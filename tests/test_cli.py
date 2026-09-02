@@ -238,3 +238,27 @@ def test_log_flags_are_accepted(
     monkeypatch.setenv("GH_TOKEN", "t")
     flags = ["--log-level", "DEBUG", "--log-format", "console"]
     assert main([*flags, "validate", "--workflow", str(path)]) == 0
+
+
+def test_invalid_log_level_flag_exits_two() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--log-level", "FOO", "validate"])
+    assert exc.value.code == 2
+
+
+def test_invalid_log_level_env_exits_two(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ISSUEBOT_LOG_LEVEL", "FOO")
+    with pytest.raises(SystemExit) as exc:
+        main(["validate", "--workflow", str(GOOD)])
+    assert exc.value.code == 2
+    assert "unknown log level" in capsys.readouterr().err
+
+
+def test_lowercase_log_level_flag_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, executables: object
+) -> None:
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["--log-level", "debug", "validate", "--workflow", str(path)]) == 0

@@ -3,8 +3,10 @@
 import io
 import json
 import logging
+import sys
 
 import pytest
+import structlog
 
 from issuebot.log import (
     bind_issue_context,
@@ -87,3 +89,48 @@ def test_console_format_renders_without_error() -> None:
     output = stream.getvalue()
     assert "console line" in output
     assert "key=value" in output
+
+
+def test_unknown_level_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown log level"):
+        configure_logging(level="FOO", stream=io.StringIO())
+
+
+def test_unknown_format_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown log format"):
+        configure_logging(fmt="jsno", stream=io.StringIO())  # type: ignore[arg-type]
+
+
+def test_level_is_case_insensitive() -> None:
+    stream = io.StringIO()
+    configure_logging(level="warning", stream=stream)
+    get_logger().info("dropped")
+    get_logger().warning("kept")
+    records = _lines(stream)
+    assert [r["event"] for r in records] == ["kept"]
+
+
+def test_reconfigure_replaces_only_its_own_handler() -> None:
+    root = logging.getLogger()
+    null_handler = logging.NullHandler()
+    root.addHandler(null_handler)
+    try:
+        configure_logging(stream=io.StringIO())
+        configure_logging(stream=io.StringIO())
+        assert null_handler in root.handlers
+        processor_formatter_handlers = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler.formatter, structlog.stdlib.ProcessorFormatter)
+        ]
+        assert len(processor_formatter_handlers) == 1
+    finally:
+        root.removeHandler(null_handler)
+
+
+def test_default_stream_is_current_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", fake_stderr)
+    configure_logging()
+    get_logger().info("to stderr")
+    assert _lines(fake_stderr)[0]["event"] == "to stderr"

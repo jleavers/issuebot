@@ -13,7 +13,7 @@ import yaml
 from issuebot import __version__
 from issuebot.config import ConfigError, Settings, Workflow, load_workflow
 from issuebot.config.resolve import ENV_REF
-from issuebot.log import configure_logging
+from issuebot.log import LOG_LEVELS, configure_logging
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
 
@@ -42,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"issuebot {__version__}")
     parser.add_argument(
         "--log-level",
+        choices=LOG_LEVELS,
+        type=str.upper,
         default=None,
         help="DEBUG, INFO, WARNING or ERROR (default: $ISSUEBOT_LOG_LEVEL or INFO)",
     )
@@ -72,10 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    configure_logging(
-        level=args.log_level or os.environ.get("ISSUEBOT_LOG_LEVEL", "INFO"),
-        fmt=args.log_format or os.environ.get("ISSUEBOT_LOG_FORMAT", "json"),
-    )
+    try:
+        configure_logging(
+            level=args.log_level or os.environ.get("ISSUEBOT_LOG_LEVEL", "INFO"),
+            fmt=args.log_format or os.environ.get("ISSUEBOT_LOG_FORMAT", "json"),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.command is None:
         parser.print_help()
         return 2

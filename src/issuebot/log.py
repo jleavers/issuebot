@@ -8,7 +8,11 @@ import structlog
 
 LogFormat = Literal["json", "console"]
 
+LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR")
+
 _FIXED_KEYS = ("timestamp", "level", "logger", "event")
+
+_handler: logging.Handler | None = None
 
 
 def _order_fixed_keys(
@@ -24,12 +28,23 @@ def configure_logging(
     *,
     level: str = "INFO",
     fmt: LogFormat = "json",
-    stream: TextIO = sys.stderr,
+    stream: TextIO | None = None,
 ) -> None:
     """Configure structlog and the standard library to emit one line per event to ``stream``.
 
     Safe to call repeatedly (tests reconfigure with fresh streams).
     """
+    if stream is None:
+        stream = sys.stderr
+
+    level = level.upper()
+    if level not in LOG_LEVELS:
+        raise ValueError(f"unknown log level {level!r}; expected one of {', '.join(LOG_LEVELS)}")
+    if fmt not in ("json", "console"):
+        raise ValueError(f"unknown log format {fmt!r}; expected 'json' or 'console'")
+
+    global _handler
+
     shared: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
@@ -61,9 +76,11 @@ def configure_logging(
     handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
     root = logging.getLogger()
-    root.handlers.clear()
+    if _handler is not None:
+        root.removeHandler(_handler)
     root.addHandler(handler)
-    root.setLevel(level.upper())
+    _handler = handler
+    root.setLevel(level)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
