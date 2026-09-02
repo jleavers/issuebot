@@ -1,5 +1,6 @@
 """GitHub integration: normalised issue model, the label state machine and adapters."""
 
+from issuebot.github.errors import ErrorCategory, GitHubError
 from issuebot.github.models import (
     WORKPAD_MARKER,
     AuthStatus,
@@ -11,6 +12,7 @@ from issuebot.github.models import (
     RepoInfo,
     StateLabel,
 )
+from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
 from issuebot.github.state import (
     ACTIVE_STATES,
     LABEL_STYLES,
@@ -34,6 +36,8 @@ __all__ = [
     "Actor",
     "AuthStatus",
     "Comment",
+    "ErrorCategory",
+    "GitHubError",
     "Issue",
     "LabelEnsured",
     "LabelStyle",
@@ -45,5 +49,9 @@ __all__ = [
     "is_active",
     "is_allowed",
     "is_terminal",
+    "issue_from_node",
+    "label_name",
     "next_state_for",
+    "repo_short_name",
+    "role_for",
 ]
