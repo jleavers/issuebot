@@ -26,7 +26,7 @@ Out of scope: any GitHub or Claude interaction, scheduling, database schema, HTT
 ├── .github/
 │   ├── dependabot.yml
 │   └── workflows/ci.yml
-├── .pre-commit-config.yaml         (unchanged)
+├── .pre-commit-config.yaml         (revs bumped, see section 3)
 ├── .python-version                 3.14
 ├── AGENTS.md                       (unchanged)
 ├── CLAUDE.md                       (commands section updated)
@@ -217,7 +217,7 @@ imports `pydantic` directly; later phases consume `Settings`.
 
 ```python
 def configure_logging(*, level: str = "INFO", fmt: Literal["json", "console"] = "json",
-                      stream: TextIO = sys.stderr) -> None
+                      stream: TextIO | None = None) -> None
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger
 def bind_issue_context(*, issue_number: int, issue_identifier: str) -> None
 def bind_session_context(*, session_id: str) -> None
@@ -226,6 +226,8 @@ def clear_context() -> None
 
 - Logs go to **stderr**. Stdout is reserved for CLI output so `issuebot validate
   --show-config | …` is usable.
+- `level` and `fmt` are validated and raise `ValueError`; the module replaces only
+  the handler it installed.
 - `json` renders one JSON object per line with `timestamp` (ISO 8601 UTC),
   `level`, `logger`, `event`, then bound context and call-site keys. `console` is
   structlog's coloured developer renderer.
@@ -295,6 +297,9 @@ issuebot --version
 issuebot validate [--workflow PATH] [--show-config]
 ```
 
+`--log-level` accepts `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive); an
+invalid flag or environment value exits 2 with a usage error.
+
 - `--workflow` default: `ISSUEBOT_WORKFLOW` if set, else `./WORKFLOW.md` (Symphony
   §5.1 precedence: explicit, then cwd default).
 - `validate` prints one line per check to stdout in the form
@@ -356,7 +361,7 @@ services:
     image: postgres:18
     environment: {POSTGRES_USER: issuebot, POSTGRES_PASSWORD: issuebot, POSTGRES_DB: issuebot}
     volumes: [pgdata:/var/lib/postgresql]        # PG18 moved PGDATA under /var/lib/postgresql/18
-    ports: ["127.0.0.1:5432:5432"]
+    ports: ["127.0.0.1:${ISSUEBOT_DB_PORT:-5432}:5432"]
     healthcheck: pg_isready -U issuebot -d issuebot
   worker:
     build: .
@@ -388,7 +393,7 @@ concurrency group that cancels superseded runs:
 | `docker` | `docker/setup-buildx-action@v4`, `docker/build-push-action@v7` with `push: false`, `load: true`, GitHub Actions cache; then `docker run --rm <image> --version` |
 
 `.github/dependabot.yml`: weekly updates for `uv`, `docker` and `github-actions`,
-each grouping minor and patch bumps into one PR.
+each grouping minor and patch bumps into one PR (major bumps arrive individually).
 
 ## 10. Repository documents
 

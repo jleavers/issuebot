@@ -278,7 +278,7 @@ Single-tenant, high-trust, intended for repositories the operator owns:
 ```yaml
 github:
   repo: owner/name              # required
-  token: $GH_TOKEN              # [$GH_TOKEN]
+  # token: omitted → GH_TOKEN from the environment; an explicit $VAR must be set
   labels:                       # override label names if desired
     todo: issuebot/todo
     in_progress: issuebot/in-progress
@@ -315,7 +315,7 @@ database:
 notifications:
   slack:
     webhook_url: $SLACK_WEBHOOK_URL   # optional
-    events: [state_changed, blocked, run_failed]
+    events: [state_changed, blocked]
 server:
   port: 8080
   bind: 0.0.0.0                 # container default; 127.0.0.1 outside Docker
