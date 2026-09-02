@@ -14,6 +14,7 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
@@ -59,6 +60,7 @@ __all__ = [
     "is_active",
     "is_allowed",
     "is_terminal",
+    "is_workpad_body",
     "issue_from_node",
     "label_name",
     "next_state_for",

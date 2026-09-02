@@ -9,7 +9,6 @@ from typing import Any
 from issuebot.config import GitHubLabels, GitHubSettings
 from issuebot.github.errors import ErrorCategory, GitHubError
 from issuebot.github.models import (
-    WORKPAD_MARKER,
     AuthStatus,
     Comment,
     Issue,
@@ -17,6 +16,7 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
@@ -108,7 +108,9 @@ class GhCliAdapter:
         return await self._collect(list(StateLabel), CLOSED_ISSUES_QUERY)
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
-        numbers = sorted({int(value) for value in ids if str(value).isdigit()})
+        numbers = sorted(
+            {int(value) for value in ids if str(value).isascii() and str(value).isdigit()}
+        )
         self._log.debug("fetch_issues_by_ids", ids=numbers)
         issues: list[Issue] = []
         for start in range(0, len(numbers), ID_BATCH_SIZE):
@@ -125,6 +127,8 @@ class GhCliAdapter:
                 node = repository.get(f"i{number}")
                 if node is None:
                     continue
+                if not isinstance(node, Mapping):
+                    raise GitHubError("response", f"malformed issue record for alias i{number}")
                 issues.append(issue_from_node(node, repo=self.repo, labels=self.labels))
         return issues
 
@@ -176,7 +180,7 @@ class GhCliAdapter:
         if not isinstance(payload, list):
             raise GitHubError("response", "comments response is not a list")
         for item in payload:
-            if isinstance(item, Mapping) and _is_workpad(item.get("body")):
+            if isinstance(item, Mapping) and is_workpad_body(item.get("body")):
                 return _comment_from(item)
         return None
 
@@ -411,12 +415,6 @@ def _dig(mapping: Any, *keys: str) -> Any:
             return None
         node = node.get(key)
     return node
-
-
-def _is_workpad(body: Any) -> bool:
-    if not isinstance(body, str) or not body.strip():
-        return False
-    return body.lstrip().splitlines()[0].strip() == WORKPAD_MARKER
 
 
 def _comment_from(payload: Any) -> Comment:

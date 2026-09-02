@@ -219,6 +219,14 @@ async def test_fetch_by_ids_malformed_record_raises() -> None:
     assert exc.value.category == "response"
 
 
+async def test_fetch_by_ids_non_object_alias_raises_response() -> None:
+    runner = StubRunner()
+    runner.on(has("i7: issue"), stdout=json.dumps({"data": {"repository": {"i7": "nope"}}}))
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).fetch_issues_by_ids(["7"])
+    assert exc.value.category == "response"
+
+
 # --- GraphQL error handling ----------------------------------------------------------
 
 
@@ -288,6 +296,11 @@ async def test_missing_data_object_raises_response() -> None:
         (1, "gh: Resource not accessible by integration (HTTP 403)", "auth", False),
         (1, "something unexpected happened", "status", False),
         (1, "", "status", False),
+        (1, "gh: authentication required", "auth", False),
+        (1, "gh: You have exceeded a secondary rate limit", "rate_limited", True),
+        (1, "could not resolve host: api.github.com", "transport", True),
+        (1, "gh: request timeout after 30s", "transport", True),
+        (1, "gh: TLS handshake failed", "transport", True),
     ],
 )
 async def test_error_mapping(returncode: int, stderr: str, category: str, retryable: bool) -> None:

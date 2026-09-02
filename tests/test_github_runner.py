@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,10 @@ from pydantic import SecretStr
 from issuebot.github.errors import GitHubError
 from issuebot.github.runner import GhResult, GhRunner
 from issuebot.log import configure_logging
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="tests/fakes/gh is a POSIX shebang script"
+)
 
 FAKE_GH = Path(__file__).parent / "fakes" / "gh"
 
@@ -74,6 +79,17 @@ async def test_timeout_kills_and_raises_transport() -> None:
 
 async def test_missing_executable_raises_config() -> None:
     runner = GhRunner(command="/nonexistent/gh", environ={"PATH": "/nonexistent"})
+    with pytest.raises(GitHubError) as exc:
+        await runner.run(["--version"])
+    assert exc.value.category == "config"
+    assert not exc.value.retryable
+
+
+async def test_non_executable_command_raises_config(tmp_path: Path) -> None:
+    path = tmp_path / "gh"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o644)
+    runner = GhRunner(command=str(path), environ={"PATH": "/nonexistent"})
     with pytest.raises(GitHubError) as exc:
         await runner.run(["--version"])
     assert exc.value.category == "config"

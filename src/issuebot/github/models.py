@@ -8,6 +8,13 @@ from typing import Literal
 WORKPAD_MARKER = "## Issuebot Workpad"
 
 
+def is_workpad_body(body: object) -> bool:
+    """True when a comment body's first non-blank line is the workpad marker."""
+    if not isinstance(body, str) or not body.strip():
+        return False
+    return body.lstrip().splitlines()[0].strip() == WORKPAD_MARKER
+
+
 class StateLabel(StrEnum):
     """The five roles of the label state machine; values equal GitHubLabels field names."""
 

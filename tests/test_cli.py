@@ -338,6 +338,25 @@ def test_validate_reports_repo_access_failure(
     assert "[ OK ] github.labels: 5 labels present" in out
 
 
+def test_validate_reports_labels_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+
+    async def failing_missing_labels() -> object:
+        raise GitHubError("transport", "injected transport failure")
+
+    monkeypatch.setattr(fake_github, "missing_labels", failing_missing_labels)
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[ OK ] gh auth: logged in as fake-user" in out
+    assert "[ OK ] github.repo access: example/repo (default branch main)" in out
+    assert "[FAIL] github.labels: transport: injected transport failure" in out
+
+
 def test_validate_warns_about_missing_labels(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

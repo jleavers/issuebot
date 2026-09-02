@@ -7,7 +7,7 @@ import pytest
 
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
-from issuebot.github.models import StateLabel
+from issuebot.github.models import WORKPAD_MARKER, StateLabel, is_workpad_body
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
 
 LABELS = GitHubLabels()
@@ -207,3 +207,20 @@ def test_unusable_optional_metadata_normalises_quietly() -> None:
     assert issue.labels == ()
     assert issue.assignees == ()
     assert issue.closed_at is None
+
+
+# --- is_workpad_body --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (WORKPAD_MARKER, True),
+        (f"{WORKPAD_MARKER} extra text", False),
+        (f"\n\n{WORKPAD_MARKER}\n\n### Plan\n", True),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_workpad_body(body: str | None, expected: bool) -> None:
+    assert is_workpad_body(body) is expected

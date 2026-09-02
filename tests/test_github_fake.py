@@ -114,6 +114,18 @@ async def test_set_state_requires_the_label_to_exist_in_the_repo(fake: FakeGitHu
     assert "labels ensure" in exc.value.message
 
 
+async def test_set_state_requires_every_state_label_to_exist_in_the_repo(
+    fake: FakeGitHub,
+) -> None:
+    issue = fake.add_issue("A")
+    del fake.repo_labels["issuebot/complete"]
+    with pytest.raises(GitHubError) as exc:
+        await fake.set_state(issue.number, StateLabel.TODO)
+    assert exc.value.category == "not_found"
+    assert "labels ensure" in exc.value.message
+    assert fake.issue(issue.number).labels == ()
+
+
 async def test_set_state_on_unknown_issue_raises_not_found(fake: FakeGitHub) -> None:
     with pytest.raises(GitHubError) as exc:
         await fake.set_state(999, StateLabel.TODO)

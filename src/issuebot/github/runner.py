@@ -68,15 +68,15 @@ class GhRunner:
                 stderr=asyncio.subprocess.PIPE,
                 env=self.child_environment(),
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
             self._log.debug(
                 "gh_invocation",
                 argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
                 exit_code=None,
-                error="not found",
+                error=str(exc),
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
-            raise GitHubError("config", f"{self._command!r} not found on PATH") from exc
+            raise GitHubError("config", f"cannot run {self._command!r}: {exc}") from exc
 
         payload = stdin.encode("utf-8") if stdin is not None else None
         try:

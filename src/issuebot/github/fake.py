@@ -9,7 +9,6 @@ from typing import Any
 from issuebot.config import GitHubLabels, GitHubSettings
 from issuebot.github.errors import ErrorCategory, GitHubError
 from issuebot.github.models import (
-    WORKPAD_MARKER,
     AuthStatus,
     Comment,
     Issue,
@@ -19,6 +18,7 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
 from issuebot.github.state import LABEL_STYLES, LabelStyle
@@ -98,7 +98,9 @@ class FakeGitHub:
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         wanted = tuple(ids)
         self._enter("fetch_issues_by_ids", wanted)
-        numbers = sorted({int(value) for value in wanted if str(value).isdigit()})
+        numbers = sorted(
+            {int(value) for value in wanted if str(value).isascii() and str(value).isdigit()}
+        )
         return [self._snapshot(self._issues[n]) for n in numbers if n in self._issues]
 
     async def fetch_terminal_issues(self) -> list[Issue]:
@@ -115,8 +117,8 @@ class FakeGitHub:
     async def set_state(self, number: int, state: StateLabel) -> None:
         self._enter("set_state", number, state)
         record = self._require_issue(number)
+        self._require_state_labels()
         target = label_name(self.labels, state)
-        self._require_label(target)
         self._strip_state_labels(record)
         record.labels.append(target)
         record.updated_at = self._now()
@@ -124,8 +126,7 @@ class FakeGitHub:
     async def clear_state(self, number: int) -> None:
         self._enter("clear_state", number)
         record = self._require_issue(number)
-        for role in StateLabel:
-            self._require_label(label_name(self.labels, role))
+        self._require_state_labels()
         self._strip_state_labels(record)
         record.updated_at = self._now()
 
@@ -149,10 +150,7 @@ class FakeGitHub:
         self._enter("find_workpad_comment", number)
         record = self._require_issue(number)
         for comment in record.comments:
-            first_line = (
-                comment.body.lstrip().splitlines()[0].strip() if comment.body.strip() else ""
-            )
-            if first_line == WORKPAD_MARKER:
+            if is_workpad_body(comment.body):
                 return comment
         return None
 
@@ -320,6 +318,10 @@ class FakeGitHub:
     def _require_label(self, name: str) -> None:
         if name not in self.repo_labels:
             raise GitHubError("not_found", f"'{name}' not found; run issuebot labels ensure")
+
+    def _require_state_labels(self) -> None:
+        for role in StateLabel:
+            self._require_label(label_name(self.labels, role))
 
     def _strip_state_labels(self, record: _FakeIssue) -> None:
         state_names = {name.lower() for name in self.labels.as_tuple()}
