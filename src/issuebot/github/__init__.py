@@ -13,6 +13,7 @@ from issuebot.github.models import (
     StateLabel,
 )
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
+from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
 from issuebot.github.state import (
     ACTIVE_STATES,
     LABEL_STYLES,
@@ -37,6 +38,9 @@ __all__ = [
     "AuthStatus",
     "Comment",
     "ErrorCategory",
+    "GhResult",
+    "GhRunner",
+    "GhRunnerLike",
     "GitHubError",
     "Issue",
     "LabelEnsured",
