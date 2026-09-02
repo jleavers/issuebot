@@ -308,6 +308,7 @@ github:
     review: issuebot/review
     rework: issuebot/rework
     complete: issuebot/complete
+  request_timeout_ms: 30000
 polling:
   interval_ms: 30000
 workspace:
