@@ -310,3 +310,75 @@ async def test_token_is_redacted_from_error_text() -> None:
     assert "sekret" not in exc.value.message
     assert "***" in exc.value.message
     assert exc.value.stderr is not None and "sekret" not in exc.value.stderr
+
+
+# --- debug logging and advanced error handling ----------------------------------
+
+
+async def test_read_methods_log_debug_on_entry() -> None:
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", stream=stream)
+    runner = StubRunner()
+    empty = json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issues": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+                }
+            }
+        }
+    )
+    runner.on(has("api"), stdout=empty)
+    adapter = make_adapter(runner)
+    await adapter.fetch_issues_by_states([StateLabel.TODO])
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert any(record.get("event") == "fetch_issues_by_states" for record in records)
+    debug_record = next(r for r in records if r.get("event") == "fetch_issues_by_states")
+    assert debug_record.get("states") == ["todo"]
+
+
+async def test_token_is_redacted_from_graphql_error_stderr() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("api"),
+        stdout=json.dumps({"errors": [{"message": "boom"}]}),
+        stderr="gh: something sekret happened",
+        returncode=1,
+    )
+    adapter = make_adapter(runner, token=SecretStr("sekret"))
+    with pytest.raises(GitHubError) as exc:
+        await adapter.fetch_issues_by_states([StateLabel.TODO])
+    assert exc.value.category == "response"
+    assert exc.value.stderr is not None
+    assert "sekret" not in exc.value.stderr
+    assert "***" in exc.value.stderr
+
+
+async def test_null_list_node_is_skipped_and_logged() -> None:
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    runner = StubRunner()
+    page = json.loads(fixture("list_todo_page2.json"))
+    page["data"]["repository"]["issues"]["nodes"] = [
+        None,
+        {
+            "number": 44,
+            "title": "Write docs",
+            "body": "",
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/44",
+            "createdAt": "2026-09-01T11:00:00Z",
+            "updatedAt": "2026-09-01T11:00:00Z",
+            "closedAt": None,
+            "labels": {"nodes": [{"name": "issuebot/todo"}]},
+            "assignees": {"nodes": []},
+            "closedByPullRequestsReferences": {"nodes": []},
+        },
+    ]
+    runner.on(has("label=issuebot/todo"), stdout=json.dumps(page))
+    issues = await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
+    assert [issue.number for issue in issues] == [44]
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    skipped = next(r for r in records if r.get("event") == "issue_record_skipped")
+    assert skipped.get("issue_number") is None
+    assert "not an object" in skipped.get("reason", "")

@@ -87,15 +87,18 @@ class GhCliAdapter:
 
     async def fetch_issues_by_states(self, states: Iterable[StateLabel]) -> list[Issue]:
         roles = list(dict.fromkeys(states))
+        self._log.debug("fetch_issues_by_states", states=[role.value for role in roles])
         if not roles:
             return []
         return await self._collect(roles, OPEN_ISSUES_QUERY)
 
     async def fetch_terminal_issues(self) -> list[Issue]:
+        self._log.debug("fetch_terminal_issues")
         return await self._collect(list(StateLabel), CLOSED_ISSUES_QUERY)
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         numbers = sorted({int(value) for value in ids if str(value).isdigit()})
+        self._log.debug("fetch_issues_by_ids", ids=numbers)
         issues: list[Issue] = []
         for start in range(0, len(numbers), ID_BATCH_SIZE):
             batch = numbers[start : start + ID_BATCH_SIZE]
@@ -133,10 +136,15 @@ class GhCliAdapter:
             if not isinstance(connection, Mapping):
                 raise GitHubError("response", "GraphQL response has no repository.issues")
             for node in connection.get("nodes") or []:
+                if not isinstance(node, Mapping):
+                    self._log.warning(
+                        "issue_record_skipped", issue_number=None, reason="record is not an object"
+                    )
+                    continue
                 try:
                     issues.append(issue_from_node(node, repo=self.repo, labels=self.labels))
                 except GitHubError as exc:
-                    number = node.get("number") if isinstance(node, Mapping) else None
+                    number = node.get("number")
                     self._log.warning(
                         "issue_record_skipped", issue_number=number, reason=exc.message
                     )
@@ -161,10 +169,11 @@ class GhCliAdapter:
         for key, value in variables.items():
             args += ["-f", f"{key}={value}"]
         result = await self._runner.run(args)
+        stderr = self._redact(result.stderr)
         payload = _parse_json(result.stdout)
         errors = payload.get("errors") if isinstance(payload, Mapping) else None
         if isinstance(errors, list) and errors:
-            self._raise_for_graphql_errors(errors, result, allow_missing_aliases)
+            self._raise_for_graphql_errors(errors, result, stderr, allow_missing_aliases)
         elif result.returncode != 0:
             raise self._error_for(result)
         data = payload.get("data") if isinstance(payload, Mapping) else None
@@ -173,12 +182,12 @@ class GhCliAdapter:
                 "response",
                 "GraphQL response has no data object",
                 exit_code=result.returncode,
-                stderr=result.stderr,
+                stderr=stderr,
             )
         return data
 
     def _raise_for_graphql_errors(
-        self, errors: list[Any], result: GhResult, allow_missing_aliases: bool
+        self, errors: list[Any], result: GhResult, stderr: str, allow_missing_aliases: bool
     ) -> None:
         entries = [entry for entry in errors if isinstance(entry, Mapping)]
         types = {entry.get("type") for entry in entries}
@@ -189,11 +198,9 @@ class GhCliAdapter:
         if types == {"NOT_FOUND"} and allow_missing_aliases and alias_level:
             return
         if "RATE_LIMITED" in types:
-            raise GitHubError(
-                "rate_limited", messages, exit_code=result.returncode, stderr=result.stderr
-            )
+            raise GitHubError("rate_limited", messages, exit_code=result.returncode, stderr=stderr)
         category: ErrorCategory = "not_found" if types == {"NOT_FOUND"} else "response"
-        raise GitHubError(category, messages, exit_code=result.returncode, stderr=result.stderr)
+        raise GitHubError(category, messages, exit_code=result.returncode, stderr=stderr)
 
     async def _gh(self, args: Sequence[str], *, stdin: str | None = None) -> GhResult:
         result = await self._runner.run(args, stdin=stdin)
