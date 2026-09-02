@@ -1,5 +1,7 @@
 """Tests for the gh subprocess boundary, against tests/fakes/gh."""
 
+import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ from pydantic import SecretStr
 
 from issuebot.github.errors import GitHubError
 from issuebot.github.runner import GhResult, GhRunner
+from issuebot.log import configure_logging
 
 FAKE_GH = Path(__file__).parent / "fakes" / "gh"
 
@@ -75,3 +78,61 @@ async def test_missing_executable_raises_config() -> None:
         await runner.run(["--version"])
     assert exc.value.category == "config"
     assert not exc.value.retryable
+
+
+async def test_timeout_logs_debug_line() -> None:
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", stream=stream)
+    runner = _runner(
+        timeout_ms=1000, token=SecretStr("sekret"), extra_env={"FAKE_GH_SCENARIO": "sleep"}
+    )
+    with pytest.raises(GitHubError) as exc:
+        await runner.run(["api", "slow"])
+    assert exc.value.category == "transport"
+
+    # Parse the captured JSON lines
+    output = stream.getvalue()
+    found = False
+    for line in output.split("\n"):
+        if not line:
+            continue
+        record = json.loads(line)
+        if record.get("event") == "gh_invocation":
+            assert record["exit_code"] is None
+            assert record.get("timed_out") is True
+            assert "env" not in record
+            assert "sekret" not in output
+            found = True
+            break
+    assert found, "No gh_invocation record found"
+
+
+async def test_external_cancellation_kills_and_reaps(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    runner = _runner(
+        timeout_ms=30000,
+        extra_env={
+            "FAKE_GH_SCENARIO": "sleep",
+            "FAKE_GH_PIDFILE": str(pidfile),
+        },
+    )
+
+    # Start the run task and wrap with outer timeout to cancel from outside
+    task = asyncio.create_task(runner.run(["api", "slow"]))
+
+    # Wait for the pidfile to be created (poll for up to 2 seconds)
+    for _ in range(20):
+        if pidfile.exists():
+            break
+        await asyncio.sleep(0.1)
+    else:
+        pytest.fail("Pidfile was not created")
+
+    # Cancel the task after 1 second
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    # Check that the process was killed and reaped
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

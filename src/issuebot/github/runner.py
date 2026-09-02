@@ -1,6 +1,7 @@
 """The only place that spawns the gh CLI."""
 
 import asyncio
+import contextlib
 import os
 import time
 from collections.abc import Mapping, Sequence
@@ -68,18 +69,40 @@ class GhRunner:
                 env=self.child_environment(),
             )
         except FileNotFoundError as exc:
+            self._log.debug(
+                "gh_invocation",
+                argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+                exit_code=None,
+                error="not found",
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
             raise GitHubError("config", f"{self._command!r} not found on PATH") from exc
 
         payload = stdin.encode("utf-8") if stdin is not None else None
         try:
             out, err = await asyncio.wait_for(process.communicate(payload), timeout=self._timeout_s)
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
             summary = " ".join(args[:3])
+            self._log.debug(
+                "gh_invocation",
+                argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+                exit_code=None,
+                timed_out=True,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
             raise GitHubError(
                 "transport", f"gh timed out after {self._timeout_s:.0f}s: {summary}"
             ) from None
+        except BaseException:
+            # Ensure cleanup on any other exception (e.g., CancelledError)
+            if process.returncode is None:
+                process.kill()
+                with contextlib.suppress(Exception):
+                    await process.wait()
+            raise
 
         result = GhResult(
             returncode=process.returncode if process.returncode is not None else -1,

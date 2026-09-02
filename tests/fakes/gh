@@ -10,6 +10,13 @@ import sys
 import time
 
 scenario = os.environ.get("FAKE_GH_SCENARIO", "echo")
+
+# Write PID if pidfile is specified
+pidfile = os.environ.get("FAKE_GH_PIDFILE")
+if pidfile:
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+
 if scenario == "sleep":
     time.sleep(10)
 if scenario == "fail":
