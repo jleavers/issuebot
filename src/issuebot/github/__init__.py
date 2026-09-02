@@ -1,6 +1,8 @@
 """GitHub integration: normalised issue model, the label state machine and adapters."""
 
+from issuebot.github.adapter import GitHubAdapter
 from issuebot.github.errors import ErrorCategory, GitHubError
+from issuebot.github.ghcli import GhCliAdapter
 from issuebot.github.models import (
     WORKPAD_MARKER,
     AuthStatus,
@@ -38,9 +40,11 @@ __all__ = [
     "AuthStatus",
     "Comment",
     "ErrorCategory",
+    "GhCliAdapter",
     "GhResult",
     "GhRunner",
     "GhRunnerLike",
+    "GitHubAdapter",
     "GitHubError",
     "Issue",
     "LabelEnsured",
