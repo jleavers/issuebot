@@ -388,7 +388,7 @@ concurrency group that cancels superseded runs:
 
 | Job | Steps |
 |---|---|
-| `lint` | `actions/checkout@v7`, `astral-sh/setup-uv@v10`, `uv sync --frozen`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pre-commit run --all-files --show-diff-on-failure` |
+| `lint` | `actions/checkout@v7`, `astral-sh/setup-uv@v10.0.1`, `uv sync --frozen`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pre-commit run --all-files --show-diff-on-failure` |
 | `test` | same setup; a `postgres:18` service with a health check and `DATABASE_URL` exported (unused until Phase 6, present now so that phase does not touch CI); `uv run pytest` |
 | `docker` | `docker/setup-buildx-action@v4`, `docker/build-push-action@v7` with `push: false`, `load: true`, GitHub Actions cache; then `docker run --rm <image> --version` |
 
