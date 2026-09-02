@@ -139,6 +139,15 @@ def test_missing_file(tmp_path: Path) -> None:
     assert "not found" in str(exc.value)
 
 
+def test_undecodable_file_is_unreadable(tmp_path: Path) -> None:
+    wf_path = tmp_path / "WORKFLOW.md"
+    wf_path.write_bytes(b"\xff\xfe---\ngithub: {}\n---\nBody")
+    with pytest.raises(MissingWorkflowFile) as exc:
+        load_workflow(wf_path, environ={})
+    assert exc.value.path == wf_path.resolve()
+    assert "unreadable" in str(exc.value)
+
+
 def test_parse_errors_carry_path(tmp_path: Path) -> None:
     wf_path = tmp_path / "WORKFLOW.md"
     wf_path.write_text("---\ngithub: {}\nBody", encoding="utf-8")

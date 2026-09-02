@@ -78,7 +78,7 @@ def load_workflow(path: Path | str, *, environ: Mapping[str, str] | None = None)
         raise MissingWorkflowFile(
             f"workflow file not found: {resolved_path}", path=resolved_path
         ) from None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise MissingWorkflowFile(f"workflow file unreadable: {exc}", path=resolved_path) from exc
 
     try:
