@@ -116,11 +116,11 @@ step whenever the uv-managed `ruff` moves.
 ```python
 @dataclass(frozen=True)
 class Workflow:
-    path: Path                 # absolute
+    path: Path  # absolute
     config: Settings
     prompt_template: str
-    raw_config: dict[str, Any] # front matter as parsed, before resolution
-    source_mtime_ns: int       # for Phase 4 hot reload
+    raw_config: dict[str, Any]  # front matter as parsed, before resolution
+    source_mtime_ns: int  # for Phase 4 hot reload
 ```
 
 ### 4.2 Settings schema

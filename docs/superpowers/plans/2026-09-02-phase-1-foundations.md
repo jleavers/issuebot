@@ -828,8 +828,6 @@ from issuebot.log import configure_logging
 Then append to the end of the file:
 
 ```python
-
-
 # --- bus and sinks -------------------------------------------------------------
 
 
@@ -1134,7 +1132,9 @@ def test_non_mapping_front_matter_is_rejected() -> None:
 def test_error_codes() -> None:
     assert WorkflowParseError("x").code == "workflow_parse_error"
     assert FrontMatterNotAMap("x").code == "workflow_front_matter_not_a_map"
-    assert MissingEnvironmentVariable(variable="V", field="f").code == "missing_environment_variable"
+    assert (
+        MissingEnvironmentVariable(variable="V", field="f").code == "missing_environment_variable"
+    )
     assert SettingsValidationError([]).code == "invalid_settings"
 
 
@@ -1938,8 +1938,6 @@ from issuebot.config.workflow import parse_workflow_text
 Then append to the end of the file:
 
 ```python
-
-
 # --- load_workflow ---------------------------------------------------------------
 
 GOOD = """---
@@ -2669,9 +2667,7 @@ def run_checks(workflow: Workflow) -> list[Check]:
 
 def _token_check(workflow: Workflow) -> Check:
     if workflow.config.github.token is None:
-        return Check(
-            "github.token", "fail", "not set; export GH_TOKEN or set github.token: $VAR"
-        )
+        return Check("github.token", "fail", "not set; export GH_TOKEN or set github.token: $VAR")
     raw_github = workflow.raw_config.get("github")
     raw_token = raw_github.get("token") if isinstance(raw_github, dict) else None
     if raw_token is None:
