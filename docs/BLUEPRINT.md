@@ -10,7 +10,7 @@
 ### Differences to Symphony
 
 - Use claude instead of codex, using claude -p and auto mode
-- Use GitHub issues instead of Linear, using the gh CLI. Labels to be used on issues, e.g. 
+- Use GitHub issues instead of Linear, using the gh CLI. Labels to be used on issues, e.g.
     1. issuebot/todo: set by human
     2. issuebot/in-progress: set by agent when work ongoing
     3. issuebot/review: set by agent when PR opened
