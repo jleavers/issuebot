@@ -2,6 +2,7 @@
 
 from issuebot.github.adapter import GitHubAdapter
 from issuebot.github.errors import ErrorCategory, GitHubError
+from issuebot.github.fake import FakeGitHub
 from issuebot.github.ghcli import GhCliAdapter
 from issuebot.github.models import (
     WORKPAD_MARKER,
@@ -40,6 +41,7 @@ __all__ = [
     "AuthStatus",
     "Comment",
     "ErrorCategory",
+    "FakeGitHub",
     "GhCliAdapter",
     "GhResult",
     "GhRunner",
