@@ -3,13 +3,24 @@
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from issuebot.config import GitHubLabels, GitHubSettings
 from issuebot.github.errors import ErrorCategory, GitHubError
-from issuebot.github.models import Issue, StateLabel
+from issuebot.github.models import (
+    WORKPAD_MARKER,
+    AuthStatus,
+    Comment,
+    Issue,
+    LabelEnsured,
+    RateLimit,
+    RepoInfo,
+    StateLabel,
+)
 from issuebot.github.normalise import issue_from_node, label_name
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
+from issuebot.github.state import LABEL_STYLES, LabelStyle
 from issuebot.log import get_logger
 
 PAGE_SIZE = 100
@@ -116,6 +127,155 @@ class GhCliAdapter:
                     continue
                 issues.append(issue_from_node(node, repo=self.repo, labels=self.labels))
         return issues
+
+    # --- writes ------------------------------------------------------------------
+
+    async def set_state(self, number: int, state: StateLabel) -> None:
+        target = label_name(self.labels, state)
+        others = [label_name(self.labels, role) for role in StateLabel if role is not state]
+        self._log.debug("set_state", issue_number=number, state=state.value)
+        await self._edit_labels(number, add=target, remove=others)
+
+    async def clear_state(self, number: int) -> None:
+        self._log.debug("clear_state", issue_number=number)
+        await self._edit_labels(number, add=None, remove=list(self.labels.as_tuple()))
+
+    async def _edit_labels(self, number: int, *, add: str | None, remove: Sequence[str]) -> None:
+        args = ["issue", "edit", str(number), "-R", self.repo]
+        if add is not None:
+            args += ["--add-label", add]
+        args += ["--remove-label", ",".join(remove)]
+        try:
+            await self._gh(args)
+        except GitHubError as exc:
+            if exc.category == "not_found":
+                raise GitHubError(
+                    "not_found",
+                    f"{exc.message}; run issuebot labels ensure",
+                    exit_code=exc.exit_code,
+                    stderr=exc.stderr,
+                ) from exc
+            raise
+
+    async def comment(self, number: int, body: str) -> Comment:
+        self._log.debug("comment", issue_number=number)
+        result = await self._gh(
+            ["api", "-X", "POST", f"repos/{self.repo}/issues/{number}/comments", "--input", "-"],
+            stdin=json.dumps({"body": body}),
+        )
+        return _comment_from(_parse_json(result.stdout))
+
+    async def find_workpad_comment(self, number: int) -> Comment | None:
+        self._log.debug("find_workpad_comment", issue_number=number)
+        result = await self._gh(["api", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
+        payload = _parse_json(result.stdout)
+        if not isinstance(payload, list):
+            raise GitHubError("response", "comments response is not a list")
+        for item in payload:
+            if isinstance(item, Mapping) and _is_workpad(item.get("body")):
+                return _comment_from(item)
+        return None
+
+    async def update_comment(self, comment_id: int, body: str) -> Comment:
+        self._log.debug("update_comment", comment_id=comment_id)
+        result = await self._gh(
+            [
+                "api",
+                "-X",
+                "PATCH",
+                f"repos/{self.repo}/issues/comments/{comment_id}",
+                "--input",
+                "-",
+            ],
+            stdin=json.dumps({"body": body}),
+        )
+        return _comment_from(_parse_json(result.stdout))
+
+    # --- labels ------------------------------------------------------------------
+
+    async def ensure_labels(self) -> list[LabelEnsured]:
+        self._log.debug("ensure_labels")
+        existing = await self._repo_labels()
+        results: list[LabelEnsured] = []
+        for role in StateLabel:
+            name = label_name(self.labels, role)
+            style = LABEL_STYLES[role]
+            current = existing.get(name.lower())
+            if current is None:
+                await self._create_label(name, style, force=False)
+                results.append(LabelEnsured(name=name, outcome="created"))
+            elif current != (style.color.lower(), style.description):
+                await self._create_label(name, style, force=True)
+                results.append(LabelEnsured(name=name, outcome="updated"))
+            else:
+                results.append(LabelEnsured(name=name, outcome="unchanged"))
+        return results
+
+    async def missing_labels(self) -> list[str]:
+        self._log.debug("missing_labels")
+        existing = await self._repo_labels()
+        return [name for name in self.labels.as_tuple() if name.lower() not in existing]
+
+    async def _repo_labels(self) -> dict[str, tuple[str, str]]:
+        """Existing labels keyed by lowercased name -> (lowercased colour, description)."""
+        result = await self._gh(
+            ["label", "list", "-R", self.repo, "--json", "name,color,description", "--limit", "200"]
+        )
+        payload = _parse_json(result.stdout)
+        if not isinstance(payload, list):
+            raise GitHubError("response", "label list response is not a list")
+        labels: dict[str, tuple[str, str]] = {}
+        for item in payload:
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str):
+                color = str(item.get("color") or "").lower()
+                labels[item["name"].lower()] = (color, str(item.get("description") or ""))
+        return labels
+
+    async def _create_label(self, name: str, style: LabelStyle, *, force: bool) -> None:
+        args = ["label", "create", name, "-R", self.repo]
+        args += ["--color", style.color, "--description", style.description]
+        if force:
+            args.append("--force")
+        await self._gh(args)
+
+    # --- probes ------------------------------------------------------------------
+
+    async def rate_limit(self) -> RateLimit:
+        self._log.debug("rate_limit")
+        result = await self._gh(["api", "rate_limit", "--jq", ".resources.graphql"])
+        payload = _parse_json(result.stdout)
+        try:
+            return RateLimit(
+                limit=int(payload["limit"]),
+                remaining=int(payload["remaining"]),
+                used=int(payload["used"]),
+                reset_at=datetime.fromtimestamp(int(payload["reset"]), UTC),
+            )
+        except (TypeError, KeyError, ValueError) as exc:
+            raise GitHubError("response", "unexpected rate_limit response") from exc
+
+    async def auth_status(self) -> AuthStatus:
+        self._log.debug("auth_status")
+        result = await self._gh(["api", "user", "--jq", ".login"])
+        login = result.stdout.strip()
+        if not login or login in ("null", "{}", "[1]") or login.startswith(("{", "[")):
+            raise GitHubError("response", "user response has no login")
+        return AuthStatus(login=login)
+
+    async def repo_info(self) -> RepoInfo:
+        self._log.debug("repo_info")
+        result = await self._gh(
+            ["api", f"repos/{self.repo}", "--jq", "{full_name,default_branch,private}"]
+        )
+        payload = _parse_json(result.stdout)
+        try:
+            return RepoInfo(
+                full_name=str(payload["full_name"]),
+                default_branch=str(payload["default_branch"]),
+                private=bool(payload["private"]),
+            )
+        except (TypeError, KeyError) as exc:
+            raise GitHubError("response", "unexpected repository response") from exc
 
     async def _collect(self, roles: Sequence[StateLabel], query: str) -> list[Issue]:
         found: dict[int, Issue] = {}
@@ -247,3 +407,27 @@ def _dig(mapping: Any, *keys: str) -> Any:
             return None
         node = node.get(key)
     return node
+
+
+def _is_workpad(body: Any) -> bool:
+    if not isinstance(body, str) or not body.strip():
+        return False
+    return body.lstrip().splitlines()[0].strip() == WORKPAD_MARKER
+
+
+def _comment_from(payload: Any) -> Comment:
+    if not isinstance(payload, Mapping):
+        raise GitHubError("response", "comment response is not an object")
+    user = payload.get("user")
+    author = user.get("login") if isinstance(user, Mapping) else None
+    try:
+        return Comment(
+            id=int(payload["id"]),
+            body=str(payload.get("body") or ""),
+            url=str(payload["html_url"]),
+            author=str(author or ""),
+            created_at=datetime.fromisoformat(payload["created_at"]),
+            updated_at=datetime.fromisoformat(payload["updated_at"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GitHubError("response", "unexpected comment response") from exc

@@ -3,6 +3,7 @@
 import io
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from pydantic import SecretStr
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError
 from issuebot.github.ghcli import ID_BATCH_SIZE, GhCliAdapter, by_ids_query
-from issuebot.github.models import StateLabel
+from issuebot.github.models import WORKPAD_MARKER, StateLabel
 from issuebot.github.runner import GhResult
 from issuebot.log import configure_logging
 
@@ -382,3 +383,197 @@ async def test_null_list_node_is_skipped_and_logged() -> None:
     skipped = next(r for r in records if r.get("event") == "issue_record_skipped")
     assert skipped.get("issue_number") is None
     assert "not an object" in skipped.get("reason", "")
+
+
+# --- writes --------------------------------------------------------------------------
+
+REMOVE_ALL = "issuebot/todo,issuebot/in-progress,issuebot/review,issuebot/rework,issuebot/complete"
+
+
+async def test_set_state_adds_target_and_removes_the_other_four() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS)
+    assert runner.argv(0) == [
+        "issue",
+        "edit",
+        "42",
+        "-R",
+        "example/repo",
+        "--add-label",
+        "issuebot/in-progress",
+        "--remove-label",
+        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete",
+    ]
+
+
+async def test_clear_state_removes_all_five() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).clear_state(42)
+    assert runner.argv(0) == [
+        "issue",
+        "edit",
+        "42",
+        "-R",
+        "example/repo",
+        "--remove-label",
+        REMOVE_ALL,
+    ]
+
+
+async def test_set_state_with_missing_label_hints_at_labels_ensure() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"), stderr="'issuebot/in-progress' not found", returncode=1)
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS)
+    assert exc.value.category == "not_found"
+    assert "run issuebot labels ensure" in exc.value.message
+
+
+async def test_comment_posts_json_body_and_parses_response() -> None:
+    runner = StubRunner()
+    runner.on(has("POST", "repos/example/repo/issues/42/comments"), stdout=fixture("comment.json"))
+    comment = await make_adapter(runner).comment(42, "Blocked: turn budget exhausted.")
+    argv, stdin = runner.calls[0]
+    assert argv == ["api", "-X", "POST", "repos/example/repo/issues/42/comments", "--input", "-"]
+    assert json.loads(stdin or "") == {"body": "Blocked: turn budget exhausted."}
+    assert comment.id == 1003
+    assert comment.author == "issuebot-bot"
+    assert comment.url.endswith("#issuecomment-1003")
+    assert comment.created_at == datetime(2026, 9, 2, 11, 0, tzinfo=UTC)
+
+
+async def test_find_workpad_comment_returns_marker_comment_or_none() -> None:
+    runner = StubRunner()
+    runner.on(has("issues/42/comments?per_page=100"), stdout=fixture("comments.json"))
+    runner.on(has("issues/43/comments?per_page=100"), stdout="[]")
+    adapter = make_adapter(runner)
+    found = await adapter.find_workpad_comment(42)
+    assert found is not None
+    assert found.id == 1002
+    assert found.body.startswith(WORKPAD_MARKER)
+    assert found.updated_at == datetime(2026, 9, 2, 10, 30, tzinfo=UTC)
+    assert await adapter.find_workpad_comment(43) is None
+    assert runner.argv(0) == ["api", "repos/example/repo/issues/42/comments?per_page=100"]
+
+
+async def test_update_comment_patches_body() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("PATCH", "repos/example/repo/issues/comments/1002"), stdout=fixture("comment.json")
+    )
+    await make_adapter(runner).update_comment(1002, "new body")
+    argv, stdin = runner.calls[0]
+    assert argv == ["api", "-X", "PATCH", "repos/example/repo/issues/comments/1002", "--input", "-"]
+    assert json.loads(stdin or "") == {"body": "new body"}
+
+
+async def test_comment_response_that_is_not_an_object_raises_response() -> None:
+    runner = StubRunner()
+    runner.on(has("POST"), stdout="[]")
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).comment(42, "x")
+    assert exc.value.category == "response"
+
+
+# --- labels ----------------------------------------------------------------------------
+
+
+async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
+    runner = StubRunner()
+    runner.on(has("label", "list"), stdout=fixture("labels.json"))
+    runner.on(has("label", "create"))
+    results = await make_adapter(runner).ensure_labels()
+    assert [(r.name, r.outcome) for r in results] == [
+        ("issuebot/todo", "unchanged"),
+        ("issuebot/in-progress", "created"),
+        ("issuebot/review", "updated"),
+        ("issuebot/rework", "created"),
+        ("issuebot/complete", "created"),
+    ]
+    assert runner.argv(0) == [
+        "label",
+        "list",
+        "-R",
+        "example/repo",
+        "--json",
+        "name,color,description",
+        "--limit",
+        "200",
+    ]
+    creates = [argv for argv, _ in runner.calls if argv[:2] == ["label", "create"]]
+    assert len(creates) == 4
+    assert creates[0] == [
+        "label",
+        "create",
+        "issuebot/in-progress",
+        "-R",
+        "example/repo",
+        "--color",
+        "FBCA04",
+        "--description",
+        "An issuebot agent is working on it",
+    ]
+    review = next(argv for argv in creates if argv[2] == "issuebot/review")
+    assert review[-1] == "--force"
+    assert all("--force" not in argv for argv in creates if argv[2] != "issuebot/review")
+
+
+async def test_missing_labels_lists_absent_names_in_role_order() -> None:
+    runner = StubRunner()
+    runner.on(has("label", "list"), stdout=fixture("labels.json"))
+    missing = await make_adapter(runner).missing_labels()
+    assert missing == ["issuebot/in-progress", "issuebot/rework", "issuebot/complete"]
+
+
+async def test_label_list_that_is_not_a_list_raises_response() -> None:
+    runner = StubRunner()
+    runner.on(has("label", "list"), stdout="{}")
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).missing_labels()
+    assert exc.value.category == "response"
+
+
+# --- probes ----------------------------------------------------------------------------
+
+
+async def test_rate_limit_parses_graphql_budget() -> None:
+    runner = StubRunner()
+    runner.on(has("rate_limit"), stdout=fixture("rate_limit.json"))
+    limit = await make_adapter(runner).rate_limit()
+    assert runner.argv(0) == ["api", "rate_limit", "--jq", ".resources.graphql"]
+    assert (limit.limit, limit.remaining, limit.used) == (5000, 4988, 12)
+    assert limit.reset_at == datetime.fromtimestamp(1788000000, UTC)
+
+
+async def test_auth_status_reads_login() -> None:
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="jleavers\n")
+    status = await make_adapter(runner).auth_status()
+    assert runner.argv(0) == ["api", "user", "--jq", ".login"]
+    assert status.login == "jleavers"
+
+
+async def test_repo_info_parses_fields() -> None:
+    runner = StubRunner()
+    runner.on(has("repos/example/repo"), stdout=fixture("repo.json"))
+    info = await make_adapter(runner).repo_info()
+    assert runner.argv(0) == [
+        "api",
+        "repos/example/repo",
+        "--jq",
+        "{full_name,default_branch,private}",
+    ]
+    assert (info.full_name, info.default_branch, info.private) == ("example/repo", "main", False)
+
+
+@pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
+async def test_probe_responses_are_validated(stdout: str) -> None:
+    runner = StubRunner()
+    runner.on(has("api"), stdout=stdout)
+    adapter = make_adapter(runner)
+    for call in (adapter.rate_limit, adapter.auth_status, adapter.repo_info):
+        with pytest.raises(GitHubError) as exc:
+            await call()
+        assert exc.value.category == "response"
