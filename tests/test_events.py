@@ -1,20 +1,26 @@
 """Tests for event types."""
 
+import io
 import json
 from datetime import UTC, datetime
+
+import pytest
 
 from issuebot.events import (
     EVENT_KINDS,
     Blocked,
     Event,
+    EventBus,
     IssueCancelled,
     IssueCompleted,
+    LogSink,
     NotificationSent,
     PrOpened,
     RunEnded,
     RunStarted,
     StateChanged,
 )
+from issuebot.log import configure_logging
 
 ALL_EVENTS: list[Event] = [
     StateChanged(
@@ -99,3 +105,90 @@ def test_events_are_immutable() -> None:
     except AttributeError:
         return
     raise AssertionError("event was mutable")
+
+
+# --- bus and sinks -------------------------------------------------------------
+
+
+class _Recorder:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.seen: list[Event] = []
+
+    def handle(self, event: Event) -> None:
+        self.seen.append(event)
+
+
+class _Exploder:
+    name = "exploder"
+
+    def handle(self, event: Event) -> None:
+        raise RuntimeError("boom")
+
+
+def _blocked() -> Blocked:
+    return Blocked(issue_number=1, issue_identifier="repo-1", reason="x")
+
+
+def test_publish_fans_out_in_registration_order() -> None:
+    first, second = _Recorder("first"), _Recorder("second")
+    bus = EventBus([first])
+    bus.add_sink(second)
+    event = _blocked()
+    bus.publish(event)
+    assert first.seen == [event]
+    assert second.seen == [event]
+    assert [s.name for s in bus.sinks] == ["first", "second"]
+
+
+def test_raising_sink_is_isolated_counted_and_logged() -> None:
+    stream = io.StringIO()
+    configure_logging(fmt="json", stream=stream)  # type: ignore[arg-type]
+    after = _Recorder("after")
+    bus = EventBus([_Exploder(), after])
+    bus.publish(_blocked())
+    bus.publish(_blocked())
+    assert len(after.seen) == 2
+    assert bus.failures == {"exploder": 2}
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert lines[0]["event"] == "event_sink_failed"
+    assert lines[0]["sink"] == "exploder"
+    assert lines[0]["event_kind"] == "blocked"
+    assert lines[0]["level"] == "error"
+
+
+def test_duplicate_sink_name_is_rejected() -> None:
+    bus = EventBus([_Recorder("dup")])
+    with pytest.raises(ValueError, match="dup"):
+        bus.add_sink(_Recorder("dup"))
+
+
+def test_remove_sink_stops_delivery() -> None:
+    sink = _Recorder("gone")
+    bus = EventBus([sink])
+    bus.remove_sink("gone")
+    bus.publish(_blocked())
+    assert sink.seen == []
+    assert bus.sinks == ()
+
+
+def test_log_sink_logs_kind_and_fields() -> None:
+    stream = io.StringIO()
+    configure_logging(fmt="json", stream=stream)  # type: ignore[arg-type]
+    bus = EventBus([LogSink()])
+    bus.publish(
+        StateChanged(
+            issue_number=3,
+            issue_identifier="repo-3",
+            from_label="issuebot/todo",
+            to_label="issuebot/in-progress",
+            actor="issuebot",
+        )
+    )
+    (record,) = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert record["event"] == "state_changed"
+    assert record["issue_number"] == 3
+    assert record["to_label"] == "issuebot/in-progress"
+    assert record["logger"] == "issuebot.events"
+    assert record["level"] == "info"
+    assert LogSink.name == "log"
