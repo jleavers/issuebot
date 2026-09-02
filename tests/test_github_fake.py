@@ -120,6 +120,18 @@ async def test_set_state_on_unknown_issue_raises_not_found(fake: FakeGitHub) -> 
     assert exc.value.category == "not_found"
 
 
+async def test_clear_state_requires_every_state_label_to_exist_in_the_repo(
+    fake: FakeGitHub,
+) -> None:
+    issue = fake.add_issue("A", labels=("issuebot/todo",))
+    del fake.repo_labels["issuebot/complete"]
+    with pytest.raises(GitHubError) as exc:
+        await fake.clear_state(issue.number)
+    assert exc.value.category == "not_found"
+    assert "labels ensure" in exc.value.message
+    assert fake.issue(issue.number).labels == ("issuebot/todo",)
+
+
 def test_human_helpers_change_labels_without_recording_calls(fake: FakeGitHub) -> None:
     issue = fake.add_issue("A")
     fake.human_set_state(issue.number, StateLabel.TODO)

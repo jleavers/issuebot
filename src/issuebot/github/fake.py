@@ -124,6 +124,8 @@ class FakeGitHub:
     async def clear_state(self, number: int) -> None:
         self._enter("clear_state", number)
         record = self._require_issue(number)
+        for role in StateLabel:
+            self._require_label(label_name(self.labels, role))
         self._strip_state_labels(record)
         record.updated_at = self._now()
 
