@@ -204,3 +204,14 @@ def test_workflow_is_frozen(tmp_path: Path) -> None:
     wf = load_workflow(wf_path, environ={})
     with pytest.raises(AttributeError):
         wf.prompt_template = "changed"  # type: ignore[misc]
+
+
+def test_empty_workspace_root_is_rejected(tmp_path: Path) -> None:
+    wf_path = tmp_path / "WORKFLOW.md"
+    wf_path.write_text(
+        '---\ngithub:\n  repo: o/r\nworkspace:\n  root: ""\n---\nBody', encoding="utf-8"
+    )
+    with pytest.raises(SettingsValidationError) as exc:
+        load_workflow(wf_path, environ={})
+    fields = {field for field, _ in exc.value.errors}
+    assert "workspace.root" in fields

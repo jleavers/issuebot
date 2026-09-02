@@ -262,3 +262,12 @@ def test_lowercase_log_level_flag_is_accepted(
     path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
     monkeypatch.setenv("GH_TOKEN", "t")
     assert main(["--log-level", "debug", "validate", "--workflow", str(path)]) == 0
+
+
+def test_explicit_workflow_flag_beats_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, executables: object
+) -> None:
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    monkeypatch.setenv("ISSUEBOT_WORKFLOW", str(tmp_path / "does-not-exist.md"))
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0

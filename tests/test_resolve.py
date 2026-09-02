@@ -109,3 +109,8 @@ def test_non_mapping_section_is_left_for_validation() -> None:
 
 def test_resolve_env_value_non_string_passes_through() -> None:
     assert resolve_env_value(42, field="f", fallback=None, environ={}) == 42
+
+
+def test_empty_workspace_root_is_left_for_validation() -> None:
+    out = resolve_config({"workspace": {"root": ""}}, environ={}, base_dir=BASE)
+    assert out["workspace"]["root"] == ""

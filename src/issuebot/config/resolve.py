@@ -81,7 +81,7 @@ def resolve_config(
     )
     if root is None:
         root = WORKSPACE_ROOT_DEFAULT
-    if isinstance(root, str):
+    if isinstance(root, str) and root:
         root = str(resolve_path(root, base_dir=base_dir))
     _set(config, WORKSPACE_ROOT_FIELD, root)
     return config

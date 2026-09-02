@@ -72,8 +72,10 @@ def load_workflow(path: Path | str, *, environ: Mapping[str, str] | None = None)
     env: Mapping[str, str] = os.environ if environ is None else environ
     resolved_path = Path(path).expanduser().resolve()
     try:
-        text = resolved_path.read_text(encoding="utf-8")
+        # Stat before read: a racing rewrite then yields content at least as new as
+        # the recorded mtime, so the next reload sees the change.
         mtime_ns = resolved_path.stat().st_mtime_ns
+        text = resolved_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise MissingWorkflowFile(
             f"workflow file not found: {resolved_path}", path=resolved_path
