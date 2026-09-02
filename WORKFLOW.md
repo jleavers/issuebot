@@ -1,7 +1,7 @@
 ---
 github:
   repo: jleavers/issuebot
-  token: $GH_TOKEN
+  # token: omitted on purpose; GH_TOKEN from the environment is used
 polling:
   interval_ms: 30000
 workspace:
