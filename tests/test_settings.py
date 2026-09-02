@@ -25,6 +25,7 @@ def test_minimal_config_applies_every_default() -> None:
         "issuebot/rework",
         "issuebot/complete",
     )
+    assert s.github.request_timeout_ms == 30_000
     assert s.polling.interval_ms == 30_000
     assert s.workspace.root == Path("/workspaces")
     assert s.hooks.after_create is None
@@ -158,6 +159,12 @@ def test_slack_events_must_be_known_kinds() -> None:
             {**MINIMAL, "notifications": {"slack": {"events": ["state_changed", "nope"]}}}
         )
     assert "notifications.slack.events" in _locs(exc.value)
+
+
+def test_request_timeout_lower_bound() -> None:
+    with pytest.raises(ValidationError) as exc:
+        Settings.model_validate({"github": {"repo": "o/r", "request_timeout_ms": 999}})
+    assert "github.request_timeout_ms" in _locs(exc.value)
 
 
 def test_settings_are_frozen() -> None:

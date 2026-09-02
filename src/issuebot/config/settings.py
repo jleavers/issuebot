@@ -39,6 +39,7 @@ class GitHubSettings(_Model):
     repo: RepoName
     token: SecretStr | None = None
     labels: GitHubLabels = Field(default_factory=GitHubLabels)
+    request_timeout_ms: int = Field(default=30_000, ge=1000)
 
 
 class PollingSettings(_Model):
