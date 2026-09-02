@@ -22,6 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------- runtime
 FROM ${PYTHON_IMAGE} AS runtime
 ARG CLAUDE_CODE_VERSION=2.1.258
+ARG ISSUEBOT_VERSION=0.1.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -52,7 +53,8 @@ WORKDIR /app
 VOLUME ["/workspaces", "/home/issuebot/.claude"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
-      org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator"
+      org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator" \
+      org.opencontainers.image.version="${ISSUEBOT_VERSION}"
 
 ENTRYPOINT ["issuebot"]
 CMD ["validate"]

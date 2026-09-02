@@ -158,3 +158,9 @@ def test_slack_events_must_be_known_kinds() -> None:
             {**MINIMAL, "notifications": {"slack": {"events": ["state_changed", "nope"]}}}
         )
     assert "notifications.slack.events" in _locs(exc.value)
+
+
+def test_settings_are_frozen() -> None:
+    s = Settings.model_validate(MINIMAL)
+    with pytest.raises(ValidationError):
+        s.polling.interval_ms = 1
