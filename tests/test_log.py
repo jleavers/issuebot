@@ -41,6 +41,7 @@ def test_json_line_has_fixed_keys() -> None:
     assert record["logger"] == "issuebot.test"
     assert record["answer"] == 42
     assert str(record["timestamp"]).endswith("Z")
+    assert list(record.keys())[:4] == ["timestamp", "level", "logger", "event"]
 
 
 def test_bound_issue_and_session_context_appear() -> None:

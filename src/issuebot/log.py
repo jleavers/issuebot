@@ -8,6 +8,17 @@ import structlog
 
 LogFormat = Literal["json", "console"]
 
+_FIXED_KEYS = ("timestamp", "level", "logger", "event")
+
+
+def _order_fixed_keys(
+    _logger: object, _method: str, event_dict: structlog.types.EventDict
+) -> structlog.types.EventDict:
+    """Put the fixed keys first, in a stable order, so every line reads the same way."""
+    ordered = {key: event_dict.pop(key) for key in _FIXED_KEYS if key in event_dict}
+    ordered.update(event_dict)
+    return ordered
+
 
 def configure_logging(
     *,
@@ -41,7 +52,11 @@ def configure_logging(
 
     formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=shared,
-        processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            _order_fixed_keys,
+            renderer,
+        ],
     )
     handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
