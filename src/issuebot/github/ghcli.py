@@ -148,7 +148,11 @@ class GhCliAdapter:
         try:
             await self._gh(args)
         except GitHubError as exc:
-            if exc.category == "not_found":
+            if (
+                exc.category == "not_found"
+                and "not found" in exc.message.lower()
+                and "could not resolve to" not in exc.message.lower()
+            ):
                 raise GitHubError(
                     "not_found",
                     f"{exc.message}; run issuebot labels ensure",

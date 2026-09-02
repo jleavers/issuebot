@@ -431,6 +431,19 @@ async def test_set_state_with_missing_label_hints_at_labels_ensure() -> None:
     assert "run issuebot labels ensure" in exc.value.message
 
 
+async def test_set_state_on_missing_issue_does_not_hint_at_labels_ensure() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("issue", "edit"),
+        stderr="Could not resolve to an issue (repository.issue)",
+        returncode=1,
+    )
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).set_state(999, StateLabel.IN_PROGRESS)
+    assert exc.value.category == "not_found"
+    assert "labels ensure" not in exc.value.message
+
+
 async def test_comment_posts_json_body_and_parses_response() -> None:
     runner = StubRunner()
     runner.on(has("POST", "repos/example/repo/issues/42/comments"), stdout=fixture("comment.json"))
