@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: issuebot
+      POSTGRES_PASSWORD: issuebot
+      POSTGRES_DB: issuebot
+    volumes:
+      # PostgreSQL 18 moved PGDATA to /var/lib/postgresql/18/docker; mount the parent.
+      - pgdata:/var/lib/postgresql
+    ports:
+      # Override with ISSUEBOT_DB_PORT in the project dot-env file if 5432 is taken on the host.
+      - "127.0.0.1:${ISSUEBOT_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U issuebot -d issuebot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build: .
+    # Phase 4 replaces this with ["worker"]. Until then `docker compose up` validates config.
+    command: ["validate"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+    volumes:
+      - ./WORKFLOW.md:/app/WORKFLOW.md:ro
+      - workspaces:/workspaces
+      - claude-home:/home/issuebot/.claude
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  workspaces:
+  claude-home:
