@@ -2,16 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repository state
+## Commands
 
-This repo is at the planning stage: it contains `README.md`, `AGENTS.md` and
-`docs/BLUEPRINT.md` and **no source code, build system or tests yet**. There are
-therefore no build/lint/test commands to document — when the first code lands,
-add them here.
+Python 3.14 with `uv`; `src` layout; package `issuebot`.
 
-The `.gitignore` already anticipates the stack (Python: `__pycache__/`, `.venv/`,
-`.pytest_cache/`, `.ruff_cache/`, `*.egg-info/`), so `pytest` and `ruff` are the
-expected test/lint tools unless a deliberate decision changes that.
+```bash
+uv sync                              # create .venv and install (uses uv.lock)
+uv run pytest                        # tests (hermetic; no network, no Docker)
+uv run pytest tests/test_cli.py -k validate   # one file / one pattern
+uv run ruff check . && uv run ruff format --check .
+uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
+uv run issuebot validate             # load ./WORKFLOW.md and check the environment
+docker compose build                 # image: git, gh, claude, app venv
+docker compose up                    # db (postgres:18) + worker (runs validate until Phase 4)
+```
+
+CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
+a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
+
+## Package layout
+
+- `issuebot.config`: `load_workflow(path)` → `Workflow(config: Settings, prompt_template,
+  raw_config, path, source_mtime_ns)`. Front matter → `$VAR`/`~`/relative-path
+  resolution (`resolve.py`, designated fields only) → pydantic `Settings`
+  (`settings.py`, `extra="forbid"`). Errors are `ConfigError` subclasses with a `code`.
+- `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
+  `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
+- `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
+  (synchronous, sink failures isolated and counted), `LogSink`.
+- `issuebot.cli`: argparse; `issuebot validate [--workflow PATH] [--show-config]`
+  exits 0/1/2 (ok / failed checks / workflow unloadable).
+
+Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
+`docs/superpowers/plans/` (one implementation plan per phase).
 
 ## What issuebot is
 
