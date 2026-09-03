@@ -171,3 +171,45 @@ def test_settings_are_frozen() -> None:
     s = Settings.model_validate(MINIMAL)
     with pytest.raises(ValidationError):
         s.polling.interval_ms = 1
+
+
+def test_phase_three_defaults() -> None:
+    s = Settings.model_validate(MINIMAL)
+    assert s.agent.self_review is True
+    assert s.claude.setting_sources is None
+
+
+def test_self_review_can_be_disabled() -> None:
+    s = Settings.model_validate({**MINIMAL, "agent": {"self_review": False}})
+    assert s.agent.self_review is False
+
+
+def test_setting_sources_accepts_known_sources() -> None:
+    s = Settings.model_validate({**MINIMAL, "claude": {"setting_sources": ["project", "local"]}})
+    assert s.claude.setting_sources == ["project", "local"]
+
+
+@pytest.mark.parametrize(
+    ("value", "needle"),
+    [
+        ([], "at least one source"),
+        (["project", "project"], "repeat"),
+        (["global"], "user"),
+    ],
+)
+def test_setting_sources_rejects_bad_values(value: list[str], needle: str) -> None:
+    with pytest.raises(ValidationError, match=needle) as exc:
+        Settings.model_validate({**MINIMAL, "claude": {"setting_sources": value}})
+    assert any(loc.startswith("claude.setting_sources") for loc in _locs(exc.value))
+
+
+def test_state_labels_distinctness_is_case_insensitive() -> None:
+    with pytest.raises(ValidationError, match="distinct"):
+        GitHubLabels(todo="Issuebot/Todo", review="issuebot/todo")
+
+
+@pytest.mark.parametrize(("value", "needle"), [("a,b", "','"), ("-todo", "'-'")])
+def test_state_label_names_that_break_gh_are_rejected(value: str, needle: str) -> None:
+    with pytest.raises(ValidationError, match=needle) as exc:
+        GitHubLabels(review=value)
+    assert "review" in _locs(exc.value)

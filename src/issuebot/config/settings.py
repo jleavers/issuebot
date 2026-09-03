@@ -15,6 +15,7 @@ class _Model(BaseModel):
 RepoName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 PermissionMode = Literal["auto", "acceptEdits", "dontAsk", "bypassPermissions"]
+SettingSource = Literal["user", "project", "local"]
 
 
 class GitHubLabels(_Model):
@@ -27,11 +28,20 @@ class GitHubLabels(_Model):
     def as_tuple(self) -> tuple[str, ...]:
         return (self.todo, self.in_progress, self.review, self.rework, self.complete)
 
+    @field_validator("todo", "in_progress", "review", "rework", "complete")
+    @classmethod
+    def _label_name_is_usable(cls, value: str) -> str:
+        if "," in value:
+            raise ValueError("state label names must not contain ','")
+        if value.startswith("-"):
+            raise ValueError("state label names must not start with '-'")
+        return value
+
     @model_validator(mode="after")
     def _labels_are_distinct(self) -> Self:
         values = self.as_tuple()
-        if len(set(values)) != len(values):
-            raise ValueError("state labels must be distinct")
+        if len({value.lower() for value in values}) != len(values):
+            raise ValueError("state labels must be distinct (compared case-insensitively)")
         return self
 
 
@@ -70,6 +80,7 @@ class AgentSettings(_Model):
     max_turns: int = Field(default=5, ge=1)
     max_attempts: int = Field(default=3, ge=1)
     max_retry_backoff_ms: int = Field(default=300_000, ge=1000)
+    self_review: bool = True
 
 
 class ClaudeSettings(_Model):
@@ -82,6 +93,20 @@ class ClaudeSettings(_Model):
     allowed_tools: list[str] = Field(default_factory=list)
     disallowed_tools: list[str] = Field(default_factory=list)
     append_system_prompt: str | None = None
+    setting_sources: list[SettingSource] | None = None
+
+    @field_validator("setting_sources")
+    @classmethod
+    def _setting_sources_are_usable(
+        cls, value: list[SettingSource] | None
+    ) -> list[SettingSource] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("claude.setting_sources must name at least one source or be omitted")
+        if len(set(value)) != len(value):
+            raise ValueError("claude.setting_sources must not repeat a source")
+        return value
 
 
 class DatabaseSettings(_Model):
