@@ -185,6 +185,16 @@ async def test_remnant_without_git_is_recreated(
 
 
 @posix
+async def test_remnant_file_is_replaced(tmp_path: Path, make_issue: Callable[..., Issue]) -> None:
+    manager, _ = make_manager(tmp_path)
+    manager.root.mkdir(parents=True, exist_ok=True)
+    (manager.root / "example-42").write_text("not a directory")
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert ws.created
+    assert (ws.path / ".git").is_dir()
+
+
+@posix
 async def test_clone_failure_removes_directory_and_raises(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
@@ -233,6 +243,19 @@ async def test_remove_runs_before_remove_and_deletes(
     assert marker.exists()
     assert not ws.path.exists()
     assert await manager.remove("example-42") is False
+
+
+@posix
+async def test_remove_runs_before_remove_on_a_remnant(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    marker = tmp_path / "removed"
+    manager, _ = make_manager(tmp_path, hooks={"before_remove": f"touch {marker}"})
+    remnant = manager.root / "example-42"
+    remnant.mkdir(parents=True)
+    assert await manager.remove("example-42") is True
+    assert marker.exists()
+    assert not remnant.exists()
 
 
 @posix

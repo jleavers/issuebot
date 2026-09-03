@@ -135,7 +135,13 @@ class WorkspaceManager:
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
             self._log.warning("workspace_remnant_removed", workspace=str(path))
-            shutil.rmtree(path)
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError as exc:
+                raise AgentError("workspace_error", f"cannot remove remnant {path}: {exc}") from exc
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             await self._clone(path)
@@ -171,8 +177,7 @@ class WorkspaceManager:
         path = self.path_for(identifier)
         if not path.exists():
             return False
-        if (path / ".git").is_dir():
-            await self.run_hook("before_remove", path)
+        await self.run_hook("before_remove", path)
         shutil.rmtree(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
@@ -225,7 +230,11 @@ class WorkspaceManager:
                 stderr_tail="",
             )
             self._log.warning(
-                "hook_timed_out", hook=name, timeout_ms=self._settings.hooks.timeout_ms
+                "hook_failed",
+                hook=name,
+                timed_out=True,
+                timeout_ms=self._settings.hooks.timeout_ms,
+                duration_ms=result.duration_ms,
             )
             return result
         except BaseException:
