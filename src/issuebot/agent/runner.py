@@ -1,9 +1,12 @@
 """The claude -p subprocess boundary: argv, environment, stream-json parsing and timeouts."""
 
 import asyncio
+import contextlib
 import json
 import os
 import re
+import signal
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -307,3 +310,231 @@ class ClaudeRunner:
 
     def child_environment(self) -> dict[str, str]:
         return agent_environment(self._environ, token=self._token)
+
+    async def run_turn(
+        self,
+        *,
+        prompt: str,
+        workspace: Path,
+        session_id: str,
+        resume: bool,
+        turn_number: int,
+        log_dir: Path,
+        observer: TurnObserver | None = None,
+        cancel: asyncio.Event | None = None,
+    ) -> TurnResult:
+        """Run one turn; every failure is reported in the result, only cancellation propagates."""
+        stdout_path = log_dir / f"turn-{turn_number}.jsonl"
+        stderr_path = log_dir / f"turn-{turn_number}.stderr.log"
+        parser = StreamParser(turn_number=turn_number, expected_session_id=session_id)
+        emit = _Emitter(observer, self._log)
+        started = time.monotonic()
+
+        def finish(
+            category: AgentErrorCategory | None, error: str | None, exit_code: int | None
+        ) -> TurnResult:
+            result = parser.result or {}
+            usage = result.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            turn = TurnResult(
+                turn_number=turn_number,
+                session_id=parser.session_id,
+                model=parser.model,
+                api_key_source=parser.api_key_source,
+                exit_code=exit_code,
+                subtype=_string(result.get("subtype")),
+                is_error=bool(result.get("is_error")),
+                num_turns=_int(result.get("num_turns")),
+                input_tokens=_int(usage.get("input_tokens")),
+                cache_creation_input_tokens=_int(usage.get("cache_creation_input_tokens")),
+                cache_read_input_tokens=_int(usage.get("cache_read_input_tokens")),
+                output_tokens=_int(usage.get("output_tokens")),
+                cost_usd=_float(result.get("total_cost_usd")),
+                duration_ms=_int(result.get("duration_ms")),
+                permission_denials=len(result.get("permission_denials") or []),
+                result_text=_string(result.get("result")),
+                error_category=category,
+                error=error,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+            self._log.info(
+                "claude_turn_finished",
+                turn_number=turn_number,
+                exit_code=exit_code,
+                error_category=category,
+                error=error,
+                cost_usd=turn.cost_usd,
+                input_tokens=turn.total_input_tokens,
+                output_tokens=turn.output_tokens,
+                num_turns=turn.num_turns,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+            return turn
+
+        resolved = workspace.resolve()
+        inside = resolved != self._root and resolved.is_relative_to(self._root)
+        if not (resolved.is_dir() and inside):
+            message = f"{workspace} is not a directory inside {self._root}"
+            return finish("invalid_workspace_cwd", message, None)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
+        argv = self.build_argv(session_id=session_id, resume=resume)
+        self._log.info(
+            "claude_turn_started",
+            turn_number=turn_number,
+            argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+            workspace=str(resolved),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+        )
+        category: AgentErrorCategory | None = None
+        error: str | None = None
+        with stderr_path.open("wb") as stderr_file:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=resolved,
+                    env=self.child_environment(),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                    limit=STREAM_LINE_LIMIT,
+                )
+            except OSError as exc:
+                return finish("claude_not_found", f"cannot run {argv[0]!r}: {exc}", None)
+
+            writer = asyncio.create_task(_feed_stdin(process, prompt))
+            reader = asyncio.create_task(self._read_stream(process, parser, emit, stdout_path))
+            waiters: set[asyncio.Task[Any]] = {reader}
+            cancel_waiter = asyncio.create_task(cancel.wait()) if cancel is not None else None
+            if cancel_waiter is not None:
+                waiters.add(cancel_waiter)
+            try:
+                done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                if cancel_waiter is not None and cancel_waiter in done:
+                    category, error = "cancelled", "cancelled while the turn was running"
+                    await self._terminate(process)
+                elif reader.result() == "timeout":
+                    category = "turn_timeout"
+                    error = f"no output for {self._timeout_s:.0f}s"
+                    await self._terminate(process)
+            except asyncio.CancelledError:
+                await self._terminate(process)
+                raise
+            finally:
+                for task in (writer, reader, cancel_waiter):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+            exit_code = await process.wait()
+
+        emit(_event("process_exit", parser, detail=str(exit_code)))
+        if category is None:
+            category, error = classify_result(parser.result, exit_code, _last_line(stderr_path))
+        if category is None:
+            emit(_event("turn_completed", parser, detail=parser.model))
+        elif category == "turn_timeout":
+            emit(_event("turn_timeout", parser, detail=error))
+        else:
+            emit(_event("turn_failed", parser, detail=error))
+        return finish(category, error, exit_code)
+
+    async def _read_stream(
+        self,
+        process: asyncio.subprocess.Process,
+        parser: StreamParser,
+        emit: _Emitter,
+        stdout_path: Path,
+    ) -> str:
+        """Tee stdout to the log file and feed the parser; "timeout" on silence, else "eof"."""
+        stdout = process.stdout
+        if stdout is None:
+            return "eof"
+        with stdout_path.open("ab") as out:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(stdout.readline(), timeout=self._timeout_s)
+                except TimeoutError:
+                    return "timeout"
+                except ValueError:
+                    self._log.warning(
+                        "claude_stream_line_too_long",
+                        turn_number=parser.turn_number,
+                        limit=STREAM_LINE_LIMIT,
+                    )
+                    emit(parser.overrun())
+                    continue
+                if not raw:
+                    return "eof"
+                out.write(raw)
+                out.flush()
+                for event in parser.feed(raw.decode("utf-8", errors="replace")):
+                    emit(event)
+
+    async def _terminate(self, process: asyncio.subprocess.Process) -> None:
+        """SIGTERM, wait for the grace period, then SIGKILL the whole process group."""
+        if process.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+
+class _Emitter:
+    """Logs every turn event and hands it to the observer, isolating observer failures."""
+
+    def __init__(self, observer: TurnObserver | None, log: Any) -> None:
+        self._observer = observer
+        self._log = log
+
+    def __call__(self, event: TurnEvent) -> None:
+        self._log.debug(
+            "claude_turn_event",
+            kind=event.kind,
+            turn_number=event.turn_number,
+            message_type=event.message_type,
+            tool_name=event.tool_name,
+            detail=event.detail,
+        )
+        if self._observer is None:
+            return
+        try:
+            self._observer.on_turn_event(event)
+        except Exception:
+            self._log.exception("turn_observer_failed", kind=event.kind)
+
+
+def _event(kind: TurnEventKind, parser: StreamParser, *, detail: str | None) -> TurnEvent:
+    return TurnEvent(
+        kind=kind, turn_number=parser.turn_number, session_id=parser.session_id, detail=detail
+    )
+
+
+async def _feed_stdin(process: asyncio.subprocess.Process, prompt: str) -> None:
+    stdin = process.stdin
+    if stdin is None:
+        return
+    try:
+        stdin.write(prompt.encode("utf-8"))
+        await stdin.drain()
+    except BrokenPipeError, ConnectionResetError:
+        return
+    finally:
+        stdin.close()
+
+
+def _last_line(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:_MESSAGE_LIMIT] if lines else ""
