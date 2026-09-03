@@ -1,12 +1,13 @@
 """The orchestrator: one task owning the schedule, workers as child tasks, a queue between."""
 
 import asyncio
+import math
 import os
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
@@ -33,16 +34,20 @@ from issuebot.github import (
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
 from issuebot.orchestrator.state import (
+    CONTINUATION_DELAY_MS,
     REVIEW_GRACE_TICKS,
     TERMINAL_SWEEP_EVERY_TICKS,
+    BlockedContext,
     ClaudeTotals,
     Counters,
     RetryEntry,
+    RetryKind,
     RetryRow,
     RunningEntry,
     RunningRow,
     RuntimeSnapshot,
     StopCause,
+    backoff_ms,
     observe_transition,
     sort_candidates,
 )
@@ -515,6 +520,267 @@ class Orchestrator:
             self._counters = self._counters.bump(issues_completed=1)
         elif outcome == "cancelled":
             self._counters = self._counters.bump(issues_cancelled=1)
+
+    # --- worker exits and retries ------------------------------------------------
+
+    async def handle_worker_exit(self, issue_id: str) -> None:
+        """Symphony §16.6 with the blocked escape: totals, then retry, escape or release."""
+        entry = self._running.pop(issue_id, None)
+        if entry is None or entry.task is None:
+            return
+        task = entry.task
+        self._counters = self._counters.bump(runs_ended=1)
+        result: RunResult | None = None
+        error: str | None = None
+        if task.cancelled():
+            error = "worker task cancelled"
+            self._add_elapsed(entry)
+        elif task.exception() is not None:
+            exc = task.exception()
+            self._log.error(
+                "worker_crashed",
+                issue_number=entry.issue.number,
+                issue_identifier=entry.identifier,
+                run_id=entry.run_id,
+                error=str(exc),
+                exc_info=exc,
+            )
+            error = f"worker crashed: {exc}"
+            self._add_elapsed(entry)
+        else:
+            result = task.result()
+            self._totals = self._totals.add(result)
+        self._log.info(
+            "worker_exited",
+            issue_number=entry.issue.number,
+            issue_identifier=entry.identifier,
+            run_id=entry.run_id,
+            attempt=entry.attempt,
+            outcome=result.outcome if result is not None else None,
+            stop_reason=result.stop_reason if result is not None else None,
+            cause=entry.stop_cause,
+            turns=result.turns if result is not None else entry.turns,
+            cost_usd=result.cost_usd if result is not None else 0.0,
+            error=error or (result.error if result is not None else None),
+        )
+        if entry.terminal_issue is not None:
+            await self._finish(entry.terminal_issue)
+            return
+        if task.cancelled() or entry.stop_cause in ("moved", "missing", "shutdown"):
+            self._log.info(
+                "issue_released",
+                issue_number=entry.issue.number,
+                issue_identifier=entry.identifier,
+                reason=entry.stop_cause or "task cancelled",
+            )
+            return
+        if entry.stop_cause == "stalled":
+            await self._after_failure(entry, f"stalled: {entry.stop_detail}", result)
+            return
+        if result is None:
+            await self._after_failure(entry, error or "worker crashed", None)
+            return
+        if result.outcome == "succeeded":
+            if result.stop_reason == "max_turns" and result.final_state is StateLabel.IN_PROGRESS:
+                review = self._workflow.config.github.labels.review
+                reason = (
+                    f"Turn budget exhausted: {result.turns} turns in attempt {entry.attempt} "
+                    f"without reaching `{review}`."
+                )
+                await self._escape(entry, reason, result)
+                return
+            final = result.final_issue
+            if final is not None and final.github_state == "open":
+                for event in observe_transition(entry.issue, final):
+                    self._bus.publish(event)
+            self._schedule(
+                entry.issue,
+                attempt=1,
+                kind="continuation",
+                delay_ms=CONTINUATION_DELAY_MS,
+                error=None,
+            )
+            return
+        await self._after_failure(entry, f"{result.error_category}: {result.error}", result)
+
+    def _add_elapsed(self, entry: RunningEntry) -> None:
+        elapsed = self._clock() - entry.started_mono
+        self._totals = replace(
+            self._totals, seconds_running=round(self._totals.seconds_running + elapsed, 3)
+        )
+
+    async def _after_failure(
+        self, entry: RunningEntry, error: str, result: RunResult | None
+    ) -> None:
+        agent = self._workflow.config.agent
+        if entry.attempt >= agent.max_attempts:
+            reason = (
+                f"{agent.max_attempts} consecutive worker sessions failed; last error: {error}."
+            )
+            await self._escape(entry, reason, result)
+            return
+        self._schedule(
+            entry.issue,
+            attempt=entry.attempt + 1,
+            kind="failure",
+            delay_ms=backoff_ms(entry.attempt + 1, agent.max_retry_backoff_ms),
+            error=error,
+        )
+
+    async def _escape(self, entry: RunningEntry, reason: str, result: RunResult | None) -> None:
+        context = BlockedContext(
+            reason=reason,
+            run_id=entry.run_id,
+            attempt=entry.attempt,
+            turns=result.turns if result is not None else entry.turns,
+            log_dir=str(result.log_dir) if result is not None and result.log_dir else None,
+        )
+        outcome = await actions.blocked_escape(
+            self._adapter, self._bus, entry.issue_id, context, now=self._now()
+        )
+        if outcome == "applied":
+            self._counters = self._counters.bump(blocked=1)
+        elif outcome == "failed":
+            self._schedule(
+                entry.issue,
+                attempt=1,
+                kind="escape",
+                delay_ms=backoff_ms(1, self._workflow.config.agent.max_retry_backoff_ms),
+                error="blocked escape failed",
+                escape=context,
+            )
+
+    def _schedule(
+        self,
+        issue: Issue,
+        *,
+        attempt: int,
+        kind: RetryKind,
+        delay_ms: int,
+        error: str | None,
+        escape: BlockedContext | None = None,
+    ) -> None:
+        entry = RetryEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            issue_number=issue.number,
+            issue_url=issue.url,
+            attempt=attempt,
+            kind=kind,
+            due_mono=self._clock() + delay_ms / 1000,
+            due_at=self._now() + timedelta(milliseconds=delay_ms),
+            error=error,
+            escape=escape,
+        )
+        self._retries[issue.id] = entry
+        self._log.info(
+            "retry_scheduled",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            kind=kind,
+            attempt=attempt,
+            due_in_ms=delay_ms,
+            error=error,
+        )
+
+    def _requeue(self, entry: RetryEntry, *, delay_ms: int, error: str, kind: RetryKind) -> None:
+        self._retries[entry.issue_id] = replace(
+            entry,
+            kind=kind,
+            due_mono=self._clock() + delay_ms / 1000,
+            due_at=self._now() + timedelta(milliseconds=delay_ms),
+            error=error,
+        )
+        self._log.info(
+            "retry_scheduled",
+            issue_number=entry.issue_number,
+            issue_identifier=entry.identifier,
+            kind=kind,
+            attempt=entry.attempt,
+            due_in_ms=delay_ms,
+            error=error,
+        )
+
+    def _release(self, entry: RetryEntry, reason: str) -> None:
+        self._log.info(
+            "retry_released",
+            issue_number=entry.issue_number,
+            issue_identifier=entry.identifier,
+            kind=entry.kind,
+            reason=reason,
+        )
+
+    def _earliest_due(self) -> float:
+        return min((entry.due_mono for entry in self._retries.values()), default=math.inf)
+
+    async def fire_due_retries(self) -> None:
+        """Symphony §16.6's retry timer, for every entry whose time has come."""
+        now = self._clock()
+        due = sorted(
+            (entry for entry in self._retries.values() if entry.due_mono <= now),
+            key=lambda entry: entry.due_mono,
+        )
+        for entry in due:
+            if self._stopping:
+                return
+            if self._retries.get(entry.issue_id) is not entry:
+                continue
+            del self._retries[entry.issue_id]
+            await self._fire(entry)
+
+    async def _fire(self, entry: RetryEntry) -> None:
+        settings = self._workflow.config
+        self._log.info(
+            "retry_fired",
+            issue_number=entry.issue_number,
+            issue_identifier=entry.identifier,
+            kind=entry.kind,
+            attempt=entry.attempt,
+        )
+        if entry.kind == "escape" and entry.escape is not None:
+            outcome = await actions.blocked_escape(
+                self._adapter, self._bus, entry.issue_id, entry.escape, now=self._now()
+            )
+            if outcome == "applied":
+                self._counters = self._counters.bump(blocked=1)
+            elif outcome == "failed":
+                self._requeue(
+                    replace(entry, attempt=entry.attempt + 1),
+                    kind="escape",
+                    delay_ms=backoff_ms(entry.attempt + 1, settings.agent.max_retry_backoff_ms),
+                    error="blocked escape failed",
+                )
+            return
+        try:
+            issues = await self._adapter.fetch_issues_by_ids([entry.issue_id])
+        except GitHubError as exc:
+            self._requeue(
+                entry,
+                kind=entry.kind,
+                delay_ms=settings.polling.interval_ms,
+                error=f"retry refresh failed: {exc.message}",
+            )
+            return
+        if not issues:
+            self._release(entry, "missing")
+            return
+        issue = issues[0]
+        if issue.github_state == "closed":
+            await self._finish(issue)
+            return
+        if not issue.dispatchable or issue.state not in ACTIVE_STATES:
+            self._release(entry, "not_active")
+            return
+        if self._slots() <= 0:
+            self._requeue(
+                entry,
+                kind="slots",
+                delay_ms=settings.polling.interval_ms,
+                error="no available orchestrator slots",
+            )
+            return
+        attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1
+        await self._dispatch(issue, attempt=attempt, resume_session_id=None)
 
 
 def _changed_sections(old: Workflow, new: Workflow) -> list[str]:

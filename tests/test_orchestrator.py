@@ -14,11 +14,15 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, Wo
 from issuebot.agent.session import run_session
 from issuebot.config import Settings, load_workflow
 from issuebot.events import (
+    Blocked,
     Event,
     EventBus,
+    IssueCancelled,
     IssueCompleted,
+    PrOpened,
+    StateChanged,
 )
-from issuebot.github import FakeGitHub, GhResult, Issue, StateLabel
+from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, Issue, StateLabel
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
     Orchestrator,
@@ -562,6 +566,461 @@ async def test_workspace_path_error_skips_the_orphan(
     assert h.sessions.runs == []
 
 
+# --- worker exits and retries -----------------------------------------------------------
+
+
+async def test_a_freed_slot_dispatches_the_oldest_todo_next(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    h.add_issue(3, "rework")
+    h.add_issue(4, "in_progress")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["3", "4"]
+    h.github.human_set_state(4, StateLabel.REVIEW)
+    await h.exit(h.run_for(4), final_issue=h.github.issue(4))
+    assert "4" not in h.orchestrator.running
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [4, 3, 1]
+    assert h.github.issue(2).state is StateLabel.TODO
+
+
+async def test_normal_exit_to_review_schedules_a_continuation_that_releases(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.open_pr(1, pr_number=2)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    assert h.orchestrator.running == {}
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == ("continuation", 1, None)
+    assert retry.due_mono == START_MONO + 1
+    assert retry.due_at == START + timedelta(seconds=1)
+    assert h.recorder.kinds == ["state_changed", "state_changed", "pr_opened"]
+    agent_move = h.recorder.of(StateChanged)[1]
+    assert (agent_move.actor, agent_move.to_label) == ("agent", "issuebot/review")
+    assert agent_move.pr_url == "https://github.com/example/repo/pull/2"
+    snapshot = h.orchestrator.snapshot()
+    assert snapshot.counters.runs_ended == 1
+    assert (snapshot.totals.input_tokens, snapshot.totals.cost_usd) == (100, 0.5)
+    assert snapshot.totals.seconds_running == 12.0
+    await h.fire(0.5)
+    assert "1" in h.orchestrator.retries
+    await h.fire(0.5)
+    assert h.orchestrator.retries == {}
+    assert len(h.sessions.runs) == 1
+
+
+async def test_normal_exit_to_todo_redispatches_a_fresh_attempt(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.TODO)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1), final_state=StateLabel.TODO)
+    assert h.recorder.of(StateChanged)[-1].actor == "human"
+    await h.fire(1)
+    assert len(h.sessions.runs) == 2
+    assert h.run_for(1).kwargs["attempt"] == 1
+    assert h.calls("set_state") == [(1, StateLabel.IN_PROGRESS), (1, StateLabel.IN_PROGRESS)]
+
+
+async def test_failure_backoff_doubles_and_caps_then_escapes(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=3, max_retry_backoff_ms=30_000)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == ("failure", 2, "process_exit: boom")
+    assert retry.due_mono == START_MONO + 20
+    await h.fire(19)
+    assert len(h.sessions.runs) == 1
+    await h.fire(1)
+    assert len(h.sessions.runs) == 2
+    assert h.run_for(1).kwargs["attempt"] == 2
+    assert h.run_for(1).kwargs["resume_session_id"] is None
+    assert h.calls("set_state") == [(1, StateLabel.IN_PROGRESS)]
+    await h.exit(
+        h.run_for(1),
+        outcome="timed_out",
+        stop_reason="failure",
+        error_category="turn_timeout",
+        error="no output for 3600s",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    retry = h.retry(1)
+    assert (retry.attempt, retry.due_mono - h.clock()) == (3, 30.0)
+    await h.fire(30)
+    assert h.run_for(1).kwargs["attempt"] == 3
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom again",
+        final_state=StateLabel.IN_PROGRESS,
+        turns=2,
+    )
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    body = h.github.comments_for(1)[0].body
+    assert body.startswith(WORKPAD_MARKER)
+    assert "3 consecutive worker sessions failed; last error: process_exit: boom again." in body
+    assert "(attempt 3, 2 turns)" in body
+    assert h.recorder.of(Blocked)[0].reason.startswith("3 consecutive worker sessions failed")
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
+async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.comment(1, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    await h.exit(
+        h.run_for(1),
+        stop_reason="max_turns",
+        final_state=StateLabel.IN_PROGRESS,
+        final_issue=h.github.issue(1),
+        turns=3,
+    )
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    comments = h.github.comments_for(1)
+    assert len(comments) == 1
+    assert "Turn budget exhausted: 3 turns in attempt 1 without reaching `issuebot/review`." in (
+        comments[0].body
+    )
+    assert h.recorder.kinds == ["state_changed", "state_changed", "blocked"]
+    assert h.recorder.of(StateChanged)[1].actor == "issuebot"
+
+
+async def test_escape_failure_is_retried_with_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    run = h.run_for(1)
+    with monkeypatch.context() as patch:
+        h.fail_on("set_state", patch)
+        await h.exit(run, stop_reason="max_turns", final_state=StateLabel.IN_PROGRESS, turns=3)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == ("escape", 1, "blocked escape failed")
+    assert retry.due_mono == START_MONO + 10
+    assert retry.escape is not None
+    assert retry.escape.run_id == run.kwargs["run_id"]
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    with monkeypatch.context() as patch:
+        h.fail_on("set_state", patch)
+        await h.fire(10)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.due_mono - h.clock()) == ("escape", 2, 20.0)
+    await h.fire(20)
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.github.comments_for(1)[0].body.count("### Issuebot blocked") == 1
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
+async def test_retry_requeues_when_no_slot_is_free(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(2),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    h.add_issue(3, "todo")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1", "3"]
+    await h.fire(20)
+    retry = h.retry(2)
+    assert (retry.kind, retry.attempt, retry.error) == (
+        "slots",
+        2,
+        "no available orchestrator slots",
+    )
+    assert retry.due_mono == h.clock() + 30
+    assert len(h.sessions.runs) == 3
+
+
+async def test_retry_refresh_failure_requeues_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    with monkeypatch.context() as patch:
+        h.fail_on("fetch_issues_by_ids", patch)
+        await h.fire(20)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt) == ("failure", 2)
+    assert retry.error is not None and retry.error.startswith("retry refresh failed: ")
+    assert retry.due_mono == h.clock() + 30
+    assert len(h.sessions.runs) == 1
+
+
+async def test_retry_finds_the_issue_closed_or_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    for number in (1, 2):
+        await h.exit(
+            h.run_for(number),
+            outcome="failed",
+            stop_reason="failure",
+            error_category="process_exit",
+            error="boom",
+            final_state=StateLabel.IN_PROGRESS,
+        )
+    h.workspace_dir("repo-1")
+    h.github.close_issue(1)
+
+    original = h.github.fetch_issues_by_ids
+
+    async def hide_two(ids: Any) -> list[Issue]:
+        return [issue for issue in await original(ids) if issue.number != 2]
+
+    monkeypatch.setattr(h.github, "fetch_issues_by_ids", hide_two)
+    await h.fire(20)
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is None
+    assert isinstance(h.recorder.of(IssueCancelled)[0], IssueCancelled)
+    assert not (h.root / "repo-1").exists()
+    assert len(h.sessions.runs) == 2
+
+
+async def test_crashed_worker_is_retried(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.clock.advance(7)
+    h.run_for(1).fail(RuntimeError("kaboom"))
+    await h.drain()
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == ("failure", 2, "worker crashed: kaboom")
+    snapshot = h.orchestrator.snapshot()
+    assert snapshot.counters.runs_ended == 1
+    assert snapshot.totals.seconds_running == 7.0
+
+
+async def test_terminal_sweep_drops_a_retry_for_a_closed_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    h.github.close_issue(1)
+    for _ in range(10):
+        await h.tick()
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is None
+
+
+# --- reconcile ----------------------------------------------------------------------------
+
+
+async def test_reconcile_with_nothing_running_makes_no_request(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    await h.tick()
+    h.github.calls.clear()
+    await h.orchestrator.reconcile()
+    assert h.github.calls == []
+
+
+async def test_reconcile_refresh_failure_keeps_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.TODO)
+    with monkeypatch.context() as patch:
+        h.fail_on("fetch_issues_by_ids", patch)
+        await h.tick()
+    assert h.entry(1).stop_cause is None
+    assert not h.entry(1).cancel.is_set()
+
+
+async def test_reconcile_updates_the_snapshot_and_sees_the_pr(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.open_pr(1, pr_number=5)
+    await h.tick()
+    entry = h.entry(1)
+    assert entry.issue.linked_pr is not None and entry.issue.linked_pr.number == 5
+    assert entry.stop_cause is None
+    assert h.recorder.of(PrOpened)[0].pr_number == 5
+    await h.tick()
+    assert len(h.recorder.of(PrOpened)) == 1
+
+
+async def test_reconcile_gives_review_one_tick_of_grace(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.tick()
+    entry = h.entry(1)
+    assert entry.review_seen_tick == 1
+    assert not entry.cancel.is_set()
+    assert [event.actor for event in h.recorder.of(StateChanged)] == ["issuebot", "agent"]
+    await h.tick()
+    assert entry.cancel.is_set()
+    assert (entry.stop_cause, entry.stop_detail) == ("moved", "review")
+    await h.drain()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    assert (h.root / "repo-1").is_dir()
+    assert len(h.recorder.of(StateChanged)) == 2
+
+
+@pytest.mark.parametrize("state", [StateLabel.TODO, StateLabel.REWORK])
+async def test_reconcile_cancels_other_moves_at_once(tmp_path: Path, state: StateLabel) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_set_state(1, state)
+    await h.tick()
+    entry = h.entry(1)
+    assert entry.cancel.is_set()
+    assert (entry.stop_cause, entry.stop_detail) == ("moved", state.value)
+    assert h.recorder.of(StateChanged)[-1].actor == "human"
+    await h.drain()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+
+
+async def test_reconcile_cancels_an_unlabelled_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_remove_label(1, "issuebot/in-progress")
+    await h.tick()
+    assert (h.entry(1).stop_cause, h.entry(1).stop_detail) == ("moved", "unlabelled")
+
+
+async def test_reconcile_completes_a_closed_issue_after_the_worker_exits(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+    await h.tick()
+    entry = h.entry(1)
+    assert entry.stop_cause == "closed"
+    assert entry.terminal_issue is not None
+    assert (h.root / "repo-1").is_dir()
+    await h.drain()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.recorder.of(IssueCompleted)[0].pr_url == "https://github.com/example/repo/pull/5"
+    assert not (h.root / "repo-1").exists()
+    assert h.orchestrator.snapshot().counters.issues_completed == 1
+
+
+async def test_reconcile_cancels_a_closed_unmerged_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+    h.github.close_issue(1)
+    await h.tick()
+    await h.drain()
+    assert h.github.issue(1).state is None
+    assert len(h.recorder.of(IssueCancelled)) == 1
+    assert not (h.root / "repo-1").exists()
+    assert h.orchestrator.snapshot().counters.issues_cancelled == 1
+
+
+async def test_reconcile_releases_a_missing_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+
+    async def nothing(ids: Any) -> list[Issue]:
+        return []
+
+    monkeypatch.setattr(h.github, "fetch_issues_by_ids", nothing)
+    await h.tick()
+    assert h.entry(1).stop_cause == "missing"
+    await h.drain()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    assert (h.root / "repo-1").is_dir()
+
+
+async def test_stall_detection_kills_and_retries(tmp_path: Path) -> None:
+    h = Harness(tmp_path, stall_timeout_ms=300_000)
+    h.add_issue(1, "todo")
+    await h.tick()
+    run = h.run_for(1)
+    h.clock.advance(200)
+    run.observer.on_turn_event(activity(tool_name="Bash", message_type="assistant"))
+    h.clock.advance(150)
+    await h.tick()
+    assert h.entry(1).stop_cause is None
+    h.clock.advance(151)
+    await h.tick()
+    entry = h.entry(1)
+    assert (entry.stop_cause, entry.stop_detail) == ("stalled", "no activity for 301 s")
+    assert entry.cancel.is_set()
+    await h.drain()
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == (
+        "failure",
+        2,
+        "stalled: no activity for 301 s",
+    )
+
+
+async def test_stall_detection_is_disabled_at_zero(tmp_path: Path) -> None:
+    h = Harness(tmp_path, stall_timeout_ms=0)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.clock.advance(100_000)
+    await h.tick()
+    assert h.entry(1).stop_cause is None
+
+
 # --- terminal sweep -----------------------------------------------------------------------
 
 
@@ -659,3 +1118,43 @@ async def test_preflight_failure_skips_dispatch_but_reconciles(tmp_path: Path) -
     h.which_missing = set()
     await h.tick()
     assert len(h.sessions.runs) == 2
+
+
+# --- snapshot -----------------------------------------------------------------------------
+
+
+async def test_snapshot_rows_and_active_seconds(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", title="First")
+    h.add_issue(2, "todo")
+    await h.tick()
+    h.run_for(1).observer.on_turn_event(activity(kind="session_started", session_id="sess-1"))
+    await h.exit(
+        h.run_for(2),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    h.clock.advance(5)
+    snapshot = h.orchestrator.snapshot()
+    assert snapshot.at == h.now()
+    assert snapshot.workflow_path == str(h.path)
+    assert (snapshot.tick_count, snapshot.last_tick_at) == (1, START)
+    row = snapshot.running[0]
+    assert (row.issue_number, row.identifier, row.title, row.state) == (
+        1,
+        "repo-1",
+        "First",
+        "in_progress",
+    )
+    assert (row.session_id, row.attempt, row.started_at) == ("sess-1", 1, START)
+    assert row.last_activity_at == START
+    assert row.last_event == "session_started"
+    retry = snapshot.retrying[0]
+    assert (retry.issue_number, retry.kind, retry.attempt) == (2, "failure", 2)
+    assert retry.due_at == START + timedelta(seconds=20)
+    assert snapshot.totals.seconds_running == 12.0 + 5.0
+    assert snapshot.counters.runs_started == 2
+    assert snapshot.to_dict()["running"][0]["identifier"] == "repo-1"
