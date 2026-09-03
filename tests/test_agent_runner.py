@@ -480,7 +480,7 @@ async def test_silence_times_out_and_kills(workspace: Path, tmp_path: Path) -> N
     runner = runner_for(
         workspace,
         scenario="silent",
-        turn_timeout_ms=500,
+        turn_timeout_ms=1500,
         extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)},
     )
     recorder = Recorder()
@@ -501,7 +501,7 @@ async def test_stubborn_child_is_killed_after_the_grace_period(
     runner = runner_for(
         workspace,
         scenario="stubborn",
-        turn_timeout_ms=500,
+        turn_timeout_ms=1500,
         extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)},
     )
     turn = await run(runner, workspace)
@@ -550,6 +550,48 @@ async def test_long_lines_are_parsed(workspace: Path) -> None:
     assert turn.ok
     assert len(turn.stdout_path.read_text().splitlines()) == 7
     assert [e.message_type for e in recorder.events].count("user") == 2
+
+
+@posix
+async def test_overlong_line_is_dropped_and_the_turn_continues(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("issuebot.agent.runner.STREAM_LINE_LIMIT", 64 * 1024)
+    recorder = Recorder()
+    turn = await run(runner_for(workspace, scenario="long_line"), workspace, observer=recorder)
+    assert turn.ok
+    assert turn.result_text == "hello issuebot"
+    assert sum(1 for event in recorder.events if event.message_type == "unparseable") >= 1
+
+
+@posix
+async def test_reader_failure_terminates_the_child(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "pid"
+    runner = runner_for(workspace, scenario="slow", extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)})
+
+    async def fake_read_stream(
+        self: ClaudeRunner,
+        process: asyncio.subprocess.Process,
+        parser: object,
+        emit: object,
+        stdout_path: Path,
+    ) -> str:
+        await asyncio.sleep(0.3)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ClaudeRunner, "_read_stream", fake_read_stream)
+    recorder = Recorder()
+    task = asyncio.create_task(run(runner, workspace, observer=recorder))
+    pid = await wait_for_file(pidfile)
+    turn = await task
+    assert turn.error_category == "process_exit"
+    assert turn.error is not None
+    assert "disk full" in turn.error
+    assert turn.exit_code == -signal.SIGTERM
+    await assert_gone(pid)
+    assert recorder.kinds[-2:] == ["process_exit", "turn_failed"]
 
 
 @posix

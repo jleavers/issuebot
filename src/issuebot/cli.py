@@ -471,7 +471,6 @@ async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> in
         from_label = issue.state_labels[0] if issue.state_labels else None
         try:
             await adapter.set_state(number, StateLabel.IN_PROGRESS)
-            refreshed = await adapter.fetch_issues_by_ids([str(number)])
         except GitHubError as exc:
             print(f"[FAIL] claim: {exc}")
             return 1
@@ -484,6 +483,11 @@ async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> in
                 actor="issuebot",
             )
         )
+        try:
+            refreshed = await adapter.fetch_issues_by_ids([str(number)])
+        except GitHubError as exc:
+            print(f"[FAIL] claim: {exc}")
+            return 1
         if refreshed:
             issue = refreshed[0]
     result = await _run_session(

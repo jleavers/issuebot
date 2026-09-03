@@ -6,6 +6,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -13,6 +14,7 @@ from issuebot import __version__
 from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
 from issuebot.cli import main, not_runnable, render_issue_table, render_run_summary
 from issuebot.config import GitHubSettings, Settings
+from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
@@ -576,6 +578,23 @@ def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubSession:
     return stub
 
 
+class RecordingSink:
+    """Stands in for LogSink: records every published event instead of logging it."""
+
+    name = "recording"
+    events: ClassVar[list[Event]] = []
+
+    def handle(self, event: Event) -> None:
+        RecordingSink.events.append(event)
+
+
+@pytest.fixture
+def recording_sink(monkeypatch: pytest.MonkeyPatch) -> type[RecordingSink]:
+    RecordingSink.events = []
+    monkeypatch.setattr("issuebot.cli.LogSink", RecordingSink)
+    return RecordingSink
+
+
 def _workflow_with_root(tmp_path: Path, **extra_lines: str) -> Path:
     lines = ["---", "github:", "  repo: example/repo", "workspace:", f"  root: {tmp_path / 'ws'}"]
     lines.extend(extra_lines.values())
@@ -627,6 +646,7 @@ def test_run_once_claims_a_todo_issue_and_prints_the_summary(
     tmp_path: Path,
     fake_github: FakeGitHub,
     stub_session: StubSession,
+    recording_sink: type[RecordingSink],
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
@@ -648,6 +668,12 @@ def test_run_once_claims_a_todo_issue_and_prints_the_summary(
     issue = call["issue"]
     assert isinstance(issue, Issue)
     assert issue.state is StateLabel.IN_PROGRESS
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/todo"
+    assert state_changed.to_label == "issuebot/in-progress"
+    assert state_changed.actor == "issuebot"
+    assert state_changed.issue_number == 42
 
 
 def test_run_once_rework_sets_the_flag(
@@ -655,12 +681,19 @@ def test_run_once_rework_sets_the_flag(
     tmp_path: Path,
     fake_github: FakeGitHub,
     stub_session: StubSession,
+    recording_sink: type[RecordingSink],
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/rework",), number=42)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert stub_session.calls[0]["rework"] is True
     assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/rework"
+    assert state_changed.to_label == "issuebot/in-progress"
+    assert state_changed.actor == "issuebot"
+    assert state_changed.issue_number == 42
 
 
 def test_run_once_in_progress_issue_is_not_reclaimed(
@@ -668,12 +701,14 @@ def test_run_once_in_progress_issue_is_not_reclaimed(
     tmp_path: Path,
     fake_github: FakeGitHub,
     stub_session: StubSession,
+    recording_sink: type[RecordingSink],
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/in-progress",), number=42)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert all(name != "set_state" for name, _ in fake_github.calls)
     assert len(stub_session.calls) == 1
+    assert not any(isinstance(event, StateChanged) for event in recording_sink.events)
 
 
 def test_run_once_reports_an_exhausted_turn_budget(
@@ -786,6 +821,7 @@ def test_run_once_reports_claim_failure(
     tmp_path: Path,
     fake_github: FakeGitHub,
     stub_session: StubSession,
+    recording_sink: type[RecordingSink],
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
@@ -797,6 +833,38 @@ def test_run_once_reports_claim_failure(
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     assert "[FAIL] claim: transport: injected transport failure" in capsys.readouterr().out
     assert stub_session.calls == []
+    assert not any(isinstance(event, StateChanged) for event in recording_sink.events)
+
+
+def test_run_once_claim_event_is_published_even_when_the_refetch_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """set_state lands on GitHub even though the re-fetch after it fails; the event still fires."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    original_fetch = fake_github.fetch_issues_by_ids
+    calls = {"n": 0}
+
+    async def flaky_fetch(ids: object) -> list[Issue]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await original_fetch(ids)  # type: ignore[arg-type]
+        raise GitHubError("transport", "injected refetch failure")
+
+    monkeypatch.setattr(fake_github, "fetch_issues_by_ids", flaky_fetch)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert "[FAIL] claim: transport: injected refetch failure" in capsys.readouterr().out
+    assert stub_session.calls == []
+    assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/todo"
+    assert state_changed.to_label == "issuebot/in-progress"
 
 
 def test_run_once_unloadable_workflow_exits_two(capsys: pytest.CaptureFixture[str]) -> None:

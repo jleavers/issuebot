@@ -316,7 +316,7 @@ async def test_hook_timeout_kills_the_process_group(
 ) -> None:
     pidfile = tmp_path / "pid"
     script = f"sleep 30 & echo $! > {pidfile}; wait"
-    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=500)
+    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=1500)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     result = await manager.run_hook("before_run", ws.path)
     assert result is not None

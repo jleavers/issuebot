@@ -420,16 +420,27 @@ class ClaudeRunner:
                     category = "turn_timeout"
                     error = f"no output for {self._timeout_s:.0f}s"
                     await self._terminate(process)
-            except asyncio.CancelledError:
+            except Exception as exc:
+                await self._terminate(process)
+                category, error = "process_exit", f"turn supervision failed: {exc}"
+            except BaseException:
                 await self._terminate(process)
                 emit(_event("process_exit", parser, detail=str(process.returncode)))
                 raise
             finally:
                 for task in (writer, reader, cancel_waiter):
-                    if task is not None and not task.done():
+                    if task is None:
+                        continue
+                    if not task.done():
                         task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await task
+                    elif not task.cancelled() and task.exception() is not None:
+                        self._log.warning(
+                            "claude_turn_task_failed",
+                            turn_number=turn_number,
+                            error=str(task.exception()),
+                        )
             exit_code = await process.wait()
 
         emit(_event("process_exit", parser, detail=str(exit_code)))
