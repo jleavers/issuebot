@@ -522,7 +522,7 @@ class Orchestrator:
         elif outcome == "cancelled":
             self._counters = self._counters.bump(issues_cancelled=1)
 
-    # --- worker exits and retries                                            --------
+    # --- worker exits and retries -----------------------------------------------------
 
     async def handle_worker_exit(self, issue_id: str) -> None:
         """Symphony §16.6 with the blocked escape: totals, then retry, escape or release."""
