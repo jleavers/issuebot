@@ -150,7 +150,7 @@ def test_parse_claude_version(text: str | None, expected: tuple[int, int, int] |
 
 
 def test_minimum_version_is_the_permission_prompts_release() -> None:
-    assert (2, 1, 259) == MIN_CLAUDE_VERSION
+    assert MIN_CLAUDE_VERSION == (2, 1, 259)
 
 
 # --- stream parsing --------------------------------------------------------------------
