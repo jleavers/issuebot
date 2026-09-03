@@ -620,3 +620,43 @@ async def test_missing_executable_is_claude_not_found(workspace: Path) -> None:
     assert "/nonexistent/claude" in turn.error
     assert turn.exit_code is None
     assert (workspace / ".issuebot" / "runs" / "run-1" / "turn-1.prompt.md").exists()
+
+
+# --- Phase 4 hardening: group kill after the leader exited, pre-set cancel ------------
+
+
+@posix
+async def test_orphaned_grandchild_is_killed_with_the_group(
+    workspace: Path, tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    runner = runner_for(
+        workspace,
+        scenario="orphan",
+        turn_timeout_ms=500,
+        extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)},
+    )
+    recorder = Recorder()
+    turn = await run(runner, workspace, observer=recorder)
+    grandchild = await wait_for_file(pidfile)
+    assert turn.error_category == "turn_timeout"
+    assert turn.exit_code == 0
+    await assert_gone(grandchild)
+    assert recorder.kinds[-2:] == ["process_exit", "turn_timeout"]
+
+
+@posix
+async def test_preset_cancel_spawns_nothing(workspace: Path, tmp_path: Path) -> None:
+    record = tmp_path / "record.json"
+    runner = runner_for(workspace, extra_env={"CLAUDE_FAKE_RECORD": str(record)})
+    cancel = asyncio.Event()
+    cancel.set()
+    recorder = Recorder()
+    log_dir = workspace / ".issuebot" / "runs" / "run-1"
+    turn = await run(runner, workspace, observer=recorder, cancel=cancel, log_dir=log_dir)
+    assert turn.error_category == "cancelled"
+    assert turn.exit_code is None
+    assert turn.session_id is None
+    assert not record.exists()
+    assert not log_dir.exists()
+    assert recorder.kinds == []

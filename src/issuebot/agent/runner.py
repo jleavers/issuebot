@@ -377,6 +377,8 @@ class ClaudeRunner:
         if not (resolved.is_dir() and inside):
             message = f"{workspace} is not a directory inside {self._root}"
             return finish("invalid_workspace_cwd", message, None)
+        if cancel is not None and cancel.is_set():
+            return finish("cancelled", "cancelled before the turn started", None)
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
         argv = self.build_argv(session_id=session_id, resume=resume)
@@ -487,17 +489,19 @@ class ClaudeRunner:
                     emit(event)
 
     async def _terminate(self, process: asyncio.subprocess.Process) -> None:
-        """SIGTERM, wait for the grace period, then SIGKILL the whole process group."""
-        if process.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
-        except TimeoutError:
+        """SIGTERM the leader, wait for the grace period, then SIGKILL the whole group.
+
+        The group is killed even when the leader has already exited: a grandchild that
+        inherited stdout would otherwise outlive the turn and hold the pipe open.
+        """
+        if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.wait()
+                process.terminate()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
 
 
 class _Emitter:
