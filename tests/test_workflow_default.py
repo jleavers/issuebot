@@ -97,7 +97,8 @@ def test_follow_up_and_rework_context(make_issue: Callable[..., Issue]) -> None:
         context(workflow, issue, attempt=2, rework=True)
     )
     assert "## Follow-up context" in text
-    assert "worker session #2" in text
+    assert "This is attempt 2 for this issue" in text
+    assert "worker session #" not in text
     assert "## Rework context" in text
     assert "The pull request is #51 (open)" in text
     assert "Linked pull request: #51 (open)" in text
@@ -118,3 +119,10 @@ def test_continuation_renders(make_issue: Callable[..., Issue]) -> None:
         context(workflow, dispatched(make_issue), turn_number=2)
     )
     assert "continuation turn 2 of 5" in text
+
+
+def test_after_create_unshallows_a_shallow_clone() -> None:
+    hook = load().config.hooks.after_create
+    assert hook is not None
+    assert "git rev-parse --is-shallow-repository" in hook
+    assert "git fetch --unshallow" in hook
