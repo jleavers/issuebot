@@ -1,0 +1,46 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "nodes": [
+          {
+            "number": 42,
+            "title": "Add retry backoff",
+            "body": "We need exponential backoff.",
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/42",
+            "createdAt": "2026-09-01T09:00:00Z",
+            "updatedAt": "2026-09-02T10:11:12Z",
+            "closedAt": null,
+            "labels": {"nodes": [{"name": "bug"}, {"name": "issuebot/todo"}]},
+            "assignees": {"nodes": []},
+            "closedByPullRequestsReferences": {"nodes": []}
+          },
+          {
+            "number": 43,
+            "title": "Fix label parsing",
+            "body": null,
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/43",
+            "createdAt": "2026-09-01T10:00:00Z",
+            "updatedAt": "2026-09-02T09:00:00Z",
+            "closedAt": null,
+            "labels": {"nodes": [{"name": "issuebot/todo"}, {"name": "issuebot/in-progress"}]},
+            "assignees": {"nodes": [{"login": "jleavers"}]},
+            "closedByPullRequestsReferences": {
+              "nodes": [
+                {
+                  "number": 51,
+                  "url": "https://github.com/example/repo/pull/51",
+                  "state": "OPEN",
+                  "mergedAt": null
+                }
+              ]
+            }
+          }
+        ],
+        "pageInfo": {"hasNextPage": true, "endCursor": "Y3Vyc29yOjI="}
+      }
+    }
+  }
+}

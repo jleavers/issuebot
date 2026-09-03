@@ -1,0 +1,5 @@
+[
+  {"name": "bug", "color": "d73a4a", "description": "Something isn't working"},
+  {"name": "issuebot/todo", "color": "0e8a16", "description": "Queued for issuebot; a human sets this"},
+  {"name": "issuebot/review", "color": "000000", "description": "old text"}
+]

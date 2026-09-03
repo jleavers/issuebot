@@ -13,6 +13,7 @@ for the container stack, Docker with Compose.
 uv sync
 uv run pytest
 uv run issuebot validate          # checks ./WORKFLOW.md and the environment
+uv run issuebot labels ensure     # once per repository: creates the issuebot/* labels
 cp .env.example .env              # then fill in GH_TOKEN and Claude auth
 docker compose up --build         # postgres:18 + worker
 ```

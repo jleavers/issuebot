@@ -1,0 +1,37 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "nodes": [
+          {
+            "number": 43,
+            "title": "Fix label parsing",
+            "body": null,
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/43",
+            "createdAt": "2026-09-01T10:00:00Z",
+            "updatedAt": "2026-09-02T09:00:00Z",
+            "closedAt": null,
+            "labels": {"nodes": [{"name": "issuebot/todo"}, {"name": "issuebot/in-progress"}]},
+            "assignees": {"nodes": []},
+            "closedByPullRequestsReferences": {"nodes": []}
+          },
+          {
+            "number": 40,
+            "title": "Older in-progress issue",
+            "body": null,
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/40",
+            "createdAt": "2026-08-30T08:00:00Z",
+            "updatedAt": "2026-09-02T08:00:00Z",
+            "closedAt": null,
+            "labels": {"nodes": [{"name": "issuebot/in-progress"}]},
+            "assignees": {"nodes": []},
+            "closedByPullRequestsReferences": {"nodes": []}
+          }
+        ],
+        "pageInfo": {"hasNextPage": false, "endCursor": null}
+      }
+    }
+  }
+}

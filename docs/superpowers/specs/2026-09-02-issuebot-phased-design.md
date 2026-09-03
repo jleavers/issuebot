@@ -211,8 +211,31 @@ rework flow, and the follow-up-issue rule. Follow-up issues are created with
 bot picks them up; the prompt asks for a `related to #N` line in the body.
 
 The template receives `issue` (normalised fields plus `pr` if a linked PR exists),
-`attempt`, `turn_number`, `max_turns`, and `rework` (bool). Strict rendering: unknown
-variables and filters fail the attempt.
+`attempt`, `turn_number`, `max_turns`, `rework` (bool) and `self_review` (bool).
+Strict rendering: unknown variables and filters fail the attempt.
+
+**Code review is layered, and `review` keeps meaning "a human's turn".** Three
+layers, none of which adds a label:
+
+1. **In-run review (Phase 3, prompt).** Before opening the PR, the agent runs a
+   fresh-context review of `git diff origin/main...HEAD` (the code-review skill at
+   low effort, or a review subagent with a review prompt) and fixes every Critical
+   and Important finding. Gated by `agent.self_review` (default on) so cost can be
+   traded for polish per workflow. A review the agent spawns itself is a first gate,
+   not an independent one.
+2. **Independent review on the PR (repository configuration, from Phase 4).** The
+   Claude Code GitHub Action reviews every pull request on open, agent-authored or
+   human-authored, and posts its findings as PR review comments. The prompt's PR
+   feedback sweep already treats every actionable bot or human comment as blocking:
+   the agent addresses or explicitly rebuts each one and never sets `issuebot/review`
+   while actionable comments remain or checks are failing. A review that lands after
+   the agent's turn ended is picked up by the next continuation turn (§2.4), because
+   the issue stays `in-progress` until the agent moves it.
+3. **Human review** at `issuebot/review`, unchanged.
+
+A separate issuebot-owned reviewer agent with its own state was considered and
+deferred (see Later): it would double agent spawns and add an implementer-reviewer
+loop to the orchestrator for little that layers 1 and 2 do not already provide.
 
 ### 2.7 Persistence (observability store)
 
@@ -285,6 +308,7 @@ github:
     review: issuebot/review
     rework: issuebot/rework
     complete: issuebot/complete
+  request_timeout_ms: 30000
 polling:
   interval_ms: 30000
 workspace:
@@ -300,6 +324,7 @@ agent:
   max_turns: 5                  # claude -p invocations per worker session
   max_attempts: 3               # failed worker sessions before the blocked escape
   max_retry_backoff_ms: 300000
+  self_review: true             # fresh-context review of the diff before the PR is opened
 claude:
   command: claude               # executable; args are owned by issuebot
   model: null                   # pass-through to --model when set
@@ -430,19 +455,27 @@ foreground, with a fake `claude` for tests. This is where the prompt gets writte
 - `issuebot.agent.session`: the multi-turn worker loop from §2.4 (turn, re-fetch,
   continue or stop), returning a `RunOutcome`.
 - Default `WORKFLOW.md` for this repository (dogfood policy) adapted from Symphony's
-  template to GitHub labels and `gh`.
+  template to GitHub labels and `gh`, including the in-run review step from §2.6:
+  when `self_review` is on, the agent must run a fresh-context review of its diff and
+  resolve Critical and Important findings before opening the PR, and the completion
+  bar before `issuebot/review` requires green checks and no actionable review
+  comments (bot or human) on the PR.
+- `agent.self_review` setting (bool, default `true`), passed to the template as
+  `self_review`.
 - Test fixtures: fake `claude` script; recorded `stream-json` samples.
 - CLI: `issuebot run-once <number>` runs a full worker session in the foreground with
   logs to the terminal. This is the tool for iterating on the prompt.
 
-**Out of scope.** Polling, claims, retries, concurrency.
+**Out of scope.** Polling, claims, retries, concurrency; the GitHub review action
+(Phase 4).
 
-**Interfaces.** `run_session(issue, settings, adapter, bus, cancel) -> RunOutcome`;
+**Interfaces.** `run_session(issue, settings, adapter, bus, cancel) -> RunResult`;
 `WorkspaceManager`; runtime event kinds.
 
 **Done when.** With a real `claude`, `issuebot run-once` against a trivial issue in a
-scratch repo produces a branch, a PR with `Closes #N`, and the `review` label; all
-runner behaviour is covered by tests using the fake `claude`.
+scratch repo produces a branch, a PR with `Closes #N`, and the `review` label, and the
+run's transcript shows the review pass before the PR was opened; all runner behaviour
+is covered by tests using the fake `claude`.
 
 ### Phase 4: Orchestrator
 
@@ -471,6 +504,11 @@ End of this phase is the first dogfooding milestone.
 - Refresh trigger: an in-process `request_refresh()` (wired to PostgreSQL `NOTIFY` in
   Phase 6).
 - CLI: `issuebot worker [--workflow PATH]`; compose `worker` service becomes real.
+- Repository chore for the dogfooding milestone: install the Claude Code GitHub
+  Action with an automated review prompt on pull-request events (needs an
+  `ANTHROPIC_API_KEY` repository secret, which is the user's call). issuebot's code
+  needs nothing for it; the prompt's feedback sweep and the continuation turns are
+  what make the action's comments reach the agent (§2.6, layer 2).
 
 **Out of scope.** Database, dashboard, Slack.
 
@@ -559,7 +597,9 @@ authentication; multiple target repositories per worker; GitHub webhooks instead
 polling; per-issue log viewer in the dashboard; cost budgets per issue and per day;
 SSH or remote workers (Symphony Appendix A); Windows host support for the worker
 itself (the repo's cross-OS rule applies to scripts the agent writes, the service is
-Linux-in-Docker).
+Linux-in-Docker); an issuebot-owned reviewer agent with its own state or label, to be
+revisited only if the in-run review and the GitHub review action (§2.6) prove
+insufficient.
 
 ## 4. Decisions to confirm
 
@@ -590,6 +630,11 @@ Each was made to keep moving; any can be changed before Phase 1 without cost.
     `stats`)** but recovery after a connectivity drop is automatic (retry with backoff,
     restart resume). This answers the blueprint's open query: the CLI is for
     inspection and prompt iteration, not the recovery path.
+13. **Code review is layered without a sixth label** (decided 2026-09-02): an in-run
+    fresh-context review gated by `agent.self_review` (Phase 3), the Claude Code
+    GitHub Action reviewing every PR (repository configuration, Phase 4 milestone),
+    then the human at `issuebot/review`. A separate reviewer agent with its own state
+    is deferred to Later.
 
 ## 5. Suggested file naming for the per-phase documents
 

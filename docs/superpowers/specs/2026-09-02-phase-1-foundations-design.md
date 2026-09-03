@@ -139,6 +139,7 @@ failure.
 | `github.labels.review` | non-empty str | `issuebot/review` |
 | `github.labels.rework` | non-empty str | `issuebot/rework` |
 | `github.labels.complete` | non-empty str | `issuebot/complete` |
+| `github.request_timeout_ms` | int ≥ 1000 (added in Phase 2; bounds every `gh` call) | 30000 |
 | (labels) | the five values must be distinct | |
 | `polling.interval_ms` | int ≥ 1000 | 30000 |
 | `workspace.root` | `Path`, absolute after resolution (4.3) | env `ISSUEBOT_WORKSPACE_ROOT`, else `/workspaces` |

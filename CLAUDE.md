@@ -13,6 +13,8 @@ uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
+uv run issuebot labels ensure        # create/update the five state labels in github.repo
+uv run issuebot issues list          # table of open issues carrying a state label
 docker compose build                 # image: git, gh, claude, app venv
 docker compose up                    # db (postgres:18) + worker (runs validate until Phase 4)
 ```
@@ -30,8 +32,14 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
   (synchronous, sink failures isolated and counted), `LogSink`.
-- `issuebot.cli`: argparse; `issuebot validate [--workflow PATH] [--show-config]`
-  exits 0/1/2 (ok / failed checks / workflow unloadable).
+- `issuebot.github`: `StateLabel` roles and the transition table (`state.py`); frozen
+  `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter` protocol (async);
+  `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via `gh issue edit`,
+  `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary); `FakeGitHub`
+  for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`).
+- `issuebot.cli`: argparse; `validate` (twelve checks, three of them network probes
+  through the adapter), `labels ensure`, `issues list`; exit codes 0/1/2 (ok / failed /
+  workflow unloadable). Tests substitute `_which` and `_adapter_factory`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).
