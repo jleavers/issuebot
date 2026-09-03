@@ -43,7 +43,7 @@ signature.
 
 ```
 compose.yaml                    worker runs ["worker"], init, restart, stop_grace_period 120s
-WORKFLOW.md                     + hooks.after_create: git fetch --unshallow; attempt wording
+WORKFLOW.md                     + hooks.after_create: guarded git fetch --unshallow; attempt wording
 src/issuebot/
 ├── cli.py                      + worker
 ├── agent/runner.py             _terminate kills the group after the leader exited; pre-set cancel
@@ -301,6 +301,10 @@ async def claim(adapter: GitHubAdapter, bus: EventBus, issue: Issue) -> Issue | 
 def blocked_block(context: BlockedContext, now: datetime, labels: GitHubLabels) -> str: ...
 
 
+EscapeOutcome = Literal["applied", "skipped", "failed"]
+FinishOutcome = Literal["complete", "cancelled", "unchanged", "failed"]
+
+
 async def blocked_escape(
     adapter: GitHubAdapter,
     bus: EventBus,
@@ -308,8 +312,8 @@ async def blocked_escape(
     context: BlockedContext,
     *,
     now: datetime,
-) -> bool:
-    """Roadmap §1's blocked escape. True when applied or no longer needed; False on GitHubError."""
+) -> EscapeOutcome:
+    """Roadmap §1's blocked escape: applied, skipped (no longer needed), or failed (GitHubError)."""
 
 
 async def finish_terminal(
@@ -317,8 +321,9 @@ async def finish_terminal(
     bus: EventBus,
     workspaces: WorkspaceManager,
     issue: Issue,
-) -> ClosedOutcome | None:
-    """A closed issue: complete or cancelled, events, workspace removed. None on GitHubError."""
+) -> FinishOutcome:
+    """A closed issue: complete or cancelled (events published), unchanged (already complete),
+    or failed (GitHubError); the workspace is removed in every case."""
 
 
 async def remove_workspace(workspaces: WorkspaceManager, identifier: str) -> bool:
@@ -346,7 +351,8 @@ sees the label it will find on its first refresh without a second request.
    `Blocked(reason=context.reason)`. Return `True`.
 
 A `GitHubError` at any step logs `blocked_escape_failed` and returns
-`False`; the caller retries with backoff. The block:
+`"failed"`; the caller retries with backoff and counts only `"applied"`
+escapes. The block:
 
 ```markdown
 ### Issuebot blocked (2026-09-03T14:02:11Z)
@@ -363,18 +369,19 @@ Appended to the end of the workpad it lands under the template's
 - `<max_attempts> consecutive worker sessions failed; last error: <category>: <message>.`
   (a stall reads `stalled: no activity for <n> s`).
 
-**`finish_terminal`.** `classify_closed(issue)`:
+**`finish_terminal`.** An issue whose `state is COMPLETE` already is
+`"unchanged"` (no writes, no events). Otherwise `classify_closed(issue)`:
 
-- `complete`: unless `issue.state is COMPLETE` already, `set_state(number,
-  COMPLETE)` and publish `StateChanged(from, complete name,
-  actor="issuebot", pr_url)` and `IssueCompleted(pr_url)`.
+- `complete`: `set_state(number, COMPLETE)` and publish
+  `StateChanged(from, complete name, actor="issuebot", pr_url)` and
+  `IssueCompleted(pr_url)`.
 - `cancelled`: `clear_state(number)` and publish `StateChanged(from, None,
   actor="issuebot")` and `IssueCancelled(reason="closed without a merged
   pull request")`.
 
 Then `remove_workspace(workspaces, identifier)` in every case, including
-after a `GitHubError` (the issue is closed either way; the label write is
-retried by the next sweep). Log `issue_finished` with the outcome.
+after a `GitHubError` (`"failed"`: the issue is closed either way; the label
+write is retried by the next sweep). Log `issue_finished` with the outcome.
 
 ## 6. Orchestrator (`orchestrator.py`)
 
@@ -474,7 +481,7 @@ In this order (Symphony §8.1 with the roadmap's additions):
    from the new settings, logs `workflow_reloaded` (INFO, with the changed
    top-level sections), and clears `config_error`. A `ConfigError` (or a
    failed stat) keeps the last good workflow, sets `config_error`, and logs
-   `workflow_reload_failed` at ERROR once per distinct mtime. Running
+   `workflow_reload_failed` at ERROR once per distinct failure message. Running
    workers keep the `Workflow` they were dispatched with; the new poll
    interval and slot count apply at once; the prompt and settings apply to
    the next dispatch (Symphony §6.2).
@@ -732,12 +739,17 @@ Two edits, mirrored into the scratch copy for the live check:
 
    ```yaml
    hooks:
-     after_create: git fetch --unshallow
+     after_create: |
+       if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
    ```
 
    so the self-review's `git diff origin/HEAD...HEAD` and a rework's merge
    of the default branch always have a merge base (carry-over 2; the
-   built-in clone stays shallow per Phase 3 decision 9).
+   built-in clone stays shallow per Phase 3 decision 9). The guard matters:
+   a `--depth 1` clone of a repository whose default branch has a single
+   commit is not shallow, and an unconditional `git fetch --unshallow`
+   then fails with "--unshallow on a complete repository does not make
+   sense", failing every workspace creation.
 2. The follow-up context block's first line becomes `This is attempt
    {{ attempt }} for this issue: the previous worker session failed or was
    cut short, and issuebot dispatched a fresh session.` because `attempt`
@@ -794,8 +806,8 @@ called directly; `run()` is used by a few loop tests with
    separate set is unnecessary when every mutation happens in one task.
 3. **Reuse requires `.git` and `.issuebot`**, and `.issuebot` is created
    last (carry-over 1).
-4. **`git fetch --unshallow` lives in `hooks.after_create`** of the dogfood
-   workflow; the built-in clone stays shallow (carry-over 2).
+4. **A guarded `git fetch --unshallow` lives in `hooks.after_create`** of
+   the dogfood workflow; the built-in clone stays shallow (carry-over 2).
 5. **The blocked escape appends a dated block to the workpad, then sets
    `review`**, creating the workpad when it is missing, idempotent per run
    id, retried with backoff on failure and never re-dispatching
