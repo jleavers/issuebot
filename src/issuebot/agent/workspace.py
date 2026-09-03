@@ -130,28 +130,33 @@ class WorkspaceManager:
 
     async def create_or_reuse(self, issue: Issue) -> Workspace:
         path = self.path_for(issue.identifier)
-        if (path / ".git").is_dir():
+        if (path / ".git").is_dir() and (path / ".issuebot").is_dir():
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
             self._log.warning("workspace_remnant_removed", workspace=str(path))
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-            except OSError as exc:
-                raise AgentError("workspace_error", f"cannot remove remnant {path}: {exc}") from exc
-        self.root.mkdir(parents=True, exist_ok=True)
+            _remove_path(path, "cannot remove remnant")
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AgentError(
+                "workspace_error", f"cannot create workspace root {self.root}: {exc}"
+            ) from exc
         try:
             await self._clone(path)
             post = await self._run_script("post_clone", POST_CLONE_SCRIPT, path)
             if not post.ok:
                 raise AgentError("workspace_error", f"post-clone setup failed: {post.summary}")
-            (path / ".issuebot").mkdir(exist_ok=True)
             hook = await self.run_hook("after_create", path)
             if hook is not None and not hook.ok:
                 raise AgentError("workspace_error", f"after_create hook failed: {hook.summary}")
+            # Created last: its presence marks a workspace whose creation completed.
+            try:
+                (path / ".issuebot").mkdir(exist_ok=True)
+            except OSError as exc:
+                raise AgentError(
+                    "workspace_error", f"cannot create {path / '.issuebot'}: {exc}"
+                ) from exc
         except AgentError:
             shutil.rmtree(path, ignore_errors=True)
             raise
@@ -178,7 +183,7 @@ class WorkspaceManager:
         if not path.exists():
             return False
         await self.run_hook("before_remove", path)
-        shutil.rmtree(path)
+        _remove_path(path, "cannot remove workspace")
         self._log.info("workspace_removed", workspace=str(path))
         return True
 
@@ -321,6 +326,17 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"expected an integer, got {value!r}")
     return value
+
+
+def _remove_path(path: Path, what: str) -> None:
+    """Delete a directory tree or a plain file; every OSError becomes a workspace_error."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError as exc:
+        raise AgentError("workspace_error", f"{what} {path}: {exc}") from exc
 
 
 def _elapsed_ms(started: float) -> int:

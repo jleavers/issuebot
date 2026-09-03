@@ -15,8 +15,9 @@ uv run pytest
 uv run issuebot validate          # checks ./WORKFLOW.md and the environment
 uv run issuebot labels ensure     # once per repository: creates the issuebot/* labels
 uv run issuebot run-once 42       # one agent session for issue #42, in the foreground
+uv run issuebot worker            # the long-running orchestrator; Ctrl-C stops it
 cp .env.example .env              # then fill in GH_TOKEN and Claude auth
-docker compose up --build         # postgres:18 + worker
+docker compose up --build         # postgres:18 + worker (issuebot worker)
 ```
 
 The design lives in [`docs/superpowers/specs/`](docs/superpowers/specs/); start with

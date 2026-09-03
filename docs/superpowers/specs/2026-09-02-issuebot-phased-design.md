@@ -509,7 +509,10 @@ End of this phase is the first dogfooding milestone.
   Action with an automated review prompt on pull-request events (needs an
   `ANTHROPIC_API_KEY` repository secret, which is the user's call). issuebot's code
   needs nothing for it; the prompt's feedback sweep and the continuation turns are
-  what make the action's comments reach the agent (§2.6, layer 2).
+  what make the action's comments reach the agent (§2.6, layer 2). Deferred on
+  2026-09-03 (Phase 4 spec, decision 12): unguarded, a missing secret fails every
+  pull-request check, which the agent's completion bar treats as blocking. It becomes
+  a chore issue issuebot can take once it is dogfooding.
 
 **Out of scope.** Database, dashboard, Slack.
 
@@ -602,7 +605,9 @@ Linux-in-Docker); an issuebot-owned reviewer agent with its own state or label, 
 revisited only if the in-run review and the GitHub review action (§2.6) prove
 insufficient; git worktrees off a shared base clone as the workspace
 implementation, a disk and clone-time optimisation over per-issue clones that
-would share one `.git` between concurrent agents.
+would share one `.git` between concurrent agents. A `since` filter on
+`fetch_terminal_issues`, so the terminal sweep stops re-reading every completed issue the
+repository has (Phase 4 bounds it to every tenth tick instead).
 
 ## 4. Decisions to confirm
 

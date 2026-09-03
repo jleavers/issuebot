@@ -237,6 +237,11 @@ recreated. Creation:
 Any failure in steps 1 to 4 removes `path` and raises
 `AgentError("workspace_error", ...)`.
 
+*Amended by Phase 4 (spec §10):* reuse requires both `path/.git` and `path/.issuebot`;
+`.issuebot` is created as the last creation step, after `after_create`, so a hook that
+writes under it must `mkdir -p .issuebot` first; the root `mkdir`, the marker `mkdir`
+and `remove()` raise `AgentError("workspace_error")` instead of a raw `OSError`.
+
 **Hooks.** `run_hook` returns `None` when the hook is not configured.
 Otherwise it spawns `[*hook_shell, script]` with `cwd=workspace`,
 `start_new_session=True`, stdin closed, the environment from
@@ -551,6 +556,11 @@ group, then reap. After reaping, `process_exit` is emitted with the exit code
 (negative signal number when killed), so the observer sees that event once
 per turn on every path. `CancelledError` raised into `run_turn` does the same
 before propagating, so a cancelled task never leaves a `claude` behind.
+
+*Amended by Phase 4 (spec §10):* the process group is SIGKILLed even when the leader has
+already exited (a grandchild holding stdout no longer outlives the turn), and a `cancel`
+event that is already set when `run_turn` starts returns `cancelled` without spawning,
+creating the log directory or emitting any event.
 
 ## 8. Session (`session.py`)
 

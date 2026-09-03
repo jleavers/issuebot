@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -133,7 +134,7 @@ def test_run_log_dir_and_session_path_layout() -> None:
 async def test_create_clones_and_prepares_the_repository(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
-    hook = "echo created > .issuebot/hook.txt"
+    hook = "mkdir -p .issuebot && echo created > .issuebot/hook.txt"
     manager, gh = make_manager(tmp_path, hooks={"after_create": hook})
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert ws.created
@@ -391,3 +392,77 @@ def test_read_session_returns_none_for_missing_or_bad_files(tmp_path: Path) -> N
     record = manager.read_session(ws)
     assert record is not None
     assert record.last_outcome is None
+
+
+# --- Phase 4 hardening: reuse marker and OSError conversion ---------------------------
+
+
+@posix
+async def test_git_without_issuebot_marker_is_recreated(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, gh = make_manager(tmp_path)
+    issue = make_issue(identifier="example-42")
+    first = await manager.create_or_reuse(issue)
+    shutil.rmtree(first.path / ".issuebot")
+    (first.path / "stale").write_text("x")
+    second = await manager.create_or_reuse(issue)
+    assert second.created
+    assert len(gh.calls) == 2
+    assert not (second.path / "stale").exists()
+    assert (second.path / ".issuebot").is_dir()
+
+
+@posix
+async def test_issuebot_marker_is_created_after_the_after_create_hook(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(
+        tmp_path, hooks={"after_create": "test ! -e .issuebot && touch hook-ran"}
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert (ws.path / "hook-ran").exists()
+    assert (ws.path / ".issuebot").is_dir()
+
+
+@posix
+async def test_marker_creation_failure_is_workspace_error(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path, hooks={"after_create": "touch .issuebot"})
+    with pytest.raises(AgentError) as exc:
+        await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert exc.value.category == "workspace_error"
+    assert ".issuebot" in exc.value.message
+    assert not (manager.root / "example-42").exists()
+
+
+async def test_root_creation_failure_is_workspace_error(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, gh = make_manager(tmp_path)
+    manager.root.parent.mkdir(parents=True, exist_ok=True)
+    manager.root.write_text("not a directory")
+    with pytest.raises(AgentError) as exc:
+        await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert exc.value.category == "workspace_error"
+    assert "workspace root" in exc.value.message
+    assert gh.calls == []
+
+
+@posix
+async def test_remove_failure_is_workspace_error(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError) as exc:
+        await manager.remove("example-42")
+    assert exc.value.category == "workspace_error"
+    assert "refused" in exc.value.message
+    assert ws.path.is_dir()

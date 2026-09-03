@@ -6,6 +6,11 @@ polling:
   interval_ms: 30000
 workspace:
   root: /workspaces
+hooks:
+  # The built-in clone is shallow; the self-review's `git diff origin/HEAD...HEAD` and a
+  # rework's merge of the default branch need the merge base.
+  after_create: |
+    if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
 agent:
   max_concurrent_agents: 2
   max_turns: 5
@@ -26,7 +31,7 @@ You are working on GitHub issue `{{ issue.identifier }}` (#{{ issue.number }}) i
 {% if attempt > 1 %}
 ## Follow-up context
 
-- This is worker session #{{ attempt }} for this issue: a continuation, or a retry after a failure.
+- This is attempt {{ attempt }} for this issue: the previous worker session failed or was cut short, and issuebot dispatched a fresh session.
 - Resume from the current workspace, branch and workpad state instead of starting over.
 - Do not repeat investigation or validation the workpad already records unless new changes need it.
 - Do not end the turn while the issue is still labelled `{{ labels.in_progress }}` unless you are blocked by missing access.

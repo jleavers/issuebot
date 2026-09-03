@@ -16,8 +16,9 @@ uv run issuebot validate             # load ./WORKFLOW.md and check the environm
 uv run issuebot labels ensure        # create/update the five state labels in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
 uv run issuebot run-once <number>    # one worker session in the foreground (--show-prompt renders only)
+uv run issuebot worker               # the long-running orchestrator; SIGTERM or Ctrl-C stops it
 docker compose build                 # image: git, gh, claude, app venv
-docker compose up                    # db (postgres:18) + worker (runs validate until Phase 4)
+docker compose up                    # db (postgres:18) + worker (issuebot worker)
 ```
 
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
@@ -47,12 +48,29 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `.issuebot/runs/<run_id>/`); `run_session` (turns, refresh between turns, `RunResult`,
   publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`).
+- `issuebot.orchestrator`: one asyncio task owns the schedule. `state.py` (pure): `RunningEntry`,
+  `RetryEntry`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
+  attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
+  then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
+  otherwise, plus `PrOpened`). `actions.py`: `claim`, `blocked_escape` (workpad block then
+  `review`, idempotent per run id), `finish_terminal` (complete or cancelled, workspace removed).
+  `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
+  `missing_labels`), then `tick()` (reconcile: stalls, running refresh with a one-tick grace for
+  `review`, terminal sweep on the first and every tenth tick; mtime reload; preflight; fetch
+  `in_progress`/`rework`/`todo`; dispatch while slots remain; snapshot) and a queue wait that
+  fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
+  (`max_turns` while `in_progress` or `max_attempts` failures → the blocked escape).
+  `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`.
+  Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
+  never resume. Tests drive `tick()`, `handle_worker_exit()` and `fire_due_retries()` directly
+  with a fake clock and a scripted `run_session`.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
   adapter, a `claude --version` floor of 2.1.259, and a prompt render against a sample
   issue), `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims
-  `in-progress`, runs one session, never sets `review`); exit codes 0/1/2 (ok / failed /
-  workflow unloadable). Tests substitute `_which`, `_claude_version`, `_adapter_factory`
-  and `_run_session`.
+  `in-progress`, runs one session, never sets `review`), `worker [--workflow PATH]` (the
+  orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines and exit 1 when the startup probes
+  fail); exit codes 0/1/2 (ok / failed / workflow unloadable). Tests substitute `_which`,
+  `_claude_version`, `_adapter_factory`, `_run_session` and `_orchestrator_factory`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).

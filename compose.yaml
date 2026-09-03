@@ -19,8 +19,13 @@ services:
 
   worker:
     build: .
-    # Phase 4 replaces this with ["worker"]. Until then `docker compose up` validates config.
-    command: ["validate"]
+    command: ["worker"]
+    # tini as PID 1 reaps grandchildren that outlive a killed claude.
+    init: true
+    restart: unless-stopped
+    # Longer than the orchestrator's shutdown wait (hooks.timeout_ms + 20 s), so Docker never
+    # SIGKILLs a worker that is still running after_run.
+    stop_grace_period: 120s
     env_file:
       - path: .env
         required: false
