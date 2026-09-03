@@ -14,6 +14,7 @@ uv sync
 uv run pytest
 uv run issuebot validate          # checks ./WORKFLOW.md and the environment
 uv run issuebot labels ensure     # once per repository: creates the issuebot/* labels
+uv run issuebot run-once 42       # one agent session for issue #42, in the foreground
 cp .env.example .env              # then fill in GH_TOKEN and Claude auth
 docker compose up --build         # postgres:18 + worker
 ```

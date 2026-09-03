@@ -140,7 +140,7 @@ failure.
 | `github.labels.rework` | non-empty str | `issuebot/rework` |
 | `github.labels.complete` | non-empty str | `issuebot/complete` |
 | `github.request_timeout_ms` | int ≥ 1000 (added in Phase 2; bounds every `gh` call) | 30000 |
-| (labels) | the five values must be distinct | |
+| (labels) | the five values must be distinct case-insensitively; no `,` inside a name, no leading `-` (tightened in Phase 3) | |
 | `polling.interval_ms` | int ≥ 1000 | 30000 |
 | `workspace.root` | `Path`, absolute after resolution (4.3) | env `ISSUEBOT_WORKSPACE_ROOT`, else `/workspaces` |
 | `hooks.after_create` | `str \| None`, verbatim | `None` |
@@ -152,6 +152,7 @@ failure.
 | `agent.max_turns` | int ≥ 1 | 5 |
 | `agent.max_attempts` | int ≥ 1 | 3 |
 | `agent.max_retry_backoff_ms` | int ≥ 1000 | 300000 |
+| `agent.self_review` | bool (added in Phase 3; gates the in-run review step) | `true` |
 | `claude.command` | non-empty str (executable name or path) | `claude` |
 | `claude.model` | `str \| None` | `None` |
 | `claude.permission_mode` | one of `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions` | `auto` |
@@ -161,6 +162,7 @@ failure.
 | `claude.allowed_tools` | `list[str]` | `[]` |
 | `claude.disallowed_tools` | `list[str]` | `[]` |
 | `claude.append_system_prompt` | `str \| None` | `None` |
+| `claude.setting_sources` | `list[user \| project \| local] \| None`, non-empty and distinct when set (added in Phase 3; passed as `--setting-sources`) | `None` |
 | `database.url` | `SecretStr \| None`, resolved (4.3) | env `DATABASE_URL` |
 | `notifications.slack.webhook_url` | `SecretStr \| None`, resolved (4.3) | env `SLACK_WEBHOOK_URL` |
 | `notifications.slack.events` | `list[str]`, each a member of `EVENT_KINDS` (section 6) | `["state_changed", "blocked"]` |
@@ -346,7 +348,7 @@ Multi-stage:
    `issuebot` (uid 1000) with `HOME=/home/issuebot`; Claude Code installed as that
    user with the native installer pinned by build arg
    (`curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"`,
-   default `2.1.258`), which puts `claude` in `/home/issuebot/.local/bin`; the venv
+   default `2.1.259`), which puts `claude` in `/home/issuebot/.local/bin`; the venv
    copied from `builder` to `/app/.venv`; `PATH` includes both;
    `WORKDIR /app`; `ENTRYPOINT ["issuebot"]`; `CMD ["validate"]`.
 3. Declared volumes `/workspaces` and `/home/issuebot/.claude`, owned by `issuebot`.

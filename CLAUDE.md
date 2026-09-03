@@ -15,6 +15,7 @@ uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint j
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
 uv run issuebot labels ensure        # create/update the five state labels in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
+uv run issuebot run-once <number>    # one worker session in the foreground (--show-prompt renders only)
 docker compose build                 # image: git, gh, claude, app venv
 docker compose up                    # db (postgres:18) + worker (runs validate until Phase 4)
 ```
@@ -37,9 +38,21 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via `gh issue edit`,
   `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary); `FakeGitHub`
   for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`).
-- `issuebot.cli`: argparse; `validate` (twelve checks, three of them network probes
-  through the adapter), `labels ensure`, `issues list`; exit codes 0/1/2 (ok / failed /
-  workflow unloadable). Tests substitute `_which` and `_adapter_factory`.
+- `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
+  `bash -lc` hooks with timeout, `.issuebot/session.json`); `PromptRenderer` (Jinja2
+  `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `attempt`,
+  `turn_number`, `max_turns`, `rework`, `self_review`); `ClaudeRunner` (`claude -p
+  --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
+  environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
+  `.issuebot/runs/<run_id>/`); `run_session` (turns, refresh between turns, `RunResult`,
+  publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
+  Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`).
+- `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
+  adapter, a `claude --version` floor of 2.1.259, and a prompt render against a sample
+  issue), `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims
+  `in-progress`, runs one session, never sets `review`); exit codes 0/1/2 (ok / failed /
+  workflow unloadable). Tests substitute `_which`, `_claude_version`, `_adapter_factory`
+  and `_run_session`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).
