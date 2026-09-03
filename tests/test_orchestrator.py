@@ -1021,6 +1021,28 @@ async def test_stall_detection_is_disabled_at_zero(tmp_path: Path) -> None:
     assert h.entry(1).stop_cause is None
 
 
+async def test_reconcile_releases_a_reopened_issue_without_finishing(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+    h.github.close_issue(1)
+    await h.tick()
+    entry = h.entry(1)
+    assert entry.stop_cause == "closed"
+    assert entry.terminal_issue is not None
+    h.github.reopen_issue(1)
+    await h.tick()
+    assert entry.terminal_issue is None
+    await h.drain()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    assert (h.root / "repo-1").is_dir()
+    counters = h.orchestrator.snapshot().counters
+    assert (counters.issues_completed, counters.issues_cancelled) == (0, 0)
+
+
 # --- terminal sweep -----------------------------------------------------------------------
 
 

@@ -240,6 +240,7 @@ class Orchestrator:
             max_concurrent_agents=settings.agent.max_concurrent_agents,
             max_turns=settings.agent.max_turns,
             max_attempts=settings.agent.max_attempts,
+            turn_timeout_ms=settings.claude.turn_timeout_ms,
             stall_timeout_ms=settings.claude.stall_timeout_ms,
             workspace_root=str(settings.workspace.root),
         )
@@ -473,6 +474,7 @@ class Orchestrator:
             for event in observe_transition(entry.issue, current):
                 self._bus.publish(event)
             entry.issue = current
+            entry.terminal_issue = None
             if current.state is StateLabel.IN_PROGRESS and current.dispatchable:
                 continue
             if current.state is StateLabel.REVIEW:
@@ -567,7 +569,7 @@ class Orchestrator:
         if entry.terminal_issue is not None:
             await self._finish(entry.terminal_issue)
             return
-        if task.cancelled() or entry.stop_cause in ("moved", "missing", "shutdown"):
+        if task.cancelled() or entry.stop_cause in ("moved", "missing", "shutdown", "closed"):
             self._log.info(
                 "issue_released",
                 issue_number=entry.issue.number,
