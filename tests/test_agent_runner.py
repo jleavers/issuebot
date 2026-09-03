@@ -532,12 +532,15 @@ async def test_task_cancellation_kills_and_reaps(workspace: Path, tmp_path: Path
     runner = runner_for(
         workspace, scenario="silent", extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)}
     )
-    task = asyncio.create_task(run(runner, workspace))
+    recorder = Recorder()
+    task = asyncio.create_task(run(runner, workspace, observer=recorder))
     pid = await wait_for_file(pidfile)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     await assert_gone(pid)
+    assert recorder.kinds[-1] == "process_exit"
+    assert recorder.events[-1].detail == str(-signal.SIGTERM)
 
 
 @posix

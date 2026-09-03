@@ -422,6 +422,7 @@ class ClaudeRunner:
                     await self._terminate(process)
             except asyncio.CancelledError:
                 await self._terminate(process)
+                emit(_event("process_exit", parser, detail=str(process.returncode)))
                 raise
             finally:
                 for task in (writer, reader, cancel_waiter):
