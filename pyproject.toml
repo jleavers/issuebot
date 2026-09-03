@@ -36,6 +36,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "N", "SIM", "RUF"]
+per-file-ignores = { "tests/**/*.py" = ["SIM300"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
