@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -38,6 +40,7 @@ from issuebot.events import EventBus, LogSink, StateChanged
 from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.github.normalise import repo_short_name
 from issuebot.log import LOG_LEVELS, configure_logging
+from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
 
@@ -65,6 +68,7 @@ def _claude_version_output(command: str) -> str | None:
 
 _claude_version = _claude_version_output
 _run_session = run_session
+_orchestrator_factory = Orchestrator
 
 CheckStatus = Literal["ok", "warn", "fail"]
 _TAGS: dict[CheckStatus, str] = {"ok": "[ OK ]", "warn": "[WARN]", "fail": "[FAIL]"}
@@ -152,6 +156,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the rendered first-turn prompt and exit without running anything",
     )
     run_once.set_defaults(func=cmd_run_once)
+
+    worker = subparsers.add_parser(
+        "worker", help="run the orchestrator until SIGTERM or SIGINT (the long-running service)"
+    )
+    _add_workflow_option(worker)
+    worker.set_defaults(func=cmd_worker)
     return parser
 
 
@@ -550,3 +560,40 @@ def render_run_summary(result: RunResult) -> str:
 def _duration(seconds: float) -> str:
     total = int(seconds)
     return f"{total // 60}m{total % 60:02d}s"
+
+
+# --- worker ----------------------------------------------------------------------------
+
+
+def cmd_worker(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    return asyncio.run(_run_worker(workflow))
+
+
+async def _run_worker(workflow: Workflow) -> int:
+    """Run the orchestrator until a stop signal; 1 when startup validation fails."""
+    orchestrator = _orchestrator_factory(
+        workflow,
+        bus=EventBus([LogSink()]),
+        adapter_factory=_adapter_factory,
+        run_session=_run_session,
+        which=_which,
+    )
+    loop = asyncio.get_running_loop()
+    signals = (signal.SIGTERM, signal.SIGINT)
+    for signum in signals:
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(signum, orchestrator.request_stop)
+    try:
+        await orchestrator.run()
+    except OrchestratorStartupError as exc:
+        for problem in exc.problems:
+            print(f"[FAIL] startup: {problem}")
+        return 1
+    finally:
+        for signum in signals:
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(signum)
+    return 0

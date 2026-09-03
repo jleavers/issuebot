@@ -1,6 +1,8 @@
 """Tests for the command-line entry point."""
 
+import asyncio
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -16,6 +18,7 @@ from issuebot.cli import main, not_runnable, render_issue_table, render_run_summ
 from issuebot.config import GitHubSettings, Settings
 from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
+from issuebot.orchestrator import OrchestratorStartupError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
 GOOD = FIXTURES / "good.md"
@@ -945,3 +948,88 @@ def test_run_once_end_to_end_with_the_fakes(
     assert len(runs) == 1
     assert (runs[0] / "turn-1.jsonl").exists()
     assert (runs[0] / "turn-1.prompt.md").read_text() == "Body for `repo-42`"
+
+
+# --- worker --------------------------------------------------------------------------------
+
+
+class StubOrchestrator:
+    """Stands in for Orchestrator: records its construction and plays one scripted run()."""
+
+    instances: ClassVar[list[StubOrchestrator]] = []
+    next_problems: ClassVar[list[str] | None] = None
+    next_sigterm: ClassVar[bool] = False
+
+    def __init__(self, workflow: object, **kwargs: object) -> None:
+        self.workflow = workflow
+        self.kwargs = kwargs
+        self.stops = 0
+        StubOrchestrator.instances.append(self)
+
+    def request_stop(self) -> None:
+        self.stops += 1
+
+    async def run(self) -> None:
+        if StubOrchestrator.next_problems is not None:
+            raise OrchestratorStartupError(StubOrchestrator.next_problems)
+        if StubOrchestrator.next_sigterm:
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if self.stops:
+                    return
+            raise AssertionError("SIGTERM did not reach request_stop")
+
+
+@pytest.fixture
+def stub_orchestrator(monkeypatch: pytest.MonkeyPatch) -> type[StubOrchestrator]:
+    StubOrchestrator.instances = []
+    StubOrchestrator.next_problems = None
+    StubOrchestrator.next_sigterm = False
+    monkeypatch.setattr("issuebot.cli._orchestrator_factory", StubOrchestrator)
+    return StubOrchestrator
+
+
+def test_worker_unloadable_workflow_exits_two(
+    stub_orchestrator: type[StubOrchestrator], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["worker", "--workflow", str(INVALID)]) == 2
+    assert "[FAIL] workflow:" in capsys.readouterr().out
+    assert stub_orchestrator.instances == []
+
+
+def test_worker_reports_startup_failures(
+    tmp_path: Path,
+    stub_orchestrator: type[StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub_orchestrator.next_problems = ["'gh' not found on PATH", "labels missing: a"]
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["[FAIL] startup: 'gh' not found on PATH", "[FAIL] startup: labels missing: a"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM handling is POSIX")
+def test_worker_stops_on_sigterm_and_wires_the_seams(
+    tmp_path: Path,
+    stub_orchestrator: type[StubOrchestrator],
+    stub_session: StubSession,
+    fake_github: FakeGitHub,
+    executables: Callable[[set[str]], None],
+) -> None:
+    stub_orchestrator.next_sigterm = True
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    instance = stub_orchestrator.instances[0]
+    assert instance.stops == 1
+    assert instance.workflow.config.github.repo == "example/repo"  # type: ignore[attr-defined]
+    kwargs = instance.kwargs
+    assert kwargs["adapter_factory"](None) is fake_github  # type: ignore[operator]
+    assert kwargs["run_session"] is stub_session
+    assert kwargs["which"]("gh") == "/usr/bin/gh"  # type: ignore[operator]
+    assert [sink.name for sink in kwargs["bus"].sinks] == ["log"]  # type: ignore[attr-defined]
+
+
+def test_worker_requires_no_arguments(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["worker", "extra"])
+    assert exc.value.code == 2
