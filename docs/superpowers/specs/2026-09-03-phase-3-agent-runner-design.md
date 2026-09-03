@@ -34,9 +34,10 @@ Claude Code GitHub Action, PostgreSQL. All Phase 4 or later.
 
 ```
 pyproject.toml                  + jinja2>=3.1 (uv.lock changes for this and nothing else)
+Dockerfile                      CLAUDE_CODE_VERSION default 2.1.259 (--permission-prompts none needs it)
 WORKFLOW.md                     the dogfood policy: real prompt body, model: opus, setting_sources: [project]
 src/issuebot/
-├── cli.py                      + run-once, prompt check renders the template
+├── cli.py                      + run-once; prompt check renders the template; claude version check
 ├── config/settings.py          + agent.self_review, claude.setting_sources, label name rules
 ├── github/ghcli.py             find_workpad_comment paginates
 └── agent/
@@ -211,7 +212,9 @@ recreated. Creation:
    `gh repo clone <owner/name> <path> -- --depth 1`. The runner is a
    `GhRunner(token=settings.github.token, timeout_ms=settings.hooks.timeout_ms)`
    by default: the built-in clone is bounded like the hook Symphony would use
-   for it. A `GitHubError` or non-zero exit is a `workspace_error`.
+   for it. A `GitHubError` or non-zero exit is a `workspace_error`. A
+   workflow that wants full history runs `git fetch --unshallow` in
+   `after_create`.
 2. Run the built-in post-clone script through the hook runner (same shell,
    timeout and environment as a hook):
 
@@ -333,7 +336,7 @@ order:
 
 ```
 <claude.command> -p --output-format stream-json --verbose
-  --permission-mode <claude.permission_mode>
+  --permission-mode <claude.permission_mode> --permission-prompts none
   --max-budget-usd <claude.max_budget_usd>
   --session-id <uuid>            # first turn of a fresh conversation
   --resume <session_id>          # continuation turns, or the first turn when resuming
@@ -346,10 +349,24 @@ order:
 
 The prompt is written to **stdin**, not passed as an argument: it can exceed
 a single argument's length limit, and it stays out of `ps` and the argv debug
-log. `--verbose` is required by `stream-json` in `-p` mode. `--max-turns`
-(Claude's internal agentic turns) is not set; `agent.max_turns` counts
-`claude -p` invocations. `--bare` is deliberately not used: it skips the
-repository's `CLAUDE.md` and does not read the OAuth login.
+log. `--verbose` is required by `stream-json` in `-p` mode.
+`--permission-prompts none` (Claude Code 2.1.259) makes the unattended
+posture explicit: anything that would prompt (an `ask` rule, a hook answering
+"ask", the few calls that prompt even under `bypassPermissions`) is denied at
+once while the permission mode keeps deciding everything else, so a turn can
+never wait for a human. `--max-turns` (Claude's internal agentic turns) is not
+set; `agent.max_turns` counts `claude -p` invocations. `--bare` is
+deliberately not used: it skips the repository's `CLAUDE.md` and does not
+read the OAuth login.
+
+Because of that flag the minimum Claude Code version is **2.1.259**
+(`MIN_CLAUDE_VERSION` in `runner.py`); the Dockerfile's `CLAUDE_CODE_VERSION`
+build arg moves to it. `validate`'s `claude.command` check now also runs
+`<command> --version` (ten-second timeout, through a module-level
+`_claude_version` seam) and reports `[ OK ] claude.command: <path> (2.1.259)`,
+or `[FAIL] claude.command: <path> is 2.1.240; issuebot needs 2.1.259 or
+newer`, or `[WARN] claude.command: <path> (version unknown: <reason>)` when
+the output cannot be parsed. Presence on `PATH` is still checked first.
 
 ### 7.2 Environment
 
@@ -841,21 +858,30 @@ against (the credential helper and the exclude entry are checked with real
 17. **The real `claude` run is paid for by the operator's subscription login**
     on the developer host (no `ANTHROPIC_API_KEY` in the environment);
     `claude.max_budget_usd` caps the estimated cost per turn either way.
+18. **`--permission-prompts none` is always passed** (decided 2026-09-03 on
+    the 2.1.259 changelog entry); the Docker pin moves to 2.1.259 and
+    `validate` enforces the minimum version.
+19. **Per-issue clones, not git worktrees.** The agent never runs in the
+    operator's checkout, so the multi-session conflicts worktrees solve
+    cannot arise; worktrees would share one `.git` between concurrent agents
+    (ref-lock contention on fetch, a base repository to prune) for a disk and
+    clone-time saving. Recorded under the roadmap's Later as an optimisation.
 
 ## 14. Done when
 
 - `uv run pytest -q` passes (no network, no real `gh` or `claude`); ruff and
   pre-commit clean; CI green; `docker compose build` succeeds with the new
-  lock file.
-- `uv run issuebot validate` reports `prompt: ... renders` for the committed
-  `WORKFLOW.md`.
+  lock file and Claude Code 2.1.259.
+- `uv run issuebot validate` reports `prompt: ... renders` and
+  `claude.command: ... (2.1.259)` for the committed `WORKFLOW.md`.
 - Live check, from the developer host with `export GH_TOKEN=$(gh auth token)`
   and no `ANTHROPIC_API_KEY` set:
   1. `gh repo create jleavers/issuebot-scratch --private` seeded with a
      README, a tiny Python module with one function and a `pyproject.toml`;
      `uv run issuebot labels ensure --workflow <scratch WORKFLOW.md>` where
      that file is the committed one with `github.repo: jleavers/issuebot-scratch`
-     and `workspace.root` pointing at a directory on the host;
+     and `workspace.root` pointing at a directory on the host that is not
+     inside any existing checkout (for example `~/issuebot-workspaces`);
   2. one issue labelled `issuebot/todo` asking for a trivial, testable change
      (a second function plus its test);
   3. `uv run issuebot run-once <number> --workflow <scratch WORKFLOW.md>`
