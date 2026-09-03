@@ -1,15 +1,20 @@
 """Tests for the command-line entry point."""
 
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from issuebot import __version__
-from issuebot.cli import main, render_issue_table
-from issuebot.config import GitHubSettings
+from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
+from issuebot.cli import main, not_runnable, render_issue_table, render_run_summary
+from issuebot.config import GitHubSettings, Settings
+from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
@@ -19,12 +24,13 @@ INVALID = FIXTURES / "invalid.md"
 
 @pytest.fixture
 def executables(monkeypatch: pytest.MonkeyPatch) -> Callable[[set[str]], None]:
-    """Pretend the given executable names exist on PATH and nothing else does."""
+    """Pretend the given executable names exist on PATH and report Claude Code 2.1.259."""
 
-    def install(names: set[str]) -> None:
+    def install(names: set[str], version: str | None = "2.1.259 (Claude Code)") -> None:
         monkeypatch.setattr(
             "issuebot.cli._which", lambda name: f"/usr/bin/{name}" if name in names else None
         )
+        monkeypatch.setattr("issuebot.cli._claude_version", lambda command: version)
 
     install({"claude", "gh"})
     return install
@@ -93,11 +99,11 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] github.repo: example/repo" in out
     assert "[ OK ] github.token: set (from $GH_TOKEN)" in out
     assert "[ OK ] workspace.root: /workspaces" in out
-    assert "[ OK ] claude.command: /usr/bin/claude" in out
+    assert "[ OK ] claude.command: /usr/bin/claude (2.1.259)" in out
     assert "[ OK ] gh: /usr/bin/gh" in out
     assert "[ OK ] database.url: not configured (history and dashboard disabled)" in out
     assert "[ OK ] notifications.slack: not configured" in out
-    assert "[ OK ] prompt: 44 characters" in out
+    assert "[ OK ] prompt: 44 characters, renders" in out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
     assert "[ OK ] github.labels: 5 labels present" in out
@@ -211,6 +217,46 @@ def test_validate_configured_database_and_slack(
     out = capsys.readouterr().out
     assert "[ OK ] database.url: configured" in out
     assert "[ OK ] notifications.slack: configured" in out
+
+
+def test_validate_old_claude_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, version="2.1.240 (Claude Code)")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert (
+        "[FAIL] claude.command: /usr/bin/claude is 2.1.240; issuebot needs 2.1.259 or newer" in out
+    )
+
+
+def test_validate_unknown_claude_version_warns(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, version=None)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] claude.command: /usr/bin/claude (version unknown: no output)" in out
+    assert "0 failed, 1 warnings" in out
+
+
+def test_validate_prompt_that_does_not_render_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nHello {{ nope }}")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] prompt: template does not render: 'nope' is undefined" in out
 
 
 def test_validate_unloadable_workflow_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
@@ -472,3 +518,430 @@ def test_render_issue_table_marks_conflicts_and_aligns(make_issue: Callable[...,
     assert "conflict" in lines[3]
     assert "#10 merged" in lines[2]
     assert all(line.startswith(("NUMBER", "2 ", "9 ", "5 ")) for line in lines)
+
+
+# --- run-once ------------------------------------------------------------------------------
+
+
+class StubSession:
+    """Stands in for run_session: records the call and returns a configurable RunResult."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.outcome = "succeeded"
+        self.stop_reason = "issue_moved"
+        self.error_category: str | None = None
+        self.final_state: StateLabel | None = StateLabel.REVIEW
+
+    async def __call__(
+        self,
+        issue: Issue,
+        workflow: object,
+        adapter: object,
+        bus: object,
+        *,
+        workspaces: WorkspaceManager,
+        runner: object,
+        attempt: int = 1,
+        rework: bool = False,
+        **kwargs: object,
+    ) -> RunResult:
+        self.calls.append({"issue": issue, "attempt": attempt, "rework": rework})
+        run_id = "20260903T081200Z-abc123"
+        workspace = workspaces.root / "repo-42"
+        return RunResult(
+            run_id=run_id,
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            attempt=attempt,
+            session_id="s",
+            outcome=self.outcome,  # type: ignore[arg-type]
+            stop_reason=self.stop_reason,  # type: ignore[arg-type]
+            error_category=self.error_category,  # type: ignore[arg-type]
+            error="injected failure" if self.error_category else None,
+            turns=2,
+            input_tokens=45120,
+            output_tokens=3004,
+            cost_usd=0.31,
+            duration_s=102.0,
+            final_state=self.final_state,
+            final_issue=None,
+            workspace_path=workspace,
+            log_dir=workspace / ".issuebot" / "runs" / run_id,
+        )
+
+
+@pytest.fixture
+def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubSession:
+    stub = StubSession()
+    monkeypatch.setattr("issuebot.cli._run_session", stub)
+    return stub
+
+
+class RecordingSink:
+    """Stands in for LogSink: records every published event instead of logging it."""
+
+    name = "recording"
+    events: ClassVar[list[Event]] = []
+
+    def handle(self, event: Event) -> None:
+        RecordingSink.events.append(event)
+
+
+@pytest.fixture
+def recording_sink(monkeypatch: pytest.MonkeyPatch) -> type[RecordingSink]:
+    RecordingSink.events = []
+    monkeypatch.setattr("issuebot.cli.LogSink", RecordingSink)
+    return RecordingSink
+
+
+def _workflow_with_root(tmp_path: Path, **extra_lines: str) -> Path:
+    lines = ["---", "github:", "  repo: example/repo", "workspace:", f"  root: {tmp_path / 'ws'}"]
+    lines.extend(extra_lines.values())
+    lines.extend(["---", "Body for `{{ issue.identifier }}`"])
+    return _write(tmp_path, "\n".join(lines) + "\n")
+
+
+def test_run_once_reports_missing_issue(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, stub_session: StubSession
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["run-once", "7", "--workflow", str(GOOD)]) == 1
+    assert "[FAIL] issue: #7 not found" in capsys.readouterr().out
+    assert stub_session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("labels", "closed", "needle"),
+    [
+        (("issuebot/review",), False, "#42 is review; label it issuebot/todo or issuebot/rework"),
+        (("issuebot/complete",), False, "#42 is complete"),
+        ((), False, "#42 is unlabelled"),
+        (("issuebot/todo", "issuebot/review"), False, "#42 carries more than one state label"),
+        (("issuebot/todo",), True, "#42 is closed"),
+    ],
+)
+def test_run_once_refuses_unrunnable_issues(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    labels: tuple[str, ...],
+    closed: bool,
+    needle: str,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=labels, number=42)
+    if closed:
+        fake_github.close_issue(42)
+    assert main(["run-once", "42", "--workflow", str(GOOD)]) == 1
+    assert f"[FAIL] issue: {needle}" in capsys.readouterr().out
+    assert stub_session.calls == []
+    assert ("set_state", (42, StateLabel.IN_PROGRESS)) not in fake_github.calls
+
+
+def test_run_once_claims_a_todo_issue_and_prints_the_summary(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == (
+        "run 20260903T081200Z-abc123: succeeded (issue_moved) after 2 turns in 1m42s, "
+        "$0.31, 45120 in / 3004 out"
+    )
+    assert lines[1] == "issue #42 is now review"
+    log_dir = tmp_path / "ws" / "repo-42" / ".issuebot" / "runs" / "20260903T081200Z-abc123"
+    assert lines[2] == f"logs: {log_dir}"
+    assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
+    assert fake_github.issue(42).state is StateLabel.IN_PROGRESS
+    [call] = stub_session.calls
+    assert call["attempt"] == 1
+    assert call["rework"] is False
+    issue = call["issue"]
+    assert isinstance(issue, Issue)
+    assert issue.state is StateLabel.IN_PROGRESS
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/todo"
+    assert state_changed.to_label == "issuebot/in-progress"
+    assert state_changed.actor == "issuebot"
+    assert state_changed.issue_number == 42
+
+
+def test_run_once_rework_sets_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/rework",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_session.calls[0]["rework"] is True
+    assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/rework"
+    assert state_changed.to_label == "issuebot/in-progress"
+    assert state_changed.actor == "issuebot"
+    assert state_changed.issue_number == 42
+
+
+def test_run_once_in_progress_issue_is_not_reclaimed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/in-progress",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert all(name != "set_state" for name, _ in fake_github.calls)
+    assert len(stub_session.calls) == 1
+    assert not any(isinstance(event, StateChanged) for event in recording_sink.events)
+
+
+def test_run_once_reports_an_exhausted_turn_budget(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    stub_session.stop_reason = "max_turns"
+    stub_session.final_state = StateLabel.IN_PROGRESS
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "turn budget exhausted; issue #42 remains in_progress (the blocked escape is Phase 4)"
+        in out
+    )
+
+
+def test_run_once_reports_failure_and_exits_one(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    stub_session.outcome = "failed"
+    stub_session.stop_reason = "failure"
+    stub_session.error_category = "turn_failed"
+    stub_session.final_state = StateLabel.IN_PROGRESS
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out
+    assert "run 20260903T081200Z-abc123: failed (failure) after 2 turns" in out
+    assert "error: turn_failed: injected failure" in out
+
+
+def test_run_once_show_prompt_has_no_side_effects(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 0
+    assert capsys.readouterr().out == "Body for `repo-42`\n"
+    assert stub_session.calls == []
+    assert [name for name, _ in fake_github.calls] == ["fetch_issues_by_ids"]
+    assert fake_github.issue(42).state is StateLabel.TODO
+    assert not (tmp_path / "ws").exists()
+
+
+def test_run_once_show_prompt_reports_template_errors(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _write(tmp_path, "---\ngithub:\n  repo: example/repo\n---\n{{ nope }}")
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] prompt: template does not render" in capsys.readouterr().out
+
+
+def test_run_once_attempt_increments_from_the_session_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    workspace = tmp_path / "ws" / "repo-42"
+    workspace.mkdir(parents=True)
+    manager = WorkspaceManager(
+        Settings.model_validate(
+            {"github": {"repo": "example/repo"}, "workspace": {"root": str(tmp_path / "ws")}}
+        ),
+        environ={},
+    )
+    manager.write_session(
+        workspace,
+        SessionRecord(
+            issue_number=42,
+            issue_identifier="repo-42",
+            run_id="old",
+            session_id="old-session",
+            attempt=2,
+            turn_number=5,
+            last_outcome="succeeded",
+            updated_at=datetime(2026, 9, 3, 8, 0, tzinfo=UTC),
+        ),
+    )
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    assert stub_session.calls[0]["attempt"] == 3
+
+
+def test_run_once_reports_claim_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+
+    async def failing_set_state(number: int, state: StateLabel) -> None:
+        raise GitHubError("transport", "injected transport failure")
+
+    monkeypatch.setattr(fake_github, "set_state", failing_set_state)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert "[FAIL] claim: transport: injected transport failure" in capsys.readouterr().out
+    assert stub_session.calls == []
+    assert not any(isinstance(event, StateChanged) for event in recording_sink.events)
+
+
+def test_run_once_claim_event_is_published_even_when_the_refetch_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """set_state lands on GitHub even though the re-fetch after it fails; the event still fires."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    original_fetch = fake_github.fetch_issues_by_ids
+    calls = {"n": 0}
+
+    async def flaky_fetch(ids: object) -> list[Issue]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await original_fetch(ids)  # type: ignore[arg-type]
+        raise GitHubError("transport", "injected refetch failure")
+
+    monkeypatch.setattr(fake_github, "fetch_issues_by_ids", flaky_fetch)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert "[FAIL] claim: transport: injected refetch failure" in capsys.readouterr().out
+    assert stub_session.calls == []
+    assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
+    state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
+    [state_changed] = state_changes
+    assert state_changed.from_label == "issuebot/todo"
+    assert state_changed.to_label == "issuebot/in-progress"
+
+
+def test_run_once_unloadable_workflow_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["run-once", "42", "--workflow", str(INVALID)]) == 2
+    assert capsys.readouterr().out.startswith("[FAIL] workflow: ")
+
+
+def test_run_once_requires_a_number() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["run-once", "forty-two"])
+    assert exc.value.code == 2
+
+
+def test_not_runnable_messages(make_issue: Callable[..., Issue]) -> None:
+    labels = GitHubSettings(repo="o/r").labels
+    assert not_runnable(make_issue(), labels) is None
+    assert not_runnable(make_issue(state=StateLabel.IN_PROGRESS), labels) is None
+    closed = make_issue(github_state="closed", dispatchable=False)
+    assert not_runnable(closed, labels) == "is closed"
+    assert not_runnable(make_issue(state=StateLabel.COMPLETE), labels) == (
+        "is complete; label it issuebot/todo or issuebot/rework first"
+    )
+
+
+def test_render_run_summary_singular_turn_and_missing_log_dir() -> None:
+    result = RunResult(
+        run_id="r",
+        issue_number=7,
+        issue_identifier="repo-7",
+        attempt=1,
+        session_id="s",
+        outcome="succeeded",
+        stop_reason="issue_missing",
+        error_category=None,
+        error=None,
+        turns=1,
+        input_tokens=10,
+        output_tokens=2,
+        cost_usd=0.5,
+        duration_s=59.9,
+        final_state=None,
+        final_issue=None,
+        workspace_path=None,
+        log_dir=None,
+    )
+    assert render_run_summary(result) == (
+        "run r: succeeded (issue_missing) after 1 turn in 0m59s, $0.50, 10 in / 2 out\n"
+        "issue #7 is now unlabelled\n"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fakes are POSIX shebang scripts")
+def test_run_once_end_to_end_with_the_fakes(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+) -> None:
+    fakes = Path(__file__).parent / "fakes"
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("PATH", f"{fakes}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_FAKE_SCENARIO", raising=False)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(
+        tmp_path,
+        agent="agent:\n  max_turns: 1",
+        claude=f"claude:\n  command: {fakes / 'claude'}",
+    )
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "succeeded (max_turns) after 1 turn" in out
+    assert "turn budget exhausted; issue #42 remains in_progress" in out
+    workspace = tmp_path / "ws" / "repo-42"
+    assert (workspace / ".git").is_dir()
+    assert (workspace / ".issuebot" / "session.json").exists()
+    runs = list((workspace / ".issuebot" / "runs").iterdir())
+    assert len(runs) == 1
+    assert (runs[0] / "turn-1.jsonl").exists()
+    assert (runs[0] / "turn-1.prompt.md").read_text() == "Body for `repo-42`"

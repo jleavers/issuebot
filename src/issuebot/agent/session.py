@@ -1,0 +1,341 @@
+"""One worker session: workspace, before_run, turns with refresh between them, RunResult."""
+
+import asyncio
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
+
+from issuebot.agent.errors import AgentError, AgentErrorCategory, outcome_for
+from issuebot.agent.prompt import PromptContext, PromptRenderer
+from issuebot.agent.runner import TurnObserver, TurnResult, TurnRunner
+from issuebot.agent.workspace import SessionRecord, WorkspaceManager, run_log_dir
+from issuebot.config import Workflow
+from issuebot.events import EventBus, RunEnded, RunOutcome, RunStarted
+from issuebot.github import GitHubAdapter, GitHubError, Issue, StateLabel
+from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
+
+StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "cancelled"]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RunResult:
+    """What one worker session did and why it stopped."""
+
+    run_id: str
+    issue_number: int
+    issue_identifier: str
+    attempt: int
+    session_id: str
+    outcome: RunOutcome
+    stop_reason: StopReason
+    error_category: AgentErrorCategory | None
+    error: str | None
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    duration_s: float
+    final_state: StateLabel | None
+    final_issue: Issue | None
+    workspace_path: Path | None
+    log_dir: Path | None
+
+
+def new_run_id(now: datetime | None = None) -> str:
+    """A sortable, readable run id: ``20260903T081200Z-a1b2c3``."""
+    stamp = (now or datetime.now(UTC)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+@dataclass
+class _State:
+    run_id: str
+    session_id: str
+    attempt: int
+    issue: Issue
+    started: float
+    workspace_path: Path | None = None
+    log_dir: Path | None = None
+    final_issue: Issue | None = None
+    turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    outcome: RunOutcome = "succeeded"
+    stop_reason: StopReason | None = None
+    error_category: AgentErrorCategory | None = None
+    error: str | None = None
+
+    def fail(self, category: AgentErrorCategory, message: str | None) -> None:
+        self.error_category = category
+        self.error = message or category
+        self.outcome = outcome_for(category)
+        self.stop_reason = "cancelled" if category == "cancelled" else "failure"
+
+    def stop(self, reason: StopReason) -> None:
+        self.stop_reason = reason
+        self.outcome = "succeeded"
+
+    def record_turn(self, turn: TurnResult) -> None:
+        self.turns += 1
+        self.input_tokens += turn.total_input_tokens
+        self.output_tokens += turn.output_tokens
+        self.cost_usd += turn.cost_usd
+
+    def session_record(self, turn_number: int, last_outcome: RunOutcome | None) -> SessionRecord:
+        return SessionRecord(
+            issue_number=self.issue.number,
+            issue_identifier=self.issue.identifier,
+            run_id=self.run_id,
+            session_id=self.session_id,
+            attempt=self.attempt,
+            turn_number=turn_number,
+            last_outcome=last_outcome,
+            updated_at=datetime.now(UTC),
+        )
+
+    def result(self) -> RunResult:
+        return RunResult(
+            run_id=self.run_id,
+            issue_number=self.issue.number,
+            issue_identifier=self.issue.identifier,
+            attempt=self.attempt,
+            session_id=self.session_id,
+            outcome=self.outcome,
+            stop_reason=self.stop_reason or "failure",
+            error_category=self.error_category,
+            error=self.error,
+            turns=self.turns,
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            cost_usd=round(self.cost_usd, 6),
+            duration_s=round(time.monotonic() - self.started, 3),
+            final_state=self.issue.state,
+            final_issue=self.final_issue,
+            workspace_path=self.workspace_path,
+            log_dir=self.log_dir,
+        )
+
+
+async def run_session(
+    issue: Issue,
+    workflow: Workflow,
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    *,
+    workspaces: WorkspaceManager,
+    runner: TurnRunner,
+    attempt: int = 1,
+    rework: bool = False,
+    resume_session_id: str | None = None,
+    cancel: asyncio.Event | None = None,
+    observer: TurnObserver | None = None,
+    run_id: str | None = None,
+) -> RunResult:
+    """Run one worker session for ``issue`` (roadmap §2.4) and report what happened."""
+    state = _State(
+        run_id=run_id or new_run_id(),
+        session_id=resume_session_id or str(uuid.uuid4()),
+        attempt=attempt,
+        issue=issue,
+        started=time.monotonic(),
+    )
+    log = get_logger(__name__)
+    bind_issue_context(issue_number=issue.number, issue_identifier=issue.identifier)
+    bind_session_context(session_id=state.session_id)
+    try:
+        try:
+            state.workspace_path = workspaces.path_for(issue.identifier)
+        except AgentError as exc:
+            state.fail(exc.category, exc.message)
+        bus.publish(
+            RunStarted(
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                run_id=state.run_id,
+                attempt=attempt,
+                session_id=state.session_id,
+                workspace_path=str(state.workspace_path or ""),
+            )
+        )
+        log.info(
+            "run_started",
+            run_id=state.run_id,
+            attempt=attempt,
+            rework=rework,
+            resuming=resume_session_id is not None,
+        )
+        if state.stop_reason is None:
+            await _execute(
+                state,
+                workflow,
+                adapter,
+                workspaces,
+                runner,
+                rework=rework,
+                resuming=resume_session_id is not None,
+                cancel=cancel,
+                observer=observer,
+            )
+        result = state.result()
+        bus.publish(
+            RunEnded(
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                run_id=result.run_id,
+                outcome=result.outcome,
+                error=_error_text(result),
+                turns=result.turns,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                duration_s=result.duration_s,
+            )
+        )
+        log.info(
+            "run_finished",
+            run_id=result.run_id,
+            outcome=result.outcome,
+            stop_reason=result.stop_reason,
+            turns=result.turns,
+            cost_usd=result.cost_usd,
+            error=_error_text(result),
+        )
+        return result
+    finally:
+        clear_context()
+
+
+def _error_text(result: RunResult) -> str | None:
+    if result.error_category is None:
+        return None
+    return f"{result.error_category}: {result.error}"
+
+
+async def _execute(
+    state: _State,
+    workflow: Workflow,
+    adapter: GitHubAdapter,
+    workspaces: WorkspaceManager,
+    runner: TurnRunner,
+    *,
+    rework: bool,
+    resuming: bool,
+    cancel: asyncio.Event | None,
+    observer: TurnObserver | None,
+) -> None:
+    try:
+        workspace = await workspaces.create_or_reuse(state.issue)
+    except AgentError as exc:
+        state.fail(exc.category, exc.message)
+        return
+    state.workspace_path = workspace.path
+    state.log_dir = run_log_dir(workspace.path, state.run_id)
+    try:
+        hook = await workspaces.run_hook("before_run", workspace.path)
+        if hook is not None and not hook.ok:
+            state.fail("hook_error", f"before_run hook failed: {hook.summary}")
+            return
+        try:
+            renderer = PromptRenderer(workflow.prompt_template)
+        except AgentError as exc:
+            state.fail(exc.category, exc.message)
+            return
+        _save(workspaces, workspace.path, state.session_record(0, None))
+        await _turn_loop(
+            state,
+            workflow,
+            renderer,
+            adapter,
+            workspaces,
+            runner,
+            workspace.path,
+            rework=rework,
+            resuming=resuming,
+            cancel=cancel,
+            observer=observer,
+        )
+    finally:
+        await workspaces.run_hook("after_run", workspace.path)
+        _save(workspaces, workspace.path, state.session_record(state.turns, state.outcome))
+
+
+async def _turn_loop(
+    state: _State,
+    workflow: Workflow,
+    renderer: PromptRenderer,
+    adapter: GitHubAdapter,
+    workspaces: WorkspaceManager,
+    runner: TurnRunner,
+    workspace: Path,
+    *,
+    rework: bool,
+    resuming: bool,
+    cancel: asyncio.Event | None,
+    observer: TurnObserver | None,
+) -> None:
+    settings = workflow.config
+    max_turns = settings.agent.max_turns
+    for turn_number in range(1, max_turns + 1):
+        context = PromptContext(
+            issue=state.issue,
+            repo=settings.github.repo,
+            labels=settings.github.labels,
+            attempt=state.attempt,
+            turn_number=turn_number,
+            max_turns=max_turns,
+            rework=rework,
+            self_review=settings.agent.self_review,
+        )
+        resume = turn_number > 1 or resuming
+        try:
+            prompt = renderer.render_continuation(context) if resume else renderer.render(context)
+        except AgentError as exc:
+            state.fail(exc.category, exc.message)
+            return
+        turn = await runner.run_turn(
+            prompt=prompt,
+            workspace=workspace,
+            session_id=state.session_id,
+            resume=resume,
+            turn_number=turn_number,
+            log_dir=run_log_dir(workspace, state.run_id),
+            observer=observer,
+            cancel=cancel,
+        )
+        state.record_turn(turn)
+        _save(workspaces, workspace, state.session_record(turn_number, None))
+        if not turn.ok:
+            state.fail(turn.error_category or "turn_failed", turn.error)
+            return
+        if cancel is not None and cancel.is_set():
+            state.fail("cancelled", "cancelled between turns")
+            return
+        try:
+            refreshed = await adapter.fetch_issues_by_ids([state.issue.id])
+        except GitHubError as exc:
+            state.fail("github_error", f"could not refresh the issue: {exc}")
+            return
+        if not refreshed:
+            state.stop("issue_missing")
+            return
+        state.issue = refreshed[0]
+        state.final_issue = refreshed[0]
+        if state.issue.state is not StateLabel.IN_PROGRESS or not state.issue.dispatchable:
+            state.stop("issue_moved")
+            return
+        if turn_number == max_turns:
+            state.stop("max_turns")
+            return
+
+
+def _save(workspaces: WorkspaceManager, workspace: Path, record: SessionRecord) -> None:
+    try:
+        workspaces.write_session(workspace, record)
+    except OSError as exc:
+        get_logger(__name__).warning(
+            "session_file_write_failed", workspace=str(workspace), error=str(exc)
+        )

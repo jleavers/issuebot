@@ -470,10 +470,10 @@ async def test_comment_posts_json_body_and_parses_response() -> None:
     assert comment.created_at == datetime(2026, 9, 2, 11, 0, tzinfo=UTC)
 
 
-async def test_find_workpad_comment_returns_marker_comment_or_none() -> None:
+async def test_find_workpad_comment_paginates_and_returns_marker_comment_or_none() -> None:
     runner = StubRunner()
-    runner.on(has("issues/42/comments?per_page=100"), stdout=fixture("comments.json"))
-    runner.on(has("issues/43/comments?per_page=100"), stdout="[]")
+    runner.on(has("issues/42/comments?per_page=100"), stdout=fixture("comments_paged.json"))
+    runner.on(has("issues/43/comments?per_page=100"), stdout="[[]]")
     adapter = make_adapter(runner)
     found = await adapter.find_workpad_comment(42)
     assert found is not None
@@ -481,7 +481,28 @@ async def test_find_workpad_comment_returns_marker_comment_or_none() -> None:
     assert found.body.startswith(WORKPAD_MARKER)
     assert found.updated_at == datetime(2026, 9, 2, 10, 30, tzinfo=UTC)
     assert await adapter.find_workpad_comment(43) is None
-    assert runner.argv(0) == ["api", "repos/example/repo/issues/42/comments?per_page=100"]
+    assert runner.argv(0) == [
+        "api",
+        "repos/example/repo/issues/42/comments?per_page=100",
+        "--paginate",
+        "--slurp",
+    ]
+
+
+async def test_find_workpad_comment_accepts_a_single_wrapped_page() -> None:
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    found = await make_adapter(runner).find_workpad_comment(42)
+    assert found is not None
+    assert found.id == 1002
+
+
+async def test_find_workpad_comment_rejects_unwrapped_pages() -> None:
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout=fixture("comments.json"))
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).find_workpad_comment(42)
+    assert exc.value.category == "response"
 
 
 async def test_update_comment_patches_body() -> None:

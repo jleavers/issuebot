@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Fake `claude` for runner tests: replays recorded stream-json, or misbehaves on request.
+
+CLAUDE_FAKE_SCENARIO selects the behaviour (success, error_result, budget, long_line,
+crash_after_init, no_init, silent, slow, stubborn). CLAUDE_FAKE_RECORD names a file that
+receives argv, stdin, cwd and selected environment as JSON. CLAUDE_FAKE_DELAY_MS sleeps
+between replayed lines. CLAUDE_FAKE_PIDFILE receives the pid. The names carry the CLAUDE_
+prefix because only that prefix passes through the runner's environment filter.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
+PLACEHOLDER = "00000000-0000-4000-8000-000000000000"
+RECORDED_ENV = (
+    "GH_TOKEN",
+    "GH_PROMPT_DISABLED",
+    "NO_COLOR",
+    "DISABLE_AUTOUPDATER",
+    "HOME",
+    "ANTHROPIC_API_KEY",
+    "SSH_AUTH_SOCK",
+    "CLAUDE_FAKE_SCENARIO",
+)
+
+scenario = os.environ.get("CLAUDE_FAKE_SCENARIO", "success")
+argv = sys.argv[1:]
+
+
+def option(name: str) -> str | None:
+    if name not in argv:
+        return None
+    index = argv.index(name) + 1
+    return argv[index] if index < len(argv) else None
+
+
+session_id = option("--session-id") or option("--resume") or PLACEHOLDER
+prompt = sys.stdin.read()
+
+pidfile = os.environ.get("CLAUDE_FAKE_PIDFILE")
+if pidfile:
+    Path(pidfile).write_text(str(os.getpid()))
+record = os.environ.get("CLAUDE_FAKE_RECORD")
+if record:
+    Path(record).write_text(
+        json.dumps(
+            {
+                "argv": argv,
+                "stdin": prompt,
+                "cwd": os.getcwd(),
+                "env": {key: os.environ.get(key) for key in RECORDED_ENV},
+            }
+        )
+    )
+delay = int(os.environ.get("CLAUDE_FAKE_DELAY_MS", "0")) / 1000
+
+
+def emit(line: str) -> None:
+    sys.stdout.write(line.replace(PLACEHOLDER, session_id) + "\n")
+    sys.stdout.flush()
+
+
+def lines(name: str) -> list[str]:
+    return (FIXTURES / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()
+
+
+def replay(name: str, pause: float) -> None:
+    for line in lines(name):
+        emit(line)
+        if pause:
+            time.sleep(pause)
+
+
+if scenario == "success":
+    replay("success", delay)
+    sys.exit(0)
+if scenario == "error_result":
+    replay("error_result", delay)
+    sys.exit(1)
+if scenario == "budget":
+    replay("budget", delay)
+    sys.exit(1)
+if scenario == "slow":
+    replay("success", 0.2)
+    sys.exit(0)
+if scenario == "long_line":
+    recorded = lines("success")
+    big = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"tool_use_id": "toolu_big", "type": "tool_result", "content": "x" * 200_000}
+            ],
+        },
+        "session_id": PLACEHOLDER,
+    }
+    for line in [*recorded[:4], json.dumps(big), *recorded[4:]]:
+        emit(line)
+    sys.exit(0)
+if scenario == "crash_after_init":
+    emit(lines("success")[0])
+    sys.stderr.write("fatal: the fake claude crashed\n")
+    sys.exit(2)
+if scenario == "no_init":
+    sys.stdout.write("Error: not a stream-json line\n")
+    sys.stderr.write("No conversation found with session ID\n")
+    sys.exit(1)
+if scenario in ("silent", "stubborn"):
+    if scenario == "stubborn":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    emit(lines("success")[0])
+    time.sleep(30)
+    sys.exit(0)
+sys.stderr.write(f"unknown CLAUDE_FAKE_SCENARIO {scenario!r}\n")
+sys.exit(3)

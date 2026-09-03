@@ -20,6 +20,7 @@ from issuebot.config.settings import (
     PollingSettings,
     ServerSettings,
     Settings,
+    SettingSource,
     SlackSettings,
     WorkspaceSettings,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "PermissionMode",
     "PollingSettings",
     "ServerSettings",
+    "SettingSource",
     "Settings",
     "SettingsValidationError",
     "SlackSettings",

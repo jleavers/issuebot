@@ -335,6 +335,7 @@ claude:
   allowed_tools: []
   disallowed_tools: []
   append_system_prompt: null
+  setting_sources: null         # pass-through to --setting-sources; the dogfood file sets [project]
 database:
   url: $DATABASE_URL            # optional; worker runs without it
 notifications:
@@ -599,7 +600,9 @@ SSH or remote workers (Symphony Appendix A); Windows host support for the worker
 itself (the repo's cross-OS rule applies to scripts the agent writes, the service is
 Linux-in-Docker); an issuebot-owned reviewer agent with its own state or label, to be
 revisited only if the in-run review and the GitHub review action (§2.6) prove
-insufficient.
+insufficient; git worktrees off a shared base clone as the workspace
+implementation, a disk and clone-time optimisation over per-issue clones that
+would share one `.git` between concurrent agents.
 
 ## 4. Decisions to confirm
 
