@@ -21,6 +21,7 @@ from issuebot.agent import (
     new_run_id,
     run_session,
 )
+from issuebot.agent.runner import TERMINATE_GRACE_S
 from issuebot.config import ConfigError, GitHubSettings, Settings, Workflow, load_workflow
 from issuebot.events import EventBus
 from issuebot.github import (
@@ -521,7 +522,7 @@ class Orchestrator:
         elif outcome == "cancelled":
             self._counters = self._counters.bump(issues_cancelled=1)
 
-    # --- worker exits and retries ------------------------------------------------
+    # --- worker exits and retries                                            --------
 
     async def handle_worker_exit(self, issue_id: str) -> None:
         """Symphony §16.6 with the blocked escape: totals, then retry, escape or release."""
@@ -781,6 +782,88 @@ class Orchestrator:
             return
         attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1
         await self._dispatch(issue, attempt=attempt, resume_session_id=None)
+
+    # --- the loop -----------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """Startup, then tick and wait until stopped; shutdown on the way out."""
+        await self.startup()
+        try:
+            while not self._stopping:
+                await self.tick()
+                await self._wait_for_next_tick()
+        finally:
+            await self.shutdown()
+
+    async def _wait_for_next_tick(self) -> None:
+        deadline = self._clock() + self._workflow.config.polling.interval_ms / 1000
+        while not self._stopping:
+            await self.fire_due_retries()
+            now = self._clock()
+            if now >= deadline:
+                return
+            timeout = min(deadline, self._earliest_due()) - now
+            if timeout <= 0:
+                continue
+            try:
+                message = await asyncio.wait_for(self._queue.get(), timeout)
+            except TimeoutError:
+                continue
+            if message is _REFRESH:
+                self._refresh_pending = False
+                return
+            if message is _STOP:
+                return
+            if isinstance(message, _WorkerExited):
+                await self.handle_worker_exit(message.issue_id)
+
+    def request_refresh(self) -> None:
+        """Ask for a tick now; coalesced while one is already pending."""
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        self._queue.put_nowait(_REFRESH)
+
+    def request_stop(self) -> None:
+        if self._stopping:
+            return
+        self._stopping = True
+        self._log.info("stop_requested")
+        self._queue.put_nowait(_STOP)
+
+    async def shutdown(self) -> None:
+        """Cancel every worker, wait for after_run, drain the exits, drop the retries."""
+        self._stopping = True
+        settings = self._workflow.config
+        if self._running:
+            self._log.info("shutdown_started", running=len(self._running))
+            tasks: list[asyncio.Task[RunResult]] = []
+            for entry in self._running.values():
+                entry.stop("shutdown", "worker stopping")
+                if entry.task is not None:
+                    tasks.append(entry.task)
+            timeout = settings.hooks.timeout_ms / 1000 + TERMINATE_GRACE_S + SHUTDOWN_MARGIN_S
+            _done, pending = await asyncio.wait(tasks, timeout=timeout)
+            if pending:
+                self._log.warning("shutdown_timeout", pending=len(pending), timeout_s=timeout)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            for issue_id in list(self._running):
+                await self.handle_worker_exit(issue_id)
+        self._retries.clear()
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        counters = self._counters
+        self._log.info(
+            "orchestrator_stopped",
+            runs_started=counters.runs_started,
+            runs_ended=counters.runs_ended,
+            issues_completed=counters.issues_completed,
+            issues_cancelled=counters.issues_cancelled,
+            blocked=counters.blocked,
+            cost_usd=self._totals.cost_usd,
+        )
 
 
 def _changed_sections(old: Workflow, new: Workflow) -> list[str]:

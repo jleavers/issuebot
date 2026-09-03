@@ -1158,3 +1158,116 @@ async def test_snapshot_rows_and_active_seconds(tmp_path: Path) -> None:
     assert snapshot.totals.seconds_running == 12.0 + 5.0
     assert snapshot.counters.runs_started == 2
     assert snapshot.to_dict()["running"][0]["identifier"] == "repo-1"
+
+
+# --- the loop -----------------------------------------------------------------------------
+
+
+async def wait_until(condition: Any, *, timeout: float = 10.0) -> None:
+    for _ in range(int(timeout / 0.02)):
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+async def test_run_ticks_refreshes_and_stops(tmp_path: Path) -> None:
+    h = Harness(tmp_path, interval_ms=60_000)
+    h.orchestrator._clock = __import__("time").monotonic
+    task = asyncio.create_task(h.orchestrator.run())
+    await wait_until(lambda: len(h.snapshots) == 1)
+    h.orchestrator.request_refresh()
+    h.orchestrator.request_refresh()
+    await wait_until(lambda: len(h.snapshots) == 2, timeout=2.0)
+    await asyncio.sleep(0.1)
+    assert len(h.snapshots) == 2
+    h.orchestrator.request_stop()
+    await asyncio.wait_for(task, timeout=5)
+    assert h.orchestrator.stopping is True
+
+
+async def test_shutdown_cancels_workers_and_leaves_the_label(tmp_path: Path) -> None:
+    h = Harness(tmp_path, interval_ms=60_000)
+    h.orchestrator._clock = __import__("time").monotonic
+    h.add_issue(1, "todo")
+    task = asyncio.create_task(h.orchestrator.run())
+    await wait_until(lambda: len(h.sessions.runs) == 1)
+    h.orchestrator.request_stop()
+    await asyncio.wait_for(task, timeout=5)
+    assert h.run_for(1).cancel.is_set()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    assert h.orchestrator.snapshot().counters.runs_ended == 1
+
+
+async def test_shutdown_cancels_stragglers_after_the_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path, interval_ms=60_000)
+    h.orchestrator._clock = __import__("time").monotonic
+    monkeypatch.setattr(orchestrator_module, "TERMINATE_GRACE_S", 0.0)
+    monkeypatch.setattr(orchestrator_module, "SHUTDOWN_MARGIN_S", 0.2)
+    h.write_workflow(hooks={"timeout_ms": "1"})
+    h.orchestrator._workflow = load_workflow(h.path, environ=h.environ)
+
+    async def stubborn(*args: Any, **kwargs: Any) -> RunResult:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    h.orchestrator._run_session = stubborn
+    h.add_issue(1, "todo")
+    task = asyncio.create_task(h.orchestrator.run())
+    await wait_until(lambda: len(h.orchestrator.running) == 1)
+    h.orchestrator.request_stop()
+    await asyncio.wait_for(task, timeout=5)
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.snapshot().counters.runs_ended == 1
+
+
+async def test_run_propagates_startup_errors(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.which_missing = {"claude"}
+    with pytest.raises(OrchestratorStartupError):
+        await h.orchestrator.run()
+
+
+# --- end to end ---------------------------------------------------------------------------
+
+
+@posix
+async def test_end_to_end_with_the_fakes(tmp_path: Path) -> None:
+    h = Harness(
+        tmp_path,
+        max_turns=1,
+        interval_ms=1000,
+        claude=str(FAKE_CLAUDE),
+        hooks={"after_run": "touch after-run-ran"},
+        real_sessions=True,
+    )
+    h.orchestrator._clock = __import__("time").monotonic
+    h.add_issue(1, "todo", title="Add a function")
+    task = asyncio.create_task(h.orchestrator.run())
+    await wait_until(lambda: h.github.issue(1).state is StateLabel.REVIEW, timeout=20.0)
+    h.orchestrator.request_stop()
+    await asyncio.wait_for(task, timeout=10)
+    assert h.recorder.kinds == [
+        "state_changed",
+        "run_started",
+        "run_ended",
+        "state_changed",
+        "blocked",
+    ]
+    workspace = h.root / "repo-1"
+    assert (workspace / ".git").is_dir()
+    assert (workspace / "after-run-ran").exists()
+    assert (workspace / ".issuebot" / "session.json").exists()
+    runs = list((workspace / ".issuebot" / "runs").iterdir())
+    assert len(runs) == 1
+    assert (runs[0] / "turn-1.jsonl").exists()
+    body = h.github.comments_for(1)[0].body
+    assert body.startswith(WORKPAD_MARKER)
+    assert "Turn budget exhausted: 1 turns in attempt 1" in body
+    assert str(runs[0]) in body
+    totals = h.orchestrator.snapshot().totals
+    assert totals.input_tokens > 0 and totals.cost_usd > 0
