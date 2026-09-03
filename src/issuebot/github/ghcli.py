@@ -175,13 +175,23 @@ class GhCliAdapter:
 
     async def find_workpad_comment(self, number: int) -> Comment | None:
         self._log.debug("find_workpad_comment", issue_number=number)
-        result = await self._gh(["api", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
-        payload = _parse_json(result.stdout)
-        if not isinstance(payload, list):
-            raise GitHubError("response", "comments response is not a list")
-        for item in payload:
-            if isinstance(item, Mapping) and is_workpad_body(item.get("body")):
-                return _comment_from(item)
+        result = await self._gh(
+            [
+                "api",
+                f"repos/{self.repo}/issues/{number}/comments?per_page={PAGE_SIZE}",
+                "--paginate",
+                "--slurp",
+            ]
+        )
+        pages = _parse_json(result.stdout)
+        if not isinstance(pages, list):
+            raise GitHubError("response", "comments response is not a list of pages")
+        for page in pages:
+            if not isinstance(page, list):
+                raise GitHubError("response", "comments page is not a list")
+            for item in page:
+                if isinstance(item, Mapping) and is_workpad_body(item.get("body")):
+                    return _comment_from(item)
         return None
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
