@@ -52,6 +52,7 @@ tests/
 ├── fakes/gh                    + `repo clone` creates a git repository at the target path
 ├── fixtures/claude/*.jsonl     recorded stream-json (one real capture, error variants derived from it)
 ├── fixtures/gh/comments_paged.json
+├── test_agent_errors.py
 ├── test_agent_workspace.py
 ├── test_agent_prompt.py
 ├── test_agent_runner.py
@@ -162,6 +163,7 @@ class HookResult:  # frozen
     stdout_tail: str  # last 2000 characters
     stderr_tail: str
     ok: bool  # property: returncode == 0 and not timed_out
+    summary: str  # property: "exit status N: <last stderr line>" or "timed out after N ms"
 
 
 class SessionRecord:  # frozen
@@ -193,6 +195,7 @@ class WorkspaceManager:
     ) -> None: ...
 
     root: Path
+    hook_shell: tuple[str, ...]
 
     def path_for(self, identifier: str) -> Path: ...
     def is_contained(self, path: Path) -> bool: ...
@@ -322,8 +325,8 @@ Continuation guidance:
 ```
 
 `validate`'s existing `prompt` check gains rendering: it compiles the body and
-renders it against a sample `todo` issue (`attempt=1`, `turn_number=1`,
-`rework=False`) and reports `[ OK ] prompt: <n> characters, renders` or
+renders it against a sample `in_progress` issue (`attempt=1`, `turn_number=1`,
+`rework=False`, the configured `self_review`) and reports `[ OK ] prompt: <n> characters, renders` or
 `[FAIL] prompt: <jinja message>`. The empty-body warning stays. `validate`
 still has twelve checks.
 
@@ -440,6 +443,26 @@ class TurnResult:  # frozen
     ok: bool  # property: error_category is None
     total_input_tokens: int  # property: input + cache creation + cache read
 ```
+
+```python
+class TurnRunner(Protocol):  # what run_session depends on; ClaudeRunner satisfies it
+    async def run_turn(
+        self,
+        *,
+        prompt,
+        workspace,
+        session_id,
+        resume,
+        turn_number,
+        log_dir,
+        observer=None,
+        cancel=None,
+    ) -> TurnResult: ...
+```
+
+`StreamParser` (feeds one line at a time, remembers `system/init` and
+`result`, reports activity), `classify_result` (the table in §7.4) and
+`parse_claude_version` are public, pure and unit-tested without a subprocess.
 
 Runtime events are **internal**: they go to the optional `TurnObserver` and to
 the log, not to the event bus, and `EVENT_KINDS` is unchanged. Phase 4's stall
@@ -561,19 +584,24 @@ def new_run_id(now: datetime | None = None) -> str: ...  # "20260903T081200Z-a1b
 
 async def run_session(
     issue: Issue,
-    settings: Settings,
+    workflow: Workflow,
     adapter: GitHubAdapter,
     bus: EventBus,
     *,
     workspaces: WorkspaceManager,
-    runner: ClaudeRunner,
+    runner: TurnRunner,
     attempt: int = 1,
+    rework: bool = False,
     resume_session_id: str | None = None,
     cancel: asyncio.Event | None = None,
     observer: TurnObserver | None = None,
     run_id: str | None = None,
 ) -> RunResult: ...
 ```
+
+`workflow` supplies both the settings and the prompt template; `rework` tells
+the prompt that the orchestrator dispatched the issue from `rework`; `runner`
+is any `TurnRunner` (§7.3), which `ClaudeRunner` satisfies and tests stub.
 
 `run_session` is roadmap §2.4's worker session (Symphony §16.5):
 
@@ -781,17 +809,20 @@ All hermetic. No test contacts GitHub or Anthropic; no test runs the real
 spawn it are `skipif(sys.platform == "win32")` like the `gh` runner tests):
 
 - reads the prompt from stdin, records `{"argv", "stdin", "env": {selected
-  names}, "cwd"}` as JSON to the path in `FAKE_CLAUDE_RECORD` when set;
+  names}, "cwd"}` as JSON to the path in `CLAUDE_FAKE_RECORD` when set (the
+  knobs carry the `CLAUDE_` prefix because only that prefix passes through
+  the runner's environment filter, §7.2);
 - replays `tests/fixtures/claude/<scenario>.jsonl` line by line with the
   session id in the fixture replaced by the one in `--session-id`/`--resume`,
-  sleeping `FAKE_CLAUDE_DELAY_MS` between lines when set;
-- scenarios via `FAKE_CLAUDE_SCENARIO`: `success` (default), `error_result`
+  sleeping `CLAUDE_FAKE_DELAY_MS` between lines when set;
+- scenarios via `CLAUDE_FAKE_SCENARIO`: `success` (default), `error_result`
   (`error_during_execution`, `is_error` true, exit 1), `budget`
   (`error_max_budget_usd`), `crash_after_init` (init then exit 2 with a
   stderr line), `no_init` (one non-JSON line then exit 1), `silent` (init
-  then sleep 30 s: turn timeout), `slow` (success with a 200 ms delay per
+  then sleep 30 s: turn timeout), `stubborn` (like `silent` but ignoring
+  `SIGTERM`: the SIGKILL fallback), `slow` (success with a 200 ms delay per
   line: cancellation), `long_line` (success whose tool result is 200 KB);
-- writes its pid to `FAKE_CLAUDE_PIDFILE` when set (kill assertions).
+- writes its pid to `CLAUDE_FAKE_PIDFILE` when set (kill assertions).
 
 **Fixtures** (`tests/fixtures/claude/`): `success.jsonl` is the real capture
 made during the design session (Claude Code 2.1.259, `claude-opus-5`, a
