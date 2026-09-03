@@ -2,7 +2,7 @@
 
 ARG PYTHON_IMAGE=python:3.14-slim
 
-FROM ghcr.io/astral-sh/uv:0.11.17 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.9 AS uv
 
 # ---------------------------------------------------------------- builder
 FROM ${PYTHON_IMAGE} AS builder
