@@ -137,6 +137,19 @@ async def test_urllib_post_refuses_other_schemes() -> None:
     assert result == PostResult(status=None, error="unsupported URL scheme 'ftp'")
 
 
+async def test_urllib_post_reports_an_unparseable_url_without_raising() -> None:
+    result = await urllib_post("http://[::1", slack_payload("x"))
+    assert result.status is None
+    assert result.error is not None
+
+
+async def test_urllib_post_reports_an_invalid_path_without_raising() -> None:
+    result = await urllib_post("http://127.0.0.1:9/bad path", slack_payload("x"))
+    assert result.status is None
+    assert result.error is not None
+    assert "bad path" not in result.error
+
+
 # --- helpers ---------------------------------------------------------------------------
 
 

@@ -1,6 +1,7 @@
 """Slack incoming-webhook sink: a queue drained by one task, bounded retry, redacted errors."""
 
 import asyncio
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -52,7 +53,10 @@ def slack_payload(text: str) -> bytes:
 def redact(text: str, url: str) -> str:
     """Replace the webhook URL, and its path on its own, with a placeholder."""
     redacted = text.replace(url, REDACTED)
-    path = urlsplit(url).path
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        path = ""
     if path and path != "/":
         redacted = redacted.replace(path, REDACTED)
     return redacted
@@ -65,20 +69,23 @@ def subscribed_kinds(slack: SlackSettings) -> frozenset[str]:
 
 async def urllib_post(url: str, payload: bytes, *, timeout_s: float = POST_TIMEOUT_S) -> PostResult:
     """POST ``payload`` as JSON with urllib in a worker thread; never raises."""
-    scheme = urlsplit(url).scheme
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError as exc:
+        return PostResult(status=None, error=redact(f"{type(exc).__name__}: {exc}", url))
     if scheme not in _SCHEMES:
         return PostResult(status=None, error=f"unsupported URL scheme {scheme!r}")
     return await asyncio.to_thread(_post_blocking, url, payload, timeout_s)
 
 
 def _post_blocking(url: str, payload: bytes, timeout_s: float) -> PostResult:
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
     try:
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             return PostResult(status=response.status)
     except urllib.error.HTTPError as exc:
@@ -87,7 +94,7 @@ def _post_blocking(url: str, payload: bytes, timeout_s: float) -> PostResult:
             retry_after_s=_retry_after(exc.headers.get("Retry-After")),
             error=redact(str(exc), url),
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         return PostResult(status=None, error=redact(f"{type(exc).__name__}: {exc}", url))
 
 
