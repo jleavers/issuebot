@@ -18,6 +18,7 @@ from issuebot.github import Issue
 from issuebot.log import configure_logging
 
 T0 = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+DESCRIPTION = "postgresql://issuebot@db.example/issuebot"
 
 
 class FakeStore:
@@ -83,7 +84,9 @@ class Harness:
         self.clock = Clock()
         self.stream = io.StringIO()
         configure_logging(fmt="json", level="DEBUG", stream=self.stream)  # type: ignore[arg-type]
-        self.sink = PostgresSink(self.store, sleep=self.sleep, now=self.clock)
+        self.sink = PostgresSink(
+            self.store, sleep=self.sleep, now=self.clock, description=DESCRIPTION
+        )
 
     async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
@@ -119,7 +122,8 @@ async def test_events_published_before_start_are_written_in_order(h: Harness) ->
     assert [call[1].issue_number for call in h.store.calls] == [1, 2]
     assert (h.sink.written, h.sink.failed, h.sink.dropped) == (2, 0, 0)
     assert h.store.connects == 1 and h.store.closed
-    assert h.logged("db_connected")[0]["attempt"] == 1
+    connected = h.logged("db_connected")[0]
+    assert (connected["attempt"], connected["database"]) == (1, DESCRIPTION)
     closed = h.logged("db_sink_closed")[0]
     assert (closed["written"], closed["failed"], closed["dropped"]) == (2, 0, 0)
 
@@ -211,6 +215,21 @@ async def test_a_lost_connection_reconnects_and_retries_the_item(h: Harness) -> 
     retry = h.logged("db_write_retry")[0]
     assert (retry["kind"], retry["issue_number"]) == ("blocked", 1)
     assert retry["error"] == "server closed the connection"
+
+
+async def test_repeated_write_failures_back_off_before_each_reconnect(h: Harness) -> None:
+    h.store.fail_next = [StoreUnavailableError("disk full") for _ in range(3)]
+    h.sink.handle(blocked(1))
+    h.sink.handle(blocked(2))
+    h.sink.start()
+    await h.sink.close()
+    assert [call[1].issue_number for call in h.store.calls] == [1, 2]
+    assert (h.sink.written, h.sink.failed, h.sink.reconnects) == (2, 0, 3)
+    assert h.store.connects == 4
+    assert h.sleeps == [1.0, 2.0]
+    retries = h.logged("db_write_retry")
+    assert [line["retries"] for line in retries] == [1, 2, 3]
+    assert [line["delay_s"] for line in retries] == [None, 1.0, 2.0]
 
 
 async def test_connect_failures_back_off_before_the_first_write(h: Harness) -> None:

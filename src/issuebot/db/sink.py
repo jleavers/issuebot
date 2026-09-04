@@ -187,6 +187,7 @@ class PostgresSink:
         return ("snapshot", at, data)
 
     async def _write(self, work: _Work) -> None:
+        retries = 0
         while True:
             if not self._connected:
                 await self._ensure_connected()
@@ -194,7 +195,17 @@ class PostgresSink:
                 await self._apply(work)
             except StoreUnavailableError as exc:
                 self._connected = False
-                self._log.warning("db_write_retry", error=exc.message, **_describe(work))
+                retries += 1
+                delay = None if retries == 1 else reconnect_delay(retries - 1)
+                self._log.warning(
+                    "db_write_retry",
+                    error=exc.message,
+                    retries=retries,
+                    delay_s=delay,
+                    **_describe(work),
+                )
+                if delay is not None:
+                    await self._sleep(delay)
                 continue
             except StoreError as exc:
                 self.failed += 1
