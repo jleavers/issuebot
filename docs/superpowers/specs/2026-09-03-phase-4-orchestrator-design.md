@@ -338,7 +338,7 @@ sees the label it will find on its first refresh without a second request.
 **`blocked_escape`.**
 
 1. `fetch_issues_by_ids([issue_id])`. Missing, closed, or `state is not
-   IN_PROGRESS`: return `True` (the world moved on; nothing to do).
+   IN_PROGRESS`: return `"skipped"` (the world moved on; nothing to do).
 2. `find_workpad_comment(number)`. When found and its body already contains
    the line ``Run `<run_id>` `` the block is already there (a previous
    attempt appended it and then failed at step 3); skip to step 3. Otherwise
@@ -348,7 +348,7 @@ sees the label it will find on its first refresh without a second request.
 3. `set_state(number, REVIEW)`.
 4. Publish `StateChanged(from=in_progress name, to=review name,
    actor="issuebot", pr_url=linked PR url or None)` and
-   `Blocked(reason=context.reason)`. Return `True`.
+   `Blocked(reason=context.reason)`. Return `"applied"`.
 
 A `GitHubError` at any step logs `blocked_escape_failed` and returns
 `"failed"`; the caller retries with backoff and counts only `"applied"`
@@ -515,10 +515,11 @@ async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str 
    `"cancelled"` (the previous process stopped it: shutdown or stall), the
    plan is `attempt = record.attempt`, `resume_session_id =
    record.session_id`, `resumed = True`; the Claude transcript is intact in
-   both cases. Any other record (`succeeded`, `failed`, `timed_out`), no
-   record, or a `path_for` failure (logged `dispatch_skipped`) means a
-   fresh session at attempt 1. `todo` and `rework` candidates are always
-   fresh; retries (§6.7) never resume.
+   both cases. Any other record (`succeeded`, `failed`, `timed_out`) or no
+   record means a fresh session at attempt 1; a `path_for` failure skips the
+   candidate for this tick (logged `dispatch_skipped`; Phase 4 ruling R2).
+   `todo` and `rework` candidates are always fresh; retries (§6.7) never
+   resume.
 3. Create the `RunningEntry` (`run_id = new_run_id()`, `started_* = clock()
    / now()`, a fresh `cancel` event), spawn the worker task, register its
    done-callback (posts `WorkerExited(issue_id)` to the queue), store the
@@ -570,7 +571,7 @@ Otherwise one `fetch_issues_by_ids(running ids)`; a `GitHubError` logs
 | open, `in_progress`, dispatchable | publish `observe_transition(entry.issue, current)` (that is, `PrOpened` when a PR appeared); `entry.issue = current` |
 | open, `review` | first sight: publish `observe_transition` (`StateChanged(actor="agent")`), `entry.issue = current`, `review_seen_tick = tick_count`; seen at an earlier tick and still running: `stop("moved", "review")` |
 | open, `todo`, `rework`, unlabelled, more than one state label, or not dispatchable | publish `observe_transition`, `entry.issue = current`, `stop("moved", <state or "unlabelled">)`; no cleanup |
-| closed | `entry.terminal_issue = current` (always, even when another cause already stopped the entry), `stop("closed", ...)`; `finish_terminal` runs when the worker has exited (§6.8), never while `claude` may still be writing to the workspace |
+| closed | `entry.terminal_issue = current` (always, even when another cause already stopped the entry), `stop("closed", ...)`; `finish_terminal` runs when the worker has exited (§6.8), never while `claude` may still be writing to the workspace. A later refresh that returns the issue open again clears `terminal_issue`, so the exit releases the issue instead of finishing it (Phase 4 ruling R13) |
 | not returned | `stop("missing", ...)`; no cleanup |
 
 The one-tick grace for `review` (decided 2026-09-03) exists because the
@@ -611,12 +612,13 @@ any existing entry for the issue (Symphony §8.4) and logs `retry_scheduled`
 `fire_due_retries()` handles every entry with `due_mono <= clock()`, oldest
 due first, logging `retry_fired`:
 
-1. Pop it. `fetch_issues_by_ids([issue_id])`; a `GitHubError` re-schedules
-   the same kind and attempt after `polling.interval_ms` with error `retry
-   refresh failed: <message>` (never counted as an attempt).
-2. Missing: release (log `retry_released`, reason `missing`).
-3. `kind == "escape"`: `blocked_escape(...)` with the stored context; `False`
-   re-schedules kind `escape` with `attempt + 1`. Done either way.
+1. Pop it. `kind == "escape"`: `blocked_escape(...)` with the stored context
+   (it refreshes the issue itself); `"failed"` re-schedules kind `escape`
+   with `attempt + 1`. Done either way, before any refresh.
+2. `fetch_issues_by_ids([issue_id])`; a `GitHubError` re-schedules the same
+   kind and attempt after `polling.interval_ms` with error `retry refresh
+   failed: <message>` (never counted as an attempt).
+3. Missing: release (log `retry_released`, reason `missing`).
 4. Closed: `finish_terminal`; release.
 5. Not active, or not dispatchable: release (reason `not_active`).
 6. Active and no slot free: re-schedule kind `slots`, same attempt, error
@@ -637,15 +639,15 @@ totals and `seconds_running`, bumps `runs_ended`, logs `worker_exited`
 
 | Condition | Action |
 |---|---|
-| task raised (not cancelled) | log `worker_crashed` with the traceback; treat as failed with error `worker crashed: <exc>` |
-| task cancelled by `task.cancel()` (shutdown last resort) | release |
 | `entry.terminal_issue` is set | `finish_terminal(entry.terminal_issue)`; release |
-| `stop_cause in ("moved", "missing", "shutdown")` | release |
+| `outcome == "succeeded"` and `final_issue` is set and open, whatever the stop cause | publish `observe_transition(entry.issue, final_issue)`, then continue with the rows below (amended by Phase 5, see below) |
+| task cancelled by `task.cancel()` (shutdown last resort), or `stop_cause in ("moved", "missing", "shutdown", "closed")` | release (`closed` reaches here only when a later refresh cleared the terminal snapshot: the reopen edge of §6.5) |
 | `stop_cause == "stalled"` | as failed, error `stalled: <detail>` |
-| `outcome == "succeeded"`, `stop_reason == "max_turns"`, `final_state is IN_PROGRESS` | blocked escape with reason `Turn budget exhausted ...`; on `False`, schedule kind `escape`, attempt 1 |
-| `outcome == "succeeded"` otherwise | publish `observe_transition(entry.issue, final_issue)` when `final_issue` is set and open; schedule `continuation`, attempt 1 |
+| task raised (not cancelled) | log `worker_crashed` with the traceback; treat as failed with error `worker crashed: <exc>` |
+| `outcome == "succeeded"`, `stop_reason == "max_turns"`, `final_state is IN_PROGRESS` | blocked escape with reason `Turn budget exhausted ...`; on `"failed"`, schedule kind `escape`, attempt 1 |
+| `outcome == "succeeded"` otherwise | schedule `continuation`, attempt 1 |
 | failed, `entry.attempt < max_attempts` | schedule `failure`, `attempt + 1`, error `<category>: <message>` |
-| failed, `entry.attempt >= max_attempts` | blocked escape with reason `<n> consecutive worker sessions failed; last error: ...`; on `False`, schedule kind `escape`, attempt 1 |
+| failed, `entry.attempt >= max_attempts` | blocked escape with reason `<n> consecutive worker sessions failed; last error: ...`; on `"failed"`, schedule kind `escape`, attempt 1 |
 
 "Failed" covers `failed`, `timed_out` and a `cancelled` outcome the
 orchestrator did not cause. The escape's `BlockedContext` carries the run
@@ -799,7 +801,7 @@ called directly; `run()` is used by a few loop tests with
 | File | Covers |
 |---|---|
 | `test_orchestrator_state.py` | `backoff_ms` 1 → 10 s, 2 → 20 s, 3 → 40 s, cap at `max_retry_backoff_ms`; `sort_candidates` rank (in_progress, rework, todo), oldest first, number tie-break; `claimed_snapshot` replaces only the state labels; `observe_transition` agent review with `pr_url`, human moves, no change, `PrOpened`, both at once; `ClaudeTotals.add`; `Counters.bump`; `RuntimeSnapshot.to_dict` survives `json.dumps` |
-| `test_orchestrator_actions.py` | `claim` calls `set_state`, publishes `StateChanged` with the right labels and actor, returns the claimed snapshot; `GitHubError` → `None`, no event; `blocked_block` content; `blocked_escape` appends to an existing workpad (one `update_comment`, body ends with the block), creates the workpad when missing (`comment`, body starts with the marker), sets `review`, publishes `StateChanged` and `Blocked`; no-op when the issue is `review`/closed/missing; idempotent when the block for that run id is already present (no second append, label still set); `GitHubError` on the comment write → `False` and no `set_state`; `finish_terminal` complete (label, both events, workspace removed), cancelled (labels cleared, both events, workspace removed), already complete (no `set_state`, removal still attempted), `GitHubError` → `None` and removal still attempted; `remove_workspace` contains `AgentError` |
+| `test_orchestrator_actions.py` | `claim` calls `set_state`, publishes `StateChanged` with the right labels and actor, returns the claimed snapshot; `GitHubError` → `None`, no event; `blocked_block` content; `blocked_escape` appends to an existing workpad (one `update_comment`, body ends with the block), creates the workpad when missing (`comment`, body starts with the marker), sets `review`, publishes `StateChanged` and `Blocked`; no-op when the issue is `review`/closed/missing; idempotent when the block for that run id is already present (no second append, label still set); `GitHubError` on the comment write → `"failed"` and no `set_state`; `finish_terminal` complete (label, both events, workspace removed), cancelled (labels cleared, both events, workspace removed), already complete (no `set_state`, removal still attempted), `GitHubError` → `"failed"` and removal still attempted; `remove_workspace` contains `AgentError` |
 | `test_orchestrator.py` | **dispatch**: rank order and slot limit across two ticks; `dispatchable=false` and non-active states skipped; claimed issues (running and retrying) skipped; claim failure aborts without a worker and the next tick dispatches; worker kwargs (`rework`, `attempt=1`, `run_id`, `cancel`, observer, no resume); orphan with `last_outcome=None` resumes (`resume_session_id`, `attempt` from the record, `resumed`), other records dispatch fresh; workspace path error skips. **exits and retries**: `issue_moved` to `review` → `StateChanged(agent)` from the final snapshot and a continuation entry due in 1 s, which releases when fired; `issue_moved` to `todo` → continuation fires into a fresh attempt 1; failure → attempt 2 due in 20 s with the error text, then attempt 3 in 40 s, cap honoured; `max_attempts` reached → escape (label, workpad block naming the error, `Blocked`, counter); `max_turns` while `in_progress` → escape immediately, no retry; escape `GitHubError` → kind `escape` due in 10 s, fires and succeeds; slots full when a retry fires → kind `slots`, same attempt, due in one interval; retry refresh failure → requeued unchanged; retry finds the issue closed → `finish_terminal`; missing → released; crashed worker → failure retry and `worker_crashed` logged. **reconcile**: nothing running makes no request; refresh failure keeps workers; `in_progress` refresh updates the snapshot and publishes `PrOpened`; `review` grace (marked on tick n, cancelled on tick n+1, exit releases without cleanup, one `StateChanged(agent)`); `todo` cancels at once with `StateChanged(human)`; closed with a merged PR cancels, and the exit completes the issue and removes the workspace; closed without a PR cancels and strips labels; missing cancels and releases; stall after `stall_timeout_ms` of silence → cancel and failure retry with `stalled` in the error; `stall_timeout_ms: 0` disables. **sweep**: on the first tick and every tenth after it, never in between; `review` issue closed by a merged PR → `complete`, `IssueCompleted`, workspace gone; already complete → no `set_state`; a failing terminal fetch only warns. **reload and preflight**: interval and slot changes apply on the next tick; a template change reaches the next dispatch's workflow; an invalid rewrite keeps the last good config, sets `config_error`, logs once; a missing `claude` skips dispatch while reconcile still runs. **loop**: `run()` with a 1 s interval ticks, `request_refresh()` forces an early tick, `request_stop()` returns from `run()`; shutdown sets every cancel event, waits for the exits, leaves labels alone, releases. **startup**: preflight problem, auth failure and missing labels each raise `OrchestratorStartupError` with a message that names the fix. **snapshot**: rows, totals including active seconds, counters, `to_dict`. **end to end** (`skipif win32`): real `run_session`, `WorkspaceManager` on `tmp_path` with the fake `gh`, `ClaudeRunner` on the fake `claude` (`success`), `max_turns=1`, `after_run` hook writing a marker file, `interval_ms=1000`: a `todo` issue is claimed, the run ends `max_turns`, the escape moves it to `review` with a workpad comment, `run_started`/`run_ended`/`state_changed`/`blocked` are all on the bus, then `request_stop()` returns |
 | `test_cli.py` | `worker`: unloadable workflow → 2; `OrchestratorStartupError` → `[FAIL] startup:` lines and 1; a stub orchestrator whose `run()` sends `SIGTERM` to the process sees `request_stop()` called and the command exits 0 (`skipif win32`); the factory receives the CLI's adapter factory and `run_session` seams |
 | `test_agent_workspace.py`, `test_agent_runner.py`, `test_workflow_default.py` | the §10 rows; the §9 edits |
