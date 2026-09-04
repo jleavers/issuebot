@@ -569,6 +569,8 @@ class Orchestrator:
         if entry.terminal_issue is not None:
             await self._finish(entry.terminal_issue)
             return
+        if result is not None and result.outcome == "succeeded":
+            self._publish_final_transition(entry, result)
         if task.cancelled() or entry.stop_cause in ("moved", "missing", "shutdown", "closed"):
             self._log.info(
                 "issue_released",
@@ -592,10 +594,6 @@ class Orchestrator:
                 )
                 await self._escape(entry, reason, result)
                 return
-            final = result.final_issue
-            if final is not None and final.github_state == "open":
-                for event in observe_transition(entry.issue, final):
-                    self._bus.publish(event)
             self._schedule(
                 entry.issue,
                 attempt=1,
@@ -605,6 +603,17 @@ class Orchestrator:
             )
             return
         await self._after_failure(entry, f"{result.error_category}: {result.error}", result)
+
+    def _publish_final_transition(self, entry: RunningEntry, result: RunResult) -> None:
+        """What changed between the entry's snapshot and the session's last refresh (§4.2).
+
+        Published before the release rows so a move that lands while the worker is being
+        stopped (shutdown, or a human move seen by reconcile) still reaches the bus.
+        """
+        final = result.final_issue
+        if final is not None and final.github_state == "open":
+            for event in observe_transition(entry.issue, final):
+                self._bus.publish(event)
 
     def _add_elapsed(self, entry: RunningEntry) -> None:
         elapsed = self._clock() - entry.started_mono

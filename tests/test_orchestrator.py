@@ -1247,6 +1247,24 @@ async def test_shutdown_cancels_stragglers_after_the_timeout(
     assert h.orchestrator.snapshot().counters.runs_ended == 1
 
 
+async def test_success_during_shutdown_publishes_the_agent_transition(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.open_pr(1, pr_number=2)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    h.run_for(1).finish(final_issue=h.github.issue(1))
+    await h.orchestrator.shutdown()
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    assert h.recorder.kinds == ["state_changed", "state_changed", "pr_opened"]
+    agent_move = h.recorder.of(StateChanged)[1]
+    assert (agent_move.actor, agent_move.to_label) == ("agent", "issuebot/review")
+    assert agent_move.pr_url == "https://github.com/example/repo/pull/2"
+    assert h.recorder.of(PrOpened)[0].pr_number == 2
+    assert h.orchestrator.snapshot().counters.runs_ended == 1
+
+
 async def test_run_propagates_startup_errors(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.which_missing = {"claude"}

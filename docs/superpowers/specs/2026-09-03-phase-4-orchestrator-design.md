@@ -653,6 +653,14 @@ id, attempt, turns and `str(result.log_dir)`; a successful escape bumps
 `blocked` and logs `blocked_escape_applied`. Releasing means the issue is
 neither running nor retrying; the next tick treats it like any other.
 
+*Amended by Phase 5 (spec §7):* a `succeeded` result whose `final_issue` is
+set and open publishes `observe_transition(entry.issue, final_issue)` right
+after the `terminal_issue` row and before every release row, so an agent's
+move to `review` that lands while the worker is being stopped (shutdown, or
+a human move seen by reconcile) still reaches the bus; the continuation row
+no longer publishes it itself, and the `max_turns` escape may be preceded by
+a `PrOpened`.
+
 The continuation retry after a normal exit is Symphony §7.1's re-check: it
 re-fetches one second later and releases when the issue is no longer active
 (the common case, `review`), or dispatches a fresh attempt 1 when a human
