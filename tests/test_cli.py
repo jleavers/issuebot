@@ -6,17 +6,29 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
 from issuebot import __version__
 from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
-from issuebot.cli import main, not_runnable, render_issue_table, render_run_summary
-from issuebot.config import GitHubSettings, Settings
+from issuebot.cli import (
+    StatsView,
+    main,
+    not_runnable,
+    render_issue_table,
+    render_run_summary,
+    render_stats,
+    render_status,
+)
+from issuebot.config import GitHubLabels, GitHubSettings, Settings
+from issuebot.db import DatabaseError, MigrationResult, Probe, StoreError, StoreUnavailableError
+from issuebot.db.queries import DailyPoint, SnapshotRow
+from issuebot.db.store import IssueSnapshot
 from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
 from issuebot.notifications import PostResult
@@ -75,6 +87,147 @@ class FakeSlackPost:
 def slack_post(monkeypatch: pytest.MonkeyPatch) -> FakeSlackPost:
     fake = FakeSlackPost()
     monkeypatch.setattr("issuebot.cli._slack_post", fake)
+    return fake
+
+
+DB_URL = "postgresql://issuebot:s3cret@db.example:5432/issuebot"
+PROBE_OK = Probe(server_version="PostgreSQL 18.1", schema_version=1, latest_version=1)
+
+
+class FakeStore:
+    """The sink's store: records every write."""
+
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+        self.issues: list[list[IssueSnapshot]] = []
+        self.snapshots: list[dict[str, Any]] = []
+        self.closed = False
+
+    async def connect(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def apply_event(self, event: Event) -> None:
+        self.events.append(event)
+
+    async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
+        self.issues.append(list(issues))
+
+    async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
+        self.snapshots.append(dict(data))
+
+
+class FakeQueries:
+    """Canned answers for status and stats."""
+
+    def __init__(self) -> None:
+        self.snapshot_row: SnapshotRow | None = None
+        self.closed = {1: 0, 7: 0}
+        self.runs = {1: 0, 7: 0}
+        self.groups: dict[str, list[object]] = {role.value: [] for role in StateLabel}
+        self.series: list[DailyPoint] = []
+        self.error: DatabaseError | None = None
+        self.days_asked: int | None = None
+
+    def _check(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    async def snapshot(self) -> SnapshotRow | None:
+        self._check()
+        return self.snapshot_row
+
+    async def closed_count(self, window: timedelta) -> int:
+        self._check()
+        return self.closed[window.days]
+
+    async def runs_count(self, window: timedelta) -> int:
+        return self.runs[window.days]
+
+    async def issues_by_state(self) -> dict[str, list[object]]:
+        self._check()
+        return self.groups
+
+    async def daily_series(self, days: int) -> list[DailyPoint]:
+        self.days_asked = days
+        return self.series
+
+
+class FakeListener:
+    def __init__(self, on_notify: Callable[[], None]) -> None:
+        self.on_notify = on_notify
+        self.started = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeDatabase:
+    """Stands in for issuebot.db.Database: one instance per test with canned results."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.migrations = 0
+        self.migrate_result = MigrationResult(applied=(), version=1)
+        self.migrate_error: DatabaseError | None = None
+        self.probe_result = PROBE_OK
+        self.probe_error: DatabaseError | None = None
+        self.queries_obj = FakeQueries()
+        self.store_obj = FakeStore()
+        self.labels: GitHubLabels | None = None
+        self.listeners: list[FakeListener] = []
+        self.notified = 0
+        self.notify_error: DatabaseError | None = None
+
+    def factory(self, url: str) -> FakeDatabase:
+        self.urls.append(url)
+        return self
+
+    @property
+    def description(self) -> str:
+        return "postgresql://issuebot@db.example:5432/issuebot"
+
+    async def migrate(self) -> MigrationResult:
+        self.migrations += 1
+        if self.migrate_error is not None:
+            raise self.migrate_error
+        return self.migrate_result
+
+    async def probe(self) -> Probe:
+        if self.probe_error is not None:
+            raise self.probe_error
+        return self.probe_result
+
+    @asynccontextmanager
+    async def queries(self) -> AsyncIterator[FakeQueries]:
+        yield self.queries_obj
+
+    def store(self, labels: GitHubLabels) -> FakeStore:
+        self.labels = labels
+        return self.store_obj
+
+    def listener(self, on_notify: Callable[[], None]) -> FakeListener:
+        listener = FakeListener(on_notify)
+        self.listeners.append(listener)
+        return listener
+
+    async def notify_refresh(self) -> None:
+        if self.notify_error is not None:
+            raise self.notify_error
+        self.notified += 1
+
+
+@pytest.fixture(autouse=True)
+def fake_database(monkeypatch: pytest.MonkeyPatch) -> FakeDatabase:
+    """Every CLI command talks to this stand-in instead of a real PostgreSQL server."""
+    fake = FakeDatabase()
+    monkeypatch.setattr("issuebot.cli._database_factory", fake.factory)
     return fake
 
 
@@ -243,12 +396,94 @@ def test_validate_configured_database_and_slack(
     path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] database.url: configured" in out
+    assert "[ OK ] database.url: connected (PostgreSQL 18.1); schema version 1" in out
     assert (
         "[WARN] notifications.slack: configured (blocked, state_changed); the URL is not a "
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
+    assert "12 checks: 0 failed, 1 warnings" in out
+
+
+def _validate_with_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str = DB_URL
+) -> int:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", url)
+    path = _write(
+        tmp_path, "---\ngithub:\n  repo: o/r\nnotifications:\n  slack:\n    events: []\n---\nBody"
+    )
+    return main(["validate", "--workflow", str(path)])
+
+
+def test_validate_rejects_a_non_postgres_database_url(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] database.url: not a postgresql:// URL" in out
+    assert "12 checks: 1 failed, 0 warnings" in out
+    assert fake_database.urls == []
+
+
+def test_validate_reports_an_unreachable_database_without_the_url(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    fake_database.probe_error = StoreUnavailableError(
+        "cannot connect: connection to server at <database url> failed"
+    )
+    assert _validate_with_database(tmp_path, monkeypatch) == 1
+    out = capsys.readouterr().out
+    assert (
+        "[FAIL] database.url: cannot connect: connection to server at <database url> failed" in out
+    )
+    assert "s3cret" not in out
+    assert fake_database.urls == [DB_URL]
+
+
+def test_validate_warns_when_the_schema_is_behind(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    fake_database.probe_result = Probe(
+        server_version="PostgreSQL 18.1", schema_version=0, latest_version=1
+    )
+    assert _validate_with_database(tmp_path, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
+        "run issuebot migrate" in out
+    )
+    assert "12 checks: 0 failed, 1 warnings" in out
+
+
+def test_validate_fails_when_the_schema_is_ahead(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    fake_database.probe_result = Probe(
+        server_version="PostgreSQL 18.1", schema_version=2, latest_version=1
+    )
+    assert _validate_with_database(tmp_path, monkeypatch) == 1
+    out = capsys.readouterr().out
+    assert (
+        "[FAIL] database.url: connected (PostgreSQL 18.1); schema version 2 is newer than "
+        "this issuebot knows (1)" in out
+    )
 
 
 def test_validate_slack_configured_ok(
@@ -1173,10 +1408,14 @@ class StubOrchestrator:
         self.workflow = workflow
         self.kwargs = kwargs
         self.stops = 0
+        self.refreshes = 0
         StubOrchestrator.instances.append(self)
 
     def request_stop(self) -> None:
         self.stops += 1
+
+    def request_refresh(self) -> None:
+        self.refreshes += 1
 
     async def run(self) -> None:
         if StubOrchestrator.next_problems is not None:
@@ -1293,3 +1532,350 @@ def test_worker_requires_no_arguments(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["worker", "extra"])
     assert exc.value.code == 2
+
+
+# --- migrate, status, stats, refresh ---------------------------------------------------------
+
+
+def _db_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, url: str | None = DB_URL
+) -> Path:
+    if url is not None:
+        monkeypatch.setenv("DATABASE_URL", url)
+    return _write(tmp_path, "---\ngithub:\n  repo: example/repo\n---\nBody")
+
+
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+def test_database_commands_need_a_configured_url(
+    command: list[str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch, url=None)
+    assert main([*command, "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == (
+        "[FAIL] database: not configured; export DATABASE_URL or set database.url: $VAR\n"
+    )
+    assert fake_database.urls == []
+
+
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+def test_database_commands_exit_two_on_an_unloadable_workflow(
+    command: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*command, "--workflow", str(INVALID)]) == 2
+    assert "[FAIL] workflow:" in capsys.readouterr().out
+
+
+def test_migrate_reports_what_it_applied(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    fake_database.migrate_result = MigrationResult(applied=("0001_initial",), version=1)
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["migrate", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == (
+        "[ OK ] migration 0001_initial: applied\n[ OK ] database: schema version 1\n"
+    )
+    assert fake_database.urls == [DB_URL]
+    assert fake_database.migrations == 1
+
+
+def test_migrate_reports_nothing_to_do_and_failures(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["migrate", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == "[ OK ] database: unchanged at schema version 1\n"
+    fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
+    assert main(["migrate", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+
+
+SNAPSHOT_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+SNAPSHOT_DATA: dict[str, Any] = {
+    "at": SNAPSHOT_AT.isoformat(),
+    "workflow_path": "/app/WORKFLOW.md",
+    "workflow_mtime_ns": 1,
+    "config_valid": True,
+    "config_error": None,
+    "poll_interval_ms": 30000,
+    "max_concurrent_agents": 2,
+    "tick_count": 42,
+    "last_tick_at": "2026-09-04T11:59:58+00:00",
+    "running": [
+        {
+            "issue_number": 7,
+            "identifier": "repo-7",
+            "title": "Seven",
+            "url": "https://github.com/example/repo/issues/7",
+            "state": "in_progress",
+            "attempt": 2,
+            "rework": False,
+            "resumed": True,
+            "run_id": "20260904T115000Z-abc123",
+            "session_id": "s",
+            "started_at": "2026-09-04T11:50:00+00:00",
+            "last_activity_at": "2026-09-04T11:59:00+00:00",
+            "last_event": "turn_activity:Edit",
+            "turns": 1,
+            "stop_cause": None,
+        }
+    ],
+    "retrying": [
+        {
+            "issue_number": 9,
+            "identifier": "repo-9",
+            "url": "https://github.com/example/repo/issues/9",
+            "attempt": 3,
+            "kind": "failure",
+            "due_at": "2026-09-04T12:00:40+00:00",
+            "error": "turn_failed: boom",
+        }
+    ],
+    "totals": {
+        "input_tokens": 1000,
+        "output_tokens": 234,
+        "cost_usd": 1.2345,
+        "seconds_running": 321.4,
+        "total_tokens": 1234,
+    },
+    "counters": {
+        "runs_started": 3,
+        "runs_ended": 2,
+        "issues_completed": 1,
+        "issues_cancelled": 0,
+        "blocked": 1,
+    },
+}
+
+
+def test_render_status_lists_running_and_retrying_entries() -> None:
+    row = SnapshotRow(
+        at=SNAPSHOT_AT, written_at=SNAPSHOT_AT + timedelta(seconds=1), data=SNAPSHOT_DATA
+    )
+    text = render_status(row, now=SNAPSHOT_AT + timedelta(seconds=13))
+    assert text.splitlines() == [
+        "snapshot: 2026-09-04T12:00:00Z (written 2026-09-04T12:00:01Z, 12 s ago)",
+        "workflow: /app/WORKFLOW.md (config valid)",
+        "tick 42, last tick 2026-09-04T11:59:58Z, poll 30000 ms, 2 slots",
+        "running: 1",
+        "  NUMBER  ATTEMPT  TURNS  RUN_ID                   LAST_EVENT          "
+        "STARTED               IDENTIFIER",
+        "  7       2        1      20260904T115000Z-abc123  turn_activity:Edit  "
+        "2026-09-04T11:50:00Z  repo-7",
+        "retrying: 1",
+        "  NUMBER  KIND     ATTEMPT  DUE                   ERROR",
+        "  9       failure  3        2026-09-04T12:00:40Z  turn_failed: boom",
+        "totals: 3 runs started, 2 ended, 1 completed, 0 cancelled, 1 blocked; 1234 tokens, "
+        "$1.23, 321 s running",
+    ]
+
+
+def test_render_status_copes_with_an_empty_or_broken_snapshot() -> None:
+    row = SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data={"config_error": "bad yaml"})
+    text = render_status(row, now=SNAPSHOT_AT - timedelta(seconds=5))
+    assert text.splitlines() == [
+        "snapshot: 2026-09-04T12:00:00Z (written 2026-09-04T12:00:00Z, 0 s ago)",
+        "workflow: None (config error: bad yaml)",
+        "tick None, last tick -, poll None ms, None slots",
+        "running: 0",
+        "retrying: 0",
+        "totals: 0 runs started, 0 ended, 0 completed, 0 cancelled, 0 blocked; 0 tokens, $0.00, "
+        "0 s running",
+    ]
+
+
+def test_status_prints_the_snapshot_or_says_there_is_none(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["status", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == (
+        "no runtime snapshot yet (has the worker run against this database?)\n"
+    )
+    fake_database.queries_obj.snapshot_row = SnapshotRow(
+        at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data=SNAPSHOT_DATA
+    )
+    assert main(["status", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("snapshot: 2026-09-04T12:00:00Z (written 2026-09-04T12:00:00Z, ")
+    assert "running: 1" in out
+    fake_database.queries_obj.error = StoreError("UndefinedTable: relation does not exist")
+    assert main(["status", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: UndefinedTable: relation does not exist\n"
+
+
+def test_render_stats() -> None:
+    view = StatsView(
+        closed_1d=1,
+        closed_7d=12,
+        runs_1d=3,
+        runs_7d=45,
+        by_state={"todo": 2, "in_progress": 1, "review": 0, "rework": 0, "complete": 12},
+        series=[
+            DailyPoint(day=date(2026, 9, 3), closed=11, runs=42),
+            DailyPoint(day=date(2026, 9, 4), closed=1, runs=3),
+        ],
+    )
+    assert render_stats(view).splitlines() == [
+        "WINDOW  CLOSED  RUNS",
+        "1d      1       3",
+        "7d      12      45",
+        "issues: todo 2, in_progress 1, review 0, rework 0, complete 12",
+        "",
+        "DAY         CLOSED  RUNS",
+        "2026-09-03  11      42",
+        "2026-09-04  1       3",
+    ]
+
+
+def test_stats_prints_the_windows_and_the_series(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    queries = fake_database.queries_obj
+    queries.closed = {1: 1, 7: 2}
+    queries.runs = {1: 3, 7: 4}
+    queries.groups["review"] = [object()]
+    queries.series = [DailyPoint(day=date(2026, 9, 4), closed=1, runs=3)]
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["stats", "--workflow", str(path), "--days", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "1d      1       3" in out
+    assert "7d      2       4" in out
+    assert "issues: todo 0, in_progress 0, review 1, rework 0, complete 0" in out
+    assert out.endswith("DAY         CLOSED  RUNS\n2026-09-04  1       3\n")
+    assert queries.days_asked == 3
+    assert main(["stats", "--workflow", str(path), "--days", "0"]) == 1
+    assert capsys.readouterr().out == "[FAIL] stats: --days must be at least 1\n"
+    queries.error = StoreUnavailableError("cannot connect: refused")
+    assert main(["stats", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+
+
+def test_refresh_notifies_and_reports_failures(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["refresh", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh\n"
+    assert fake_database.notified == 1
+    fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
+    assert main(["refresh", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+
+
+# --- the database in run-once and worker ------------------------------------------------------
+
+
+def test_run_once_records_the_issue_and_the_claim_in_the_database(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert "issue #42 is now review" in capsys.readouterr().out
+    assert fake_database.migrations == 1
+    assert fake_database.labels == GitHubLabels()
+    store = fake_database.store_obj
+    assert [event.kind for event in store.events] == ["state_changed"]  # the stub session is silent
+    assert [snapshot.issue.state for snapshot in store.issues[-1]] == [StateLabel.IN_PROGRESS]
+    assert store.closed
+
+
+def test_run_once_fails_before_running_when_migration_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+    assert stub_session.calls == []
+    assert fake_github.issue(42).state is StateLabel.TODO
+
+
+def test_worker_wires_the_database_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    stub_orchestrator.next_event = StateChanged(
+        issue_number=7,
+        issue_identifier="repo-7",
+        from_label="issuebot/in-progress",
+        to_label="issuebot/review",
+        actor="agent",
+    )
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert fake_database.migrations == 1
+    instance = stub_orchestrator.instances[0]
+    kwargs = instance.kwargs
+    assert [sink.name for sink in kwargs["bus"].sinks] == ["log", "postgres"]  # type: ignore[attr-defined]
+    (postgres,) = [sink for sink in kwargs["bus"].sinks if sink.name == "postgres"]  # type: ignore[attr-defined]
+    assert kwargs["on_snapshot"] == postgres.record_snapshot
+    assert kwargs["on_issues"] == postgres.record_issues
+    assert postgres._description == fake_database.description
+    (listener,) = fake_database.listeners
+    assert listener.on_notify == instance.request_refresh
+    assert listener.started and listener.closed
+    store = fake_database.store_obj
+    assert [event.kind for event in store.events] == ["state_changed"]
+    assert store.closed
+
+
+def test_worker_without_a_database_passes_no_callbacks(
+    tmp_path: Path,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    kwargs = stub_orchestrator.instances[0].kwargs
+    assert (kwargs["on_snapshot"], kwargs["on_issues"]) == (None, None)
+    assert fake_database.urls == []
+    assert fake_database.listeners == []
+
+
+def test_worker_fails_before_the_orchestrator_when_migration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+    assert stub_orchestrator.instances == []
+    assert fake_database.listeners == []
