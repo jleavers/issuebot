@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from issuebot.config import GitHubLabels
-from issuebot.db import StoreError, migrate
+from issuebot.db import StoreError, connect, migrate
 from issuebot.db.database import Database
 from issuebot.db.queries import COMPLETE_LIMIT, DailyPoint, EventRow, IssueRow, RunRow
 from issuebot.db.store import IssueSnapshot, PostgresStore
@@ -103,15 +103,23 @@ async def test_counts_by_window(seeded: Database) -> None:
         assert await q.runs_count(30 * DAY) == 3
 
 
-async def test_daily_series_zero_fills_and_ends_today(seeded: Database) -> None:
+async def test_daily_series_zero_fills_and_ends_today(seeded: Database, db_url: str) -> None:
     async with seeded.queries() as q:
         series = await q.daily_series(4)
+    conn = await connect(db_url)
+    try:
+        row = await (await conn.execute("SELECT current_date")).fetchone()
+    finally:
+        await conn.close()
+    assert row is not None
+    today = row[0]
     assert len(series) == 4
     assert all(isinstance(point, DailyPoint) for point in series)
-    today = NOW.date()
     assert [point.day for point in series] == [today - timedelta(days=n) for n in (3, 2, 1, 0)]
     by_day = {point.day: point for point in series}
-    assert (by_day[today].closed, by_day[today].runs) == (1, 1)
+    # Issue 10 and run r1 sit one hour before NOW: today, or yesterday in the first UTC hour.
+    recent = (NOW - HOUR).date()
+    assert (by_day[recent].closed, by_day[recent].runs) == (1, 1)
     three_days_ago = (NOW - 3 * DAY).date()
     assert (by_day[three_days_ago].closed, by_day[three_days_ago].runs) == (1, 0)
     two_days_ago = (NOW - 2 * DAY).date()
