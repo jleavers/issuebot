@@ -91,6 +91,29 @@ def test_at_defaults_to_aware_utc_now() -> None:
     assert before <= event.at <= datetime.now(UTC)
 
 
+def test_run_ended_log_dir_defaults_to_none_and_serialises() -> None:
+    ended = ALL_EVENTS[2]
+    assert isinstance(ended, RunEnded)
+    assert ended.log_dir is None
+    assert ended.to_dict()["log_dir"] is None
+    with_dir = RunEnded(
+        issue_number=1,
+        issue_identifier="repo-1",
+        run_id="run-1",
+        outcome="failed",
+        error="x",
+        turns=0,
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0,
+        duration_s=0.1,
+        log_dir="/workspaces/repo-1/.issuebot/runs/run-1",
+    )
+    assert json.loads(json.dumps(with_dir.to_dict()))["log_dir"] == (
+        "/workspaces/repo-1/.issuebot/runs/run-1"
+    )
+
+
 def test_state_changed_pr_url_defaults_to_none() -> None:
     event = StateChanged(
         issue_number=1, issue_identifier="repo-1", from_label=None, to_label="x", actor="human"

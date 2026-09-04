@@ -18,7 +18,6 @@ StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 CONTINUATION_DELAY_MS = 1_000
 BACKOFF_BASE_MS = 10_000
 TERMINAL_SWEEP_EVERY_TICKS = 10
-REVIEW_GRACE_TICKS = 1
 
 _RANK: dict[StateLabel | None, int] = {
     StateLabel.IN_PROGRESS: 0,
@@ -120,7 +119,7 @@ class RunningEntry:
     turns: int = 0
     stop_cause: StopCause | None = None
     stop_detail: str | None = None
-    review_seen_tick: int | None = None
+    review_seen_mono: float | None = None  # first sight of `review`; the grace runs from here
     terminal_issue: Issue | None = None
 
     @property

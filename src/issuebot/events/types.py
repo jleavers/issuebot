@@ -63,6 +63,7 @@ class RunEnded(IssueEvent):
     output_tokens: int
     cost_usd: float
     duration_s: float
+    log_dir: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -1,6 +1,8 @@
 """Tests for the orchestrator against FakeGitHub, a scripted run_session and a fake clock."""
 
 import asyncio
+import io
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +25,7 @@ from issuebot.events import (
     StateChanged,
 )
 from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, Issue, StateLabel
+from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
     Orchestrator,
@@ -188,6 +191,7 @@ class Harness:
         prompt: str = "Task {{ issue.identifier }}",
         claude: str = "claude",
         real_sessions: bool = False,
+        observe_issues: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -215,6 +219,7 @@ class Harness:
         self.recorder = Recorder()
         self.bus = EventBus([self.recorder])
         self.snapshots: list[Any] = []
+        self.polled: list[list[Issue]] = []
         self.which_missing: set[str] = set()
         self.orchestrator = Orchestrator(
             self.workflow,
@@ -228,7 +233,11 @@ class Harness:
             now=self.now,
             environ=self.environ,
             on_snapshot=self.snapshots.append,
+            on_issues=self.record_polled if observe_issues else None,
         )
+
+    def record_polled(self, issues: Any) -> None:
+        self.polled.append(list(issues))
 
     # --- construction helpers ---------------------------------------------------------
 
@@ -888,17 +897,22 @@ async def test_reconcile_updates_the_snapshot_and_sees_the_pr(tmp_path: Path) ->
     assert len(h.recorder.of(PrOpened)) == 1
 
 
-async def test_reconcile_gives_review_one_tick_of_grace(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+async def test_reconcile_gives_review_one_interval_of_grace(tmp_path: Path) -> None:
+    h = Harness(tmp_path, interval_ms=30_000)
     h.add_issue(1, "todo")
     await h.tick()
     h.workspace_dir("repo-1")
     h.github.human_set_state(1, StateLabel.REVIEW)
+    h.clock.advance(30)
     await h.tick()
     entry = h.entry(1)
-    assert entry.review_seen_tick == 1
+    assert entry.review_seen_mono == h.clock.value
     assert not entry.cancel.is_set()
     assert [event.actor for event in h.recorder.of(StateChanged)] == ["issuebot", "agent"]
+    h.clock.advance(1)  # a refresh-driven tick inside the interval leaves the worker alone
+    await h.tick()
+    assert not entry.cancel.is_set()
+    h.clock.advance(29)
     await h.tick()
     assert entry.cancel.is_set()
     assert (entry.stop_cause, entry.stop_detail) == ("moved", "review")
@@ -1180,6 +1194,90 @@ async def test_snapshot_rows_and_active_seconds(tmp_path: Path) -> None:
     assert snapshot.totals.seconds_running == 12.0 + 5.0
     assert snapshot.counters.runs_started == 2
     assert snapshot.to_dict()["running"][0]["identifier"] == "repo-1"
+
+
+# --- the issues observer (Phase 6) ----------------------------------------------------------
+
+
+async def test_on_issues_receives_every_fetch(tmp_path: Path) -> None:
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "review")
+    closed = h.add_issue(3, "review")
+    h.github.open_pr(3, pr_number=7)
+    h.github.merge_pr(7)
+    h.github.close_issue(3)
+    await h.tick()
+    # the first tick: the sweep's closed issue, then the candidate fetch (review included)
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[3], [1, 2]]
+    assert h.polled[0][0].github_state == "closed"
+    assert closed.number == 3
+    assert list(h.orchestrator.running) == ["1"]
+    assert h.calls("fetch_issues_by_states")[-1] == (
+        (StateLabel.IN_PROGRESS, StateLabel.REWORK, StateLabel.TODO, StateLabel.REVIEW),
+    )
+    await h.tick()
+    # the second tick: reconcile's refresh of the running issue, then the candidate fetch
+    assert [[issue.number for issue in batch] for batch in h.polled[2:]] == [[1], [1, 2]]
+    assert h.polled[2][0].state is StateLabel.IN_PROGRESS
+
+
+async def test_on_issues_receives_a_fired_retry_refresh(tmp_path: Path) -> None:
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    h.polled.clear()
+    await h.fire(1.0)
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
+    assert h.polled[0][0].state is StateLabel.REVIEW
+    assert h.orchestrator.retries == {}
+
+
+async def test_without_an_observer_review_is_not_fetched(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "review")
+    await h.tick()
+    assert h.polled == []
+    assert h.calls("fetch_issues_by_states")[-1] == (
+        (StateLabel.IN_PROGRESS, StateLabel.REWORK, StateLabel.TODO),
+    )
+    assert h.orchestrator.running == {}
+
+
+async def test_a_raising_issues_consumer_is_logged_and_the_tick_continues(
+    tmp_path: Path,
+) -> None:
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
+    h = Harness(tmp_path, observe_issues=True)
+
+    def explode(issues: Any) -> None:
+        raise RuntimeError("consumer bug")
+
+    h.orchestrator._on_issues = explode
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert list(h.orchestrator.running) == ["1"]
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    failed = [line for line in lines if line["event"] == "issues_consumer_failed"]
+    assert len(failed) == 1  # the candidate fetch; the sweep found nothing to report
+    assert failed[0]["count"] == 1
+    assert "consumer bug" in failed[0]["exception"]
+
+
+async def test_shutdown_publishes_a_final_snapshot(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert len(h.snapshots) == 1
+    assert len(h.snapshots[-1].running) == 1
+    await h.orchestrator.shutdown()
+    assert len(h.snapshots) == 2
+    assert h.snapshots[-1].running == ()
+    assert h.snapshots[-1].retrying == ()
+    assert h.snapshots[-1].counters.runs_ended == 1
 
 
 # --- the loop -----------------------------------------------------------------------------

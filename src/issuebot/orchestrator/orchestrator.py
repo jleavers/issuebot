@@ -5,7 +5,7 @@ import math
 import os
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -36,7 +36,6 @@ from issuebot.log import get_logger
 from issuebot.orchestrator import actions
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
-    REVIEW_GRACE_TICKS,
     TERMINAL_SWEEP_EVERY_TICKS,
     BlockedContext,
     ClaudeTotals,
@@ -59,6 +58,9 @@ CANDIDATE_STATES: tuple[StateLabel, ...] = (
     StateLabel.REWORK,
     StateLabel.TODO,
 )
+# Fetched instead of CANDIDATE_STATES when an on_issues observer is attached: review is polled
+# for the history store only; the dispatch loop never runs it (Phase 6 spec §8.1).
+OBSERVED_STATES: tuple[StateLabel, ...] = (*CANDIDATE_STATES, StateLabel.REVIEW)
 SHUTDOWN_MARGIN_S = 10.0
 
 
@@ -139,6 +141,7 @@ class Orchestrator:
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
+        on_issues: Callable[[Sequence[Issue]], None] | None = None,
     ) -> None:
         self._workflow = workflow
         self._bus = bus
@@ -151,6 +154,7 @@ class Orchestrator:
         self._now = now
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
         self._on_snapshot = on_snapshot
+        self._on_issues = on_issues
         self._adapter = adapter_factory(workflow.config.github)
         self._workspaces = workspaces_factory(workflow.config)
         self._running: dict[str, RunningEntry] = {}
@@ -284,6 +288,15 @@ class Orchestrator:
         except Exception:
             self._log.exception("snapshot_consumer_failed")
 
+    def _report_issues(self, issues: Sequence[Issue]) -> None:
+        """Hand every fetched snapshot to the observer (the history store); never raises."""
+        if self._on_issues is None or not issues:
+            return
+        try:
+            self._on_issues(issues)
+        except Exception:
+            self._log.exception("issues_consumer_failed", count=len(issues))
+
     def _reload_workflow(self) -> None:
         path = self._workflow.path
         try:
@@ -314,11 +327,13 @@ class Orchestrator:
         self._log.error("workflow_reload_failed", path=str(self._workflow.path), error=message)
 
     async def _dispatch_candidates(self) -> int:
+        states = OBSERVED_STATES if self._on_issues is not None else CANDIDATE_STATES
         try:
-            issues = await self._adapter.fetch_issues_by_states(CANDIDATE_STATES)
+            issues = await self._adapter.fetch_issues_by_states(states)
         except GitHubError as exc:
             self._log.warning("candidates_fetch_failed", error=str(exc))
             return 0
+        self._report_issues(issues)
         dispatched = 0
         for issue in sort_candidates(issues):
             if self._slots() <= 0:
@@ -458,6 +473,7 @@ class Orchestrator:
         except GitHubError as exc:
             self._log.warning("reconcile_refresh_failed", error=str(exc))
             return
+        self._report_issues(refreshed)
         by_id = {issue.id: issue for issue in refreshed}
         for issue_id in ids:
             entry = self._running.get(issue_id)
@@ -478,19 +494,28 @@ class Orchestrator:
             if current.state is StateLabel.IN_PROGRESS and current.dispatchable:
                 continue
             if current.state is StateLabel.REVIEW:
-                if entry.review_seen_tick is None:
-                    entry.review_seen_tick = self._tick_count
+                if entry.review_seen_mono is None:
+                    entry.review_seen_mono = self._clock()
                     self._log.info(
                         "reconcile_review_grace",
                         issue_number=current.number,
                         issue_identifier=current.identifier,
                         run_id=entry.run_id,
+                        grace_ms=self._workflow.config.polling.interval_ms,
                     )
-                elif self._tick_count - entry.review_seen_tick >= REVIEW_GRACE_TICKS:
+                elif self._clock() - entry.review_seen_mono >= self._review_grace_s():
                     self._stop_entry(entry, "moved", "review")
                 continue
             detail = current.state.value if current.state is not None else "unlabelled"
             self._stop_entry(entry, "moved", detail)
+
+    def _review_grace_s(self) -> float:
+        """One poll interval: the grace before a worker whose issue reached review is stopped.
+
+        Measured on the monotonic clock rather than in ticks, so a refresh-driven tick (a
+        NOTIFY, Phase 6) cannot cut it short (Phase 6 spec §8.2).
+        """
+        return self._workflow.config.polling.interval_ms / 1000
 
     def _stop_entry(self, entry: RunningEntry, cause: StopCause, detail: str) -> None:
         if entry.stop_cause is None:
@@ -511,6 +536,7 @@ class Orchestrator:
         except GitHubError as exc:
             self._log.warning("terminal_sweep_failed", error=str(exc))
             return
+        self._report_issues(issues)
         for issue in issues:
             if issue.id in self._running:
                 continue
@@ -773,6 +799,7 @@ class Orchestrator:
                 error=f"retry refresh failed: {exc.message}",
             )
             return
+        self._report_issues(issues)
         if not issues:
             self._release(entry, "missing")
             return
@@ -875,6 +902,7 @@ class Orchestrator:
             blocked=counters.blocked,
             cost_usd=self._totals.cost_usd,
         )
+        self._publish_snapshot()
 
 
 def _changed_sections(old: Workflow, new: Workflow) -> list[str]:

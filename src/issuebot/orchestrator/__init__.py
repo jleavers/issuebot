@@ -12,6 +12,7 @@ from issuebot.orchestrator.actions import (
 )
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
+    OBSERVED_STATES,
     Orchestrator,
     OrchestratorStartupError,
     RunObserver,
@@ -21,7 +22,6 @@ from issuebot.orchestrator.orchestrator import (
 from issuebot.orchestrator.state import (
     BACKOFF_BASE_MS,
     CONTINUATION_DELAY_MS,
-    REVIEW_GRACE_TICKS,
     TERMINAL_SWEEP_EVERY_TICKS,
     BlockedContext,
     ClaudeTotals,
@@ -46,7 +46,7 @@ __all__ = [
     "CANCEL_REASON",
     "CANDIDATE_STATES",
     "CONTINUATION_DELAY_MS",
-    "REVIEW_GRACE_TICKS",
+    "OBSERVED_STATES",
     "TERMINAL_SWEEP_EVERY_TICKS",
     "BlockedContext",
     "ClaudeTotals",

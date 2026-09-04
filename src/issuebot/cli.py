@@ -9,7 +9,7 @@ import signal
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -37,6 +37,8 @@ from issuebot.config import (
     load_workflow,
 )
 from issuebot.config.resolve import ENV_REF
+from issuebot.db import Database, DatabaseError, PostgresSink, RefreshListener, is_postgres_url
+from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.github.normalise import repo_short_name
@@ -78,6 +80,7 @@ _claude_version = _claude_version_output
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
+_database_factory: Callable[[str], Database] = Database
 
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 SLACK_WEBHOOK_PATH = "/services/"
@@ -179,6 +182,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_workflow_option(worker)
     worker.set_defaults(func=cmd_worker)
+
+    migrate = subparsers.add_parser("migrate", help="apply pending database migrations")
+    _add_workflow_option(migrate)
+    migrate.set_defaults(func=cmd_migrate)
+
+    status = subparsers.add_parser("status", help="print the worker's last runtime snapshot")
+    _add_workflow_option(status)
+    status.set_defaults(func=cmd_status)
+
+    stats = subparsers.add_parser("stats", help="issues closed and runs started, by window and day")
+    _add_workflow_option(stats)
+    stats.add_argument(
+        "--days", type=int, default=7, help="length of the daily series (default: 7)"
+    )
+    stats.set_defaults(func=cmd_stats)
+
+    refresh = subparsers.add_parser("refresh", help="ask a running worker to poll now (NOTIFY)")
+    _add_workflow_option(refresh)
+    refresh.set_defaults(func=cmd_refresh)
     return parser
 
 
@@ -244,13 +266,7 @@ def run_checks(
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter))
-    checks.append(
-        Check(
-            "database.url",
-            "ok",
-            "configured" if cfg.database.url else "not configured (history and dashboard disabled)",
-        )
-    )
+    checks.append(_database_check(cfg))
     checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
     return checks
@@ -332,6 +348,28 @@ def _claude_check(command: str) -> Check:
 
 def _version_text(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
+
+
+def _database_check(settings: Settings) -> Check:
+    """The database.url line: presence, URL scheme, then a connect and the schema version."""
+    subject = "database.url"
+    if settings.database.url is None:
+        return Check(subject, "ok", "not configured (history and dashboard disabled)")
+    url = settings.database.url.get_secret_value()
+    if not is_postgres_url(url):
+        return Check(subject, "fail", "not a postgresql:// URL")
+    try:
+        probe = asyncio.run(_database_factory(url).probe())
+    except DatabaseError as exc:
+        return Check(subject, "fail", exc.message)
+    detail = f"connected ({probe.server_version}); schema version {probe.schema_version}"
+    if probe.ahead:
+        detail += f" is newer than this issuebot knows ({probe.latest_version})"
+        return Check(subject, "fail", detail)
+    if probe.behind:
+        detail += f" of {probe.latest_version}; run issuebot migrate"
+        return Check(subject, "warn", detail)
+    return Check(subject, "ok", detail)
 
 
 def _slack_check(settings: Settings, *, probe: bool) -> Check:
@@ -504,13 +542,71 @@ def _slack_sink(settings: Settings) -> SlackSink | None:
     )
 
 
-def _build_bus(settings: Settings) -> tuple[EventBus, SlackSink | None]:
-    """The log sink, plus the Slack sink when configured; the caller starts and closes it."""
+@dataclass
+class _Sinks:
+    """The bus and the sinks whose lifetime the CLI owns (started before, closed after)."""
+
+    bus: EventBus
+    slack: SlackSink | None
+    postgres: PostgresSink | None
+    database: Database | None
+
+    def start(self) -> None:
+        if self.slack is not None:
+            self.slack.start(self.bus)
+        if self.postgres is not None:
+            self.postgres.start()
+
+    async def close(self) -> None:
+        try:
+            if self.slack is not None:
+                await self.slack.close()
+        finally:
+            if self.postgres is not None:
+                await self.postgres.close()
+
+    def record_issues(self, issues: Sequence[Issue]) -> None:
+        if self.postgres is not None:
+            self.postgres.record_issues(issues)
+
+
+async def _open_database(settings: Settings) -> Database | None:
+    """Migrate at start when database.url is set; None when it is not; raises DatabaseError."""
+    if settings.database.url is None:
+        return None
+    database = _database_factory(settings.database.url.get_secret_value())
+    result = await database.migrate()
+    get_logger(__name__).info(
+        "db_migrated",
+        database=database.description,
+        applied=list(result.applied),
+        version=result.version,
+    )
+    return database
+
+
+async def _build_sinks(settings: Settings) -> _Sinks:
+    """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError."""
     slack = _slack_sink(settings)
+    database = await _open_database(settings)
+    postgres = (
+        PostgresSink(database.store(settings.github.labels), description=database.description)
+        if database
+        else None
+    )
     sinks: list[EventSink] = [LogSink()]
     if slack is not None:
         sinks.append(slack)
-    return EventBus(sinks), slack
+    if postgres is not None:
+        sinks.append(postgres)
+    return _Sinks(EventBus(sinks), slack, postgres, database)
+
+
+def _database_or_report(settings: Settings) -> Database | None:
+    if settings.database.url is None:
+        print("[FAIL] database: not configured; export DATABASE_URL or set database.url: $VAR")
+        return None
+    return _database_factory(settings.database.url.get_secret_value())
 
 
 # --- run-once --------------------------------------------------------------------------
@@ -563,16 +659,26 @@ async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> in
             print(f"[FAIL] prompt: {exc.message}")
             return 1
         return 0
-    bus, slack = _build_bus(settings)
-    if slack is not None:
-        slack.start(bus)
+    try:
+        sinks = await _build_sinks(settings)
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    sinks.start()
+    sinks.record_issues([issue])
     try:
         return await _claim_and_run(
-            workflow, adapter, bus, issue, workspaces=workspaces, attempt=attempt, rework=rework
+            workflow,
+            adapter,
+            sinks.bus,
+            issue,
+            workspaces=workspaces,
+            attempt=attempt,
+            rework=rework,
+            record=sinks.record_issues,
         )
     finally:
-        if slack is not None:
-            await slack.close()
+        await sinks.close()
 
 
 async def _claim_and_run(
@@ -584,6 +690,7 @@ async def _claim_and_run(
     workspaces: WorkspaceManager,
     attempt: int,
     rework: bool,
+    record: Callable[[Sequence[Issue]], None] | None = None,
 ) -> int:
     settings = workflow.config
     number = issue.number
@@ -610,6 +717,8 @@ async def _claim_and_run(
             return 1
         if refreshed:
             issue = refreshed[0]
+            if record is not None:
+                record(refreshed)
     result = await _run_session(
         issue,
         workflow,
@@ -684,16 +793,28 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
-    bus, slack = _build_bus(workflow.config)
+    try:
+        sinks = await _build_sinks(workflow.config)
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    postgres = sinks.postgres
     orchestrator = _orchestrator_factory(
         workflow,
-        bus=bus,
+        bus=sinks.bus,
         adapter_factory=_adapter_factory,
         run_session=_run_session,
         which=_which,
+        # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
+        on_snapshot=postgres.record_snapshot if postgres is not None else None,
+        on_issues=postgres.record_issues if postgres is not None else None,
     )
-    if slack is not None:
-        slack.start(bus)
+    listener: RefreshListener | None = None
+    if sinks.database is not None:
+        listener = sinks.database.listener(orchestrator.request_refresh)
+    sinks.start()
+    if listener is not None:
+        listener.start()
     loop = asyncio.get_running_loop()
     signals = (signal.SIGTERM, signal.SIGINT)
     for signum in signals:
@@ -709,6 +830,217 @@ async def _run_worker(workflow: Workflow) -> int:
         for signum in signals:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.remove_signal_handler(signum)
-        if slack is not None:
-            await slack.close()
+        try:
+            if listener is not None:
+                await listener.close()
+        finally:
+            await sinks.close()
     return 0
+
+
+# --- migrate, status, stats, refresh ----------------------------------------------------------
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    database = _database_or_report(workflow.config)
+    if database is None:
+        return 1
+    try:
+        result = asyncio.run(database.migrate())
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    for label in result.applied:
+        print(f"[ OK ] migration {label}: applied")
+    if result.applied:
+        print(f"[ OK ] database: schema version {result.version}")
+    else:
+        print(f"[ OK ] database: unchanged at schema version {result.version}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    database = _database_or_report(workflow.config)
+    if database is None:
+        return 1
+    return asyncio.run(_status(database))
+
+
+async def _status(database: Database) -> int:
+    try:
+        async with database.queries() as queries:
+            row = await queries.snapshot()
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    if row is None:
+        print("no runtime snapshot yet (has the worker run against this database?)")
+        return 0
+    print(render_status(row, now=datetime.now(UTC)), end="")
+    return 0
+
+
+@dataclass(frozen=True)
+class StatsView:
+    closed_1d: int
+    closed_7d: int
+    runs_1d: int
+    runs_7d: int
+    by_state: dict[str, int]
+    series: list[DailyPoint]
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    if args.days < 1:
+        print("[FAIL] stats: --days must be at least 1")
+        return 1
+    database = _database_or_report(workflow.config)
+    if database is None:
+        return 1
+    return asyncio.run(_stats(database, args.days))
+
+
+async def _stats(database: Database, days: int) -> int:
+    try:
+        async with database.queries() as queries:
+            groups = await queries.issues_by_state()
+            view = StatsView(
+                closed_1d=await queries.closed_count(timedelta(days=1)),
+                closed_7d=await queries.closed_count(timedelta(days=7)),
+                runs_1d=await queries.runs_count(timedelta(days=1)),
+                runs_7d=await queries.runs_count(timedelta(days=7)),
+                by_state={state: len(rows) for state, rows in groups.items()},
+                series=await queries.daily_series(days),
+            )
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    print(render_stats(view), end="")
+    return 0
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    database = _database_or_report(workflow.config)
+    if database is None:
+        return 1
+    try:
+        asyncio.run(database.notify_refresh())
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    print("[ OK ] refresh: notified issuebot_refresh")
+    return 0
+
+
+def _stamp(value: object) -> str:
+    """A second-precision UTC stamp for a datetime or an ISO 8601 string; '-' for None."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return "-"
+
+
+def _table(rows: Sequence[Sequence[str]]) -> list[str]:
+    """Left-aligned columns two spaces apart, the last column unpadded."""
+    if not rows:
+        return []
+    last = len(rows[0]) - 1
+    widths = [max(len(row[column]) for row in rows) for column in range(last)]
+    lines = []
+    for row in rows:
+        cells = [row[column].ljust(widths[column]) for column in range(last)]
+        lines.append("  ".join([*cells, row[last]]).rstrip())
+    return lines
+
+
+def render_status(row: SnapshotRow, *, now: datetime) -> str:
+    """The runtime snapshot row as text; tolerant of missing keys (the data is JSON)."""
+    data = row.data
+    age = max((now - row.written_at).total_seconds(), 0.0)
+    if data.get("config_valid"):
+        config = "config valid"
+    else:
+        config = f"config error: {data.get('config_error')}"
+    running = list(data.get("running") or [])
+    retrying = list(data.get("retrying") or [])
+    totals = dict(data.get("totals") or {})
+    counters = dict(data.get("counters") or {})
+    lines = [
+        f"snapshot: {_stamp(row.at)} (written {_stamp(row.written_at)}, {age:.0f} s ago)",
+        f"workflow: {data.get('workflow_path')} ({config})",
+        f"tick {data.get('tick_count')}, last tick {_stamp(data.get('last_tick_at'))}, "
+        f"poll {data.get('poll_interval_ms')} ms, {data.get('max_concurrent_agents')} slots",
+        f"running: {len(running)}",
+    ]
+    if running:
+        table = [("  NUMBER", "ATTEMPT", "TURNS", "RUN_ID", "LAST_EVENT", "STARTED", "IDENTIFIER")]
+        table.extend(
+            (
+                f"  {entry.get('issue_number')}",
+                str(entry.get("attempt")),
+                str(entry.get("turns")),
+                str(entry.get("run_id")),
+                str(entry.get("last_event") or "-"),
+                _stamp(entry.get("started_at")),
+                str(entry.get("identifier")),
+            )
+            for entry in running
+        )
+        lines.extend(_table(table))
+    lines.append(f"retrying: {len(retrying)}")
+    if retrying:
+        table = [("  NUMBER", "KIND", "ATTEMPT", "DUE", "ERROR")]
+        table.extend(
+            (
+                f"  {entry.get('issue_number')}",
+                str(entry.get("kind")),
+                str(entry.get("attempt")),
+                _stamp(entry.get("due_at")),
+                str(entry.get("error") or "-"),
+            )
+            for entry in retrying
+        )
+        lines.extend(_table(table))
+    lines.append(
+        f"totals: {counters.get('runs_started', 0)} runs started, "
+        f"{counters.get('runs_ended', 0)} ended, {counters.get('issues_completed', 0)} completed, "
+        f"{counters.get('issues_cancelled', 0)} cancelled, {counters.get('blocked', 0)} blocked; "
+        f"{totals.get('total_tokens', 0)} tokens, ${float(totals.get('cost_usd', 0.0)):.2f}, "
+        f"{float(totals.get('seconds_running', 0.0)):.0f} s running"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_stats(view: StatsView) -> str:
+    lines = _table(
+        [
+            ("WINDOW", "CLOSED", "RUNS"),
+            ("1d", str(view.closed_1d), str(view.runs_1d)),
+            ("7d", str(view.closed_7d), str(view.runs_7d)),
+        ]
+    )
+    states = ", ".join(f"{state} {count}" for state, count in view.by_state.items())
+    lines.append(f"issues: {states}")
+    lines.append("")
+    table = [("DAY", "CLOSED", "RUNS")]
+    table.extend(
+        (point.day.isoformat(), str(point.closed), str(point.runs)) for point in view.series
+    )
+    lines.extend(_table(table))
+    return "\n".join(lines) + "\n"

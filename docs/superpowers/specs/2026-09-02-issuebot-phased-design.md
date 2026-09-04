@@ -582,6 +582,19 @@ attachments, per-channel routing, a reload hook for `notifications.*`.
 7-day counts and a daily series; killing and restarting `worker` preserves history
 and the snapshot row recovers within one tick.
 
+Decided 2026-09-04 (Phase 6 spec): polled issues and the runtime snapshot reach the
+sink through injected callbacks (`on_issues`, `on_snapshot`), not new event kinds, so
+the log never carries a bulk poll; the sink keeps one queue with two coalescing
+markers and every `issues` write is guarded by its observation time; the tick polls
+`review` too when an observer is attached; the `review` grace becomes one poll
+interval on the monotonic clock so a `NOTIFY`-driven tick cannot cut it short;
+`shutdown()` publishes a final snapshot; `RunEnded` gains `log_dir`; `worker` and
+`run-once` migrate at start and fail fast when the configured database is unusable;
+`validate` connects and reports the schema version; counts come from
+`issues.closed_at` (complete only) and `runs.started_at`; `psycopg[binary]` without a
+pool; `issuebot refresh` (`NOTIFY`) joins the CLI. Deferred: a connection pool, event
+retention, a reload hook for `database.url`.
+
 ### Phase 7: Web dashboard
 
 **Goal.** The blueprint's Kanban, hero stats and time series, plus the JSON API.

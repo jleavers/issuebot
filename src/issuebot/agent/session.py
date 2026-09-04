@@ -193,6 +193,7 @@ async def run_session(
                 output_tokens=result.output_tokens,
                 cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
+                log_dir=str(result.log_dir) if result.log_dir is not None else None,
             )
         )
         log.info(
