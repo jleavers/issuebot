@@ -197,6 +197,7 @@ async def test_stops_when_the_agent_moves_the_issue(tmp_path: Path) -> None:
     assert isinstance(ended, RunEnded)
     assert (ended.outcome, ended.error, ended.turns) == ("succeeded", None, 1)
     assert (ended.input_tokens, ended.output_tokens, ended.cost_usd) == (60, 5, 0.25)
+    assert ended.log_dir == str(h.workspace / ".issuebot" / "runs" / "run-1")
     record = h.workspaces.read_session(h.workspace)
     assert record is not None
     assert (record.turn_number, record.last_outcome, record.attempt) == (1, "succeeded", 1)
