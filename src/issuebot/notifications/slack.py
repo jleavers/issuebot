@@ -51,14 +51,19 @@ def slack_payload(text: str) -> bytes:
 
 
 def redact(text: str, url: str) -> str:
-    """Replace the webhook URL, and its path on its own, with a placeholder."""
+    """Replace the webhook URL, and its path and query string on their own, with a placeholder."""
     redacted = text.replace(url, REDACTED)
     try:
-        path = urlsplit(url).path
+        parts = urlsplit(url)
     except ValueError:
-        path = ""
+        return redacted
+    path, query = parts.path, parts.query
+    if query:
+        redacted = redacted.replace(f"{path}?{query}", REDACTED)
     if path and path != "/":
         redacted = redacted.replace(path, REDACTED)
+    if query:
+        redacted = redacted.replace(query, REDACTED)
     return redacted
 
 
@@ -152,6 +157,7 @@ class SlackSink:
         if not isinstance(event, IssueEvent) or event.kind not in self.kinds:
             return
         if self._closed:
+            self.dropped += 1
             self._log.debug(
                 "slack_sink_closed_drop", kind=event.kind, issue_number=event.issue_number
             )
@@ -189,9 +195,18 @@ class SlackSink:
         try:
             await asyncio.wait_for(self._task, DRAIN_TIMEOUT_S)
         except TimeoutError:
+            left = 0
+            while True:
+                try:
+                    pending = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if pending is not None:
+                    left += 1
+            self.dropped += left
             self._log.warning(
                 "slack_drain_timeout",
-                left=max(self._queue.qsize() - 1, 0),
+                left=left,
                 timeout_s=DRAIN_TIMEOUT_S,
             )
         self._log.info(
@@ -205,6 +220,14 @@ class SlackSink:
                 return
             try:
                 await self._deliver(item)
+            except asyncio.CancelledError:
+                self.failed += 1
+                self._log.warning(
+                    "slack_delivery_cancelled",
+                    kind=item.event.kind,
+                    issue_number=item.event.issue_number,
+                )
+                raise
             except Exception:
                 self.failed += 1
                 self._log.exception(

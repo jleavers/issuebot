@@ -40,7 +40,7 @@ from issuebot.config.resolve import ENV_REF
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.github.normalise import repo_short_name
-from issuebot.log import LOG_LEVELS, configure_logging
+from issuebot.log import LOG_LEVELS, configure_logging, get_logger
 from issuebot.notifications import (
     POST_TIMEOUT_S,
     SlackSink,
@@ -485,9 +485,19 @@ def render_issue_table(issues: Sequence[Issue]) -> str:
 
 
 def _slack_sink(settings: Settings) -> SlackSink | None:
-    """A Slack sink when a webhook is set and at least one kind is subscribed."""
+    """A Slack sink when a webhook is set, is https, and at least one kind is subscribed."""
     slack = settings.notifications.slack
     if slack.webhook_url is None or not subscribed_kinds(slack):
+        return None
+    url = slack.webhook_url.get_secret_value()
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme != "https" or not parts.hostname:
+        get_logger(__name__).warning(
+            "slack_sink_disabled", reason="webhook_url is not an https URL"
+        )
         return None
     return SlackSink(
         slack, repo=settings.github.repo, labels=settings.github.labels, post=_slack_post

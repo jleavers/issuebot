@@ -160,6 +160,12 @@ def test_redact_strips_the_url_and_its_path() -> None:
     assert redact("root path only", "https://h/") == "root path only"
 
 
+def test_redact_strips_the_query_string() -> None:
+    url = "https://hooks.example/hook?token=abc"
+    text = "bad https://hooks.example/hook?token=abc then /hook?token=abc then token=abc"
+    assert redact(text, url) == "bad <webhook url> then <webhook url> then <webhook url>"
+
+
 @pytest.mark.parametrize(
     ("status", "ok", "retryable"),
     [
@@ -430,6 +436,7 @@ async def test_close_drains_then_drops_later_events() -> None:
     rig.bus.publish(blocked())
     await settle()
     assert len(rig.poster.calls) == 1
+    assert rig.sink.dropped == 1
     (dropped,) = rig.logged("slack_sink_closed_drop")
     assert dropped["level"] == "debug"
 
@@ -444,9 +451,13 @@ async def test_close_times_out_on_a_hanging_poster(monkeypatch: pytest.MonkeyPat
     await settle()
     await rig.sink.close()
     assert rig.sink._task is not None and rig.sink._task.cancelled()
+    assert (rig.sink.sent, rig.sink.failed, rig.sink.dropped) == (0, 1, 1)
     (timeout,) = rig.logged("slack_drain_timeout")
     assert (timeout["level"], timeout["left"]) == ("warning", 1)
-    assert rig.logged("slack_sink_closed")
+    (cancelled,) = rig.logged("slack_delivery_cancelled")
+    assert (cancelled["level"], cancelled["issue_number"]) == ("warning", 1)
+    (closed,) = rig.logged("slack_sink_closed")
+    assert (closed["sent"], closed["failed"], closed["dropped"]) == (0, 1, 1)
 
 
 async def test_start_twice_raises_and_close_before_start_is_a_noop() -> None:

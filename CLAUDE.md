@@ -84,7 +84,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `run-once <number> [--show-prompt]` (claims `in-progress`, runs one session, never sets
   `review`), `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL]
   startup:` lines and exit 1 when the startup probes fail); `run-once` and `worker` start the
-  Slack sink before and close it after; exit codes 0/1/2 (ok / failed / workflow unloadable).
+  Slack sink before and close it after (never for a non-`https` webhook); exit codes 0/1/2
+  (ok / failed / workflow unloadable).
   Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
   `_orchestrator_factory` and `_slack_post`.
 

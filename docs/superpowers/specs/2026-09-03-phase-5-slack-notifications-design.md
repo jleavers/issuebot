@@ -80,7 +80,7 @@ publish(event) ──▶ SlackSink.handle: filter, format, put_nowait ──▶ 
   an unbounded `asyncio.Queue`. When `qsize() >= QUEUE_LIMIT` (100) the event is dropped,
   `dropped` is incremented and `slack_queue_full` is logged at WARNING with the kind and
   issue number. Events published before `start()` are buffered; events published after
-  `close()` are dropped with a DEBUG log.
+  `close()` are counted as `dropped` and logged at DEBUG.
 - **The drain task** (`start(bus)` creates it; the task is stored on the sink) takes one
   pending item at a time and posts it with up to `MAX_ATTEMPTS` (3) tries:
 
@@ -99,7 +99,10 @@ publish(event) ──▶ SlackSink.handle: filter, format, put_nowait ──▶ 
   next item; the task never dies on its own.
 - **`close()`** puts a sentinel on the queue and waits up to `DRAIN_TIMEOUT_S` (10) for the
   drain task to reach it. On timeout the task is cancelled and `slack_drain_timeout` is
-  logged with the number of items left. Either way `slack_sink_closed` is logged with
+  logged with the number of items left. The item that was in flight when the task was
+  cancelled counts as `failed` (logged `slack_delivery_cancelled` with the kind and issue
+  number) and the items still queued count as `dropped`, so `slack_sink_closed` accounts
+  for every enqueued event. Either way `slack_sink_closed` is logged with
   `sent`, `failed` and `dropped`. The CLI calls `close()` after the orchestrator's own
   shutdown has finished (§6), so the `RunEnded` and release events of that shutdown are
   delivered too; ten seconds fits inside the compose `stop_grace_period` (120 s) with
@@ -180,7 +183,7 @@ def slack_payload(text: str) -> bytes:
 
 
 def redact(text: str, url: str) -> str:
-    """Replace the URL and its path (the part that carries the secret) with REDACTED."""
+    """Replace the URL and its path and query string (the part that carries the secret) with REDACTED."""
 
 
 async def urllib_post(url: str, payload: bytes, *, timeout_s: float = POST_TIMEOUT_S) -> PostResult:
@@ -228,7 +231,9 @@ construct one otherwise.
 **Sink construction.** `_slack_sink(settings) -> SlackSink | None` returns a sink when
 `webhook_url` is set and `subscribed_kinds` is non-empty, passing the module-level
 `_slack_post` seam (default `urllib_post`) so tests substitute a fake poster the way
-they substitute `_adapter_factory`.
+they substitute `_adapter_factory`. It also returns `None`, logging `slack_sink_disabled`,
+when the URL is not `https` or has no host, so a worker started without `validate` never
+posts the secret in clear.
 
 **`run-once`** and **`worker`** build the bus as `EventBus([LogSink(), sink])` when a sink
 exists, call `sink.start(bus)` on the running loop before the session or the orchestrator
@@ -316,7 +321,7 @@ one-line change each if a deployment ever needs it. The dogfood `WORKFLOW.md` ke
 
 - The webhook URL is the credential. The sink keeps it in a private attribute, never logs
   it, and every error string that leaves the transport has passed through `redact`,
-  which replaces both the full URL and its path. Log lines carry statuses, kinds, issue
+  which replaces the full URL and its path and query. Log lines carry statuses, kinds, issue
   numbers, attempt counts and redacted errors only. `validate --show-config` already masks
   it as a `SecretStr`.
 - `validate` fails a webhook that is not `https`, so the secret never travels in clear.

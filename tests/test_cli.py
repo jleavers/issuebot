@@ -1111,6 +1111,22 @@ def test_run_once_posts_the_claim_to_slack(
     )
 
 
+def test_run_once_skips_the_slack_sink_for_a_non_https_webhook(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert "issue #42 is now review" in capsys.readouterr().out
+    assert slack_post.calls == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the fakes are POSIX shebang scripts")
 def test_run_once_end_to_end_with_the_fakes(
     capsys: pytest.CaptureFixture[str],
@@ -1248,6 +1264,29 @@ def test_worker_wires_the_slack_sink_when_configured(
         ":eyes: <https://github.com/example/repo/issues/7|repo-7> `issuebot/in-progress` → "
         "`issuebot/review` by the agent · <https://github.com/example/repo/pull/8|PR #8>"
     )
+
+
+def test_worker_skips_the_slack_sink_for_a_non_https_webhook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stub_orchestrator: type[StubOrchestrator],
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
+    stub_orchestrator.next_event = StateChanged(
+        issue_number=7,
+        issue_identifier="repo-7",
+        from_label="issuebot/in-progress",
+        to_label="issuebot/review",
+        actor="agent",
+        pr_url="https://github.com/example/repo/pull/8",
+    )
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    instance = stub_orchestrator.instances[0]
+    assert [sink.name for sink in instance.kwargs["bus"].sinks] == ["log"]  # type: ignore[attr-defined]
+    assert slack_post.calls == []
+    assert "plain" not in capsys.readouterr().err
 
 
 def test_worker_requires_no_arguments(tmp_path: Path) -> None:
