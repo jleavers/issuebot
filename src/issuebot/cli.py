@@ -348,7 +348,10 @@ def _slack_check(settings: Settings, *, probe: bool) -> Check:
         )
         return Check(subject, "warn", detail)
     url = slack.webhook_url.get_secret_value()
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return Check(subject, "fail", "webhook_url is not an https URL")
     if parts.scheme != "https" or not parts.hostname:
         return Check(subject, "fail", "webhook_url is not an https URL")
     if not kinds:

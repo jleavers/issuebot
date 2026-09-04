@@ -45,6 +45,11 @@ def format_duration(seconds: float) -> str:
     return f"{total // 60}m{total % 60:02d}s"
 
 
+def _escape(text: str) -> str:
+    """Mrkdwn-escape free text so it cannot form a link or ping a channel; order matters."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None:
     """One line of Slack mrkdwn for the seven notifiable kinds; None for anything else."""
     if not isinstance(event, IssueEvent):
@@ -54,7 +59,7 @@ def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None
         case StateChanged():
             return _state_changed(event, issue, labels)
         case Blocked():
-            return f":no_entry: {issue} blocked: {event.reason}"
+            return f":no_entry: {issue} blocked: {_escape(event.reason)}"
         case RunStarted():
             return f":rocket: {issue} run started (attempt {event.attempt})"
         case RunEnded():
@@ -65,7 +70,7 @@ def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None
             merged = f" · {pr_link(event.pr_url)} merged" if event.pr_url else ""
             return f":tada: {issue} complete{merged}"
         case IssueCancelled():
-            return f":wastebasket: {issue} cancelled: {event.reason}"
+            return f":wastebasket: {issue} cancelled: {_escape(event.reason)}"
     return None
 
 
@@ -98,5 +103,5 @@ def _run_ended(event: RunEnded, issue: str) -> str:
     if event.outcome == "succeeded":
         return f":white_check_mark: {issue} run succeeded: {stats}"
     word = _OUTCOME_WORDS.get(event.outcome, event.outcome)
-    detail = f": {event.error}" if event.error else ""
+    detail = f": {_escape(event.error)}" if event.error else ""
     return f":x: {issue} run {word}{detail} ({stats})"

@@ -74,7 +74,9 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   and enqueues, cap 100; one drain task started by `start(bus)` posts with three attempts,
   `Retry-After` on 429 capped at 30 s, backoff 1 s then 4 s on 5xx and network errors, other
   4xx dropped; publishes `NotificationSent` after each delivery; `close()` drains for up to
-  10 s). Constants, not settings. A webhook or allow-list change needs a worker restart.
+  10 s). A drain timeout cancels the task, but a post already in the worker thread finishes
+  its own socket timeout first, so exit can take up to 20 s. Constants, not settings. A
+  webhook or allow-list change needs a worker restart.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
   adapter, a `claude --version` floor of 2.1.259, a `notifications.slack` check that warns when
   `SLACK_WEBHOOK_URL` is unset, requires `https`, and with `--slack-probe` posts one test

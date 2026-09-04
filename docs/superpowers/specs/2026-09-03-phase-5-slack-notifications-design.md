@@ -320,9 +320,10 @@ one-line change each if a deployment ever needs it. The dogfood `WORKFLOW.md` ke
   numbers, attempt counts and redacted errors only. `validate --show-config` already masks
   it as a `SecretStr`.
 - `validate` fails a webhook that is not `https`, so the secret never travels in clear.
-- The message text is built from issuebot's own events (label names from configuration,
-  reasons the orchestrator wrote, URLs GitHub returned); no issue body or agent output
-  reaches Slack.
+- Label names come from configuration and URLs come from GitHub. The blocked reason and
+  the run error can carry the agent's last result line or stderr (already in the log and
+  the workpad comment); those free-text fields are mrkdwn-escaped (`&`, `<`, `>`) so agent
+  output cannot form links or channel mentions. No issue body reaches Slack.
 - The drain thread's `urlopen` has a socket timeout (`POST_TIMEOUT_S`), so a hung Slack
   endpoint costs at most ten seconds per attempt and never blocks the loop.
 

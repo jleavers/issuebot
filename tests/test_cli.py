@@ -311,6 +311,22 @@ def test_validate_slack_http_url_fails_without_printing_it(
     assert "1 failed" in out
 
 
+def test_validate_slack_unparseable_url_fails_without_a_traceback(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://[::1")
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] notifications.slack: webhook_url is not an https URL" in out
+    assert "1 failed" in out
+    assert "::1" not in out
+
+
 def test_validate_slack_probe_posts_one_test_message(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

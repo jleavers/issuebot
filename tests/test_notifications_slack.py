@@ -459,6 +459,16 @@ async def test_start_twice_raises_and_close_before_start_is_a_noop() -> None:
     await rig.sink.close()
 
 
+async def test_close_twice_is_a_noop() -> None:
+    rig = make_rig()
+    rig.sink.start(rig.bus)
+    rig.bus.publish(blocked())
+    await rig.sink.close()
+    await rig.sink.close()
+    assert len(rig.poster.calls) == 1
+    assert len(rig.logged("slack_sink_closed")) == 1
+
+
 async def test_poster_exception_is_logged_and_the_loop_continues() -> None:
     rig = make_rig()
     rig.poster.raise_first = True

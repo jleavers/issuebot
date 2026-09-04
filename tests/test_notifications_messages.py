@@ -205,6 +205,13 @@ def test_issue_cancelled() -> None:
     assert fmt(event) == f":wastebasket: {ISSUE} cancelled: closed without a merged pull request"
 
 
+def test_free_text_is_escaped_for_mrkdwn() -> None:
+    blocked = Blocked(issue_number=42, issue_identifier="repo-42", reason="<!channel> & <b>")
+    assert fmt(blocked) == f":no_entry: {ISSUE} blocked: &lt;!channel&gt; &amp; &lt;b&gt;"
+    event = run_ended(outcome="failed", error="a<b")
+    assert fmt(event) == f":x: {ISSUE} run failed: a&lt;b (2 turns, 1m42s, $0.31)"
+
+
 def test_notification_sent_and_bare_events_are_not_formatted() -> None:
     sent = NotificationSent(
         issue_number=42, issue_identifier="repo-42", channel="slack", about_kind="blocked"

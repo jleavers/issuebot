@@ -182,6 +182,8 @@ class SlackSink:
         """Deliver what is queued for at most DRAIN_TIMEOUT_S, then stop the drain task."""
         if self._task is None:
             return
+        if self._closed:
+            return
         self._closed = True
         self._queue.put_nowait(None)
         try:
