@@ -121,6 +121,25 @@ async def test_a_lost_connection_reconnects_with_backoff(h: Harness) -> None:
     await h.listener.close()
 
 
+async def test_an_unexpected_error_is_logged_and_listening_resumes(h: Harness) -> None:
+    h.listener.start()
+    await h.settle()
+    h.connections[0].feed.put_nowait(RuntimeError("bug"))
+    await h.settle()
+    assert len(h.connections) == 2
+    assert h.connections[0].closed
+    assert h.sleeps == [1.0]
+    assert h.listener.reconnects == 1
+    (crashed,) = h.logged("db_listen_crashed")
+    assert "bug" in crashed["exception"]
+    assert (crashed["attempt"], crashed["delay_s"]) == (1, 1.0)
+    h.connections[1].feed.put_nowait(FakeNotify(REFRESH_CHANNEL))
+    await h.settle()
+    assert h.calls == 1
+    await h.listener.close()
+    assert len(h.logged("db_listen_closed")) == 1
+
+
 async def test_connect_failures_back_off_and_count_consecutively(h: Harness) -> None:
     h.fail_connect = [psycopg.OperationalError("refused"), psycopg.InterfaceError("refused")]
     h.listener.start()

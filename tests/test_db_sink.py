@@ -142,6 +142,20 @@ async def test_the_cap_drops_and_logs_but_delivery_continues(
     assert [call[1].issue_number for call in h.store.calls] == [1, 2]
 
 
+async def test_markers_bypass_the_cap(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, make_issue: Callable[..., Issue]
+) -> None:
+    monkeypatch.setattr(sink_module, "QUEUE_LIMIT", 1)
+    h.sink.handle(blocked(1))
+    h.sink.handle(blocked(2))
+    h.sink.record_issues([make_issue()])
+    h.sink.record_snapshot(FakeSnapshot(T0))
+    h.sink.start()
+    await h.sink.close()
+    assert [call[0] for call in h.store.calls] == ["event", "issues", "snapshot"]
+    assert h.sink.dropped == 1
+
+
 async def test_record_issues_merges_by_number_and_stamps_seen_at(
     h: Harness, make_issue: Callable[..., Issue]
 ) -> None:

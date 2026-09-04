@@ -162,6 +162,8 @@ class PostgresSink:
             if item is None:
                 return
             work = self._take(item)
+            if work is None:
+                continue
             try:
                 await self._write(work)
             except asyncio.CancelledError:
@@ -172,8 +174,11 @@ class PostgresSink:
                 self.failed += 1
                 self._log.exception("db_write_crashed", **_describe(work))
 
-    def _take(self, item: _Item) -> _Work:
-        """Resolve a queue item into the work to do, taking the pending batch or slot now."""
+    def _take(self, item: _Item) -> _Work | None:
+        """Resolve a queue item into the work to do, taking the pending batch or slot now.
+
+        None when a snapshot marker finds no snapshot: nothing to write, never an empty row.
+        """
         if isinstance(item, _EventItem):
             return item
         if item == "issues":
@@ -181,9 +186,11 @@ class PostgresSink:
             self._issues = {}
             self._issues_queued = False
             return ("issues", batch)
-        at, data = self._snapshot or (self._now(), {})
-        self._snapshot = None
         self._snapshot_queued = False
+        if self._snapshot is None:
+            return None
+        at, data = self._snapshot
+        self._snapshot = None
         return ("snapshot", at, data)
 
     async def _write(self, work: _Work) -> None:

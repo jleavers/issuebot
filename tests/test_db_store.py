@@ -118,9 +118,9 @@ async def test_run_ended_before_started_gives_the_same_row(
     store: PostgresStore, db_url: str
 ) -> None:
     await store.apply_event(ended())
-    await store.apply_event(started())
+    await store.apply_event(started(at=at(2)))
     (row,) = await rows(db_url, "SELECT * FROM runs")
-    assert (row["attempt"], row["session_id"], row["started_at"]) == (2, "sess-1", at(0))
+    assert (row["attempt"], row["session_id"], row["started_at"]) == (2, "sess-1", at(2))
     assert (row["outcome"], row["ended_at"], row["cost_usd"]) == ("succeeded", at(90), 0.75)
 
 

@@ -160,12 +160,15 @@ class FakeListener:
         self.on_notify = on_notify
         self.started = False
         self.closed = False
+        self.close_error: Exception | None = None
 
     def start(self) -> None:
         self.started = True
 
     async def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeDatabase:
@@ -182,6 +185,7 @@ class FakeDatabase:
         self.store_obj = FakeStore()
         self.labels: GitHubLabels | None = None
         self.listeners: list[FakeListener] = []
+        self.listener_close_error: Exception | None = None
         self.notified = 0
         self.notify_error: DatabaseError | None = None
 
@@ -214,6 +218,7 @@ class FakeDatabase:
 
     def listener(self, on_notify: Callable[[], None]) -> FakeListener:
         listener = FakeListener(on_notify)
+        listener.close_error = self.listener_close_error
         self.listeners.append(listener)
         return listener
 
@@ -1852,6 +1857,21 @@ def test_worker_wires_the_database_when_configured(
     store = fake_database.store_obj
     assert [event.kind for event in store.events] == ["state_changed"]
     assert store.closed
+
+
+def test_worker_closes_the_sinks_when_the_listener_close_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.listener_close_error = RuntimeError("listener close failed")
+    with pytest.raises(RuntimeError, match="listener close failed"):
+        main(["worker", "--workflow", str(_workflow_with_root(tmp_path))])
+    (listener,) = fake_database.listeners
+    assert listener.closed
+    assert fake_database.store_obj.closed
 
 
 def test_worker_without_a_database_passes_no_callbacks(

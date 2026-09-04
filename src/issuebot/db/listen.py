@@ -15,7 +15,11 @@ _LOST = (psycopg.OperationalError, psycopg.InterfaceError)
 
 
 class RefreshListener:
-    """Calls ``on_notify`` for every NOTIFY on the refresh channel; reconnects with backoff."""
+    """Calls ``on_notify`` for every NOTIFY on the refresh channel; reconnects with backoff.
+
+    A lost connection and any other unexpected error are both contained here: the task logs
+    and reconnects rather than ending, so only cancellation (from ``close``) stops it.
+    """
 
     def __init__(
         self,
@@ -64,6 +68,10 @@ class RefreshListener:
                 failures += 1
                 await self._lost(exc, failures)
                 continue
+            except Exception as exc:
+                failures += 1
+                await self._crashed(exc, failures)
+                continue
             failures = 0
             if self._connected_once:
                 self.reconnects += 1
@@ -80,6 +88,9 @@ class RefreshListener:
             except _LOST as exc:
                 failures = 1
                 await self._lost(exc, failures)
+            except Exception as exc:
+                failures = 1
+                await self._crashed(exc, failures)
 
     async def _lost(self, exc: Exception, failures: int) -> None:
         await self._close_connection()
@@ -90,6 +101,18 @@ class RefreshListener:
             attempt=failures,
             delay_s=delay,
         )
+        await self._sleep(delay)
+
+    async def _crashed(self, exc: Exception, failures: int) -> None:
+        """An unexpected error: log it with the traceback, then reconnect as if lost."""
+        delay = reconnect_delay(failures)
+        self._log.exception(
+            "db_listen_crashed",
+            error=redact(f"{type(exc).__name__}: {error_text(exc)}", self._url),
+            attempt=failures,
+            delay_s=delay,
+        )
+        await self._close_connection()
         await self._sleep(delay)
 
     async def _close_connection(self) -> None:

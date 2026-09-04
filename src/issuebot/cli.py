@@ -558,10 +558,12 @@ class _Sinks:
             self.postgres.start()
 
     async def close(self) -> None:
-        if self.slack is not None:
-            await self.slack.close()
-        if self.postgres is not None:
-            await self.postgres.close()
+        try:
+            if self.slack is not None:
+                await self.slack.close()
+        finally:
+            if self.postgres is not None:
+                await self.postgres.close()
 
     def record_issues(self, issues: Sequence[Issue]) -> None:
         if self.postgres is not None:
@@ -803,6 +805,7 @@ async def _run_worker(workflow: Workflow) -> int:
         adapter_factory=_adapter_factory,
         run_session=_run_session,
         which=_which,
+        # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,
     )
@@ -827,9 +830,11 @@ async def _run_worker(workflow: Workflow) -> int:
         for signum in signals:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.remove_signal_handler(signum)
-        if listener is not None:
-            await listener.close()
-        await sinks.close()
+        try:
+            if listener is not None:
+                await listener.close()
+        finally:
+            await sinks.close()
     return 0
 
 
