@@ -545,6 +545,16 @@ resume, blocked escape). `docker compose up worker` against this repository take
 **Done when.** Running the worker with a webhook configured posts messages for
 `todo → in-progress → review → complete` on a scratch issue.
 
+Decided 2026-09-03 (Phase 5 spec): the sink lives in `issuebot.notifications` (a
+settings-taking sink inside `issuebot.events` would close an import cycle with
+`config`); the transport is stdlib `urllib` in a worker thread, no new dependency;
+the allow-list is by kind, `run_ended` covers every outcome and stays opt-in, so a
+failed run reaches the channel through `blocked` by default; `NotificationSent` is
+published after each delivery and never re-notified; `validate` warns when the
+webhook is unset, requires `https`, and gains `--slack-probe`; `run-once` posts too;
+a webhook or allow-list change needs a restart. Deferred: Block Kit layouts and
+attachments, per-channel routing, a reload hook for `notifications.*`.
+
 ### Phase 6: Persistence
 
 **Goal.** History survives restarts and the stats the dashboard needs can be queried.

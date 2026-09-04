@@ -13,6 +13,7 @@ uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
+uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
 uv run issuebot labels ensure        # create/update the five state labels in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
 uv run issuebot run-once <number>    # one worker session in the foreground (--show-prompt renders only)
@@ -59,18 +60,34 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `review`, terminal sweep on the first and every tenth tick; mtime reload; preflight; fetch
   `in_progress`/`rework`/`todo`; dispatch while slots remain; snapshot) and a queue wait that
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
-  (`max_turns` while `in_progress` or `max_attempts` failures → the blocked escape).
+  (the session's final transition is published before any release; `max_turns` while
+  `in_progress` or `max_attempts` failures → the blocked escape).
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`.
   Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
   never resume. Tests drive `tick()`, `handle_worker_exit()` and `fire_due_retries()` directly
   with a fake clock and a scripted `run_session`.
+- `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
+  `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
+  by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
+  `urllib` in `asyncio.to_thread`, never raises, errors pass through `redact`), `PostResult`,
+  `subscribed_kinds` (the allow-list minus `notification_sent`), `SlackSink` (`handle` formats
+  and enqueues, cap 100; one drain task started by `start(bus)` posts with three attempts,
+  `Retry-After` on 429 capped at 30 s, backoff 1 s then 4 s on 5xx and network errors, other
+  4xx dropped; publishes `NotificationSent` after each delivery; `close()` drains for up to
+  10 s). A drain timeout cancels the task, but a post already in the worker thread finishes
+  its own socket timeout first, so exit can take up to 20 s. Constants, not settings. A
+  webhook or allow-list change needs a worker restart.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
-  adapter, a `claude --version` floor of 2.1.259, and a prompt render against a sample
-  issue), `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims
-  `in-progress`, runs one session, never sets `review`), `worker [--workflow PATH]` (the
-  orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines and exit 1 when the startup probes
-  fail); exit codes 0/1/2 (ok / failed / workflow unloadable). Tests substitute `_which`,
-  `_claude_version`, `_adapter_factory`, `_run_session` and `_orchestrator_factory`.
+  adapter, a `claude --version` floor of 2.1.259, a `notifications.slack` check that warns when
+  `SLACK_WEBHOOK_URL` is unset, requires `https`, and with `--slack-probe` posts one test
+  message, and a prompt render against a sample issue), `labels ensure`, `issues list`,
+  `run-once <number> [--show-prompt]` (claims `in-progress`, runs one session, never sets
+  `review`), `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL]
+  startup:` lines and exit 1 when the startup probes fail); `run-once` and `worker` start the
+  Slack sink before and close it after (never for a non-`https` webhook); exit codes 0/1/2
+  (ok / failed / workflow unloadable).
+  Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
+  `_orchestrator_factory` and `_slack_post`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).

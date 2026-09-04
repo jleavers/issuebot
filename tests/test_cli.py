@@ -1,6 +1,7 @@
 """Tests for the command-line entry point."""
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -18,11 +19,13 @@ from issuebot.cli import main, not_runnable, render_issue_table, render_run_summ
 from issuebot.config import GitHubSettings, Settings
 from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
+from issuebot.notifications import PostResult
 from issuebot.orchestrator import OrchestratorStartupError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
 GOOD = FIXTURES / "good.md"
 INVALID = FIXTURES / "invalid.md"
+WEBHOOK = "https://hooks.slack.com/services/T000/B000/secret"
 
 
 @pytest.fixture
@@ -53,6 +56,25 @@ def fake_github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     """Every CLI command talks to this in-memory GitHub instead of the real gh."""
     fake = FakeGitHub(GitHubSettings(repo="example/repo"), now=_Clock())
     monkeypatch.setattr("issuebot.cli._adapter_factory", lambda settings: fake)
+    return fake
+
+
+class FakeSlackPost:
+    """Stands in for urllib_post: records each payload; answers from a script, else 200."""
+
+    def __init__(self) -> None:
+        self.results: list[PostResult] = []
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, url: str, payload: bytes, *, timeout_s: float) -> PostResult:
+        self.calls.append({"url": url, "text": json.loads(payload)["text"]})
+        return self.results.pop(0) if self.results else PostResult(status=200)
+
+
+@pytest.fixture
+def slack_post(monkeypatch: pytest.MonkeyPatch) -> FakeSlackPost:
+    fake = FakeSlackPost()
+    monkeypatch.setattr("issuebot.cli._slack_post", fake)
     return fake
 
 
@@ -105,7 +127,10 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] claude.command: /usr/bin/claude (2.1.259)" in out
     assert "[ OK ] gh: /usr/bin/gh" in out
     assert "[ OK ] database.url: not configured (history and dashboard disabled)" in out
-    assert "[ OK ] notifications.slack: not configured" in out
+    assert (
+        "[WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on "
+        "blocked, state_changed, or set notifications.slack.events: [] to silence this" in out
+    )
     assert "[ OK ] prompt: 44 characters, renders" in out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
@@ -113,7 +138,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("12 checks: 0 failed, 0 warnings")
+    assert out.rstrip().endswith("12 checks: 0 failed, 1 warnings")
     assert "secret-token-value" not in out
 
 
@@ -146,7 +171,7 @@ def test_validate_literal_token_warns(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.token: literal value in WORKFLOW.md; prefer $VAR" in out
-    assert "0 failed, 1 warnings" in out
+    assert "0 failed, 2 warnings" in out
 
 
 def test_validate_missing_executables_fail(
@@ -163,7 +188,7 @@ def test_validate_missing_executables_fail(
     assert "[WARN] gh auth: skipped (gh not found)" in out
     assert "[WARN] github.repo access: skipped (gh not found)" in out
     assert "[WARN] github.labels: skipped (gh not found)" in out
-    assert "2 failed, 3 warnings" in out
+    assert "2 failed, 4 warnings" in out
 
 
 def test_validate_custom_claude_command_is_looked_up(
@@ -219,7 +244,153 @@ def test_validate_configured_database_and_slack(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] database.url: configured" in out
-    assert "[ OK ] notifications.slack: configured" in out
+    assert (
+        "[WARN] notifications.slack: configured (blocked, state_changed); the URL is not a "
+        "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
+    )
+    assert "hooks.example" not in out
+
+
+def test_validate_slack_configured_ok(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
+    assert "12 checks: 0 failed, 0 warnings" in out
+    assert "secret" not in out
+
+
+def test_validate_slack_empty_events_is_ok_without_a_webhook(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    text = "---\ngithub:\n  repo: o/r\nnotifications:\n  slack:\n    events: []\n---\nBody"
+    assert main(["validate", "--workflow", str(_write(tmp_path, text))]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] notifications.slack: not configured (events: [])" in out
+    assert "0 failed, 0 warnings" in out
+
+
+def test_validate_slack_empty_events_with_a_webhook_warns(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    text = "---\ngithub:\n  repo: o/r\nnotifications:\n  slack:\n    events: []\n---\nBody"
+    assert main(["validate", "--workflow", str(_write(tmp_path, text))]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] notifications.slack: configured but events is empty; nothing will be sent" in out
+
+
+def test_validate_slack_http_url_fails_without_printing_it(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] notifications.slack: webhook_url is not an https URL" in out
+    assert "plain" not in out
+    assert "1 failed" in out
+
+
+def test_validate_slack_unparseable_url_fails_without_a_traceback(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://[::1")
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] notifications.slack: webhook_url is not an https URL" in out
+    assert "1 failed" in out
+    assert "::1" not in out
+
+
+def test_validate_slack_probe_posts_one_test_message(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--slack-probe", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] notifications.slack: configured (blocked, state_changed); test message delivered"
+        in out
+    )
+    assert slack_post.calls == [
+        {
+            "url": WEBHOOK,
+            "text": ":wave: issuebot validate: Slack notifications are configured for "
+            "blocked, state_changed (o/r)",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        (PostResult(status=403, error="HTTP Error 403: Forbidden"), "HTTP 403"),
+        (
+            PostResult(status=None, error="ConnectionRefusedError: refused"),
+            "ConnectionRefusedError: refused",
+        ),
+    ],
+)
+def test_validate_slack_probe_reports_a_failed_post(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    slack_post: FakeSlackPost,
+    result: PostResult,
+    reason: str,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    slack_post.results = [result]
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    assert main(["validate", "--slack-probe", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert f"[FAIL] notifications.slack: test message not delivered: {reason}" in out
+    assert "secret" not in out
+
+
+def test_validate_slack_probe_is_skipped_when_not_configured(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--slack-probe", "--workflow", str(GOOD)]) == 0
+    assert "[WARN] notifications.slack: not configured;" in capsys.readouterr().out
+    assert slack_post.calls == []
 
 
 def test_validate_old_claude_fails(
@@ -246,7 +417,7 @@ def test_validate_unknown_claude_version_warns(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] claude.command: /usr/bin/claude (version unknown: no output)" in out
-    assert "0 failed, 1 warnings" in out
+    assert "0 failed, 2 warnings" in out
 
 
 def test_validate_prompt_that_does_not_render_fails(
@@ -421,7 +592,7 @@ def test_validate_warns_about_missing_labels(
         "[WARN] github.labels: missing: issuebot/rework, issuebot/complete; "
         "run issuebot labels ensure" in out
     )
-    assert "0 failed, 1 warnings" in out
+    assert "0 failed, 2 warnings" in out
 
 
 # --- labels ensure -----------------------------------------------------------------------
@@ -919,6 +1090,43 @@ def test_render_run_summary_singular_turn_and_missing_log_dir() -> None:
     )
 
 
+def test_run_once_posts_the_claim_to_slack(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert "issue #42 is now review" in capsys.readouterr().out
+    (call,) = slack_post.calls
+    assert call["url"] == WEBHOOK
+    assert call["text"] == (
+        ":hammer_and_wrench: <https://github.com/example/repo/issues/42|repo-42> "
+        "`issuebot/todo` → `issuebot/in-progress` by issuebot"
+    )
+
+
+def test_run_once_skips_the_slack_sink_for_a_non_https_webhook(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert "issue #42 is now review" in capsys.readouterr().out
+    assert slack_post.calls == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the fakes are POSIX shebang scripts")
 def test_run_once_end_to_end_with_the_fakes(
     capsys: pytest.CaptureFixture[str],
@@ -959,6 +1167,7 @@ class StubOrchestrator:
     instances: ClassVar[list[StubOrchestrator]] = []
     next_problems: ClassVar[list[str] | None] = None
     next_sigterm: ClassVar[bool] = False
+    next_event: ClassVar[Event | None] = None
 
     def __init__(self, workflow: object, **kwargs: object) -> None:
         self.workflow = workflow
@@ -972,6 +1181,8 @@ class StubOrchestrator:
     async def run(self) -> None:
         if StubOrchestrator.next_problems is not None:
             raise OrchestratorStartupError(StubOrchestrator.next_problems)
+        if StubOrchestrator.next_event is not None:
+            self.kwargs["bus"].publish(StubOrchestrator.next_event)  # type: ignore[attr-defined]
         if StubOrchestrator.next_sigterm:
             os.kill(os.getpid(), signal.SIGTERM)
             for _ in range(200):
@@ -986,6 +1197,7 @@ def stub_orchestrator(monkeypatch: pytest.MonkeyPatch) -> type[StubOrchestrator]
     StubOrchestrator.instances = []
     StubOrchestrator.next_problems = None
     StubOrchestrator.next_sigterm = False
+    StubOrchestrator.next_event = None
     monkeypatch.setattr("issuebot.cli._orchestrator_factory", StubOrchestrator)
     return StubOrchestrator
 
@@ -1027,6 +1239,54 @@ def test_worker_stops_on_sigterm_and_wires_the_seams(
     assert kwargs["run_session"] is stub_session
     assert kwargs["which"]("gh") == "/usr/bin/gh"  # type: ignore[operator]
     assert [sink.name for sink in kwargs["bus"].sinks] == ["log"]  # type: ignore[attr-defined]
+
+
+def test_worker_wires_the_slack_sink_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
+    stub_orchestrator.next_event = StateChanged(
+        issue_number=7,
+        issue_identifier="repo-7",
+        from_label="issuebot/in-progress",
+        to_label="issuebot/review",
+        actor="agent",
+        pr_url="https://github.com/example/repo/pull/8",
+    )
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    instance = stub_orchestrator.instances[0]
+    assert [sink.name for sink in instance.kwargs["bus"].sinks] == ["log", "slack"]  # type: ignore[attr-defined]
+    (call,) = slack_post.calls
+    assert call["text"] == (
+        ":eyes: <https://github.com/example/repo/issues/7|repo-7> `issuebot/in-progress` → "
+        "`issuebot/review` by the agent · <https://github.com/example/repo/pull/8|PR #8>"
+    )
+
+
+def test_worker_skips_the_slack_sink_for_a_non_https_webhook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stub_orchestrator: type[StubOrchestrator],
+    slack_post: FakeSlackPost,
+) -> None:
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
+    stub_orchestrator.next_event = StateChanged(
+        issue_number=7,
+        issue_identifier="repo-7",
+        from_label="issuebot/in-progress",
+        to_label="issuebot/review",
+        actor="agent",
+        pr_url="https://github.com/example/repo/pull/8",
+    )
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    instance = stub_orchestrator.instances[0]
+    assert [sink.name for sink in instance.kwargs["bus"].sinks] == ["log"]  # type: ignore[attr-defined]
+    assert slack_post.calls == []
+    assert "plain" not in capsys.readouterr().err
 
 
 def test_worker_requires_no_arguments(tmp_path: Path) -> None:
