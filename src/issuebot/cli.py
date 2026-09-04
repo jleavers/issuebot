@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -36,10 +37,17 @@ from issuebot.config import (
     load_workflow,
 )
 from issuebot.config.resolve import ENV_REF
-from issuebot.events import EventBus, LogSink, StateChanged
+from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.github.normalise import repo_short_name
 from issuebot.log import LOG_LEVELS, configure_logging
+from issuebot.notifications import (
+    POST_TIMEOUT_S,
+    SlackSink,
+    slack_payload,
+    subscribed_kinds,
+    urllib_post,
+)
 from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
@@ -69,6 +77,10 @@ def _claude_version_output(command: str) -> str | None:
 _claude_version = _claude_version_output
 _run_session = run_session
 _orchestrator_factory = Orchestrator
+_slack_post = urllib_post
+
+SLACK_WEBHOOK_HOST = "hooks.slack.com"
+SLACK_WEBHOOK_PATH = "/services/"
 
 CheckStatus = Literal["ok", "warn", "fail"]
 _TAGS: dict[CheckStatus, str] = {"ok": "[ OK ]", "warn": "[WARN]", "fail": "[FAIL]"}
@@ -122,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workflow_option(validate)
     validate.add_argument(
         "--show-config", action="store_true", help="print the effective configuration as YAML"
+    )
+    validate.add_argument(
+        "--slack-probe",
+        action="store_true",
+        help="post one test message to the configured Slack webhook",
     )
     validate.set_defaults(func=cmd_validate)
 
@@ -203,7 +220,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if workflow is None:
         return 2
     adapter = _adapter_factory(workflow.config.github) if _which("gh") else None
-    checks = run_checks(workflow, adapter=adapter)
+    checks = run_checks(workflow, adapter=adapter, slack_probe=args.slack_probe)
     for check in checks:
         print(check.line())
     failed = sum(check.status == "fail" for check in checks)
@@ -214,7 +231,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def run_checks(workflow: Workflow, *, adapter: GitHubAdapter | None = None) -> list[Check]:
+def run_checks(
+    workflow: Workflow, *, adapter: GitHubAdapter | None = None, slack_probe: bool = False
+) -> list[Check]:
     cfg = workflow.config
     checks = [
         Check("workflow", "ok", str(workflow.path)),
@@ -232,13 +251,7 @@ def run_checks(workflow: Workflow, *, adapter: GitHubAdapter | None = None) -> l
             "configured" if cfg.database.url else "not configured (history and dashboard disabled)",
         )
     )
-    checks.append(
-        Check(
-            "notifications.slack",
-            "ok",
-            "configured" if cfg.notifications.slack.webhook_url else "not configured",
-        )
-    )
+    checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
     return checks
 
@@ -319,6 +332,45 @@ def _claude_check(command: str) -> Check:
 
 def _version_text(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
+
+
+def _slack_check(settings: Settings, *, probe: bool) -> Check:
+    """The notifications.slack line: presence, URL shape (never the URL itself), optional probe."""
+    subject = "notifications.slack"
+    slack = settings.notifications.slack
+    kinds = ", ".join(sorted(subscribed_kinds(slack)))
+    if slack.webhook_url is None:
+        if not kinds:
+            return Check(subject, "ok", "not configured (events: [])")
+        detail = (
+            f"not configured; export SLACK_WEBHOOK_URL to notify on {kinds}, "
+            "or set notifications.slack.events: [] to silence this"
+        )
+        return Check(subject, "warn", detail)
+    url = slack.webhook_url.get_secret_value()
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        return Check(subject, "fail", "webhook_url is not an https URL")
+    if not kinds:
+        return Check(subject, "warn", "configured but events is empty; nothing will be sent")
+    status: CheckStatus = "ok"
+    detail = f"configured ({kinds})"
+    if parts.hostname != SLACK_WEBHOOK_HOST or not parts.path.startswith(SLACK_WEBHOOK_PATH):
+        status = "warn"
+        detail += (
+            "; the URL is not a hooks.slack.com/services/ webhook (a compatible endpoint is fine)"
+        )
+    if probe:
+        text = (
+            f":wave: issuebot validate: Slack notifications are configured for {kinds} "
+            f"({settings.github.repo})"
+        )
+        result = asyncio.run(_slack_post(url, slack_payload(text), timeout_s=POST_TIMEOUT_S))
+        if not result.ok:
+            reason = f"HTTP {result.status}" if result.status else result.error or "no response"
+            return Check(subject, "fail", f"test message not delivered: {reason}")
+        detail += "; test message delivered"
+    return Check(subject, status, detail)
 
 
 def _prompt_check(workflow: Workflow) -> Check:
@@ -426,6 +478,28 @@ def render_issue_table(issues: Sequence[Issue]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- the event bus ---------------------------------------------------------------------
+
+
+def _slack_sink(settings: Settings) -> SlackSink | None:
+    """A Slack sink when a webhook is set and at least one kind is subscribed."""
+    slack = settings.notifications.slack
+    if slack.webhook_url is None or not subscribed_kinds(slack):
+        return None
+    return SlackSink(
+        slack, repo=settings.github.repo, labels=settings.github.labels, post=_slack_post
+    )
+
+
+def _build_bus(settings: Settings) -> tuple[EventBus, SlackSink | None]:
+    """The log sink, plus the Slack sink when configured; the caller starts and closes it."""
+    slack = _slack_sink(settings)
+    sinks: list[EventSink] = [LogSink()]
+    if slack is not None:
+        sinks.append(slack)
+    return EventBus(sinks), slack
+
+
 # --- run-once --------------------------------------------------------------------------
 
 
@@ -476,7 +550,30 @@ async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> in
             print(f"[FAIL] prompt: {exc.message}")
             return 1
         return 0
-    bus = EventBus([LogSink()])
+    bus, slack = _build_bus(settings)
+    if slack is not None:
+        slack.start(bus)
+    try:
+        return await _claim_and_run(
+            workflow, adapter, bus, issue, workspaces=workspaces, attempt=attempt, rework=rework
+        )
+    finally:
+        if slack is not None:
+            await slack.close()
+
+
+async def _claim_and_run(
+    workflow: Workflow,
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    *,
+    workspaces: WorkspaceManager,
+    attempt: int,
+    rework: bool,
+) -> int:
+    settings = workflow.config
+    number = issue.number
     if issue.state is not StateLabel.IN_PROGRESS:
         from_label = issue.state_labels[0] if issue.state_labels else None
         try:
@@ -574,13 +671,16 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
+    bus, slack = _build_bus(workflow.config)
     orchestrator = _orchestrator_factory(
         workflow,
-        bus=EventBus([LogSink()]),
+        bus=bus,
         adapter_factory=_adapter_factory,
         run_session=_run_session,
         which=_which,
     )
+    if slack is not None:
+        slack.start(bus)
     loop = asyncio.get_running_loop()
     signals = (signal.SIGTERM, signal.SIGINT)
     for signum in signals:
@@ -596,4 +696,6 @@ async def _run_worker(workflow: Workflow) -> int:
         for signum in signals:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.remove_signal_handler(signum)
+        if slack is not None:
+            await slack.close()
     return 0
