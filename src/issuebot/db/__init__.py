@@ -15,7 +15,9 @@ from issuebot.db.connection import (
     reconnect_delay,
     redact,
 )
+from issuebot.db.database import Database, Probe
 from issuebot.db.errors import DatabaseError, MigrationError, StoreError, StoreUnavailableError
+from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import (
     ADVISORY_LOCK_KEY,
     MIGRATIONS_ROOT,
@@ -26,20 +28,49 @@ from issuebot.db.migrate import (
     migrate,
     schema_version,
 )
+from issuebot.db.queries import (
+    COMPLETE_LIMIT,
+    DailyPoint,
+    EventRow,
+    IssueRow,
+    Queries,
+    RunRow,
+    SnapshotRow,
+)
+from issuebot.db.sink import DRAIN_TIMEOUT_S, QUEUE_LIMIT, PostgresSink, SnapshotLike
+from issuebot.db.store import IssueSnapshot, PostgresStore, Store
 
 __all__ = [
     "ADVISORY_LOCK_KEY",
     "APPLICATION_NAME",
+    "COMPLETE_LIMIT",
     "CONNECT_TIMEOUT_S",
+    "DRAIN_TIMEOUT_S",
     "MIGRATIONS_ROOT",
     "POSTGRES_SCHEMES",
+    "QUEUE_LIMIT",
     "RECONNECT_DELAYS_S",
     "REDACTED",
+    "REFRESH_CHANNEL",
     "Connector",
+    "DailyPoint",
+    "Database",
     "DatabaseError",
+    "EventRow",
+    "IssueRow",
+    "IssueSnapshot",
     "Migration",
     "MigrationError",
     "MigrationResult",
+    "PostgresSink",
+    "PostgresStore",
+    "Probe",
+    "Queries",
+    "RefreshListener",
+    "RunRow",
+    "SnapshotLike",
+    "SnapshotRow",
+    "Store",
     "StoreError",
     "StoreUnavailableError",
     "apply_migrations",
