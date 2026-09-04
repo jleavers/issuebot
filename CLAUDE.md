@@ -8,8 +8,10 @@ Python 3.14 with `uv`; `src` layout; package `issuebot`.
 
 ```bash
 uv sync                              # create .venv and install (uses uv.lock)
-uv run pytest                        # tests (hermetic; no network, no Docker)
+uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
+ISSUEBOT_DB_PORT=5440 docker compose up -d db   # a local postgres:18 (5432 is taken on this host)
+DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5440/issuebot uv run pytest   # + the DB tests
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
@@ -18,6 +20,10 @@ uv run issuebot labels ensure        # create/update the five state labels in gi
 uv run issuebot issues list          # table of open issues carrying a state label
 uv run issuebot run-once <number>    # one worker session in the foreground (--show-prompt renders only)
 uv run issuebot worker               # the long-running orchestrator; SIGTERM or Ctrl-C stops it
+uv run issuebot migrate              # apply pending .sql migrations (worker and run-once do it too)
+uv run issuebot status               # the worker's last runtime snapshot, read from the database
+uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
+uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
 docker compose build                 # image: git, gh, claude, app venv
 docker compose up                    # db (postgres:18) + worker (issuebot worker)
 ```
@@ -34,7 +40,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
 - `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
-  (synchronous, sink failures isolated and counted), `LogSink`.
+  (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
+  carries the run's log directory.
 - `issuebot.github`: `StateLabel` roles and the transition table (`state.py`); frozen
   `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter` protocol (async);
   `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via `gh issue edit`,
@@ -56,13 +63,17 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   otherwise, plus `PrOpened`). `actions.py`: `claim`, `blocked_escape` (workpad block then
   `review`, idempotent per run id), `finish_terminal` (complete or cancelled, workspace removed).
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
-  `missing_labels`), then `tick()` (reconcile: stalls, running refresh with a one-tick grace for
-  `review`, terminal sweep on the first and every tenth tick; mtime reload; preflight; fetch
-  `in_progress`/`rework`/`todo`; dispatch while slots remain; snapshot) and a queue wait that
+  `missing_labels`), then `tick()` (reconcile: stalls, running refresh with one poll interval of
+  grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
+  tick; mtime reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
+  `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
   (the session's final transition is published before any release; `max_turns` while
   `in_progress` or `max_attempts` failures → the blocked escape).
-  `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`.
+  `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
+  and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
+  (every successful fetch) are how polled data reaches the database sink without the
+  orchestrator importing `db`.
   Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
   never resume. Tests drive `tick()`, `handle_worker_exit()` and `fire_due_retries()` directly
   with a fake clock and a scripted `run_session`.
@@ -77,17 +88,42 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   10 s). A drain timeout cancels the task, but a post already in the worker thread finishes
   its own socket timeout first, so exit can take up to 20 s. Constants, not settings. A
   webhook or allow-list change needs a worker restart.
+- `issuebot.db`: the observability store, imported by `cli` only; imports `config`, `events`,
+  `github` and `log`. `migrations/NNNN_name.sql` applied by `migrate.py` in one transaction
+  under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
+  files is an error). `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session),
+  `describe`/`redact` (the URL's password never reaches a log or a line), `reconnect_delay`
+  (1, 2, 4, 8, 16, then 30 s). `store.py`: `PostgresStore` (`apply_event` appends to `events`
+  and upserts `runs` on `run_started`/`run_ended` or updates `issues` on `state_changed`,
+  `issue_completed`, `issue_cancelled`; `upsert_issues`; `write_snapshot`); every `issues`
+  write is guarded by `seen_at`, so write order never matters. `sink.py`: `PostgresSink`
+  (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots into one
+  pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects with
+  backoff and retries the item in flight; statement failures are dropped and counted;
+  `close()` drains for up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh`
+  on its own connection, callback per NOTIFY, reconnects). `queries.py`: `Queries` over one
+  connection (`closed_count`, `runs_count`, `daily_series`, `issues_by_state`, `runs_for_issue`,
+  `recent_events`, `snapshot`) returning the frozen row types Phase 7 renders. `database.py`:
+  the `Database` facade the CLI goes through (`migrate`, `probe`, `queries`, `store`,
+  `listener`, `notify_refresh`). Constants, not settings; a `database.url` change needs a
+  restart. Tests: `db_url` (conftest) creates a schema per test and skips without
+  `DATABASE_URL`; the sink and listener tests use fakes.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
-  adapter, a `claude --version` floor of 2.1.259, a `notifications.slack` check that warns when
-  `SLACK_WEBHOOK_URL` is unset, requires `https`, and with `--slack-probe` posts one test
-  message, and a prompt render against a sample issue), `labels ensure`, `issues list`,
-  `run-once <number> [--show-prompt]` (claims `in-progress`, runs one session, never sets
-  `review`), `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL]
-  startup:` lines and exit 1 when the startup probes fail); `run-once` and `worker` start the
-  Slack sink before and close it after (never for a non-`https` webhook); exit codes 0/1/2
-  (ok / failed / workflow unloadable).
+  adapter, a `claude --version` floor of 2.1.259, a `database.url` check that connects and
+  reports the server and schema versions (behind warns, ahead or unreachable fails), a
+  `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
+  and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
+  `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims `in-progress`,
+  runs one session, never sets `review`), `worker [--workflow PATH]` (the orchestrator until
+  SIGTERM/SIGINT; `[FAIL] startup:` lines and exit 1 when the startup probes fail), `migrate`,
+  `status`, `stats [--days N]` and `refresh` (each `[FAIL] database:` and exit 1 without
+  `DATABASE_URL`); `run-once` and `worker` migrate first when `database.url` is set (a failure
+  is `[FAIL] database:` and exit 1), start the Slack and PostgreSQL sinks before and close them
+  after (Slack never for a non-`https` webhook); `worker` also passes `on_snapshot`/`on_issues`
+  to the orchestrator and runs the refresh listener; exit codes 0/1/2 (ok / failed / workflow
+  unloadable).
   Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
-  `_orchestrator_factory` and `_slack_post`.
+  `_orchestrator_factory`, `_slack_post` and `_database_factory`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).

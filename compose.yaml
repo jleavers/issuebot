@@ -19,6 +19,8 @@ services:
 
   worker:
     build: .
+    # The worker applies pending database migrations when it starts (issuebot migrate is the
+    # manual equivalent) and fails fast if DATABASE_URL is set but the server is unusable.
     command: ["worker"]
     # tini as PID 1 reaps grandchildren that outlive a killed claude.
     init: true

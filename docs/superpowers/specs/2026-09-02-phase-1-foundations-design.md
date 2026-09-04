@@ -255,7 +255,7 @@ JSON-safe mapping with `kind`, `at` (ISO 8601) and every field.
 |---|---|---|
 | `StateChanged` | `state_changed` | `from_label: str \| None`, `to_label: str \| None`, `actor: "issuebot" \| "agent" \| "human"`, `pr_url: str \| None` |
 | `RunStarted` | `run_started` | `run_id: str`, `attempt: int`, `session_id: str \| None`, `workspace_path: str` |
-| `RunEnded` | `run_ended` | `run_id`, `outcome: "succeeded" \| "failed" \| "timed_out" \| "stalled" \| "cancelled"`, `error: str \| None`, `turns: int`, `input_tokens: int`, `output_tokens: int`, `cost_usd: float`, `duration_s: float` |
+| `RunEnded` | `run_ended` | `run_id`, `outcome: "succeeded" \| "failed" \| "timed_out" \| "stalled" \| "cancelled"`, `error: str \| None`, `turns: int`, `input_tokens: int`, `output_tokens: int`, `cost_usd: float`, `duration_s: float`, `log_dir: str \| None = None` (added by Phase 6) |
 | `PrOpened` | `pr_opened` | `pr_number: int`, `pr_url: str` |
 | `Blocked` | `blocked` | `reason: str` |
 | `IssueCompleted` | `issue_completed` | `pr_url: str \| None` |

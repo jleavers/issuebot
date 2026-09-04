@@ -489,6 +489,11 @@ In this order (Symphony §8.1 with the roadmap's additions):
    (once per distinct message) and skip steps 4 to 6.
 4. `fetch_issues_by_states([IN_PROGRESS, REWORK, TODO])`; a `GitHubError`
    logs `candidates_fetch_failed` at WARNING and skips steps 5 and 6.
+   *Amended by Phase 6 (spec §8.1):* with an `on_issues` observer attached the
+   fetch covers `REVIEW` as well (`OBSERVED_STATES`), and every successful
+   fetch the orchestrator makes (this one, reconcile's refresh, the terminal
+   sweep, a fired retry's refresh) is handed to `on_issues`, exceptions logged
+   as `issues_consumer_failed` and swallowed.
 5. Candidates: `dispatchable`, `state in ACTIVE_STATES`, not claimed.
    `sort_candidates`. Every `in_progress` candidate is an orphan (no claim
    in this process): a crash, a restart, or a human who applied the label
@@ -580,7 +585,10 @@ writes its final message; the worker's own between-turn refresh normally
 ends the run inside the grace window, and killing the turn there would cut
 the transcript and lose the turn's cost. A human move to `review` still
 stops the worker within two intervals. Every other move stops it at the
-tick that sees it.
+tick that sees it. *Amended by Phase 6 (spec §8.2):* the grace is one poll
+interval measured on the monotonic clock (`RunningEntry.review_seen_mono`),
+not one tick, so a `NOTIFY`-driven tick cannot cut it short;
+`REVIEW_GRACE_TICKS` is gone.
 
 **Part C**: `terminal_sweep()` (§6.6) on the ticks §6.3 step 1 names.
 
@@ -704,7 +712,9 @@ and publishes `RunEnded`); `asyncio.wait` on the tasks with timeout
 task goes through `handle_worker_exit` (which releases on
 `stop_cause == "shutdown"`); retries are dropped; log `orchestrator_stopped`
 with the counters. Issues stay `in_progress` so the next process resumes
-them from `session.json`.
+them from `session.json`. *Amended by Phase 6 (spec §8.3):* `shutdown()` ends
+with the same `on_snapshot` publish the tick makes, so the stored snapshot of
+a stopped worker shows nothing running.
 
 ### 6.10 `snapshot()`
 
@@ -848,7 +858,7 @@ called directly; `run()` is used by a few loop tests with
     issuebot can take once it is dogfooding.
 13. **`review` gets a one-tick grace** before reconciliation cancels the
     worker; every other move out of `in_progress` cancels at the tick that
-    sees it.
+    sees it. (Phase 6 makes it one poll interval in time; §6.5.)
 14. **Workspaces are removed only after the worker has exited**, whichever
     path decided the issue is terminal.
 15. **The terminal sweep runs on the first tick and every tenth tick**;
