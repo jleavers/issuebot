@@ -129,7 +129,8 @@ def test_issue_document(h: Harness) -> None:
     assert body["running"]["run_id"] == RUN_ID and body["retry"] is None
     (run,) = body["runs"]
     assert (run["run_id"], run["outcome"], run["cost_usd"]) == (RUN_ID, "succeeded", 0.8976)
-    (turn,) = run["turns"]
+    assert run["turns"] == 1  # the run's turn count, a runs column
+    (turn,) = run["captured_turns"]
     assert (turn["turn_number"], turn["model"], turn["num_turns"]) == (1, "claude-opus-5", 19)
     assert turn["url"] == f"/issues/7/runs/{RUN_ID}/turns/1"
     assert "stream" not in turn and "prompt" not in turn

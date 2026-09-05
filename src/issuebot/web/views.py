@@ -299,7 +299,11 @@ def issue_document(
     events: list[EventRow],
     snapshot: SnapshotRow | None,
 ) -> dict[str, Any]:
-    """GET /api/v1/issues/<n>: the row, the snapshot's entries for it, runs with turns, events."""
+    """GET /api/v1/issues/<n>: the row, the snapshot's entries, runs with captured turns, events.
+
+    ``runs[].turns`` stays the run's turn count (a ``runs`` column); the captured turn rows
+    are ``runs[].captured_turns``.
+    """
     running = next(
         (
             entry
@@ -333,7 +337,7 @@ def issue_document(
                     "url": url,
                 }
             )
-        run_documents.append({**row_dict(run), "turns": run_turns})
+        run_documents.append({**row_dict(run), "captured_turns": run_turns})
     return {
         "issue": row_dict(issue),
         "running": running_entry(running) if running is not None else None,
