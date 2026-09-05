@@ -1,8 +1,10 @@
 # issuebot
 
-Bespoke version of https://github.com/openai/symphony using Claude and GitHub.
+Bespoke version of https://github.com/openai/symphony using Claude instead of Codex, GitHub instead of Linear, and with the addition of Slack messaging and a web dashboard.
 
-Contributors and AI agents must follow the rules in [`AGENTS.md`](AGENTS.md).
+## How To Get Started
+
+
 
 ## Development
 
@@ -52,3 +54,5 @@ restart; `validate` warns while the variable is unset.
 
 The design lives in [`docs/superpowers/specs/`](docs/superpowers/specs/); start with
 the phased design, then the per-phase specs and plans.
+
+Contributors and AI agents must follow the rules in [`AGENTS.md`](AGENTS.md).
