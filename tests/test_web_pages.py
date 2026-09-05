@@ -68,6 +68,7 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     assert 'id="closed-chart"' in text and 'id="runs-chart"' in text
     assert 'data-chart-window="30d"' in text and 'data-chart-poll-s="60"' in text
     assert '<meta name="htmx-config"' in text and '"allowEval": false' in text
+    assert '<link rel="icon" href="data:,">' in text
     assert '"code": "503", "swap": true' in text
     for label in GitHubLabels().as_tuple():
         assert label in text
