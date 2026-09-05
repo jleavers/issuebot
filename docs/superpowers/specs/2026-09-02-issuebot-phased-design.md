@@ -247,9 +247,10 @@ PostgreSQL holds history only. Tables:
 | `runs` | One row per worker session: issue, attempt, session id, started/ended, outcome, turns, tokens, cost, error, workspace and log paths. "Agents spun up" counts these |
 | `events` | Append-only: timestamp, issue, run, kind, jsonb payload. Kinds include `state_changed`, `run_started`, `run_ended`, `pr_opened`, `issue_completed`, `notification_sent`. Time series come from `date_trunc` over this table |
 | `runtime_snapshot` | Single row: the worker's in-memory snapshot, rewritten every tick |
+| `run_turns` | One row per captured turn of a run (Phase 7): the capped prompt, stream-json and stderr with a parsed summary; the dashboard's turn page reads it |
 
 Migrations are numbered `.sql` files applied by `issuebot migrate` (also run by the
-compose entrypoint). No ORM: the schema is four tables and raw SQL keeps queries
+compose entrypoint). No ORM: the schema is five tables and raw SQL keeps queries
 explicit and reviewable.
 
 ### 2.8 Dashboard
@@ -259,7 +260,8 @@ for the time series, both vendored into `static/` so the container has no CDN
 dependency. Pages: `/` (hero stats: closed in 1d/7d, agents spun up 1d/7d, running
 now, cost; two charts for the 30-day daily series; Kanban with the five label
 columns; running-agents panel with last event, turn count, tokens, cost),
-`/issues/<n>` (run history, recent events, log links). API: `GET /api/v1/state`,
+`/issues/<n>` (run history, recent events, captured turns), `/issues/<n>/runs/<run_id>/turns/<t>`
+(one turn's transcript, prompt and stderr; Phase 7). API: `GET /api/v1/state`,
 `GET /api/v1/issues/<n>`, `GET /api/v1/stats?window=`, `POST /api/v1/refresh`,
 `GET /healthz`. Shapes follow Symphony §13.7.2 with `claude_totals` in place of
 `codex_totals`.
@@ -617,11 +619,26 @@ write actions on issues from the UI.
 one poll interval, hero stats matching `issuebot stats`, charts rendering, and the
 API returning the Symphony-shaped documents.
 
+Decided 2026-09-04 (Phase 7 spec): the per-issue log viewer moves in from Later; turn logs
+live in the database (`run_turns`, captured by the PostgreSQL sink when it drains
+`run_ended`: the raw files capped, with a parsed summary), so the web process reads
+PostgreSQL only and the logs outlive the workspace; the `Database` facade per request, no
+pool; `issuebot web` migrates at start under the same advisory lock as the worker; the live
+region polls every 10 s, the charts every 60 s, the worker is `stale` after three of its
+poll intervals; `state_counts()` serves `by_state` for the CLI and the API; `POST
+/api/v1/refresh` is throttled to one NOTIFY per 5 s and reports Symphony's `coalesced`;
+`/healthz` is 503 only when the database does not answer; dependencies `fastapi`, `uvicorn`
+and (dev) `httpx2`, vendored htmx 2.0.10 and Chart.js 4.5.1; no `validate` check for
+`server.*`; the compose `web` service holds `DATABASE_URL` only; a CSP without
+`unsafe-inline` or `unsafe-eval`; the database now holds untrusted text, escaped on render.
+Deferred: a connection pool, retention for `run_turns`, a live tail of a running turn,
+Markdown rendering of agent output, a reload of `WORKFLOW.md` in the web process.
+
 ### Later (not scheduled)
 
 Recorded so the phase specs do not accidentally absorb them: GitHub App
 authentication; multiple target repositories per worker; GitHub webhooks instead of
-polling; per-issue log viewer in the dashboard; cost budgets per issue and per day;
+polling; cost budgets per issue and per day;
 SSH or remote workers (Symphony Appendix A); Windows host support for the worker
 itself (the repo's cross-OS rule applies to scripts the agent writes, the service is
 Linux-in-Docker); an issuebot-owned reviewer agent with its own state or label, to be

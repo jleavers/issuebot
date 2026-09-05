@@ -24,8 +24,10 @@ uv run issuebot migrate              # apply pending .sql migrations (worker and
 uv run issuebot status               # the worker's last runtime snapshot, read from the database
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
 uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
+uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL)
 docker compose build                 # image: git, gh, claude, app venv
-docker compose up                    # db (postgres:18) + worker (issuebot worker)
+docker compose up                    # db (postgres:18) + worker (issuebot worker) + web (issuebot web,
+                                     #   http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
 
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
@@ -55,7 +57,13 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
   `.issuebot/runs/<run_id>/`); `run_session` (turns, refresh between turns, `RunResult`,
   publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
-  Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`).
+  Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
+  `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
+  `TurnCapture`s, capped (prompt 256 KiB head; a stream line over 64 KiB becomes an
+  `issuebot_omitted` stub; 2 MiB of head lines plus the last `result` line; stderr 64 KiB tail;
+  result text 4 KiB), with the summary parsed from the init and result lines; it never raises.
+  `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7), kept byte-for-byte
+  (pre-commit excludes it).
 - `issuebot.orchestrator`: one asyncio task owns the schedule. `state.py` (pure): `RunningEntry`,
   `RetryEntry`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
   attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
@@ -88,26 +96,51 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   10 s). A drain timeout cancels the task, but a post already in the worker thread finishes
   its own socket timeout first, so exit can take up to 20 s. Constants, not settings. A
   webhook or allow-list change needs a worker restart.
-- `issuebot.db`: the observability store, imported by `cli` only; imports `config`, `events`,
-  `github` and `log`. `migrations/NNNN_name.sql` applied by `migrate.py` in one transaction
-  under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
-  files is an error). `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session),
-  `describe`/`redact` (the URL's password never reaches a log or a line), `reconnect_delay`
-  (1, 2, 4, 8, 16, then 30 s). `store.py`: `PostgresStore` (`apply_event` appends to `events`
-  and upserts `runs` on `run_started`/`run_ended` or updates `issues` on `state_changed`,
-  `issue_completed`, `issue_cancelled`; `upsert_issues`; `write_snapshot`); every `issues`
-  write is guarded by `seen_at`, so write order never matters. `sink.py`: `PostgresSink`
-  (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots into one
-  pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects with
-  backoff and retries the item in flight; statement failures are dropped and counted;
-  `close()` drains for up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh`
-  on its own connection, callback per NOTIFY, reconnects). `queries.py`: `Queries` over one
-  connection (`closed_count`, `runs_count`, `daily_series`, `issues_by_state`, `runs_for_issue`,
-  `recent_events`, `snapshot`) returning the frozen row types Phase 7 renders. `database.py`:
-  the `Database` facade the CLI goes through (`migrate`, `probe`, `queries`, `store`,
-  `listener`, `notify_refresh`). Constants, not settings; a `database.url` change needs a
-  restart. Tests: `db_url` (conftest) creates a schema per test and skips without
-  `DATABASE_URL`; the sink and listener tests use fakes.
+- `issuebot.db`: the observability store, imported by `cli` and `web`; imports `config`,
+  `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
+  `0002_run_turns`; schema version 2) applied by `migrate.py` in one transaction under an advisory lock
+  (`schema_migrations` bookkeeping; a recorded version newer than the files is an error).
+  `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session), `describe`/`redact`
+  (the URL's password never reaches a log or a line), `reconnect_delay` (1, 2, 4, 8, 16, then
+  30 s). `store.py`: `PostgresStore` (`apply_event(event, turns=())` appends to `events`, upserts
+  `runs` on `run_started`/`run_ended` and inserts the captured turns into `run_turns` in the
+  `run_ended` transaction (idempotent per `(run_id, turn_number)`), or updates `issues` on
+  `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`; `write_snapshot`);
+  every `issues` write is guarded by `seen_at`, so write order never matters. `sink.py`:
+  `PostgresSink` (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots
+  into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
+  with backoff and retries the item in flight; a `run_ended` item's turn files are captured
+  once, in a thread, before its first write attempt (`db_turns_captured`,
+  `db_turns_capture_failed`); statement failures are dropped and counted; `close()` drains for
+  up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
+  callback per NOTIFY, reconnects). `queries.py`: `Queries` over one connection (`closed_count`,
+  `runs_count`, `daily_series`, `issues_by_state` (unknown roles skipped), `state_counts`,
+  `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
+  `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
+  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
+  facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `store`, `listener`,
+  `notify_refresh`); one connection per call, no pool. Constants, not settings; a `database.url`
+  change needs a restart. Tests: `db_url` (conftest) creates a schema per test and skips without
+  `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
+  `FakeDatabase` the CLI and web tests share.
+- `issuebot.web`: the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
+  `log`. `app.py`: `create_app(database, settings, *, clock=, now=)` (FastAPI; pages `/`,
+  `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus `/prompt|stream|stderr` as
+  `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
+  `/api/v1/issues/<n>`, `/api/v1/stats?window=<N>d`, `POST /api/v1/refresh` (NOTIFY, throttled to
+  one per 5 s, Symphony's `coalesced`), `/healthz` (503 only when the database does not answer;
+  `worker` is `ok`, `stale` past three poll intervals, or `none`); `/static` (vendored htmx
+  2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept byte-for-byte); JSON error envelopes
+  under `/api/` and `/healthz`, `error.html` elsewhere; `DatabaseError` is 503; the four
+  security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
+  and template filters (`state_document`, `stats_document`, `issue_document` with
+  `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
+  `worker_status`, `age_text`, `stamp_text`, ...). `transcript.py`: `parse_transcript(stream)`
+  turns the stored stream-json into `Block`s (init, text, thinking, tool_use, tool_result, result,
+  omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
+  `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One
+  connection per request through `Database.queries()`. Constants, not settings; the web reads
+  `WORKFLOW.md` once at start.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
   adapter, a `claude --version` floor of 2.1.259, a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
@@ -116,14 +149,17 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims `in-progress`,
   runs one session, never sets `review`), `worker [--workflow PATH]` (the orchestrator until
   SIGTERM/SIGINT; `[FAIL] startup:` lines and exit 1 when the startup probes fail), `migrate`,
-  `status`, `stats [--days N]` and `refresh` (each `[FAIL] database:` and exit 1 without
-  `DATABASE_URL`); `run-once` and `worker` migrate first when `database.url` is set (a failure
-  is `[FAIL] database:` and exit 1), start the Slack and PostgreSQL sinks before and close them
-  after (Slack never for a non-`https` webhook); `worker` also passes `on_snapshot`/`on_issues`
-  to the orchestrator and runs the refresh listener; exit codes 0/1/2 (ok / failed / workflow
-  unloadable).
+  `status`, `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
+  `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
+  `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is
+  `[FAIL] database:` and exit 1); `run-once` and `worker` start the Slack and PostgreSQL sinks
+  before and close them after (Slack never for a non-`https` webhook); `worker` also passes
+  `on_snapshot`/`on_issues` to the orchestrator and runs the refresh listener; `web` builds
+  `create_app` and serves it with uvicorn (`--port`/`--bind` override `server.*`; uvicorn's
+  lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is uvicorn's error and exit
+  1); exit codes 0/1/2 (ok / failed / workflow unloadable).
   Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
-  `_orchestrator_factory`, `_slack_post` and `_database_factory`.
+  `_orchestrator_factory`, `_slack_post`, `_database_factory` and `_serve`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).

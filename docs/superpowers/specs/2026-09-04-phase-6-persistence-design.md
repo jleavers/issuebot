@@ -39,6 +39,11 @@ or pruning of `events`; no reload hook for `database.url` (a change needs a rest
 for the webhook). None of the Phase 4 or Phase 5 parked follow-ups is adopted; the three
 Phase 4 amendments below are this phase's own needs.
 
+Amended 2026-09-04 (Phase 7): the per-issue log viewer is Phase 7's, backed by a `run_turns`
+table (migration `0002_run_turns`) that the sink fills from a run's turn files when it drains
+`run_ended`; the web process uses this facade one connection per request and no pool was
+added.
+
 Frozen inputs, used as they are: `issuebot.agent` except the one-line `RunEnded.log_dir`
 population in `run_session`, `issuebot.github`, `EventBus`/`EventSink`, `EVENT_KINDS` (no
 kind is added; §4 explains why), `DatabaseSettings` (no field is added; every knob that is
@@ -88,6 +93,10 @@ tests/
 └── test_cli.py                     + the four commands, the validate check, worker and run-once wiring
 ```
 
+Amended (Phase 7): `migrations/0002_run_turns.sql` adds the `run_turns` table (the captured
+turn files, capped, with a parsed summary); the package ships two migrations and the schema
+version is 2.
+
 `issuebot.db` imports `config`, `events`, `github` (models and `role_for`) and `log` only.
 `orchestrator` and `agent` never import it; `cli` wires it. The sink accepts the runtime
 snapshot through a structural type (`at` plus `to_dict()`), so `db` does not import
@@ -100,6 +109,9 @@ snapshot through a structural type (`at` plus `to_dict()`), so `db` does not imp
 One migration, `0001_initial.sql`, creates the four tables of roadmap §2.7. Timestamps are
 `timestamptz`; every connection sets its session time zone to UTC (§7), so `date_trunc`
 and `::date` mean UTC days.
+
+Amended (Phase 7): a second migration, `0002_run_turns.sql`, creates `run_turns` (Phase 7
+spec §3.1), so the schema now has five tables at version 2.
 
 ```sql
 CREATE TABLE issues (
@@ -304,6 +316,11 @@ class Store(Protocol):
 class PostgresStore:
     def __init__(self, url: str, *, labels: GitHubLabels, connect: Connector = connect) -> None: ...
 ```
+
+Amended (Phase 7): `apply_event(event, turns: Sequence[TurnCapture] = ())` also inserts the
+captured turns into `run_turns` in the `run_ended` transaction (`ON CONFLICT (run_id,
+turn_number) DO UPDATE`, so a retried item is idempotent); the sink reads the files once, in a
+thread, before the item's first write attempt.
 
 `PostgresStore` holds one `psycopg.AsyncConnection` (autocommit; §7). Every method maps
 `psycopg.OperationalError` and `psycopg.InterfaceError` to `StoreUnavailableError` and any other
@@ -639,7 +656,9 @@ the same command as `docker compose up -d db`, or set in the dot-env file).
 - No issue body reaches the database. Events carry issue numbers, identifiers, label
   names, GitHub URLs, run ids, paths, and the free-text `reason`/`error` fields that are
   already in the log and the workpad; `issues` carries titles and labels. The dashboard
-  (Phase 7) escapes what it renders.
+  (Phase 7) escapes what it renders. Amended (Phase 7): from Phase 7 the database holds
+  untrusted text in `run_turns` (the rendered prompt embeds the issue body; tool results embed
+  repository content and command output), stored as bound parameters and escaped on render.
 - Migrations are the repository's own SQL, applied under an advisory lock; no SQL is
   built from data (every value is a bound parameter).
 - `psycopg` logs through the standard library and therefore through structlog's
