@@ -16,6 +16,7 @@ import pytest
 
 from issuebot import __version__
 from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
+from issuebot.agent.turnlog import TurnCapture
 from issuebot.cli import (
     StatsView,
     main,
@@ -99,6 +100,7 @@ class FakeStore:
 
     def __init__(self) -> None:
         self.events: list[Event] = []
+        self.turns: list[list[TurnCapture]] = []
         self.issues: list[list[IssueSnapshot]] = []
         self.snapshots: list[dict[str, Any]] = []
         self.closed = False
@@ -109,8 +111,9 @@ class FakeStore:
     async def close(self) -> None:
         self.closed = True
 
-    async def apply_event(self, event: Event) -> None:
+    async def apply_event(self, event: Event, turns: Sequence[TurnCapture] = ()) -> None:
         self.events.append(event)
+        self.turns.append(list(turns))
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
         self.issues.append(list(issues))

@@ -4,12 +4,14 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from issuebot.agent.turnlog import TurnCapture, capture_turns
 from issuebot.db.connection import reconnect_delay
 from issuebot.db.errors import StoreError, StoreUnavailableError
 from issuebot.db.store import IssueSnapshot, Store
-from issuebot.events import Event, IssueEvent
+from issuebot.events import Event, IssueEvent, RunEnded
 from issuebot.github import Issue
 from issuebot.log import get_logger
 
@@ -50,6 +52,8 @@ class PostgresSink:
     ``handle``, ``record_issues`` and ``record_snapshot`` only enqueue; ``start`` creates
     the drain task; ``close`` drains what is queued (bounded) and stops it. A lost
     connection is retried with backoff and the item in flight is retried, not dropped.
+    A ``run_ended`` item has its turn files captured (in a thread, once) before its first
+    write attempt, so the ``run_turns`` rows land in the same transaction as the run's.
     """
 
     name = "postgres"
@@ -61,11 +65,13 @@ class PostgresSink:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] = _utcnow,
         description: str | None = None,
+        capture: Callable[[Path], list[TurnCapture]] = capture_turns,
     ) -> None:
         self._store = store
         self._sleep = sleep
         self._now = now
         self._description = description
+        self._capture_turns = capture
         self._queue: asyncio.Queue[_Item | None] = asyncio.Queue()
         self._issues: dict[int, IssueSnapshot] = {}
         self._issues_queued = False
@@ -194,12 +200,13 @@ class PostgresSink:
         return ("snapshot", at, data)
 
     async def _write(self, work: _Work) -> None:
+        turns = await self._capture(work)
         retries = 0
         while True:
             if not self._connected:
                 await self._ensure_connected()
             try:
-                await self._apply(work)
+                await self._apply(work, turns)
             except StoreUnavailableError as exc:
                 self._connected = False
                 retries += 1
@@ -246,9 +253,34 @@ class PostgresSink:
             )
             return
 
-    async def _apply(self, work: _Work) -> None:
+    async def _capture(self, work: _Work) -> tuple[TurnCapture, ...]:
+        """The turn files of a run_ended item, read once in a thread; () for anything else."""
+        if not isinstance(work, _EventItem) or not isinstance(work.event, RunEnded):
+            return ()
+        event = work.event
+        if not event.log_dir:
+            return ()
+        try:
+            captures = await asyncio.to_thread(self._capture_turns, Path(event.log_dir))
+        except Exception as exc:
+            self._log.warning(
+                "db_turns_capture_failed",
+                run_id=event.run_id,
+                log_dir=event.log_dir,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return ()
+        self._log.info(
+            "db_turns_captured",
+            run_id=event.run_id,
+            turns=len(captures),
+            stream_bytes=sum(capture.stream_bytes for capture in captures),
+        )
+        return tuple(captures)
+
+    async def _apply(self, work: _Work, turns: tuple[TurnCapture, ...]) -> None:
         if isinstance(work, _EventItem):
-            await self._store.apply_event(work.event)
+            await self._store.apply_event(work.event, turns=turns)
         elif work[0] == "issues":
             await self._store.upsert_issues(work[1])
         else:

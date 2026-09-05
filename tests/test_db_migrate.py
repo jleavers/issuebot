@@ -15,18 +15,19 @@ from issuebot.db import (
     schema_version,
 )
 
-TABLES = {"issues", "runs", "events", "runtime_snapshot", "schema_migrations"}
+TABLES = {"issues", "runs", "events", "runtime_snapshot", "run_turns", "schema_migrations"}
 
 
 # --- discovery (no database) -------------------------------------------------------------
 
 
-def test_the_package_ships_the_initial_migration() -> None:
+def test_the_package_ships_the_two_migrations() -> None:
     migrations = discover_migrations()
-    assert [m.label for m in migrations] == ["0001_initial"]
-    assert migrations[0].version == 1
+    assert [m.label for m in migrations] == ["0001_initial", "0002_run_turns"]
+    assert [m.version for m in migrations] == [1, 2]
     assert "CREATE TABLE issues" in migrations[0].sql
     assert "CREATE TABLE runtime_snapshot" in migrations[0].sql
+    assert "CREATE TABLE run_turns" in migrations[1].sql
 
 
 def test_discovery_sorts_by_version_and_reads_the_sql(tmp_path: Path) -> None:
@@ -74,15 +75,15 @@ async def _tables(conn: psycopg.AsyncConnection) -> set[str]:
     return {row[0] for row in await cursor.fetchall()}
 
 
-async def test_migrate_applies_the_initial_migration_once(db_url: str) -> None:
+async def test_migrate_applies_every_migration_once(db_url: str) -> None:
     first = await migrate(db_url)
-    assert (first.applied, first.version) == (("0001_initial",), 1)
+    assert (first.applied, first.version) == (("0001_initial", "0002_run_turns"), 2)
     second = await migrate(db_url)
-    assert (second.applied, second.version) == ((), 1)
+    assert (second.applied, second.version) == ((), 2)
     conn = await connect(db_url)
     try:
         assert await _tables(conn) == TABLES
-        assert await schema_version(conn) == 1
+        assert await schema_version(conn) == 2
     finally:
         await conn.close()
 
@@ -101,7 +102,7 @@ async def test_a_newer_recorded_version_is_refused(db_url: str) -> None:
     try:
         await apply_migrations(conn)
         await conn.execute("INSERT INTO schema_migrations (version, name) VALUES (7, 'future')")
-        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(1\)"):
+        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(2\)"):
             await apply_migrations(conn)
     finally:
         await conn.close()

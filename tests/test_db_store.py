@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, StoreUnavailableError, connect, migrate
 from issuebot.db.store import IssueSnapshot, PostgresStore
@@ -84,6 +85,34 @@ def ended(**overrides: Any) -> RunEnded:
     return RunEnded(**fields)
 
 
+def capture(turn_number: int, **overrides: Any) -> TurnCapture:
+    fields: dict[str, Any] = {
+        "turn_number": turn_number,
+        "model": "claude-opus-5",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 19,
+        "input_tokens": 38,
+        "cache_creation_input_tokens": 23100,
+        "cache_read_input_tokens": 490200,
+        "output_tokens": 8425,
+        "cost_usd": 0.8976,
+        "duration_ms": 201719,
+        "result_text": "Done.",
+        "prompt": "You are working on issue #42.",
+        "prompt_bytes": 29,
+        "stream": '{"type":"result"}\n',
+        "stream_bytes": 18,
+        "stream_lines": 1,
+        "omitted_lines": 0,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "truncated": False,
+    }
+    fields.update(overrides)
+    return TurnCapture(**fields)
+
+
 def moved(**overrides: Any) -> StateChanged:
     fields: dict[str, Any] = {
         "issue_number": 42,
@@ -130,6 +159,55 @@ async def test_run_ended_alone_computes_the_start(store: PostgresStore, db_url: 
     assert row["started_at"] == at(0)
     assert (row["attempt"], row["session_id"], row["workspace_path"]) == (0, None, None)
     assert (row["outcome"], row["error"]) == ("failed", "turn_failed: boom")
+
+
+async def test_run_ended_with_captures_writes_run_turns(store: PostgresStore, db_url: str) -> None:
+    turns = [capture(1), capture(2, subtype=None, num_turns=None, cost_usd=None, truncated=True)]
+    await store.apply_event(ended(), turns=turns)
+    first, second = await rows(db_url, "SELECT * FROM run_turns ORDER BY turn_number")
+    assert (first["run_id"], first["turn_number"], first["model"]) == ("run-1", 1, "claude-opus-5")
+    assert (first["subtype"], first["is_error"], first["num_turns"]) == ("success", False, 19)
+    assert (first["input_tokens"], first["cache_creation_input_tokens"]) == (38, 23100)
+    assert (first["cache_read_input_tokens"], first["output_tokens"]) == (490200, 8425)
+    assert (first["cost_usd"], first["duration_ms"], first["result_text"]) == (
+        0.8976,
+        201719,
+        "Done.",
+    )
+    assert (first["prompt"], first["prompt_bytes"]) == ("You are working on issue #42.", 29)
+    assert (first["stream"], first["stream_bytes"], first["stream_lines"]) == (
+        '{"type":"result"}\n',
+        18,
+        1,
+    )
+    assert (first["omitted_lines"], first["stderr"], first["stderr_bytes"]) == (0, "", 0)
+    assert first["truncated"] is False
+    assert first["captured_at"] is not None
+    assert (second["turn_number"], second["subtype"], second["num_turns"]) == (2, None, None)
+    assert (second["cost_usd"], second["truncated"]) == (None, True)
+
+
+async def test_run_turns_are_idempotent_on_a_retried_event(
+    store: PostgresStore, db_url: str
+) -> None:
+    await store.apply_event(ended(), turns=[capture(1)])
+    await store.apply_event(ended(), turns=[capture(1, result_text="Done again.")])
+    (row,) = await rows(db_url, "SELECT result_text FROM run_turns")
+    assert row["result_text"] == "Done again."
+    assert len(await rows(db_url, "SELECT id FROM events")) == 2
+
+
+async def test_run_ended_without_captures_writes_no_turns(
+    store: PostgresStore, db_url: str
+) -> None:
+    await store.apply_event(ended())
+    assert await rows(db_url, "SELECT * FROM run_turns") == []
+
+
+async def test_captures_are_ignored_for_other_kinds(store: PostgresStore, db_url: str) -> None:
+    await store.apply_event(started(), turns=[capture(1)])
+    assert await rows(db_url, "SELECT * FROM run_turns") == []
+    assert len(await rows(db_url, "SELECT * FROM runs")) == 1
 
 
 async def test_an_empty_workspace_path_is_stored_as_null(store: PostgresStore, db_url: str) -> None:

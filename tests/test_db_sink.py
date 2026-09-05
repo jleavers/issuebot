@@ -3,22 +3,26 @@
 import asyncio
 import io
 import json
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from issuebot.agent.turnlog import TurnCapture, capture_turns
 from issuebot.db import StoreError, StoreUnavailableError
 from issuebot.db import sink as sink_module
 from issuebot.db.sink import PostgresSink
 from issuebot.db.store import IssueSnapshot
-from issuebot.events import Blocked, Event, EventBus, LogSink, StateChanged
+from issuebot.events import Blocked, Event, EventBus, LogSink, RunEnded, StateChanged
 from issuebot.github import Issue
 from issuebot.log import configure_logging
 
 T0 = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 DESCRIPTION = "postgresql://issuebot@db.example/issuebot"
+SAMPLE = Path(__file__).parent / "fixtures" / "runs" / "20260904T202535Z-0964cd"
 
 
 class FakeStore:
@@ -46,9 +50,9 @@ class FakeStore:
         if self.fail_next:
             raise self.fail_next.pop(0)
 
-    async def apply_event(self, event: Event) -> None:
+    async def apply_event(self, event: Event, turns: Sequence[TurnCapture] = ()) -> None:
         await self._gate()
-        self.calls.append(("event", event))
+        self.calls.append(("event", event, tuple(turns)))
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
         await self._gate()
@@ -78,14 +82,14 @@ class Clock:
 
 
 class Harness:
-    def __init__(self) -> None:
+    def __init__(self, capture: Callable[[Path], list[TurnCapture]] = capture_turns) -> None:
         self.store = FakeStore()
         self.sleeps: list[float] = []
         self.clock = Clock()
         self.stream = io.StringIO()
         configure_logging(fmt="json", level="DEBUG", stream=self.stream)  # type: ignore[arg-type]
         self.sink = PostgresSink(
-            self.store, sleep=self.sleep, now=self.clock, description=DESCRIPTION
+            self.store, sleep=self.sleep, now=self.clock, description=DESCRIPTION, capture=capture
         )
 
     async def sleep(self, seconds: float) -> None:
@@ -103,6 +107,22 @@ class Harness:
 
 def blocked(number: int, reason: str = "x") -> Blocked:
     return Blocked(issue_number=number, issue_identifier=f"repo-{number}", reason=reason)
+
+
+def run_ended(log_dir: str | None) -> RunEnded:
+    return RunEnded(
+        issue_number=7,
+        issue_identifier="repo-7",
+        run_id="20260904T202535Z-0964cd",
+        outcome="succeeded",
+        error=None,
+        turns=1,
+        input_tokens=513338,
+        output_tokens=8425,
+        cost_usd=0.8976,
+        duration_s=205.0,
+        log_dir=log_dir,
+    )
 
 
 @pytest.fixture
@@ -335,6 +355,81 @@ async def test_after_close_events_are_dropped_and_records_ignored(
     assert h.sink.dropped == 1
     assert h.logged("db_sink_closed_drop")[0]["issue_number"] == 1
     assert h.sink._queue.qsize() == 0
+
+
+# --- turn capture -----------------------------------------------------------------------------
+
+
+async def test_run_ended_captures_the_turn_files(h: Harness, tmp_path: Path) -> None:
+    shutil.copytree(SAMPLE, tmp_path / "run")
+    h.sink.handle(run_ended(str(tmp_path / "run")))
+    h.sink.start()
+    await h.sink.close()
+    (call,) = h.store.calls
+    assert call[0] == "event" and call[1].kind == "run_ended"
+    (turn,) = call[2]
+    assert (turn.turn_number, turn.model, turn.stream_lines) == (1, "claude-opus-5", 95)
+    captured = h.logged("db_turns_captured")[0]
+    assert (captured["run_id"], captured["turns"]) == ("20260904T202535Z-0964cd", 1)
+    assert captured["stream_bytes"] == 115429
+
+
+async def test_a_missing_log_dir_gives_no_captures(h: Harness, tmp_path: Path) -> None:
+    h.sink.handle(run_ended(str(tmp_path / "gone")))
+    h.sink.start()
+    await h.sink.close()
+    assert h.store.calls[0][2] == ()
+    assert h.logged("db_turns_captured")[0]["turns"] == 0
+
+
+async def test_run_ended_without_a_log_dir_never_captures() -> None:
+    calls: list[Path] = []
+
+    def capture(log_dir: Path) -> list[TurnCapture]:
+        calls.append(log_dir)
+        return []
+
+    h = Harness(capture)
+    h.sink.handle(run_ended(None))
+    h.sink.handle(blocked(1))
+    h.sink.start()
+    await h.sink.close()
+    assert calls == []
+    assert [call[1].kind for call in h.store.calls] == ["run_ended", "blocked"]
+    assert h.logged("db_turns_captured") == []
+
+
+async def test_a_capture_failure_is_logged_and_the_event_still_written() -> None:
+    def capture(log_dir: Path) -> list[TurnCapture]:
+        raise RuntimeError("disk on fire")
+
+    h = Harness(capture)
+    h.sink.handle(run_ended("/workspaces/repo-7/.issuebot/runs/x"))
+    h.sink.start()
+    await h.sink.close()
+    assert h.store.calls[0][2] == ()
+    assert (h.sink.written, h.sink.failed) == (1, 0)
+    failed = h.logged("db_turns_capture_failed")[0]
+    assert failed["log_dir"] == "/workspaces/repo-7/.issuebot/runs/x"
+    assert failed["error"] == "RuntimeError: disk on fire"
+
+
+async def test_the_capture_runs_once_even_when_the_write_is_retried(tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    def capture(log_dir: Path) -> list[TurnCapture]:
+        calls.append(log_dir)
+        return capture_turns(log_dir)
+
+    shutil.copytree(SAMPLE, tmp_path / "run")
+    h = Harness(capture)
+    h.store.fail_next = [StoreUnavailableError("server closed the connection")]
+    h.sink.handle(run_ended(str(tmp_path / "run")))
+    h.sink.start()
+    await h.sink.close()
+    assert calls == [tmp_path / "run"]
+    (call,) = h.store.calls
+    assert len(call[2]) == 1 and h.sink.reconnects == 1
 
 
 async def test_a_bare_event_has_no_issue_number(h: Harness) -> None:
