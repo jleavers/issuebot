@@ -1,6 +1,6 @@
 """The reads: view models (Phase 7's) and a Queries object bound to one connection."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -10,6 +10,7 @@ from psycopg.rows import dict_row
 from issuebot.github import StateLabel
 
 COMPLETE_LIMIT = 50
+MAX_WINDOW_DAYS = 365
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -76,6 +77,44 @@ class SnapshotRow:
     data: dict[str, Any]
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TurnSummaryRow:
+    """Every ``run_turns`` column except the three texts (prompt, stream, stderr)."""
+
+    run_id: str
+    turn_number: int
+    captured_at: datetime
+    model: str | None
+    subtype: str | None
+    is_error: bool | None
+    num_turns: int | None
+    input_tokens: int | None
+    cache_creation_input_tokens: int | None
+    cache_read_input_tokens: int | None
+    output_tokens: int | None
+    cost_usd: float | None
+    duration_ms: int | None
+    result_text: str | None
+    prompt_bytes: int
+    stream_bytes: int
+    stream_lines: int
+    omitted_lines: int
+    stderr_bytes: int
+    truncated: bool
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TurnRow(TurnSummaryRow):
+    """The whole ``run_turns`` row."""
+
+    prompt: str
+    stream: str
+    stderr: str
+
+
+SUMMARY_COLUMNS = ", ".join(f"t.{f.name}" for f in fields(TurnSummaryRow))
+
+
 CLOSED_COUNT = """
 SELECT count(*) AS n FROM issues
 WHERE state = 'complete' AND closed_at >= now() - %(window)s
@@ -118,6 +157,26 @@ RECENT_EVENTS = "SELECT * FROM events ORDER BY id DESC LIMIT %(limit)s"
 
 SNAPSHOT = "SELECT at, written_at, data FROM runtime_snapshot WHERE id"
 
+ISSUE = "SELECT * FROM issues WHERE number = %(number)s"
+
+EVENTS_FOR_ISSUE = """
+SELECT * FROM events WHERE issue_number = %(number)s ORDER BY id DESC LIMIT %(limit)s
+"""
+
+TURN_SUMMARIES_FOR_ISSUE = f"""
+SELECT {SUMMARY_COLUMNS} FROM run_turns t JOIN runs r ON r.run_id = t.run_id
+WHERE r.issue_number = %(number)s
+ORDER BY r.started_at DESC, r.run_id DESC, t.turn_number
+"""
+
+TURN = "SELECT * FROM run_turns WHERE run_id = %(run_id)s AND turn_number = %(turn_number)s"
+
+STATE_COUNTS = """
+SELECT state, count(*) AS n FROM issues
+WHERE state IS NOT NULL AND (github_state = 'open' OR state = 'complete')
+GROUP BY state
+"""
+
 
 class Queries:
     """Read-only queries over one connection; every method is one round trip or two."""
@@ -142,10 +201,37 @@ class Queries:
         """Open issues with a state, by StateLabel value, plus the latest complete ones."""
         groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
         for row in await self._rows(OPEN_ISSUES):
-            groups.setdefault(row["state"], []).append(IssueRow(**row))
+            if row["state"] in groups:  # a role this issuebot does not know is on no column
+                groups[row["state"]].append(IssueRow(**row))
         for row in await self._rows(COMPLETE_ISSUES, {"limit": COMPLETE_LIMIT}):
             groups[StateLabel.COMPLETE.value].append(IssueRow(**row))
         return groups
+
+    async def state_counts(self) -> dict[str, int]:
+        """Issues per StateLabel value over the Kanban's predicate; every role key present."""
+        counts = {role.value: 0 for role in StateLabel}
+        for row in await self._rows(STATE_COUNTS):
+            if row["state"] in counts:
+                counts[row["state"]] = int(row["n"])
+        return counts
+
+    async def issue(self, number: int) -> IssueRow | None:
+        rows = await self._rows(ISSUE, {"number": number})
+        return IssueRow(**rows[0]) if rows else None
+
+    async def events_for_issue(self, number: int, limit: int) -> list[EventRow]:
+        """Newest first."""
+        rows = await self._rows(EVENTS_FOR_ISSUE, {"number": number, "limit": limit})
+        return [EventRow(**row) for row in rows]
+
+    async def turn_summaries_for_issue(self, number: int) -> list[TurnSummaryRow]:
+        """Captured turns of the issue's runs: newest run first (runs.started_at), then turn."""
+        rows = await self._rows(TURN_SUMMARIES_FOR_ISSUE, {"number": number})
+        return [TurnSummaryRow(**row) for row in rows]
+
+    async def turn(self, run_id: str, turn_number: int) -> TurnRow | None:
+        rows = await self._rows(TURN, {"run_id": run_id, "turn_number": turn_number})
+        return TurnRow(**rows[0]) if rows else None
 
     async def runs_for_issue(self, number: int) -> list[RunRow]:
         """Newest first."""

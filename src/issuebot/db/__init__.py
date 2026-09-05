@@ -30,12 +30,15 @@ from issuebot.db.migrate import (
 )
 from issuebot.db.queries import (
     COMPLETE_LIMIT,
+    MAX_WINDOW_DAYS,
     DailyPoint,
     EventRow,
     IssueRow,
     Queries,
     RunRow,
     SnapshotRow,
+    TurnRow,
+    TurnSummaryRow,
 )
 from issuebot.db.sink import DRAIN_TIMEOUT_S, QUEUE_LIMIT, PostgresSink, SnapshotLike
 from issuebot.db.store import IssueSnapshot, PostgresStore, Store
@@ -46,6 +49,7 @@ __all__ = [
     "COMPLETE_LIMIT",
     "CONNECT_TIMEOUT_S",
     "DRAIN_TIMEOUT_S",
+    "MAX_WINDOW_DAYS",
     "MIGRATIONS_ROOT",
     "POSTGRES_SCHEMES",
     "QUEUE_LIMIT",
@@ -73,6 +77,8 @@ __all__ = [
     "Store",
     "StoreError",
     "StoreUnavailableError",
+    "TurnRow",
+    "TurnSummaryRow",
     "apply_migrations",
     "classify",
     "connect",

@@ -6,10 +6,19 @@ from typing import Any
 
 import pytest
 
+from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, connect, migrate
 from issuebot.db.database import Database
-from issuebot.db.queries import COMPLETE_LIMIT, DailyPoint, EventRow, IssueRow, RunRow
+from issuebot.db.queries import (
+    COMPLETE_LIMIT,
+    DailyPoint,
+    EventRow,
+    IssueRow,
+    RunRow,
+    TurnRow,
+    TurnSummaryRow,
+)
 from issuebot.db.store import IssueSnapshot, PostgresStore
 from issuebot.events import Blocked, RunEnded, RunStarted
 from issuebot.github import Issue, StateLabel
@@ -92,6 +101,80 @@ async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator
     )
     await store.close()
     yield Database(db_url)
+
+
+def capture(turn_number: int, **overrides: Any) -> TurnCapture:
+    fields: dict[str, Any] = {
+        "turn_number": turn_number,
+        "model": "claude-opus-5",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 19,
+        "input_tokens": 38,
+        "cache_creation_input_tokens": 23100,
+        "cache_read_input_tokens": 490200,
+        "output_tokens": 8425,
+        "cost_usd": 0.8976,
+        "duration_ms": 201719,
+        "result_text": "Done.",
+        "prompt": "You are working on issue #2.",
+        "prompt_bytes": 28,
+        "stream": '{"type":"result"}\n',
+        "stream_bytes": 18,
+        "stream_lines": 1,
+        "omitted_lines": 0,
+        "stderr": "warning: slow\n",
+        "stderr_bytes": 14,
+        "truncated": False,
+    }
+    fields.update(overrides)
+    return TurnCapture(**fields)
+
+
+def run_ended(run_id: str, number: int, at: datetime, **overrides: Any) -> RunEnded:
+    fields: dict[str, Any] = {
+        "issue_number": number,
+        "issue_identifier": f"repo-{number}",
+        "run_id": run_id,
+        "outcome": "succeeded",
+        "error": None,
+        "turns": 1,
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "cost_usd": 0.1,
+        "duration_s": 30.0,
+        "at": at,
+    }
+    fields.update(overrides)
+    return RunEnded(**fields)
+
+
+@pytest.fixture
+async def with_turns(seeded: Database, db_url: str) -> Database:
+    """Two captured turns on r2 and one on r0, an older finished run of the same issue."""
+    store = PostgresStore(db_url, labels=GitHubLabels())
+    await store.connect()
+    await store.apply_event(
+        run_ended("r2", 2, NOW - 2 * DAY + timedelta(seconds=30), outcome="failed"),
+        turns=[capture(1), capture(2, subtype=None, num_turns=None, truncated=True)],
+    )
+    await store.apply_event(
+        RunStarted(
+            issue_number=2,
+            issue_identifier="repo-2",
+            run_id="r0",
+            attempt=1,
+            session_id="s0",
+            workspace_path="/w",
+            at=NOW - 3 * DAY,
+        )
+    )
+    await store.apply_event(
+        run_ended("r0", 2, NOW - 3 * DAY + timedelta(seconds=30)),
+        turns=[capture(1, model="claude-sonnet-5")],
+    )
+    await store.close()
+    return seeded
 
 
 async def test_counts_by_window(seeded: Database) -> None:
@@ -204,6 +287,98 @@ async def test_snapshot_is_none_until_written(seeded: Database, db_url: str) -> 
     assert row is not None
     assert (row.at, row.data) == (NOW, {"tick_count": 3})
     assert row.written_at >= NOW
+
+
+async def test_issue_by_number(seeded: Database) -> None:
+    async with seeded.queries() as q:
+        row = await q.issue(3)
+        assert await q.issue(99) is None
+    assert isinstance(row, IssueRow)
+    assert (row.number, row.identifier, row.state) == (3, "repo-3", "review")
+
+
+async def test_events_for_issue_newest_first_and_limited(seeded: Database) -> None:
+    async with seeded.queries() as q:
+        events = await q.events_for_issue(2, 10)
+        two = await q.events_for_issue(2, 2)
+        assert await q.events_for_issue(99, 10) == []
+    assert [event.kind for event in events] == [
+        "blocked",
+        "run_ended",
+        "run_started",
+        "run_started",
+    ]
+    assert [event.run_id for event in events] == [None, "r2", "r2", "r1"]
+    assert [event.kind for event in two] == ["blocked", "run_ended"]
+    assert all(event.issue_number == 2 for event in events)
+
+
+async def test_turn_summaries_for_issue_newest_run_first(with_turns: Database) -> None:
+    async with with_turns.queries() as q:
+        turns = await q.turn_summaries_for_issue(2)
+        assert await q.turn_summaries_for_issue(99) == []
+    assert [(turn.run_id, turn.turn_number) for turn in turns] == [("r2", 1), ("r2", 2), ("r0", 1)]
+    assert all(isinstance(turn, TurnSummaryRow) for turn in turns)
+    assert not any(isinstance(turn, TurnRow) for turn in turns)
+    first = turns[0]
+    assert (first.model, first.subtype, first.num_turns, first.truncated) == (
+        "claude-opus-5",
+        "success",
+        19,
+        False,
+    )
+    assert (first.cost_usd, first.prompt_bytes, first.stream_bytes, first.stderr_bytes) == (
+        0.8976,
+        28,
+        18,
+        14,
+    )
+    assert (turns[1].subtype, turns[1].num_turns, turns[1].truncated) == (None, None, True)
+    assert turns[2].model == "claude-sonnet-5"
+    assert not hasattr(first, "stream")
+
+
+async def test_turn_returns_the_whole_row_or_none(with_turns: Database) -> None:
+    async with with_turns.queries() as q:
+        turn = await q.turn("r2", 2)
+        assert await q.turn("r2", 9) is None
+        assert await q.turn("nope", 1) is None
+    assert isinstance(turn, TurnRow)
+    assert (turn.run_id, turn.turn_number, turn.subtype) == ("r2", 2, None)
+    assert (turn.prompt, turn.stream, turn.stderr) == (
+        "You are working on issue #2.",
+        '{"type":"result"}\n',
+        "warning: slow\n",
+    )
+    assert turn.captured_at is not None
+
+
+async def test_state_counts_follow_the_kanban_predicate(seeded: Database) -> None:
+    async with seeded.queries() as q:
+        counts = await q.state_counts()
+    assert counts == {"todo": 2, "in_progress": 1, "review": 1, "rework": 0, "complete": 3}
+    assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
+
+
+async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: str) -> None:
+    conn = await connect(db_url)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO issues (number, identifier, title, state, state_label, github_state, url,
+                                created_at, updated_at, seen_at)
+            VALUES (77, 'repo-77', 'Mystery', 'mystery', 'issuebot/mystery', 'open',
+                    'https://github.com/example/repo/issues/77', now(), now(), now())
+            """
+        )
+    finally:
+        await conn.close()
+    async with seeded.queries() as q:
+        groups = await q.issues_by_state()
+        counts = await q.state_counts()
+    assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
+    assert 77 not in {row.number for rows in groups.values() for row in rows}
+    assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
 
 
 async def test_queries_on_an_empty_schema_report_a_database_error(db_url: str) -> None:
