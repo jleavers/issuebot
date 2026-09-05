@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}#{{ issue.number }} run {{ run.run_id }} turn {{ turn.turn_number }}{% endblock %}
+{% block content %}
+<section class="panel issue-head">
+  <h1><a href="/issues/{{ issue.number }}">#{{ issue.number }} {{ issue.title }}</a> <span class="muted">/ run <span class="mono">{{ run.run_id }}</span> / turn {{ turn.turn_number }} of {{ run.turns }}</span></h1>
+  <dl>
+    <dt>model</dt><dd>{{ turn.model or "-" }}</dd>
+    <dt>result</dt><dd>{{ turn.subtype or "no result line (the turn ended without one)" }}{% if turn.is_error %} (error){% endif %}</dd>
+    <dt>agent iterations</dt><dd>{{ turn.num_turns if turn.num_turns is not none else "?" }}</dd>
+    <dt>tokens</dt><dd>{{ (turn.input_tokens or 0)|thousands }} in, {{ (turn.cache_creation_input_tokens or 0)|thousands }} cache write, {{ (turn.cache_read_input_tokens or 0)|thousands }} cache read, {{ (turn.output_tokens or 0)|thousands }} out</dd>
+    <dt>cost</dt><dd>{{ (turn.cost_usd or 0)|money }}</dd>
+    <dt>duration</dt><dd>{{ turn.duration_ms|duration }}</dd>
+    <dt>captured</dt><dd>{{ turn.captured_at|stamp }}</dd>
+    <dt>stream</dt><dd>{{ turn.stream_lines }} lines, {{ turn.stream_bytes|thousands }} bytes{% if turn.truncated %}; <strong>truncated</strong> to the stored head (plus the result line){% endif %}{% if turn.omitted_lines %}; {{ turn.omitted_lines }} oversized line{{ "s" if turn.omitted_lines != 1 }} replaced by a stub{% endif %}</dd>
+  </dl>
+  <p class="raw-links">raw: <a href="{{ raw_url }}/prompt">prompt</a> <a href="{{ raw_url }}/stream">stream</a> <a href="{{ raw_url }}/stderr">stderr</a></p>
+</section>
+<section class="transcript">
+  <h2>Transcript</h2>
+  {% for block in transcript.blocks %}
+  {% if block.collapsed %}
+  <details class="block {{ block.kind }}"><summary>{{ block.title }}{% if block.cut %} (showing {{ block.text|length|thousands }} of {{ (block.text|length + block.cut)|thousands }} characters){% endif %}</summary><pre>{{ block.text }}</pre></details>
+  {% else %}
+  <div class="block {{ block.kind }}"><div class="block-title">{{ block.title }}{% if block.cut %} (showing {{ block.text|length|thousands }} of {{ (block.text|length + block.cut)|thousands }} characters){% endif %}</div><pre>{{ block.text }}</pre></div>
+  {% endif %}
+  {% endfor %}
+  {% if not transcript.blocks %}<p class="muted">the stored stream is empty</p>{% endif %}
+  {% if transcript.hidden %}<p class="muted">{{ transcript.hidden }} status message{{ "s" if transcript.hidden != 1 }} hidden</p>{% endif %}
+</section>
+<section>
+  <details class="file"><summary>prompt ({{ turn.prompt_bytes|thousands }} bytes{% if turn.prompt|length < turn.prompt_bytes %}, showing the first {{ turn.prompt|length|thousands }} characters{% endif %})</summary><pre>{{ turn.prompt }}</pre></details>
+  <details class="file"><summary>stderr ({{ turn.stderr_bytes|thousands }} bytes{% if turn.stderr|length < turn.stderr_bytes %}, showing the tail{% endif %})</summary><pre>{{ turn.stderr or "(empty)" }}</pre></details>
+</section>
+{% endblock %}

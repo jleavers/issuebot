@@ -1,0 +1,86 @@
+<div id="live" hx-get="/partials/dashboard" hx-trigger="every {{ live_poll_s }}s" hx-swap="outerHTML">
+{% if live.unavailable %}
+<div class="banner error">database unavailable: {{ live.unavailable }}</div>
+{% else %}
+{% set worker = live.worker %}
+<section class="panel worker {{ worker.status }}">
+  <span class="badge">worker {{ worker.status }}</span>
+  {% if worker.status == "none" %}
+  <span>no report yet (has the worker run against this database?)</span>
+  {% else %}
+  <span>reported {{ worker.written_at|age(now) }}</span>
+  <span class="muted">tick {{ worker.tick_count }}, poll {{ worker.poll_interval_ms }} ms, {{ worker.max_concurrent_agents }} slots</span>
+  {% if worker.config_valid %}
+  <span class="muted">config valid</span>
+  {% else %}
+  <span class="config-error">config error: {{ worker.config_error }}</span>
+  {% endif %}
+  {% endif %}
+</section>
+<section class="hero">
+  <div class="tile"><div class="label">closed, 1 day</div><div class="value">{{ live.hero.closed_1d }}</div></div>
+  <div class="tile"><div class="label">closed, 7 days</div><div class="value">{{ live.hero.closed_7d }}</div></div>
+  <div class="tile"><div class="label">agents run, 1 day</div><div class="value">{{ live.hero.runs_1d }}</div></div>
+  <div class="tile"><div class="label">agents run, 7 days</div><div class="value">{{ live.hero.runs_7d }}</div></div>
+  <div class="tile"><div class="label">running now</div><div class="value">{{ live.hero.running }}</div></div>
+  <div class="tile"><div class="label">retrying</div><div class="value">{{ live.hero.retrying }}</div></div>
+  <div class="tile"><div class="label">cost since start</div><div class="value">{{ live.hero.cost_usd|money }}</div></div>
+  <div class="tile"><div class="label">tokens since start</div><div class="value">{{ live.hero.total_tokens|thousands }}</div></div>
+</section>
+<section class="panel running">
+  <h2>Running</h2>
+  {% if live.running %}
+  <table>
+    <tr><th>issue</th><th>attempt</th><th class="num">turns</th><th>last event</th><th>last activity</th><th>started</th><th>stop</th></tr>
+    {% for entry in live.running %}
+    <tr>
+      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title }}{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
+      <td>{{ entry.attempt }}</td>
+      <td class="num">{{ entry.turn_count }}</td>
+      <td>{{ entry.last_event or "-" }}</td>
+      <td>{{ entry.last_event_at|age(now) }}</td>
+      <td>{{ entry.started_at|age(now) }}</td>
+      <td>{{ entry.stop_cause or "-" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">no agent is running</p>
+  {% endif %}
+</section>
+{% if live.retrying %}
+<section class="panel retrying">
+  <h2>Retrying</h2>
+  <table>
+    <tr><th>issue</th><th>kind</th><th>attempt</th><th>due</th><th>error</th></tr>
+    {% for entry in live.retrying %}
+    <tr>
+      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.issue_identifier }}</td>
+      <td>{{ entry.kind }}</td>
+      <td>{{ entry.attempt }}</td>
+      <td>{{ entry.due_at|stamp }}</td>
+      <td>{{ entry.error or "-" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+<section class="kanban">
+  {% for column in live.columns %}
+  <div class="column {{ column.role }}">
+    <h3><span>{{ column.label }}</span><span class="count">{{ column.rows|length }}</span></h3>
+    {% for row in column.rows %}
+    <div class="card">
+      <a class="title" href="/issues/{{ row.number }}"><span class="number">#{{ row.number }}</span> {{ row.title }}</a>
+      <div class="meta">
+        <span>{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a href="{{ pr }}">PR #{{ row.pr_number }}</a>{% else %}PR #{{ row.pr_number }}{% endif %} {{ row.pr_state }}{% endif %}</span>
+        <span>{{ row.updated_at|age(now) }}</span>
+      </div>
+    </div>
+    {% endfor %}
+    {% if column.capped %}<div class="capped">{{ column.rows|length }} most recent</div>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+</div>

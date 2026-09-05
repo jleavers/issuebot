@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}issuebot: {{ repo }}{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <h1>{{ repo }}</h1>
+  <button class="poll" type="button" hx-post="/api/v1/refresh" hx-swap="none">Poll now</button>
+  <span id="refresh-status"></span>
+</div>
+{% include "partials/dashboard.html" %}
+<section class="charts">
+  <div class="chart">
+    <h2>Issues closed per day ({{ chart_days }} days)</h2>
+    <canvas id="closed-chart" height="200"></canvas>
+  </div>
+  <div class="chart">
+    <h2>Agent runs per day ({{ chart_days }} days)</h2>
+    <canvas id="runs-chart" height="200"></canvas>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/chart.umd.js"></script>
+<script src="/static/app.js" data-chart-window="{{ chart_days }}d" data-chart-poll-s="{{ chart_poll_s }}"></script>
+{% endblock %}

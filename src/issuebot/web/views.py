@@ -2,10 +2,12 @@
 
 import re
 from dataclasses import fields
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
+from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
+    COMPLETE_LIMIT,
     MAX_WINDOW_DAYS,
     DailyPoint,
     EventRow,
@@ -14,6 +16,7 @@ from issuebot.db.queries import (
     SnapshotRow,
     TurnSummaryRow,
 )
+from issuebot.github import StateLabel
 
 LIVE_POLL_S = 10
 CHART_POLL_S = 60
@@ -85,6 +88,117 @@ def turn_url(number: int, run_id: str, turn_number: int) -> str:
 
 def turn_label(run_id: str, turn_number: int) -> str:
     return f"run {run_id} turn {turn_number}"
+
+
+# --- template filters -------------------------------------------------------------------------
+
+
+def age_text(value: object, now: datetime) -> str:
+    """``12 s ago``, ``3 min ago``, ``2 h ago``, ``4 d ago``; ``-`` for None; other text as is."""
+    moment = _datetime(value)
+    if moment is None:
+        return "-" if value is None else str(value)
+    seconds = max(int((now - moment).total_seconds()), 0)
+    if seconds < 60:
+        return f"{seconds} s ago"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} d ago"
+
+
+def stamp_text(value: object) -> str:
+    """A second-precision UTC stamp for a datetime or an ISO 8601 string; ``-`` for None."""
+    moment = _datetime(value)
+    if moment is None:
+        return "-" if value is None else str(value)
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def duration_text(value: object) -> str:
+    """Milliseconds as ``3m21s``; ``-`` for None."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return "-"
+    total = int(value) // 1000
+    return f"{total // 60}m{total % 60:02d}s"
+
+
+def money(value: object) -> str:
+    return f"${_float(value):.2f}"
+
+
+def thousands(value: object) -> str:
+    return f"{_int(value):,}"
+
+
+def _datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str):
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+# --- the live region --------------------------------------------------------------------------
+
+
+def dashboard_context(
+    row: SnapshotRow | None,
+    groups: dict[str, list[IssueRow]],
+    *,
+    closed_1d: int,
+    closed_7d: int,
+    runs_1d: int,
+    runs_7d: int,
+    now: datetime,
+    labels: GitHubLabels,
+) -> dict[str, Any]:
+    """What partials/dashboard.html renders: the worker line, hero stats, panels, columns."""
+    running = [running_entry(entry) for entry in _entries(row, "running")]
+    retrying = [retry_entry(entry) for entry in _entries(row, "retrying")]
+    data = row.data if row is not None else {}
+    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    worker: dict[str, Any] = {"status": worker_status(row, now)}
+    if row is not None:
+        worker.update(
+            written_at=iso(row.written_at),
+            tick_count=data.get("tick_count"),
+            poll_interval_ms=data.get("poll_interval_ms"),
+            max_concurrent_agents=data.get("max_concurrent_agents"),
+            config_valid=data.get("config_valid"),
+            config_error=data.get("config_error"),
+        )
+    names = labels.model_dump()
+    columns = []
+    for role in StateLabel:
+        rows = groups.get(role.value, [])
+        capped = role is StateLabel.COMPLETE and len(rows) >= COMPLETE_LIMIT
+        columns.append(
+            {"role": role.value, "label": names[role.value], "rows": rows, "capped": capped}
+        )
+    return {
+        "unavailable": None,
+        "worker": worker,
+        "hero": {
+            "closed_1d": closed_1d,
+            "closed_7d": closed_7d,
+            "runs_1d": runs_1d,
+            "runs_7d": runs_7d,
+            "running": len(running),
+            "retrying": len(retrying),
+            "cost_usd": _float(totals.get("cost_usd")),
+            "total_tokens": _int(totals.get("total_tokens")),
+        },
+        "running": running,
+        "retrying": retrying,
+        "columns": columns,
+    }
 
 
 # --- the API documents ----------------------------------------------------------------------

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}#{{ issue.number }} {{ issue.title }}{% endblock %}
+{% block content %}
+<section class="panel issue-head">
+  <h1><span class="muted">#{{ issue.number }}</span> {{ issue.title }} <span class="state {{ issue.state or 'unlabelled' }}">{{ issue.state_label or "unlabelled" }}</span></h1>
+  <dl>
+    <dt>identifier</dt><dd>{{ issue.identifier }}</dd>
+    <dt>GitHub</dt><dd>{% set url = issue.url|href %}{% if url %}<a href="{{ url }}">{{ url }}</a>{% else %}{{ issue.github_state }}{% endif %} ({{ issue.github_state }})</dd>
+    <dt>pull request</dt><dd>{% if issue.pr_number %}{% set pr = issue.pr_url|href %}{% if pr %}<a href="{{ pr }}">#{{ issue.pr_number }}</a>{% else %}#{{ issue.pr_number }}{% endif %} {{ issue.pr_state }}{% if issue.pr_merged_at %}, merged {{ issue.pr_merged_at|stamp }}{% endif %}{% else %}none{% endif %}</dd>
+    <dt>labels</dt><dd>{{ issue.labels|join(", ") or "none" }}</dd>
+    <dt>created</dt><dd>{{ issue.created_at|stamp }}</dd>
+    <dt>updated</dt><dd>{{ issue.updated_at|stamp }} ({{ issue.updated_at|age(now) }})</dd>
+    {% if issue.closed_at %}<dt>closed</dt><dd>{{ issue.closed_at|stamp }}</dd>{% endif %}
+    <dt>last seen by the worker</dt><dd>{{ issue.seen_at|stamp }}</dd>
+  </dl>
+</section>
+{% if running %}
+<section class="panel">
+  <h2>Running now</h2>
+  <p>run <span class="mono">{{ running.run_id }}</span>, attempt {{ running.attempt }}, turn {{ running.turn_count }}, last event {{ running.last_event or "-" }} {{ running.last_event_at|age(now) }}, started {{ running.started_at|age(now) }}{% if running.stop_cause %}, stopping: {{ running.stop_cause }}{% endif %}</p>
+</section>
+{% endif %}
+{% if retry %}
+<section class="panel">
+  <h2>Retry scheduled</h2>
+  <p>{{ retry.kind }} retry, attempt {{ retry.attempt }}, due {{ retry.due_at|stamp }}{% if retry.error %}: {{ retry.error }}{% endif %}</p>
+</section>
+{% endif %}
+<section class="panel">
+  <h2>Runs</h2>
+  {% if runs %}
+  <table>
+    <tr><th>run</th><th>attempt</th><th>started</th><th>ended</th><th>outcome</th><th class="num">turns</th><th class="num">tokens in</th><th class="num">tokens out</th><th class="num">cost</th><th>error</th><th>log dir</th></tr>
+    {% for run in runs %}
+    <tr>
+      <td class="mono">{{ run.run_id }}</td>
+      <td>{{ run.attempt }}</td>
+      <td>{{ run.started_at|stamp }}</td>
+      <td>{{ run.ended_at|stamp }}</td>
+      <td class="outcome {{ run.outcome or 'running' }}">{{ run.outcome or "running" }}</td>
+      <td class="num">{{ run.turns }}</td>
+      <td class="num">{{ run.input_tokens|thousands }}</td>
+      <td class="num">{{ run.output_tokens|thousands }}</td>
+      <td class="num">{{ run.cost_usd|money }}</td>
+      <td>{{ run.error or "-" }}</td>
+      <td class="mono">{{ run.log_dir or "-" }}</td>
+    </tr>
+    {% set turns = turns_by_run.get(run.run_id, []) %}
+    {% for turn in turns %}
+    <tr class="turn">
+      <td class="muted">turn {{ turn.turn_number }}</td>
+      <td colspan="3">{{ turn.model or "-" }}, {{ turn.num_turns if turn.num_turns is not none else "?" }} agent iterations, {{ turn.duration_ms|duration }}</td>
+      <td>{{ turn.subtype or "no result" }}</td>
+      <td class="num"></td>
+      <td class="num">{{ ((turn.input_tokens or 0) + (turn.cache_creation_input_tokens or 0) + (turn.cache_read_input_tokens or 0))|thousands }}</td>
+      <td class="num">{{ (turn.output_tokens or 0)|thousands }}</td>
+      <td class="num">{{ (turn.cost_usd or 0)|money }}</td>
+      <td><a href="/issues/{{ issue.number }}/runs/{{ run.run_id }}/turns/{{ turn.turn_number }}">transcript</a>{% if turn.truncated or turn.omitted_lines %} <span class="muted">(capped)</span>{% endif %}</td>
+      <td></td>
+    </tr>
+    {% endfor %}
+    {% if not turns and run.ended_at %}
+    <tr class="turn"><td colspan="11" class="not-captured">turn logs were not captured{% if run.log_dir %} (they lived under {{ run.log_dir }}){% endif %}</td></tr>
+    {% endif %}
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">no runs recorded</p>
+  {% endif %}
+</section>
+<section class="panel">
+  <h2>Events</h2>
+  {% if events %}
+  <table>
+    <tr><th>at</th><th>kind</th><th>what</th></tr>
+    {% for event, text in events %}
+    <tr><td>{{ event.at|stamp }}</td><td>{{ event.kind }}</td><td>{{ text }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">no events recorded</p>
+  {% endif %}
+</section>
+{% endblock %}

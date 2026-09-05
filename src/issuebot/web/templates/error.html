@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} {{ code }}{% endblock %}
+{% block content %}
+<div class="error-page">
+  <h1>{{ status }}</h1>
+  <p class="muted">{{ code }}</p>
+  <p>{{ message }}</p>
+  <p><a href="/">back to the dashboard</a></p>
+</div>
+{% endblock %}
