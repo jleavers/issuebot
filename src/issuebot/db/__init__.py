@@ -1,5 +1,6 @@
 """Persistence: psycopg 3 connections, numbered SQL migrations, the sink and the queries."""
 
+from issuebot.agent.turnlog import OMITTED_TYPE, PROMPT_LIMIT, STDERR_LIMIT, TurnCapture
 from issuebot.db.connection import (
     APPLICATION_NAME,
     CONNECT_TIMEOUT_S,
@@ -30,12 +31,15 @@ from issuebot.db.migrate import (
 )
 from issuebot.db.queries import (
     COMPLETE_LIMIT,
+    MAX_WINDOW_DAYS,
     DailyPoint,
     EventRow,
     IssueRow,
     Queries,
     RunRow,
     SnapshotRow,
+    TurnRow,
+    TurnSummaryRow,
 )
 from issuebot.db.sink import DRAIN_TIMEOUT_S, QUEUE_LIMIT, PostgresSink, SnapshotLike
 from issuebot.db.store import IssueSnapshot, PostgresStore, Store
@@ -46,12 +50,16 @@ __all__ = [
     "COMPLETE_LIMIT",
     "CONNECT_TIMEOUT_S",
     "DRAIN_TIMEOUT_S",
+    "MAX_WINDOW_DAYS",
     "MIGRATIONS_ROOT",
+    "OMITTED_TYPE",
     "POSTGRES_SCHEMES",
+    "PROMPT_LIMIT",
     "QUEUE_LIMIT",
     "RECONNECT_DELAYS_S",
     "REDACTED",
     "REFRESH_CHANNEL",
+    "STDERR_LIMIT",
     "Connector",
     "DailyPoint",
     "Database",
@@ -73,6 +81,9 @@ __all__ = [
     "Store",
     "StoreError",
     "StoreUnavailableError",
+    "TurnCapture",
+    "TurnRow",
+    "TurnSummaryRow",
     "apply_migrations",
     "classify",
     "connect",

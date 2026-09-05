@@ -41,6 +41,31 @@ services:
       db:
         condition: service_healthy
 
+  web:
+    build: .
+    # The dashboard and the JSON API. Reads WORKFLOW.md for database.url, server.* and the
+    # repository name; needs no GitHub, Claude or Slack credential, so no env_file and no
+    # workspace volume. Migrates at start like the worker (the advisory lock makes that safe).
+    command: ["web"]
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+    ports:
+      # Loopback only: the dashboard has no authentication. Override the host port with
+      # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is server.port.
+      - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
+    volumes:
+      - ./WORKFLOW.md:/app/WORKFLOW.md:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
   workspaces:

@@ -6,14 +6,14 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
+from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
 from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
 from issuebot.cli import (
@@ -26,9 +26,14 @@ from issuebot.cli import (
     render_status,
 )
 from issuebot.config import GitHubLabels, GitHubSettings, Settings
-from issuebot.db import DatabaseError, MigrationResult, Probe, StoreError, StoreUnavailableError
+from issuebot.db import (
+    MAX_WINDOW_DAYS,
+    MigrationResult,
+    Probe,
+    StoreError,
+    StoreUnavailableError,
+)
 from issuebot.db.queries import DailyPoint, SnapshotRow
-from issuebot.db.store import IssueSnapshot
 from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
 from issuebot.notifications import PostResult
@@ -88,144 +93,6 @@ def slack_post(monkeypatch: pytest.MonkeyPatch) -> FakeSlackPost:
     fake = FakeSlackPost()
     monkeypatch.setattr("issuebot.cli._slack_post", fake)
     return fake
-
-
-DB_URL = "postgresql://issuebot:s3cret@db.example:5432/issuebot"
-PROBE_OK = Probe(server_version="PostgreSQL 18.1", schema_version=1, latest_version=1)
-
-
-class FakeStore:
-    """The sink's store: records every write."""
-
-    def __init__(self) -> None:
-        self.events: list[Event] = []
-        self.issues: list[list[IssueSnapshot]] = []
-        self.snapshots: list[dict[str, Any]] = []
-        self.closed = False
-
-    async def connect(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        self.closed = True
-
-    async def apply_event(self, event: Event) -> None:
-        self.events.append(event)
-
-    async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
-        self.issues.append(list(issues))
-
-    async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
-        self.snapshots.append(dict(data))
-
-
-class FakeQueries:
-    """Canned answers for status and stats."""
-
-    def __init__(self) -> None:
-        self.snapshot_row: SnapshotRow | None = None
-        self.closed = {1: 0, 7: 0}
-        self.runs = {1: 0, 7: 0}
-        self.groups: dict[str, list[object]] = {role.value: [] for role in StateLabel}
-        self.series: list[DailyPoint] = []
-        self.error: DatabaseError | None = None
-        self.days_asked: int | None = None
-
-    def _check(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-    async def snapshot(self) -> SnapshotRow | None:
-        self._check()
-        return self.snapshot_row
-
-    async def closed_count(self, window: timedelta) -> int:
-        self._check()
-        return self.closed[window.days]
-
-    async def runs_count(self, window: timedelta) -> int:
-        return self.runs[window.days]
-
-    async def issues_by_state(self) -> dict[str, list[object]]:
-        self._check()
-        return self.groups
-
-    async def daily_series(self, days: int) -> list[DailyPoint]:
-        self.days_asked = days
-        return self.series
-
-
-class FakeListener:
-    def __init__(self, on_notify: Callable[[], None]) -> None:
-        self.on_notify = on_notify
-        self.started = False
-        self.closed = False
-        self.close_error: Exception | None = None
-
-    def start(self) -> None:
-        self.started = True
-
-    async def close(self) -> None:
-        self.closed = True
-        if self.close_error is not None:
-            raise self.close_error
-
-
-class FakeDatabase:
-    """Stands in for issuebot.db.Database: one instance per test with canned results."""
-
-    def __init__(self) -> None:
-        self.urls: list[str] = []
-        self.migrations = 0
-        self.migrate_result = MigrationResult(applied=(), version=1)
-        self.migrate_error: DatabaseError | None = None
-        self.probe_result = PROBE_OK
-        self.probe_error: DatabaseError | None = None
-        self.queries_obj = FakeQueries()
-        self.store_obj = FakeStore()
-        self.labels: GitHubLabels | None = None
-        self.listeners: list[FakeListener] = []
-        self.listener_close_error: Exception | None = None
-        self.notified = 0
-        self.notify_error: DatabaseError | None = None
-
-    def factory(self, url: str) -> FakeDatabase:
-        self.urls.append(url)
-        return self
-
-    @property
-    def description(self) -> str:
-        return "postgresql://issuebot@db.example:5432/issuebot"
-
-    async def migrate(self) -> MigrationResult:
-        self.migrations += 1
-        if self.migrate_error is not None:
-            raise self.migrate_error
-        return self.migrate_result
-
-    async def probe(self) -> Probe:
-        if self.probe_error is not None:
-            raise self.probe_error
-        return self.probe_result
-
-    @asynccontextmanager
-    async def queries(self) -> AsyncIterator[FakeQueries]:
-        yield self.queries_obj
-
-    def store(self, labels: GitHubLabels) -> FakeStore:
-        self.labels = labels
-        return self.store_obj
-
-    def listener(self, on_notify: Callable[[], None]) -> FakeListener:
-        listener = FakeListener(on_notify)
-        listener.close_error = self.listener_close_error
-        self.listeners.append(listener)
-        return listener
-
-    async def notify_refresh(self) -> None:
-        if self.notify_error is not None:
-            raise self.notify_error
-        self.notified += 1
 
 
 @pytest.fixture(autouse=True)
@@ -401,7 +268,7 @@ def test_validate_configured_database_and_slack(
     path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] database.url: connected (PostgreSQL 18.1); schema version 1" in out
+    assert "[ OK ] database.url: connected (PostgreSQL 18.1); schema version 2" in out
     assert (
         "[WARN] notifications.slack: configured (blocked, state_changed); the URL is not a "
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
@@ -1550,7 +1417,7 @@ def _db_workflow(
     return _write(tmp_path, "---\ngithub:\n  repo: example/repo\n---\nBody")
 
 
-@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"], ["web"]])
 def test_database_commands_need_a_configured_url(
     command: list[str],
     capsys: pytest.CaptureFixture[str],
@@ -1566,7 +1433,7 @@ def test_database_commands_need_a_configured_url(
     assert fake_database.urls == []
 
 
-@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"], ["web"]])
 def test_database_commands_exit_two_on_an_unloadable_workflow(
     command: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1598,7 +1465,7 @@ def test_migrate_reports_nothing_to_do_and_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["migrate", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] database: unchanged at schema version 1\n"
+    assert capsys.readouterr().out == "[ OK ] database: unchanged at schema version 2\n"
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
     assert main(["migrate", "--workflow", str(path)]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
@@ -1754,21 +1621,120 @@ def test_stats_prints_the_windows_and_the_series(
     queries = fake_database.queries_obj
     queries.closed = {1: 1, 7: 2}
     queries.runs = {1: 3, 7: 4}
-    queries.groups["review"] = [object()]
+    queries.counts["review"] = 1
+    queries.counts["complete"] = 73  # from state_counts, so no COMPLETE_LIMIT cap
     queries.series = [DailyPoint(day=date(2026, 9, 4), closed=1, runs=3)]
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["stats", "--workflow", str(path), "--days", "3"]) == 0
     out = capsys.readouterr().out
     assert "1d      1       3" in out
     assert "7d      2       4" in out
-    assert "issues: todo 0, in_progress 0, review 1, rework 0, complete 0" in out
+    assert "issues: todo 0, in_progress 0, review 1, rework 0, complete 73" in out
     assert out.endswith("DAY         CLOSED  RUNS\n2026-09-04  1       3\n")
     assert queries.days_asked == 3
-    assert main(["stats", "--workflow", str(path), "--days", "0"]) == 1
-    assert capsys.readouterr().out == "[FAIL] stats: --days must be at least 1\n"
+    assert "issues_by_state" not in queries.calls
+    for days in ("0", str(MAX_WINDOW_DAYS + 1)):
+        assert main(["stats", "--workflow", str(path), "--days", days]) == 1
+        assert capsys.readouterr().out == (
+            f"[FAIL] stats: --days must be between 1 and {MAX_WINDOW_DAYS}\n"
+        )
+    assert main(["stats", "--workflow", str(path), "--days", str(MAX_WINDOW_DAYS)]) == 0
+    assert queries.days_asked == MAX_WINDOW_DAYS
+    capsys.readouterr()
     queries.error = StoreUnavailableError("cannot connect: refused")
     assert main(["stats", "--workflow", str(path)]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+
+
+class FakeServe:
+    """Stands in for cli._serve: records the app and the bind instead of running uvicorn."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str, int]] = []
+
+    async def __call__(self, app: object, *, host: str, port: int) -> None:
+        self.calls.append((app, host, port))
+
+
+@pytest.fixture
+def fake_serve(monkeypatch: pytest.MonkeyPatch) -> FakeServe:
+    fake = FakeServe()
+    monkeypatch.setattr("issuebot.cli._serve", fake)
+    return fake
+
+
+def test_web_migrates_then_serves_on_the_configured_bind(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: example/repo\nserver:\n  bind: 127.0.0.1\n  port: 9000\n---\nBody",
+    )
+    assert main(["web", "--workflow", str(path)]) == 0
+    assert fake_database.migrations == 1 and fake_database.urls == [DB_URL]
+    ((app, host, port),) = fake_serve.calls
+    assert (host, port) == ("127.0.0.1", 9000)
+    assert getattr(app, "title", None) == "issuebot"
+    err = capsys.readouterr().err
+    assert "web_started" in err and "s3cret" not in err
+
+
+def test_web_overrides_the_bind_and_port_from_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["web", "--workflow", str(path), "--bind", "0.0.0.0", "--port", "0"]) == 0
+    ((_app, host, port),) = fake_serve.calls
+    assert (host, port) == ("0.0.0.0", 0)
+
+
+def test_web_fails_fast_when_the_migration_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+) -> None:
+    fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["web", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+    assert fake_serve.calls == []
+
+
+def test_web_rejects_a_port_out_of_range(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["web", "--workflow", str(path), "--port", "70000"]) == 1
+    assert capsys.readouterr().out == "[FAIL] web: --port must be between 0 and 65535\n"
+    assert fake_serve.calls == []
+
+
+def test_web_exits_one_when_uvicorn_cannot_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    async def refuse(app: object, *, host: str, port: int) -> None:
+        raise SystemExit(3)  # what uvicorn's startup() does on a bind failure
+
+    monkeypatch.setattr("issuebot.cli._serve", refuse)
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["web", "--workflow", str(path)]) == 1
+    assert fake_database.migrations == 1
 
 
 def test_refresh_notifies_and_reports_failures(

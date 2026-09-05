@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -11,6 +11,7 @@ import psycopg
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, classify, connect, error_text, redact
 from issuebot.db.errors import StoreError, StoreUnavailableError
@@ -41,7 +42,7 @@ class Store(Protocol):
 
     async def close(self) -> None: ...
 
-    async def apply_event(self, event: Event) -> None: ...
+    async def apply_event(self, event: Event, turns: Sequence[TurnCapture] = ()) -> None: ...
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None: ...
 
@@ -83,6 +84,41 @@ ON CONFLICT (run_id) DO UPDATE SET
     cost_usd = EXCLUDED.cost_usd,
     duration_s = EXCLUDED.duration_s,
     log_dir = EXCLUDED.log_dir
+"""
+
+INSERT_TURN = """
+INSERT INTO run_turns (run_id, turn_number, captured_at, model, subtype, is_error, num_turns,
+                       input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+                       output_tokens, cost_usd, duration_ms, result_text, prompt, prompt_bytes,
+                       stream, stream_bytes, stream_lines, omitted_lines, stderr, stderr_bytes,
+                       truncated)
+VALUES (%(run_id)s, %(turn_number)s, now(), %(model)s, %(subtype)s, %(is_error)s, %(num_turns)s,
+        %(input_tokens)s, %(cache_creation_input_tokens)s, %(cache_read_input_tokens)s,
+        %(output_tokens)s, %(cost_usd)s, %(duration_ms)s, %(result_text)s, %(prompt)s,
+        %(prompt_bytes)s, %(stream)s, %(stream_bytes)s, %(stream_lines)s, %(omitted_lines)s,
+        %(stderr)s, %(stderr_bytes)s, %(truncated)s)
+ON CONFLICT (run_id, turn_number) DO UPDATE SET
+    captured_at = now(),
+    model = EXCLUDED.model,
+    subtype = EXCLUDED.subtype,
+    is_error = EXCLUDED.is_error,
+    num_turns = EXCLUDED.num_turns,
+    input_tokens = EXCLUDED.input_tokens,
+    cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
+    cache_read_input_tokens = EXCLUDED.cache_read_input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    cost_usd = EXCLUDED.cost_usd,
+    duration_ms = EXCLUDED.duration_ms,
+    result_text = EXCLUDED.result_text,
+    prompt = EXCLUDED.prompt,
+    prompt_bytes = EXCLUDED.prompt_bytes,
+    stream = EXCLUDED.stream,
+    stream_bytes = EXCLUDED.stream_bytes,
+    stream_lines = EXCLUDED.stream_lines,
+    omitted_lines = EXCLUDED.omitted_lines,
+    stderr = EXCLUDED.stderr,
+    stderr_bytes = EXCLUDED.stderr_bytes,
+    truncated = EXCLUDED.truncated
 """
 
 STATE_CHANGED = """
@@ -177,8 +213,8 @@ class PostgresStore:
             with contextlib.suppress(psycopg.Error):
                 await conn.close()
 
-    async def apply_event(self, event: Event) -> None:
-        """Append the event; then upsert the run or update the issue it is about."""
+    async def apply_event(self, event: Event, turns: Sequence[TurnCapture] = ()) -> None:
+        """Append the event; then upsert the run (and its captured turns) or update the issue."""
         conn = self._require()
         async with self._guard(), conn.transaction():
             await conn.execute(INSERT_EVENT, event_row(event))
@@ -186,6 +222,11 @@ class PostgresStore:
                 await conn.execute(RUN_STARTED, run_started_row(event))
             elif isinstance(event, RunEnded):
                 await conn.execute(RUN_ENDED, run_ended_row(event))
+                if turns:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(
+                            INSERT_TURN, [turn_row(event.run_id, turn) for turn in turns]
+                        )
             elif isinstance(event, StateChanged):
                 await conn.execute(STATE_CHANGED, self._state_changed_row(event))
             elif isinstance(event, IssueCompleted | IssueCancelled):
@@ -249,6 +290,11 @@ def run_started_row(event: RunStarted) -> dict[str, Any]:
         "started_at": event.at,
         "workspace_path": event.workspace_path or None,
     }
+
+
+def turn_row(run_id: str, turn: TurnCapture) -> dict[str, Any]:
+    """The bound parameters of INSERT_TURN: every TurnCapture field plus the run id."""
+    return {"run_id": run_id, **{f.name: getattr(turn, f.name) for f in fields(turn)}}
 
 
 def run_ended_row(event: RunEnded) -> dict[str, Any]:
