@@ -11,9 +11,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import uvicorn
 import yaml
 
 from issuebot import __version__
@@ -37,7 +38,14 @@ from issuebot.config import (
     load_workflow,
 )
 from issuebot.config.resolve import ENV_REF
-from issuebot.db import Database, DatabaseError, PostgresSink, RefreshListener, is_postgres_url
+from issuebot.db import (
+    MAX_WINDOW_DAYS,
+    Database,
+    DatabaseError,
+    PostgresSink,
+    RefreshListener,
+    is_postgres_url,
+)
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
@@ -51,6 +59,7 @@ from issuebot.notifications import (
     urllib_post,
 )
 from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
+from issuebot.web import create_app
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
 
@@ -81,6 +90,30 @@ _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
 _database_factory: Callable[[str], Database] = Database
+
+
+async def _uvicorn_serve(app: Any, *, host: str, port: int) -> None:
+    """Serve ``app`` with uvicorn until SIGTERM or SIGINT, then return so the command exits 0.
+
+    uvicorn installs its own handlers for both signals and, once its server has shut down,
+    re-raises the signal that stopped it with the previous handler restored. The no-op
+    handlers installed here make that re-raise harmless; uvicorn's own log lines go through
+    the root logger (``log_config=None``), so they come out as structlog lines.
+    """
+    config = uvicorn.Config(app, host=host, port=port, log_config=None)
+    server = uvicorn.Server(config)
+    previous = {
+        signum: signal.signal(signum, lambda signum, frame: None)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        await server.serve()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+_serve = _uvicorn_serve
 
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 SLACK_WEBHOOK_PATH = "/services/"
@@ -201,6 +234,14 @@ def build_parser() -> argparse.ArgumentParser:
     refresh = subparsers.add_parser("refresh", help="ask a running worker to poll now (NOTIFY)")
     _add_workflow_option(refresh)
     refresh.set_defaults(func=cmd_refresh)
+
+    web = subparsers.add_parser(
+        "web", help="serve the dashboard and the JSON API until SIGTERM or SIGINT"
+    )
+    _add_workflow_option(web)
+    web.add_argument("--port", type=int, default=None, help="listen port (default: server.port)")
+    web.add_argument("--bind", default=None, help="listen address (default: server.bind)")
+    web.set_defaults(func=cmd_web)
     return parser
 
 
@@ -602,9 +643,12 @@ async def _build_sinks(settings: Settings) -> _Sinks:
     return _Sinks(EventBus(sinks), slack, postgres, database)
 
 
+_NOT_CONFIGURED = "[FAIL] database: not configured; export DATABASE_URL or set database.url: $VAR"
+
+
 def _database_or_report(settings: Settings) -> Database | None:
     if settings.database.url is None:
-        print("[FAIL] database: not configured; export DATABASE_URL or set database.url: $VAR")
+        print(_NOT_CONFIGURED)
         return None
     return _database_factory(settings.database.url.get_secret_value())
 
@@ -900,8 +944,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     workflow = _load_or_report(args)
     if workflow is None:
         return 2
-    if args.days < 1:
-        print("[FAIL] stats: --days must be at least 1")
+    if not 1 <= args.days <= MAX_WINDOW_DAYS:
+        print(f"[FAIL] stats: --days must be between 1 and {MAX_WINDOW_DAYS}")
         return 1
     database = _database_or_report(workflow.config)
     if database is None:
@@ -912,13 +956,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
 async def _stats(database: Database, days: int) -> int:
     try:
         async with database.queries() as queries:
-            groups = await queries.issues_by_state()
             view = StatsView(
                 closed_1d=await queries.closed_count(timedelta(days=1)),
                 closed_7d=await queries.closed_count(timedelta(days=7)),
                 runs_1d=await queries.runs_count(timedelta(days=1)),
                 runs_7d=await queries.runs_count(timedelta(days=7)),
-                by_state={state: len(rows) for state, rows in groups.items()},
+                by_state=await queries.state_counts(),
                 series=await queries.daily_series(days),
             )
     except DatabaseError as exc:
@@ -941,6 +984,40 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         print(f"[FAIL] database: {exc.message}")
         return 1
     print("[ OK ] refresh: notified issuebot_refresh")
+    return 0
+
+
+# --- web -------------------------------------------------------------------------------------
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    return asyncio.run(_run_web(workflow, port=args.port, bind=args.bind))
+
+
+async def _run_web(workflow: Workflow, *, port: int | None, bind: str | None) -> int:
+    """Migrate, build the app and serve it until a stop signal; the database is required;
+    a failed bind is uvicorn's error line and exit 1."""
+    settings = workflow.config
+    try:
+        database = await _open_database(settings)
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    if database is None:
+        print(_NOT_CONFIGURED)
+        return 1
+    host = bind or settings.server.bind
+    listen_port = settings.server.port if port is None else port
+    get_logger(__name__).info(
+        "web_started", bind=host, port=listen_port, database=database.description
+    )
+    try:
+        await _serve(create_app(database, settings), host=host, port=listen_port)
+    except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
+        return 1 if exc.code else 0
     return 0
 
 
