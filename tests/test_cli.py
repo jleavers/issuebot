@@ -6,17 +6,16 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
+from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
 from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
-from issuebot.agent.turnlog import TurnCapture
 from issuebot.cli import (
     StatsView,
     main,
@@ -27,9 +26,8 @@ from issuebot.cli import (
     render_status,
 )
 from issuebot.config import GitHubLabels, GitHubSettings, Settings
-from issuebot.db import DatabaseError, MigrationResult, Probe, StoreError, StoreUnavailableError
+from issuebot.db import MigrationResult, Probe, StoreError, StoreUnavailableError
 from issuebot.db.queries import DailyPoint, SnapshotRow
-from issuebot.db.store import IssueSnapshot
 from issuebot.events import Event, StateChanged
 from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
 from issuebot.notifications import PostResult
@@ -89,146 +87,6 @@ def slack_post(monkeypatch: pytest.MonkeyPatch) -> FakeSlackPost:
     fake = FakeSlackPost()
     monkeypatch.setattr("issuebot.cli._slack_post", fake)
     return fake
-
-
-DB_URL = "postgresql://issuebot:s3cret@db.example:5432/issuebot"
-PROBE_OK = Probe(server_version="PostgreSQL 18.1", schema_version=1, latest_version=1)
-
-
-class FakeStore:
-    """The sink's store: records every write."""
-
-    def __init__(self) -> None:
-        self.events: list[Event] = []
-        self.turns: list[list[TurnCapture]] = []
-        self.issues: list[list[IssueSnapshot]] = []
-        self.snapshots: list[dict[str, Any]] = []
-        self.closed = False
-
-    async def connect(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        self.closed = True
-
-    async def apply_event(self, event: Event, turns: Sequence[TurnCapture] = ()) -> None:
-        self.events.append(event)
-        self.turns.append(list(turns))
-
-    async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
-        self.issues.append(list(issues))
-
-    async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
-        self.snapshots.append(dict(data))
-
-
-class FakeQueries:
-    """Canned answers for status and stats."""
-
-    def __init__(self) -> None:
-        self.snapshot_row: SnapshotRow | None = None
-        self.closed = {1: 0, 7: 0}
-        self.runs = {1: 0, 7: 0}
-        self.groups: dict[str, list[object]] = {role.value: [] for role in StateLabel}
-        self.series: list[DailyPoint] = []
-        self.error: DatabaseError | None = None
-        self.days_asked: int | None = None
-
-    def _check(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-    async def snapshot(self) -> SnapshotRow | None:
-        self._check()
-        return self.snapshot_row
-
-    async def closed_count(self, window: timedelta) -> int:
-        self._check()
-        return self.closed[window.days]
-
-    async def runs_count(self, window: timedelta) -> int:
-        return self.runs[window.days]
-
-    async def issues_by_state(self) -> dict[str, list[object]]:
-        self._check()
-        return self.groups
-
-    async def daily_series(self, days: int) -> list[DailyPoint]:
-        self.days_asked = days
-        return self.series
-
-
-class FakeListener:
-    def __init__(self, on_notify: Callable[[], None]) -> None:
-        self.on_notify = on_notify
-        self.started = False
-        self.closed = False
-        self.close_error: Exception | None = None
-
-    def start(self) -> None:
-        self.started = True
-
-    async def close(self) -> None:
-        self.closed = True
-        if self.close_error is not None:
-            raise self.close_error
-
-
-class FakeDatabase:
-    """Stands in for issuebot.db.Database: one instance per test with canned results."""
-
-    def __init__(self) -> None:
-        self.urls: list[str] = []
-        self.migrations = 0
-        self.migrate_result = MigrationResult(applied=(), version=1)
-        self.migrate_error: DatabaseError | None = None
-        self.probe_result = PROBE_OK
-        self.probe_error: DatabaseError | None = None
-        self.queries_obj = FakeQueries()
-        self.store_obj = FakeStore()
-        self.labels: GitHubLabels | None = None
-        self.listeners: list[FakeListener] = []
-        self.listener_close_error: Exception | None = None
-        self.notified = 0
-        self.notify_error: DatabaseError | None = None
-
-    def factory(self, url: str) -> FakeDatabase:
-        self.urls.append(url)
-        return self
-
-    @property
-    def description(self) -> str:
-        return "postgresql://issuebot@db.example:5432/issuebot"
-
-    async def migrate(self) -> MigrationResult:
-        self.migrations += 1
-        if self.migrate_error is not None:
-            raise self.migrate_error
-        return self.migrate_result
-
-    async def probe(self) -> Probe:
-        if self.probe_error is not None:
-            raise self.probe_error
-        return self.probe_result
-
-    @asynccontextmanager
-    async def queries(self) -> AsyncIterator[FakeQueries]:
-        yield self.queries_obj
-
-    def store(self, labels: GitHubLabels) -> FakeStore:
-        self.labels = labels
-        return self.store_obj
-
-    def listener(self, on_notify: Callable[[], None]) -> FakeListener:
-        listener = FakeListener(on_notify)
-        listener.close_error = self.listener_close_error
-        self.listeners.append(listener)
-        return listener
-
-    async def notify_refresh(self) -> None:
-        if self.notify_error is not None:
-            raise self.notify_error
-        self.notified += 1
 
 
 @pytest.fixture(autouse=True)
@@ -404,7 +262,7 @@ def test_validate_configured_database_and_slack(
     path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] database.url: connected (PostgreSQL 18.1); schema version 1" in out
+    assert "[ OK ] database.url: connected (PostgreSQL 18.1); schema version 2" in out
     assert (
         "[WARN] notifications.slack: configured (blocked, state_changed); the URL is not a "
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
@@ -1601,7 +1459,7 @@ def test_migrate_reports_nothing_to_do_and_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["migrate", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] database: unchanged at schema version 1\n"
+    assert capsys.readouterr().out == "[ OK ] database: unchanged at schema version 2\n"
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
     assert main(["migrate", "--workflow", str(path)]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"

@@ -1,5 +1,6 @@
 """Persistence: psycopg 3 connections, numbered SQL migrations, the sink and the queries."""
 
+from issuebot.agent.turnlog import OMITTED_TYPE, TurnCapture
 from issuebot.db.connection import (
     APPLICATION_NAME,
     CONNECT_TIMEOUT_S,
@@ -51,6 +52,7 @@ __all__ = [
     "DRAIN_TIMEOUT_S",
     "MAX_WINDOW_DAYS",
     "MIGRATIONS_ROOT",
+    "OMITTED_TYPE",
     "POSTGRES_SCHEMES",
     "QUEUE_LIMIT",
     "RECONNECT_DELAYS_S",
@@ -77,6 +79,7 @@ __all__ = [
     "Store",
     "StoreError",
     "StoreUnavailableError",
+    "TurnCapture",
     "TurnRow",
     "TurnSummaryRow",
     "apply_migrations",
