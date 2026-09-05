@@ -44,3 +44,7 @@ select = ["E", "F", "I", "UP", "B", "N", "SIM", "RUF"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  # Starlette 1.6's test client still names anyio's deprecated alias at import time.
+  "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+]
