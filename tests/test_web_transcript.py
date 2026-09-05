@@ -124,6 +124,25 @@ def test_a_non_text_tool_result_is_rendered_as_text_parts_and_json() -> None:
     assert block.text == f"first\n{image}\nsecond"
 
 
+def test_a_line_separator_inside_a_tool_result_does_not_split_the_line() -> None:
+    """Node's ``JSON.stringify`` (claude's stream-json) leaves U+2028/U+0085 raw inside JSON
+    strings; the capture splits bytes on ``\\n`` only, so the parser must too."""
+    for char in (chr(0x2028), chr(0x0085)):
+        message = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": f"before{char}after"}
+                ],
+            },
+        }
+        raw = json.dumps(message, ensure_ascii=False) + "\n"
+        (block,) = parse_transcript(raw).blocks
+        assert block.kind == "tool_result"
+        assert char in block.text
+
+
 def test_a_user_text_block_is_titled_user() -> None:
     (block,) = parse(user({"type": "text", "text": "Review the diff."}))
     assert (block.kind, block.title, block.text) == ("text", "user", "Review the diff.")

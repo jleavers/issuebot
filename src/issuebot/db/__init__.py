@@ -1,6 +1,6 @@
 """Persistence: psycopg 3 connections, numbered SQL migrations, the sink and the queries."""
 
-from issuebot.agent.turnlog import OMITTED_TYPE, TurnCapture
+from issuebot.agent.turnlog import OMITTED_TYPE, PROMPT_LIMIT, STDERR_LIMIT, TurnCapture
 from issuebot.db.connection import (
     APPLICATION_NAME,
     CONNECT_TIMEOUT_S,
@@ -54,10 +54,12 @@ __all__ = [
     "MIGRATIONS_ROOT",
     "OMITTED_TYPE",
     "POSTGRES_SCHEMES",
+    "PROMPT_LIMIT",
     "QUEUE_LIMIT",
     "RECONNECT_DELAYS_S",
     "REDACTED",
     "REFRESH_CHANNEL",
+    "STDERR_LIMIT",
     "Connector",
     "DailyPoint",
     "Database",

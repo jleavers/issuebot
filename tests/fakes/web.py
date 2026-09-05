@@ -145,9 +145,9 @@ def run_row(**overrides: Any) -> RunRow:
         "cost_usd": 0.8976,
         "duration_s": 205.4,
         "workspace_path": "/workspaces/repo-7",
-        "log_dir": f"/workspaces/repo-7/.issuebot/runs/{RUN_ID}",
     }
     fields.update(overrides)
+    fields.setdefault("log_dir", f"/workspaces/repo-7/.issuebot/runs/{fields['run_id']}")
     return RunRow(**fields)
 
 

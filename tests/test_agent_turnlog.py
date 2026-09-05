@@ -133,6 +133,21 @@ def test_prompt_head_and_stderr_tail_caps(tmp_path: Path, monkeypatch: pytest.Mo
     assert (capture.stderr, capture.stderr_bytes) == ("x" * 12 + "TAIL", 24)
 
 
+def test_a_nul_byte_in_captured_text_is_replaced(tmp_path: Path) -> None:
+    """PostgreSQL rejects ``\\x00`` in ``text``; ``decode(errors="replace")`` alone lets it
+    through since it is valid UTF-8, so a NUL must not survive into any of the three texts."""
+    prompt_bytes = b"prompt \x00 text"
+    stderr_bytes = b"stderr \x00 text"
+    write_turn(tmp_path, 1, [INIT, RESULT, "not json \x00 here"])
+    (tmp_path / "turn-1.prompt.md").write_bytes(prompt_bytes)
+    (tmp_path / "turn-1.stderr.log").write_bytes(stderr_bytes)
+    capture = only(capture_turns(tmp_path))
+    assert "\x00" not in capture.prompt
+    assert "\x00" not in capture.stderr
+    assert "\x00" not in capture.stream
+    assert (capture.prompt_bytes, capture.stderr_bytes) == (len(prompt_bytes), len(stderr_bytes))
+
+
 def test_result_text_is_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(turnlog, "RESULT_TEXT_LIMIT", 5)
     write_turn(tmp_path, 1, [json.dumps({"type": "result", "result": "abcdefgh"})])

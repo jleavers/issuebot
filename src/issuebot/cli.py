@@ -1011,6 +1011,9 @@ async def _run_web(workflow: Workflow, *, port: int | None, bind: str | None) ->
         return 1
     host = bind or settings.server.bind
     listen_port = settings.server.port if port is None else port
+    if not 0 <= listen_port <= 65535:
+        print("[FAIL] web: --port must be between 0 and 65535")
+        return 1
     get_logger(__name__).info(
         "web_started", bind=host, port=listen_port, database=database.description
     )

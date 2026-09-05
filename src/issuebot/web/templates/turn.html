@@ -28,7 +28,7 @@
   {% if transcript.hidden %}<p class="muted">{{ transcript.hidden }} status message{{ "s" if transcript.hidden != 1 }} hidden</p>{% endif %}
 </section>
 <section>
-  <details class="file"><summary>prompt ({{ turn.prompt_bytes|thousands }} bytes{% if turn.prompt|length < turn.prompt_bytes %}, showing the first {{ turn.prompt|length|thousands }} characters{% endif %})</summary><pre>{{ turn.prompt }}</pre></details>
-  <details class="file"><summary>stderr ({{ turn.stderr_bytes|thousands }} bytes{% if turn.stderr|length < turn.stderr_bytes %}, showing the tail{% endif %})</summary><pre>{{ turn.stderr or "(empty)" }}</pre></details>
+  <details class="file"><summary>prompt ({{ turn.prompt_bytes|thousands }} bytes{% if prompt_cut %}, showing the first {{ turn.prompt|length|thousands }} characters{% endif %})</summary><pre>{{ turn.prompt }}</pre></details>
+  <details class="file"><summary>stderr ({{ turn.stderr_bytes|thousands }} bytes{% if stderr_cut %}, showing the tail{% endif %})</summary><pre>{{ turn.stderr or "(empty)" }}</pre></details>
 </section>
 {% endblock %}

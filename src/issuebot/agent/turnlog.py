@@ -119,16 +119,22 @@ def _capture(turn_number: int, raw: bytes, prompt: bytes, stderr: bytes) -> Turn
         cost_usd=_float(result.get("total_cost_usd")),
         duration_ms=_int(result.get("duration_ms")),
         result_text=result_text[:RESULT_TEXT_LIMIT] if result_text is not None else None,
-        prompt=prompt[:PROMPT_LIMIT].decode("utf-8", errors="replace"),
+        prompt=_text(prompt[:PROMPT_LIMIT]),
         prompt_bytes=len(prompt),
-        stream=(b"\n".join(kept) + b"\n").decode("utf-8", errors="replace") if kept else "",
+        stream=_text(b"\n".join(kept) + b"\n") if kept else "",
         stream_bytes=len(raw),
         stream_lines=len(lines),
         omitted_lines=omitted,
-        stderr=stderr[-STDERR_LIMIT:].decode("utf-8", errors="replace"),
+        stderr=_text(stderr[-STDERR_LIMIT:]),
         stderr_bytes=len(stderr),
         truncated=truncated,
     )
+
+
+def _text(data: bytes) -> str:
+    """Decode with replacement, then swap out NUL: PostgreSQL rejects ``\\x00`` in ``text``,
+    and it is valid UTF-8 so ``errors="replace"`` alone would let it through."""
+    return data.decode("utf-8", errors="replace").replace("\x00", "�")
 
 
 def _message(line: bytes) -> dict[str, Any] | None:

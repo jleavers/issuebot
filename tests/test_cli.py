@@ -1710,11 +1710,23 @@ def test_web_fails_fast_when_the_migration_fails(
     assert fake_serve.calls == []
 
 
-def test_web_exits_one_when_uvicorn_cannot_bind(
+def test_web_rejects_a_port_out_of_range(
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["web", "--workflow", str(path), "--port", "70000"]) == 1
+    assert capsys.readouterr().out == "[FAIL] web: --port must be between 0 and 65535\n"
+    assert fake_serve.calls == []
+
+
+def test_web_exits_one_when_uvicorn_cannot_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
 ) -> None:
     async def refuse(app: object, *, host: str, port: int) -> None:
         raise SystemExit(3)  # what uvicorn's startup() does on a bind failure

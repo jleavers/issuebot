@@ -45,7 +45,7 @@ def parse_transcript(stream: str) -> Transcript:
     """Blocks in stream order; unparseable lines and omitted stubs become placeholders."""
     blocks: list[Block] = []
     hidden = 0
-    for line in stream.splitlines():
+    for line in stream.split("\n"):
         if not line.strip():
             continue
         message = _message(line)

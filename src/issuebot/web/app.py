@@ -20,7 +20,7 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from issuebot.config import Settings
-from issuebot.db import MAX_WINDOW_DAYS, Database, DatabaseError
+from issuebot.db import MAX_WINDOW_DAYS, PROMPT_LIMIT, STDERR_LIMIT, Database, DatabaseError
 from issuebot.db.queries import IssueRow, RunRow, TurnRow, TurnSummaryRow
 from issuebot.log import get_logger
 from issuebot.web.transcript import parse_transcript
@@ -249,6 +249,8 @@ def create_app(
             turn=turn,
             transcript=parse_transcript(turn.stream),
             raw_url=turn_url(number, run_id, turn_number),
+            prompt_cut=turn.prompt_bytes > PROMPT_LIMIT,
+            stderr_cut=turn.stderr_bytes > STDERR_LIMIT,
         )
 
     @app.get("/issues/{number}/runs/{run_id}/turns/{turn_number}/{part}")

@@ -1,6 +1,8 @@
 """Tests for PostgresStore against a real database (skipped without DATABASE_URL)."""
 
+import re
 from collections.abc import AsyncIterator, Callable
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -9,7 +11,7 @@ import pytest
 from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, StoreUnavailableError, connect, migrate
-from issuebot.db.store import IssueSnapshot, PostgresStore
+from issuebot.db.store import INSERT_TURN, IssueSnapshot, PostgresStore
 from issuebot.events import (
     Blocked,
     Event,
@@ -159,6 +161,13 @@ async def test_run_ended_alone_computes_the_start(store: PostgresStore, db_url: 
     assert row["started_at"] == at(0)
     assert (row["attempt"], row["session_id"], row["workspace_path"]) == (0, None, None)
     assert (row["outcome"], row["error"]) == ("failed", "turn_failed: boom")
+
+
+def test_insert_turn_placeholders_match_turncapture_fields() -> None:
+    """Hermetic (no DATABASE_URL needed): pins INSERT_TURN's bound parameters against
+    TurnCapture so a future field cannot be silently dropped from the write."""
+    placeholders = set(re.findall(r"%\((\w+)\)s", INSERT_TURN))
+    assert {f.name for f in fields(TurnCapture)} | {"run_id"} == placeholders
 
 
 async def test_run_ended_with_captures_writes_run_turns(store: PostgresStore, db_url: str) -> None:

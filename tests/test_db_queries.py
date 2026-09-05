@@ -379,6 +379,7 @@ async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: s
     assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
     assert 77 not in {row.number for rows in groups.values() for row in rows}
     assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
+    assert counts == {"todo": 2, "in_progress": 1, "review": 1, "rework": 0, "complete": 3}
 
 
 async def test_queries_on_an_empty_schema_report_a_database_error(db_url: str) -> None:

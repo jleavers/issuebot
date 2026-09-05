@@ -229,13 +229,13 @@ def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None
 
 
 def test_refresh_reports_a_database_failure(h: Harness) -> None:
-    h.database.notify_error = StoreUnavailableError("cannot connect: refused")
+    message = "cannot connect to postgresql://issuebot:***@db.example:5432/issuebot: refused"
+    h.database.notify_error = StoreUnavailableError(message)
     response = h.client.post("/api/v1/refresh")
     assert response.status_code == 503
-    assert response.json() == {
-        "error": {"code": "database_unavailable", "message": "cannot connect: refused"}
-    }
+    assert response.json() == {"error": {"code": "database_unavailable", "message": message}}
     assert "s3cret" not in response.text
+    assert "***" in response.text
 
 
 def test_refresh_only_accepts_post(h: Harness) -> None:

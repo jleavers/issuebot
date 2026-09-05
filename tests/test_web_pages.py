@@ -18,7 +18,7 @@ from fakes.web import (
     snapshot,
 )
 from issuebot.config import GitHubLabels
-from issuebot.db import COMPLETE_LIMIT, StoreUnavailableError
+from issuebot.db import COMPLETE_LIMIT, PROMPT_LIMIT, STDERR_LIMIT, StoreUnavailableError
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
     age_text,
@@ -161,7 +161,17 @@ def test_the_issue_page(h: Harness) -> None:
     assert "run 20260904T202535Z-0964cd succeeded after 1 turn, $0.90" in text
     assert "513,338" in text
     assert "<th>log dir</th>" in text
-    assert text.count(f"/workspaces/repo-7/.issuebot/runs/{RUN_ID}") == 3
+    assert text.count(f"/workspaces/repo-7/.issuebot/runs/{RUN_ID}") == 1  # its own row only
+    # its own column, plus the "turn logs were not captured" hint (it has no turns)
+    assert text.count(f"/workspaces/repo-7/.issuebot/runs/{RUN_ID_2}") == 2
+
+
+def test_the_issue_page_shows_a_running_run_without_the_not_captured_hint(h: Harness) -> None:
+    h.seed_issue()
+    h.queries.runs_by_issue[7] = [run_row(run_id=RUN_ID_2, ended_at=None, outcome=None)]
+    text = html(h.client.get("/issues/7"))
+    assert '<td class="outcome running">running</td>' in text
+    assert "turn logs were not captured" not in text
 
 
 def test_the_issue_page_escapes_the_title(h: Harness) -> None:
@@ -211,6 +221,30 @@ def test_the_turn_page_notes_caps(h: Harness) -> None:
     text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
     assert "<strong>truncated</strong>" in text and "2 oversized lines replaced" in text
     assert "the stored stream is empty" in text
+
+
+def test_the_turn_page_notes_cuts_by_bytes_not_characters(h: Harness) -> None:
+    h.seed_issue()
+    row = h.queries.turn_rows[(RUN_ID, 1)]
+
+    prompt = "café — done"
+    h.queries.turn_rows[(RUN_ID, 1)] = replace(
+        row, prompt=prompt, prompt_bytes=len(prompt.encode())
+    )
+    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    assert "showing the first" not in text
+
+    h.queries.turn_rows[(RUN_ID, 1)] = replace(row, prompt_bytes=PROMPT_LIMIT + 1)
+    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    assert "showing the first" in text
+
+    h.queries.turn_rows[(RUN_ID, 1)] = replace(row, stderr_bytes=STDERR_LIMIT)
+    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    assert "showing the tail" not in text
+
+    h.queries.turn_rows[(RUN_ID, 1)] = replace(row, stderr_bytes=STDERR_LIMIT + 1)
+    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    assert "showing the tail" in text
 
 
 @pytest.mark.parametrize(
