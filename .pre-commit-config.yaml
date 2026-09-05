@@ -1,3 +1,5 @@
+# Recorded agent runs are kept byte-for-byte as the runner wrote them.
+exclude: ^tests/fixtures/runs/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

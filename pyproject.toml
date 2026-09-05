@@ -5,11 +5,13 @@ description = "Symphony-style issue-to-PR agent orchestrator built on Claude and
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+  "fastapi>=0.141",
   "jinja2>=3.1",
   "psycopg[binary]>=3.3",
   "pydantic>=2.12",
   "pyyaml>=6.0",
   "structlog>=25.1",
+  "uvicorn>=0.52",
 ]
 
 [project.scripts]
@@ -17,6 +19,7 @@ issuebot = "issuebot.cli:main"
 
 [dependency-groups]
 dev = [
+  "httpx2>=2.12",
   "pre-commit>=4.0",
   "pytest>=8.4",
   "pytest-asyncio>=1.0",
