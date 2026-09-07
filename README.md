@@ -99,7 +99,7 @@ checked-in file points at this repository. Unknown keys are rejected, so a typo 
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
-| `claude.max_budget_usd` | spend cap per turn | `5.0` |
+| `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
 | `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
@@ -238,7 +238,8 @@ unusable. The rules:
   `claude.model`, and the worker logs `model_labels_ambiguous`.
 - The label is read when the session is dispatched, so re-labelling an issue between attempts
   changes the model the next attempt runs with.
-- `claude.max_budget_usd` is per run whichever model runs; a cheaper model is not a smaller cap.
+- `claude.max_budget_usd` is per turn and does not vary by model: a cheaper model is not a
+  smaller cap, and a run of `agent.max_turns` turns can spend it once per turn.
 
 The model each turn actually ran with is recorded and shown on the dashboard's issue page,
 which is worth checking after the first run with a new label.
@@ -288,13 +289,24 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
-- **Cost.** Every turn is capped by `claude.max_budget_usd`; the dashboard and the
-  `run_ended` Slack line (opt in via `notifications.slack.events`) show each run's cost.
+- **Cost.** Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
+  times `agent.max_turns` — `5.0` and `5` mean up to $25 before the issue is escalated. The
+  right value is yours to pick and the checked-in `5.0` is only a starting point: on an API
+  key it is real money and a tight cap is a real guard, while on a Claude subscription there
+  is no per-token charge and the cap acts as a cheap-and-cheerful effort limit instead, so a
+  larger number costs nothing but a longer leash. A turn that hits the cap ends as
+  `budget_exceeded` and counts as a failed attempt. The dashboard and the `run_ended` Slack
+  line (opt in via `notifications.slack.events`) show each run's cost.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
 - **Configuration changes.** A running worker re-reads `WORKFLOW.md` when it changes.
   `database.url`, the Slack webhook and its event list are read once at start, so those need
   `docker compose restart worker`.
+- **Upgrades.** `WORKFLOW.md` is mounted into the container, but the code is baked into the
+  image: after pulling a new version of issuebot, run `docker compose build` (or
+  `docker compose up --build -d`) before anything else. A setting that a newer `WORKFLOW.md`
+  introduces fails against a stale image at `validate`, as
+  `<key>: Extra inputs are not permitted`.
 - **Safety.** The agent runs with no permission prompts and may run anything inside its
   workspace. Keep it in the container, give it a repository-scoped token, and keep the
   dashboard on loopback. The agent's environment is minimal: `PATH`, `HOME`, the
