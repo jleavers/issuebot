@@ -51,7 +51,9 @@ def test_front_matter_pins_the_dogfood_settings() -> None:
     assert cfg.claude.model == "opus"
     assert cfg.claude.permission_mode == "auto"
     assert cfg.claude.setting_sources == ["project"]
-    assert cfg.claude.max_budget_usd == 5.0
+    # max_budget_usd is not pinned: it is an operator preference that varies by repository
+    # and by plan (an API key makes it a spend guard, a subscription an effort limit), so
+    # the committed number is a starting point, not a contract.
     assert cfg.agent.self_review is True
     assert cfg.agent.max_turns == 5
     assert cfg.agent.max_concurrent_agents == 2
