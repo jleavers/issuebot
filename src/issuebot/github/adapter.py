@@ -1,6 +1,6 @@
 """The protocol every GitHub implementation satisfies (the gh-backed adapter and the fake)."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
 from issuebot.config import GitHubLabels
@@ -57,8 +57,8 @@ class GitHubAdapter(Protocol):
         """Create or update the five state labels and any extra ones; idempotent."""
         ...
 
-    async def missing_labels(self) -> list[str]:
-        """Names of the configured state labels that do not exist in the repository."""
+    async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:
+        """Names among the state labels and ``extra`` that do not exist in the repository."""
         ...
 
     async def rate_limit(self) -> RateLimit: ...

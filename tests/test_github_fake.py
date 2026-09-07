@@ -195,6 +195,15 @@ async def test_ensure_labels_creates_the_extra_labels_too(fake: FakeGitHub) -> N
     assert await fake.missing_labels() == []
 
 
+async def test_missing_labels_reports_the_extra_names_too(fake: FakeGitHub) -> None:
+    extra = ("issuebot/model/sonnet",)
+    assert await fake.missing_labels(extra) == ["issuebot/model/sonnet"]
+    fake.repo_labels["issuebot/model/sonnet"] = LabelStyle("BFD4F2", "sonnet")
+    assert await fake.missing_labels(extra) == []
+    del fake.repo_labels["issuebot/rework"]
+    assert await fake.missing_labels(extra) == ["issuebot/rework"]
+
+
 def test_preseed_labels_can_be_disabled() -> None:
     fake = FakeGitHub(SETTINGS, preseed_labels=False)
     assert fake.repo_labels == {}

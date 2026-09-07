@@ -228,7 +228,9 @@ claude:
 
 `issuebot labels ensure` creates those labels alongside the five state labels, so they appear
 in the issue's label menu. Put one on an issue and its next session runs with that model;
-issues without one use `claude.model`. The rules:
+issues without one use `claude.model`. `validate` warns while a label named here is missing
+from the repository — until it exists nobody can apply it, so the override is configured but
+unusable. The rules:
 
 - Model labels are not state labels. They never affect the lifecycle, an issue may carry one
   at any point, and the agent neither adds nor removes them.
