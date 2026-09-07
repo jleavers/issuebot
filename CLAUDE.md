@@ -151,9 +151,13 @@ floor, not the shipped version, and moves by hand.
   `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One
   connection per request through `Database.queries()`. Constants, not settings; the web reads
   `WORKFLOW.md` once at start.
-- `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
+- `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
   adapter, the labels one covering `claude.model_labels` as well as the five state labels,
-  a `claude --version` floor of 2.1.259, a `database.url` check that connects and
+  a `claude --version` floor of 2.1.259, a `claude auth status --json` probe run under
+  `agent_environment` that names the credential the agent would use (`claude.ai`,
+  `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
+  `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
+  missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
   `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
   and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
@@ -171,7 +175,7 @@ floor, not the shipped version, and moves by hand.
   `create_app` and serves it with uvicorn (`--port`/`--bind` override `server.*`; uvicorn's
   lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is uvicorn's error and exit
   1); exit codes 0/1/2 (ok / failed / workflow unloadable).
-  Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
+  Tests substitute `_which`, `_claude_version`, `_claude_auth`, `_adapter_factory`, `_run_session`,
   `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
   `_serve`.
 
