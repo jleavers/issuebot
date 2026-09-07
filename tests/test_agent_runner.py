@@ -19,6 +19,7 @@ from issuebot.agent.runner import (
     agent_environment,
     classify_result,
     parse_claude_version,
+    settings_for_labels,
 )
 from issuebot.config import Settings
 
@@ -92,6 +93,44 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         "WebFetch",
     ]
     assert "--session-id" not in argv
+
+
+# --- per-issue model override ----------------------------------------------------------
+
+
+MODEL_LABELS = {"issuebot/model/sonnet": "sonnet", "issuebot/model/fable": "fable"}
+
+
+def test_settings_for_labels_is_a_no_op_without_model_labels(tmp_path: Path) -> None:
+    base = settings(tmp_path, model="opus")
+    assert settings_for_labels(base, ("issuebot/model/sonnet",)) is base
+
+
+def test_settings_for_labels_applies_the_matching_label(tmp_path: Path) -> None:
+    base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS, max_budget_usd=2.5)
+    resolved = settings_for_labels(base, ("issuebot/todo", "Issuebot/Model/Sonnet"))
+    assert resolved.claude.model == "sonnet"
+    assert resolved.claude.max_budget_usd == 2.5
+    assert resolved.workspace.root == base.workspace.root
+    assert base.claude.model == "opus"
+
+
+def test_settings_for_labels_keeps_the_default_without_a_match(tmp_path: Path) -> None:
+    base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
+    assert settings_for_labels(base, ("issuebot/todo",)) is base
+
+
+def test_settings_for_labels_keeps_the_default_when_labels_disagree(tmp_path: Path) -> None:
+    base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
+    labels = ("issuebot/model/sonnet", "issuebot/model/fable")
+    assert settings_for_labels(base, labels).claude.model == "opus"
+
+
+def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
+    base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
+    resolved = settings_for_labels(base, ("issuebot/model/fable",))
+    argv = ClaudeRunner(resolved, environ={}).build_argv(session_id=SESSION_ID, resume=False)
+    assert argv[-2:] == ["--model", "fable"]
 
 
 def test_agent_environment_passes_only_the_allowed_names() -> None:

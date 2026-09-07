@@ -14,6 +14,7 @@ from issuebot.github.errors import GitHubError
 from issuebot.github.ghcli import ID_BATCH_SIZE, GhCliAdapter, by_ids_query
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
 from issuebot.github.runner import GhResult
+from issuebot.github.state import LabelStyle
 from issuebot.log import configure_logging
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gh"
@@ -525,6 +526,27 @@ async def test_comment_response_that_is_not_an_object_raises_response() -> None:
 
 
 # --- labels ----------------------------------------------------------------------------
+
+
+async def test_ensure_labels_creates_the_extra_labels_too() -> None:
+    runner = StubRunner()
+    runner.on(has("label", "list"), stdout=fixture("labels.json"))
+    runner.on(has("label", "create"))
+    style = LabelStyle("BFD4F2", "Run this issue with the sonnet model")
+    results = await make_adapter(runner).ensure_labels({"issuebot/model/sonnet": style})
+    assert (results[-1].name, results[-1].outcome) == ("issuebot/model/sonnet", "created")
+    creates = [argv for argv, _ in runner.calls if argv[:2] == ["label", "create"]]
+    assert creates[-1] == [
+        "label",
+        "create",
+        "issuebot/model/sonnet",
+        "-R",
+        "example/repo",
+        "--color",
+        "BFD4F2",
+        "--description",
+        "Run this issue with the sonnet model",
+    ]
 
 
 async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:

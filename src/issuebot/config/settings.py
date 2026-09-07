@@ -94,6 +94,19 @@ class ClaudeSettings(_Model):
     disallowed_tools: list[str] = Field(default_factory=list)
     append_system_prompt: str | None = None
     setting_sources: list[SettingSource] | None = None
+    model_labels: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("model_labels")
+    @classmethod
+    def _model_labels_are_usable(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, model in value.items():
+            if not name.strip():
+                raise ValueError("each key must be a non-empty label name")
+            if not model.strip():
+                raise ValueError(f"label {name!r} must map to a non-empty model name")
+        if len({name.strip().lower() for name in value}) != len(value):
+            raise ValueError("label names must be distinct (compared case-insensitively)")
+        return {name.strip(): model.strip() for name, model in value.items()}
 
     @field_validator("setting_sources")
     @classmethod

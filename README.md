@@ -192,6 +192,41 @@ claims the issue and runs one session with the logs on your terminal.
 - **Re-queue it.** Moving `issuebot/in-progress` or `issuebot/review` back to `issuebot/todo`
   is also allowed; the issue is picked up again from its existing workspace.
 
+### Choosing the model for an issue
+
+`claude.model` is the default for every session. Its value is passed straight to
+`claude --model`, so anything that flag accepts works: an alias such as `opus` or `sonnet`, or
+a full model id such as `claude-fable-5-1`.
+
+A spec-and-plan issue may deserve a bigger model than a one-line fix, so a label can override
+the default for one issue. Map the labels to models in the front matter:
+
+```yaml
+claude:
+  model: opus
+  model_labels:
+    issuebot/model/sonnet: sonnet
+    issuebot/model/fable: claude-fable-5-1
+```
+
+`issuebot labels ensure` creates those labels alongside the five state labels, so they appear
+in the issue's label menu. Put one on an issue and its next session runs with that model;
+issues without one use `claude.model`. The rules:
+
+- Model labels are not state labels. They never affect the lifecycle, an issue may carry one
+  at any point, and the agent neither adds nor removes them.
+- Exactly one model wins. An issue carrying two labels that name different models runs with
+  `claude.model`, and the worker logs `model_labels_ambiguous`.
+- The label is read when the session is dispatched, so re-labelling an issue between attempts
+  changes the model the next attempt runs with.
+- `claude.max_budget_usd` is per run whichever model runs; a cheaper model is not a smaller cap.
+
+The model each turn actually ran with is recorded and shown on the dashboard's issue page,
+which is worth checking after the first run with a new label.
+
+For one session without touching labels, `issuebot run-once <number> --model <name>` overrides
+both the label and the default.
+
 ### More than one repository
 
 Each worker is self-contained: one `WORKFLOW.md`, one workspace root, one database and one

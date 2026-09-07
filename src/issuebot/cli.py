@@ -25,9 +25,12 @@ from issuebot.agent import (
     PromptContext,
     PromptRenderer,
     RunResult,
+    TurnRunner,
     WorkspaceManager,
     parse_claude_version,
     run_session,
+    settings_for_labels,
+    settings_with_model,
 )
 from issuebot.config import (
     ConfigError,
@@ -48,7 +51,14 @@ from issuebot.db import (
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
-from issuebot.github import GhCliAdapter, GitHubAdapter, GitHubError, Issue, StateLabel
+from issuebot.github import (
+    GhCliAdapter,
+    GitHubAdapter,
+    GitHubError,
+    Issue,
+    StateLabel,
+    model_label_style,
+)
 from issuebot.github.normalise import repo_short_name
 from issuebot.log import LOG_LEVELS, configure_logging, get_logger
 from issuebot.notifications import (
@@ -66,6 +76,7 @@ DEFAULT_WORKFLOW = "WORKFLOW.md"
 # Module-level references so tests can substitute the executable lookup and the adapter.
 _which = shutil.which
 _adapter_factory: Callable[[GitHubSettings], GitHubAdapter] = GhCliAdapter
+_runner_factory: Callable[[Settings], TurnRunner] = ClaudeRunner
 
 _VERSION_PROBE_TIMEOUT_S = 10
 
@@ -203,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_once.add_argument("number", type=int, help="issue number")
     _add_workflow_option(run_once)
+    run_once.add_argument(
+        "--model",
+        help="run this session with a specific claude model, overriding claude.model_labels",
+    )
     run_once.add_argument(
         "--show-prompt",
         action="store_true",
@@ -512,8 +527,12 @@ def cmd_labels_ensure(args: argparse.Namespace) -> int:
     if workflow is None:
         return 2
     adapter = _adapter_factory(workflow.config.github)
+    extra = {
+        name: model_label_style(model)
+        for name, model in workflow.config.claude.model_labels.items()
+    }
     try:
-        results = asyncio.run(adapter.ensure_labels())
+        results = asyncio.run(adapter.ensure_labels(extra))
     except GitHubError as exc:
         print(f"[FAIL] labels: {exc}")
         return 1
@@ -660,10 +679,14 @@ def cmd_run_once(args: argparse.Namespace) -> int:
     workflow = _load_or_report(args)
     if workflow is None:
         return 2
-    return asyncio.run(_run_once(workflow, args.number, show_prompt=args.show_prompt))
+    return asyncio.run(
+        _run_once(workflow, args.number, show_prompt=args.show_prompt, model=args.model)
+    )
 
 
-async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> int:
+async def _run_once(
+    workflow: Workflow, number: int, *, show_prompt: bool, model: str | None = None
+) -> int:
     settings = workflow.config
     adapter = _adapter_factory(settings.github)
     try:
@@ -720,6 +743,7 @@ async def _run_once(workflow: Workflow, number: int, *, show_prompt: bool) -> in
             attempt=attempt,
             rework=rework,
             record=sinks.record_issues,
+            model=model,
         )
     finally:
         await sinks.close()
@@ -735,6 +759,7 @@ async def _claim_and_run(
     attempt: int,
     rework: bool,
     record: Callable[[Sequence[Issue]], None] | None = None,
+    model: str | None = None,
 ) -> int:
     settings = workflow.config
     number = issue.number
@@ -769,7 +794,11 @@ async def _claim_and_run(
         adapter,
         bus,
         workspaces=workspaces,
-        runner=ClaudeRunner(settings),
+        runner=_runner_factory(
+            settings_with_model(settings, model)
+            if model
+            else settings_for_labels(settings, issue.labels)
+        ),
         attempt=attempt,
         rework=rework,
     )

@@ -18,6 +18,10 @@ agent:
   self_review: true
 claude:
   model: opus
+  # A label overrides the default for one issue; `labels ensure` creates these.
+  model_labels:
+    issuebot/model/sonnet: sonnet
+    issuebot/model/fable: claude-fable-5-1
   permission_mode: auto
   max_budget_usd: 5.0
   setting_sources: [project]

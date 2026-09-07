@@ -7,7 +7,7 @@ import os
 import re
 import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -267,6 +267,33 @@ def _float(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return 0.0
     return float(value)
+
+
+def settings_with_model(settings: Settings, model: str | None) -> Settings:
+    """Settings running ``claude`` with ``model``; the same object when nothing changes."""
+    if model == settings.claude.model:
+        return settings
+    claude = settings.claude.model_copy(update={"model": model})
+    return settings.model_copy(update={"claude": claude})
+
+
+def settings_for_labels(settings: Settings, labels: Sequence[str]) -> Settings:
+    """Settings with ``claude.model`` replaced by the one an issue's model label names.
+
+    Exactly one distinct model wins; no match or a disagreement keeps ``claude.model``.
+    """
+    mapping = settings.claude.model_labels
+    if not mapping:
+        return settings
+    carried = {name.lower() for name in labels}
+    models = {model for name, model in mapping.items() if name.lower() in carried}
+    if len(models) != 1:
+        if models:
+            get_logger(__name__).warning(
+                "model_labels_ambiguous", models=sorted(models), model=settings.claude.model
+            )
+        return settings
+    return settings_with_model(settings, models.pop())
 
 
 class ClaudeRunner:

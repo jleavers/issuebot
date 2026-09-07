@@ -51,6 +51,14 @@ LABEL_STYLES: dict[StateLabel, LabelStyle] = {
 }
 
 
+MODEL_LABEL_COLOR = "BFD4F2"
+
+
+def model_label_style(model: str) -> LabelStyle:
+    """The style of a label that picks a claude model for one issue."""
+    return LabelStyle(MODEL_LABEL_COLOR, f"Run this issue with the {model} model")
+
+
 def is_allowed(current: StateLabel | None, target: StateLabel, actor: Actor) -> bool:
     return (current, target, actor) in TRANSITIONS
 

@@ -20,6 +20,7 @@ from issuebot.agent import (
     WorkspaceManager,
     new_run_id,
     run_session,
+    settings_for_labels,
 )
 from issuebot.agent.runner import TERMINATE_GRACE_S
 from issuebot.config import ConfigError, GitHubSettings, Settings, Workflow, load_workflow
@@ -422,7 +423,7 @@ class Orchestrator:
             self._adapter,
             self._bus,
             workspaces=self._workspaces,
-            runner=self._runner_factory(workflow.config),
+            runner=self._runner_factory(settings_for_labels(workflow.config, entry.issue.labels)),
             attempt=entry.attempt,
             rework=entry.rework,
             resume_session_id=resume_session_id,

@@ -44,19 +44,23 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
   (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
   carries the run's log directory.
-- `issuebot.github`: `StateLabel` roles and the transition table (`state.py`); frozen
-  `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter` protocol (async);
-  `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via `gh issue edit`,
-  `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary); `FakeGitHub`
-  for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`).
+- `issuebot.github`: `StateLabel` roles, the transition table and `model_label_style`
+  (`state.py`); frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
+  protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
+  `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
+  `ensure_labels` also creates the extra labels it is given); `FakeGitHub` for tests (same
+  normaliser, GitHub-like semantics, `fail_next`, `calls`).
 - `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`); `PromptRenderer` (Jinja2
   `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `attempt`,
   `turn_number`, `max_turns`, `rework`, `self_review`); `ClaudeRunner` (`claude -p
   --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `run_session` (turns, refresh between turns, `RunResult`,
-  publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
+  `.issuebot/runs/<run_id>/`); `settings_for_labels` (a `claude.model_labels` entry carried
+  by the issue replaces `claude.model`; no match, or two labels naming different models,
+  keeps the default) and `settings_with_model`; `run_session` (turns, refresh between turns,
+  `RunResult`, publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`,
+  not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
   `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
   `TurnCapture`s, capped (prompt 256 KiB head; a stream line over 64 KiB becomes an
@@ -78,6 +82,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
   (the session's final transition is published before any release; `max_turns` while
   `in_progress` or `max_attempts` failures → the blocked escape).
+  A session's runner is built from `settings_for_labels`, so a model label on the issue picks
+  that session's model.
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -146,9 +152,11 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
   `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
   and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
-  `labels ensure`, `issues list`, `run-once <number> [--show-prompt]` (claims `in-progress`,
-  runs one session, never sets `review`), `worker [--workflow PATH]` (the orchestrator until
-  SIGTERM/SIGINT; `[FAIL] startup:` lines and exit 1 when the startup probes fail), `migrate`,
+  `labels ensure` (the five state labels plus one per `claude.model_labels` entry),
+  `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
+  runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
+  `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
+  and exit 1 when the startup probes fail), `migrate`,
   `status`, `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
   `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
   `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is
@@ -159,7 +167,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is uvicorn's error and exit
   1); exit codes 0/1/2 (ok / failed / workflow unloadable).
   Tests substitute `_which`, `_claude_version`, `_adapter_factory`, `_run_session`,
-  `_orchestrator_factory`, `_slack_post`, `_database_factory` and `_serve`.
+  `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
+  `_serve`.
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).
