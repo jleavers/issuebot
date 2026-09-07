@@ -34,10 +34,16 @@ agent with your review comments.
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
    appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
    personal access token restricted to the target repository with Contents, Issues and
-   Pull requests set to read and write, plus Checks read so `gh pr checks --watch` works.
-   (A classic token with the `repo` scope also works; add `workflow` if the agent may edit
-   files under `.github/workflows/`.) The account needs permission to push branches and open
-   PRs in the target repository.
+   Pull requests set to read and write, plus Commit statuses read (for CI that posts commit
+   statuses rather than Actions check runs); Metadata read is mandatory and the UI adds it for
+   you. Do not go looking for a Checks permission: fine-grained tokens
+   [cannot call the Checks API](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#limitations-of-fine-grained-personal-access-tokens),
+   so it is not in the list. Contents read is what lets `gh pr checks --watch` read a PR's check
+   rollup, so it works with the permissions above. If the agent may edit files under
+   `.github/workflows/`, also grant Workflows — read and write is its only level, and without it
+   any push touching those files is rejected. A classic token with the `repo` scope works too;
+   it needs `workflow` adding for the same reason. The account needs permission to push branches
+   and open PRs in the target repository.
 2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
    (see step 2 below for the container).
 3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
