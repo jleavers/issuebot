@@ -4,6 +4,10 @@ name: Claude Code version
 # ecosystem never looks at it. This job is that missing update PR. It only moves the pin in
 # the Dockerfile; MIN_CLAUDE_VERSION in src/issuebot/agent/runner.py is a compatibility floor
 # and rises by hand, when the code starts depending on something newer.
+#
+# Opening the pull request needs "Allow GitHub Actions to create and approve pull requests"
+# (Settings > Actions > General > Workflow permissions). Without it the push succeeds and
+# only the pull request is refused, with HTTP 403.
 
 on:
   schedule:
@@ -27,6 +31,8 @@ jobs:
 
       - id: check
         name: Compare the pin with the npm dist-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           current="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' Dockerfile)"
@@ -45,11 +51,21 @@ jobs:
           fi
           branch="claude-code-${latest}"
           changed=false
+          reuse=false
           if [ "${current}" != "${latest}" ]; then
-            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-              echo "::notice::${branch} already exists; nothing to do"
+            # A pull request in any state means this version has been offered already: an
+            # open one is waiting, a closed one was declined on purpose. A branch with no
+            # pull request is the wreckage of a run that failed after pushing, so finish it
+            # rather than report that there is nothing to do.
+            pr="$(gh pr list --head "${branch}" --state all --json number --jq '.[0].number // ""')"
+            if [ -n "${pr}" ]; then
+              echo "::notice::${branch} already has pull request #${pr}; nothing to do"
             else
               changed=true
+              if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+                echo "::notice::${branch} exists with no pull request; reusing it"
+                reuse=true
+              fi
             fi
           fi
           {
@@ -57,6 +73,7 @@ jobs:
             echo "latest=${latest}"
             echo "branch=${branch}"
             echo "changed=${changed}"
+            echo "reuse=${reuse}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
@@ -87,14 +104,20 @@ jobs:
           CURRENT: ${{ steps.check.outputs.current }}
           LATEST: ${{ steps.check.outputs.latest }}
           BRANCH: ${{ steps.check.outputs.branch }}
+          REUSE: ${{ steps.check.outputs.reuse }}
         run: |
           set -euo pipefail
-          sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
-          git commit -am "build: pin Claude Code ${LATEST}"
-          git push -u origin "${BRANCH}"
+          if [ "${REUSE}" = "true" ]; then
+            git fetch origin "${BRANCH}"
+            git checkout "${BRANCH}"
+          else
+            sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -b "${BRANCH}"
+            git commit -am "build: pin Claude Code ${LATEST}"
+            git push -u origin "${BRANCH}"
+          fi
           cat > /tmp/pr-body.md <<BODY
           Claude Code ${CURRENT} → ${LATEST} (npm \`dist-tags.latest\` for
           \`@anthropic-ai/claude-code\`).
@@ -111,9 +134,16 @@ jobs:
           Note: pull requests opened with \`GITHUB_TOKEN\` do not start the CI workflow. Close
           and reopen this pull request, or push to the branch, to run it.
           BODY
-          gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
             -f title="build: pin Claude Code ${LATEST}" \
             -f head="${BRANCH}" \
             -f base="${GITHUB_REF_NAME}" \
             -F body=@/tmp/pr-body.md \
             --jq '.html_url'
+          then
+            echo "::error::could not open the pull request. If this is HTTP 403, turn on" \
+              "Settings > Actions > General > Workflow permissions >" \
+              "'Allow GitHub Actions to create and approve pull requests'." \
+              "The branch ${BRANCH} is pushed; re-running this job will reuse it."
+            exit 1
+          fi
