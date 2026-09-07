@@ -19,6 +19,10 @@ from issuebot.agent.errors import AgentErrorCategory
 from issuebot.config import Settings
 from issuebot.log import get_logger
 
+# The oldest claude carrying `--permission-prompts none`, the flag that makes an
+# unattended headless run possible. A compatibility floor `validate` enforces against
+# whatever claude is on PATH, not the version the image ships: raise it only when the
+# code starts depending on something newer.
 MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 259)
 STREAM_LINE_LIMIT = 10 * 1024 * 1024
 TERMINATE_GRACE_S = 10.0
