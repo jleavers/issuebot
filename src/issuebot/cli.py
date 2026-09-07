@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -27,6 +28,7 @@ from issuebot.agent import (
     RunResult,
     TurnRunner,
     WorkspaceManager,
+    agent_environment,
     parse_claude_version,
     run_session,
     settings_for_labels,
@@ -78,7 +80,7 @@ _which = shutil.which
 _adapter_factory: Callable[[GitHubSettings], GitHubAdapter] = GhCliAdapter
 _runner_factory: Callable[[Settings], TurnRunner] = ClaudeRunner
 
-_VERSION_PROBE_TIMEOUT_S = 10
+_CLAUDE_PROBE_TIMEOUT_S = 10
 
 
 def _claude_version_output(command: str) -> str | None:
@@ -88,7 +90,7 @@ def _claude_version_output(command: str) -> str | None:
             [command, "--version"],
             capture_output=True,
             text=True,
-            timeout=_VERSION_PROBE_TIMEOUT_S,
+            timeout=_CLAUDE_PROBE_TIMEOUT_S,
             check=False,
         )
     except OSError, subprocess.TimeoutExpired:
@@ -96,7 +98,28 @@ def _claude_version_output(command: str) -> str | None:
     return completed.stdout or None
 
 
+def _claude_auth_status(command: str) -> str | None:
+    """Run ``<command> auth status --json`` and return its stdout, or None when it cannot run.
+
+    The probe runs under the same filtered environment ``ClaudeRunner`` gives the agent, so the
+    check answers "can the agent authenticate", not "can this shell".
+    """
+    try:
+        completed = subprocess.run(
+            [command, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_PROBE_TIMEOUT_S,
+            check=False,
+            env=agent_environment(os.environ, token=None),
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return completed.stdout or None
+
+
 _claude_version = _claude_version_output
+_claude_auth = _claude_auth_status
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
@@ -319,6 +342,7 @@ def run_checks(
         _token_check(workflow),
         _workspace_check(cfg.workspace.root),
         _claude_check(cfg.claude.command),
+        _claude_auth_check(cfg.claude.command),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -409,6 +433,59 @@ def _claude_check(command: str) -> Check:
         detail = f"{found} is {text}; issuebot needs {needed} or newer"
         return Check("claude.command", "fail", detail)
     return Check("claude.command", "ok", f"{found} ({text})")
+
+
+def _claude_auth_check(command: str) -> Check:
+    """The claude auth line: which credential the agent will use, or that it has none."""
+    subject = "claude auth"
+    found = _which(command)
+    if not found:
+        return Check(subject, "warn", f"skipped ({command} not found)")
+    output = _claude_auth(found)
+    status = _parse_auth_status(output)
+    if status is None:
+        reason = "no output" if not output else f"unparseable output {output.strip()[:40]!r}"
+        return Check(subject, "warn", f"could not read auth status ({reason})")
+    if not status.get("loggedIn"):
+        detail = "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        return Check(subject, "fail", detail)
+    method = _auth_method_text(status)
+    source = status.get("apiKeySource")
+    if source and status.get("authMethod") != "api_key":
+        detail = (
+            f"logged in ({method}) with {source} also set; "
+            "unset one to be sure which credential is used"
+        )
+        return Check(subject, "warn", detail)
+    return Check(subject, "ok", f"logged in ({method})")
+
+
+def _parse_auth_status(output: str | None) -> dict[str, Any] | None:
+    """``claude auth status --json`` stdout as a mapping; None when it is not one."""
+    if not output:
+        return None
+    try:
+        parsed = json.loads(output)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _auth_method_text(status: Mapping[str, Any]) -> str:
+    """How the agent authenticates, as the check prints it.
+
+    ``claude auth status`` names the Claude Code login after the site it came from, so
+    ``claude.ai`` is passed through as-is; the two variable-borne credentials are named after
+    the variable that carries them, which is what a reader has to go and change.
+    """
+    method = status.get("authMethod")
+    if method == "api_key":
+        source = status.get("apiKeySource")
+        return f"API key from {source}" if source else "API key"
+    if method == "oauth_token":
+        return "CLAUDE_CODE_OAUTH_TOKEN"
+    subscription = status.get("subscriptionType")
+    return f"{method}, {subscription}" if subscription else str(method)
 
 
 def _version_text(version: tuple[int, int, int]) -> str:

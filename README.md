@@ -130,6 +130,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /home/issuebot/.local/bin/claude (2.1.259)
+[ OK ] claude auth: logged in (claude.ai, max)
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -137,7 +138,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 2
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-12 checks: 0 failed, 2 warnings
+13 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the five labels in the target repository; run it once
@@ -148,6 +149,51 @@ To use a Claude Code login instead of an API key, log in once inside the contain
 login is kept in the `claude-home` volume and survives restarts and rebuilds. Alternatively
 run `claude setup-token` on a machine with a browser and put the result in `.env` as
 `CLAUDE_CODE_OAUTH_TOKEN`. On the host, `claude` uses whatever login you already have.
+
+#### Checking that the login took
+
+The `claude auth` line above is the answer: `validate` asks `claude` which credential it would
+use, under the same trimmed environment the agent gets, so it reports what the *agent* will
+authenticate with rather than what your shell can reach. It names the route, so you can tell
+the three apart at a glance:
+
+| Line | What it means |
+|---|---|
+| `logged in (claude.ai, max)` | the login in the `claude-home` volume, on a Max subscription |
+| `logged in (CLAUDE_CODE_OAUTH_TOKEN)` | the token from `claude setup-token` |
+| `logged in (API key from ANTHROPIC_API_KEY)` | an Anthropic API key |
+| `not logged in` | nothing usable — a `[FAIL]`, because the agent cannot run |
+
+Setting both a login and `ANTHROPIC_API_KEY` is a warning rather than an error: it works, but
+which credential gets billed is not obvious from the outside, so unset one. An empty
+`ANTHROPIC_API_KEY=` counts as unset, which is what you want when you have logged in.
+
+To ask `claude` directly, without going through issuebot:
+
+```bash
+docker compose run --rm --entrypoint claude worker auth status
+```
+
+It prints JSON — `"loggedIn": true` with an `authMethod` of `claude.ai`, `oauth_token` or
+`api_key` — and `--text` gives a human-readable line instead. Note that it always exits 0, so
+read the field rather than the exit code. The `email` and `orgName` fields come back null in
+the container even when the login is good: that metadata lives in `~/.claude.json`, which sits
+outside the mounted volume and is recreated with each container. The credential itself is in
+`.claude/.credentials.json`, which *is* in the volume, and it carries a refresh token, so it
+renews itself rather than expiring after a few hours.
+
+Because `claude-home` is a named volume there is no directory to open on the host, but you can
+list it from a throwaway container:
+
+```bash
+docker volume ls | grep claude-home     # Compose prefixes the name with the project
+docker run --rm -v issuebot_claude-home:/v alpine:3 ls -la /v
+```
+
+A logged-in volume has `.credentials.json` in it. Compose names the volume after the directory
+you cloned into, so it is `issuebot_claude-home` here and `issuebot-frontend_claude-home` in a
+checkout called `issuebot-frontend` — hence the `docker volume ls` first. Never `cat` that
+file: it holds the live token.
 
 ### Step 3: start it
 

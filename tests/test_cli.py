@@ -52,15 +52,23 @@ INVALID = FIXTURES / "invalid.md"
 WEBHOOK = "https://hooks.slack.com/services/T000/B000/secret"
 
 
+LOGGED_IN = '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}'
+
+
 @pytest.fixture
 def executables(monkeypatch: pytest.MonkeyPatch) -> Callable[[set[str]], None]:
-    """Pretend the given executable names exist on PATH and report Claude Code 2.1.259."""
+    """Pretend the given names are on PATH, reporting Claude Code 2.1.259 and a claude.ai login."""
 
-    def install(names: set[str], version: str | None = "2.1.259 (Claude Code)") -> None:
+    def install(
+        names: set[str],
+        version: str | None = "2.1.259 (Claude Code)",
+        auth: str | None = LOGGED_IN,
+    ) -> None:
         monkeypatch.setattr(
             "issuebot.cli._which", lambda name: f"/usr/bin/{name}" if name in names else None
         )
         monkeypatch.setattr("issuebot.cli._claude_version", lambda command: version)
+        monkeypatch.setattr("issuebot.cli._claude_auth", lambda command: auth)
 
     install({"claude", "gh"})
     return install
@@ -170,7 +178,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("12 checks: 0 failed, 1 warnings")
+    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
     assert "secret-token-value" not in out
 
 
@@ -220,7 +228,8 @@ def test_validate_missing_executables_fail(
     assert "[WARN] gh auth: skipped (gh not found)" in out
     assert "[WARN] github.repo access: skipped (gh not found)" in out
     assert "[WARN] github.labels: skipped (gh not found)" in out
-    assert "2 failed, 4 warnings" in out
+    assert "[WARN] claude auth: skipped (claude not found)" in out
+    assert "2 failed, 5 warnings" in out
 
 
 def test_validate_custom_claude_command_is_looked_up(
@@ -281,7 +290,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "12 checks: 0 failed, 1 warnings" in out
+    assert "13 checks: 0 failed, 1 warnings" in out
 
 
 def _validate_with_database(
@@ -305,7 +314,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "12 checks: 1 failed, 0 warnings" in out
+    assert "13 checks: 1 failed, 0 warnings" in out
     assert fake_database.urls == []
 
 
@@ -344,7 +353,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "12 checks: 0 failed, 1 warnings" in out
+    assert "13 checks: 0 failed, 1 warnings" in out
 
 
 def test_validate_fails_when_the_schema_is_ahead(
@@ -377,7 +386,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "12 checks: 0 failed, 0 warnings" in out
+    assert "13 checks: 0 failed, 0 warnings" in out
     assert "secret" not in out
 
 
@@ -532,6 +541,117 @@ def test_validate_unknown_claude_version_warns(
     out = capsys.readouterr().out
     assert "[WARN] claude.command: /usr/bin/claude (version unknown: no output)" in out
     assert "0 failed, 2 warnings" in out
+
+
+def test_validate_reports_a_claude_ai_login(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
+    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
+
+
+def test_validate_reports_an_oauth_token_login(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, auth='{"loggedIn": true, "authMethod": "oauth_token"}')
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    assert "[ OK ] claude auth: logged in (CLAUDE_CODE_OAUTH_TOKEN)" in capsys.readouterr().out
+
+
+def test_validate_reports_an_api_key_login(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    status = '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}'
+    executables({"claude", "gh"}, auth=status)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] claude auth: logged in (API key from ANTHROPIC_API_KEY)" in out
+
+
+def test_validate_logged_out_claude_fails(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, auth='{"loggedIn": false, "authMethod": "none"}')
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert (
+        "[FAIL] claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY" in out
+    )
+
+
+def test_validate_auth_status_without_output_warns(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, auth=None)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] claude auth: could not read auth status (no output)" in out
+
+
+def test_validate_unparseable_auth_status_warns(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    executables({"claude", "gh"}, auth="error: unknown command auth\n")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] claude auth: could not read auth status "
+        "(unparseable output 'error: unknown command auth')" in out
+    )
+
+
+def test_validate_warns_when_a_login_and_an_api_key_are_both_set(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    status = '{"loggedIn": true, "authMethod": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"}'
+    executables({"claude", "gh"}, auth=status)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] claude auth: logged in (claude.ai) with ANTHROPIC_API_KEY also set; "
+        "unset one to be sure which credential is used" in out
+    )
+
+
+def test_validate_never_prints_the_account_behind_the_login(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[..., None],
+) -> None:
+    status = (
+        '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max", '
+        '"email": "someone@example.com", "orgName": "Someone\'s Organization"}'
+    )
+    executables({"claude", "gh"}, auth=status)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
+    assert "someone@example.com" not in out
+    assert "Organization" not in out
 
 
 def test_validate_prompt_that_does_not_render_fails(
