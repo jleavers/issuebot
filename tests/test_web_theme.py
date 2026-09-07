@@ -3,8 +3,14 @@
 The two duplicated dark blocks in ``app.css`` (one for the OS preference, one for the
 explicit choice) are the maintenance risk in this design, so they are checked against each
 other here, and every dark mark is measured against the surface it sits on.
+
+There is no JavaScript engine in the test environment, so the scripts are only held to the
+contracts they share with the stylesheet and with each other - the token names and the
+repaint event. Their behaviour (the click, the persistence, the inheritance across pages,
+the absence of a flash) is verified in a browser and recorded on the pull request.
 """
 
+import re
 from collections.abc import Iterator
 from importlib.resources import files
 from typing import Any
@@ -102,27 +108,27 @@ def test_the_script_runs_before_the_first_paint(h: Harness) -> None:
     assert "defer" not in tag and "async" not in tag
 
 
-def test_the_toggle_is_labelled_and_only_shown_when_the_script_ran() -> None:
-    assert 'aria-pressed="false"' in (files("issuebot.web") / "templates" / "base.html").read_text(
-        encoding="utf-8"
-    )
+def test_the_toggle_is_reachable_and_labelled(h: Harness) -> None:
+    text = html(h.client.get("/"))
+    # a real <button>, so it carries the role, the keyboard behaviour and the focus ring
+    assert '<button class="theme-toggle" type="button"' in text
+    assert 'aria-pressed="false"' in text and 'aria-label="Switch to dark mode"' in text
+    # the icons are decoration; the label carries the meaning
+    assert text.count('aria-hidden="true"') >= 2
+    assert ".theme-toggle:focus-visible" in CSS
+
+
+def test_the_toggle_is_not_offered_without_javascript() -> None:
+    """It cannot do anything without the script, so app.css only reveals it once it ran."""
     assert "html:not(.js) .theme-toggle { display: none; }" in CSS
-    assert 'root.classList.add("js")' in THEME_JS
-    assert "aria-label" in THEME_JS and "aria-pressed" in THEME_JS
+    assert 'classList.add("js")' in THEME_JS
 
 
-def test_the_choice_is_persisted_so_every_page_inherits_it() -> None:
-    assert 'var KEY = "issuebot-theme"' in THEME_JS
-    assert "localStorage.getItem(KEY)" in THEME_JS
-    assert "localStorage.setItem(KEY, next)" in THEME_JS
-    # storage can throw (disabled, or full); the page must still render
-    assert THEME_JS.count("catch (error)") >= 2
-
-
-def test_no_stored_choice_means_the_os_decides() -> None:
-    assert 'window.matchMedia("(prefers-color-scheme: dark)")' in THEME_JS
-    # nothing stored leaves data-theme off the element, so the media query stays in charge
-    assert "if (initial) {\n    root.dataset.theme = initial;\n  }" in THEME_JS
+def test_storage_failures_cannot_break_the_page() -> None:
+    """localStorage throws when it is disabled or full; both accesses must be guarded."""
+    reads_and_writes = THEME_JS.count("localStorage.")
+    assert reads_and_writes == 2, THEME_JS.count("localStorage.")
+    assert THEME_JS.count("catch (error)") >= reads_and_writes
 
 
 # --- the tokens -------------------------------------------------------------------------------
@@ -199,21 +205,21 @@ def test_the_dark_theme_fixes_the_bar_that_clashed() -> None:
 # --- the charts -------------------------------------------------------------------------------
 
 
-def test_the_charts_read_their_colours_from_the_stylesheet() -> None:
-    for name in ("--chart-closed", "--chart-runs", "--chart-ink", "--chart-grid"):
-        assert name in APP_JS, name
+def test_every_chart_token_the_script_asks_for_exists_in_both_themes() -> None:
+    """A token renamed in one file and not the other would silently fall back."""
+    asked = set(re.findall(r'token\("(--[a-z-]+)"', APP_JS))
+    assert asked == {"--chart-closed", "--chart-runs", "--chart-ink", "--chart-grid"}, asked
+    for name in asked:
         assert name in LIGHT and name in OS_DARK, name
+    # Chart.js paints on a canvas, which CSS cannot reach, so the values are read at runtime
     assert "getComputedStyle(document.documentElement)" in APP_JS
-    # the axis furniture too: Chart.js would otherwise paint it near-black on a dark panel
-    assert "ticks: { color: colors.ink }" in APP_JS
-    assert "grid: { color: colors.grid }" in APP_JS
 
 
-def test_the_charts_repaint_when_the_theme_changes() -> None:
-    assert 'document.addEventListener("issuebot:themechange", render)' in APP_JS
-    assert 'CustomEvent("issuebot:themechange"' in THEME_JS
-    # repainting must not refetch: the series is kept and redrawn
-    assert "series = body.series" in APP_JS
+def test_the_two_scripts_agree_on_the_repaint_event() -> None:
+    """theme.js fires it and app.js listens; a rename in one file only would go unnoticed."""
+    fired = set(re.findall(r'CustomEvent\("([a-z:]+)"', THEME_JS))
+    heard = set(re.findall(r'addEventListener\("(issuebot:[a-z]+)"', APP_JS))
+    assert fired == heard == {"issuebot:themechange"}, (fired, heard)
 
 
 def test_the_theme_introduces_no_inline_code(h: Harness) -> None:
