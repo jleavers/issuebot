@@ -48,8 +48,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   (`state.py`); frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
-  `ensure_labels` also creates the extra labels it is given); `FakeGitHub` for tests (same
-  normaliser, GitHub-like semantics, `fail_next`, `calls`).
+  `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
+  `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`).
 - `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`); `PromptRenderer` (Jinja2
   `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `attempt`,
@@ -148,7 +148,8 @@ a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
   connection per request through `Database.queries()`. Constants, not settings; the web reads
   `WORKFLOW.md` once at start.
 - `issuebot.cli`: argparse; `validate` (twelve checks: three network probes through the
-  adapter, a `claude --version` floor of 2.1.259, a `database.url` check that connects and
+  adapter, the labels one covering `claude.model_labels` as well as the five state labels,
+  a `claude --version` floor of 2.1.259, a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
   `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
   and with `--slack-probe` posts one test message, and a prompt render against a sample issue),

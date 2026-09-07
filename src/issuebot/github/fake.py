@@ -1,7 +1,7 @@
 """In-memory GitHubAdapter with GitHub-like semantics and helpers for tests."""
 
 import copy
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -192,9 +192,10 @@ class FakeGitHub:
             results.append(LabelEnsured(name=name, outcome=outcome))
         return results
 
-    async def missing_labels(self) -> list[str]:
+    async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:
         self._enter("missing_labels")
-        return [name for name in self.labels.as_tuple() if name not in self.repo_labels]
+        wanted = (*self.labels.as_tuple(), *extra)
+        return [name for name in wanted if name not in self.repo_labels]
 
     async def rate_limit(self) -> RateLimit:
         self._enter("rate_limit")

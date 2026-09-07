@@ -35,7 +35,14 @@ from issuebot.db import (
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import Event, StateChanged
-from issuebot.github import FakeGitHub, GitHubError, Issue, LinkedPr, StateLabel
+from issuebot.github import (
+    FakeGitHub,
+    GitHubError,
+    Issue,
+    LinkedPr,
+    StateLabel,
+    model_label_style,
+)
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import OrchestratorStartupError
 
@@ -159,7 +166,7 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] prompt: 44 characters, renders" in out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
-    assert "[ OK ] github.labels: 5 labels present" in out
+    assert "[ OK ] github.labels: 5 state labels present" in out
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
@@ -662,7 +669,7 @@ def test_validate_reports_repo_access_failure(
     out = capsys.readouterr().out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[FAIL] github.repo access: not_found: injected not_found failure" in out
-    assert "[ OK ] github.labels: 5 labels present" in out
+    assert "[ OK ] github.labels: 5 state labels present" in out
 
 
 def test_validate_reports_labels_failure(
@@ -673,7 +680,7 @@ def test_validate_reports_labels_failure(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
 
-    async def failing_missing_labels() -> object:
+    async def failing_missing_labels(extra: object = ()) -> object:
         raise GitHubError("transport", "injected transport failure")
 
     monkeypatch.setattr(fake_github, "missing_labels", failing_missing_labels)
@@ -700,6 +707,35 @@ def test_validate_warns_about_missing_labels(
         "run issuebot labels ensure" in out
     )
     assert "0 failed, 2 warnings" in out
+
+
+def test_validate_warns_about_missing_model_labels(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.labels: missing: issuebot/model/sonnet; run issuebot labels ensure" in out
+
+
+def test_validate_counts_the_model_labels_it_finds(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.repo_labels["issuebot/model/sonnet"] = model_label_style("sonnet")
+    path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] github.labels: 5 state labels and 1 model label present" in out
 
 
 # --- labels ensure -----------------------------------------------------------------------

@@ -596,6 +596,18 @@ async def test_missing_labels_lists_absent_names_in_role_order() -> None:
     assert missing == ["issuebot/in-progress", "issuebot/rework", "issuebot/complete"]
 
 
+async def test_missing_labels_reports_the_extra_names_after_the_state_ones() -> None:
+    runner = StubRunner()
+    runner.on(has("label", "list"), stdout=fixture("labels.json"))
+    missing = await make_adapter(runner).missing_labels(("issuebot/model/sonnet",))
+    assert missing == [
+        "issuebot/in-progress",
+        "issuebot/rework",
+        "issuebot/complete",
+        "issuebot/model/sonnet",
+    ]
+
+
 async def test_label_list_that_is_not_a_list_raises_response() -> None:
     runner = StubRunner()
     runner.on(has("label", "list"), stdout="{}")

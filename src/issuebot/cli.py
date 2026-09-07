@@ -321,20 +321,20 @@ def run_checks(
         _claude_check(cfg.claude.command),
         _executable_check("gh", "gh"),
     ]
-    checks.extend(_github_checks(adapter))
+    checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
     checks.append(_database_check(cfg))
     checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
     return checks
 
 
-def _github_checks(adapter: GitHubAdapter | None) -> list[Check]:
+def _github_checks(adapter: GitHubAdapter | None, model_labels: Sequence[str] = ()) -> list[Check]:
     if adapter is None:
         return [Check(subject, "warn", "skipped (gh not found)") for subject in _NETWORK_SUBJECTS]
-    return asyncio.run(_probe_github(adapter))
+    return asyncio.run(_probe_github(adapter, model_labels))
 
 
-async def _probe_github(adapter: GitHubAdapter) -> list[Check]:
+async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()) -> list[Check]:
     checks: list[Check] = []
     try:
         auth = await adapter.auth_status()
@@ -348,7 +348,7 @@ async def _probe_github(adapter: GitHubAdapter) -> list[Check]:
     except GitHubError as exc:
         checks.append(Check("github.repo access", "fail", str(exc)))
     try:
-        missing = await adapter.missing_labels()
+        missing = await adapter.missing_labels(model_labels)
     except GitHubError as exc:
         checks.append(Check("github.labels", "fail", str(exc)))
     else:
@@ -356,8 +356,17 @@ async def _probe_github(adapter: GitHubAdapter) -> list[Check]:
             detail = f"missing: {', '.join(missing)}; run issuebot labels ensure"
             checks.append(Check("github.labels", "warn", detail))
         else:
-            checks.append(Check("github.labels", "ok", "5 labels present"))
+            checks.append(Check("github.labels", "ok", _labels_detail(adapter, model_labels)))
     return checks
+
+
+def _labels_detail(adapter: GitHubAdapter, model_labels: Sequence[str]) -> str:
+    """What `validate` says when every label the workflow names exists."""
+    state = f"{len(adapter.labels.as_tuple())} state labels"
+    if not model_labels:
+        return f"{state} present"
+    plural = "" if len(model_labels) == 1 else "s"
+    return f"{state} and {len(model_labels)} model label{plural} present"
 
 
 def _token_check(workflow: Workflow) -> Check:

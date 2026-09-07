@@ -231,10 +231,11 @@ class GhCliAdapter:
                 results.append(LabelEnsured(name=name, outcome="unchanged"))
         return results
 
-    async def missing_labels(self) -> list[str]:
+    async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:
         self._log.debug("missing_labels")
         existing = await self._repo_labels()
-        return [name for name in self.labels.as_tuple() if name.lower() not in existing]
+        wanted = (*self.labels.as_tuple(), *extra)
+        return [name for name in wanted if name.lower() not in existing]
 
     async def _repo_labels(self) -> dict[str, tuple[str, str]]:
         """Existing labels keyed by lowercased name -> (lowercased colour, description)."""
