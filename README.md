@@ -293,6 +293,11 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
 - **Configuration changes.** A running worker re-reads `WORKFLOW.md` when it changes.
   `database.url`, the Slack webhook and its event list are read once at start, so those need
   `docker compose restart worker`.
+- **Upgrades.** `WORKFLOW.md` is mounted into the container, but the code is baked into the
+  image: after pulling a new version of issuebot, run `docker compose build` (or
+  `docker compose up --build -d`) before anything else. A setting that a newer `WORKFLOW.md`
+  introduces fails against a stale image at `validate`, as
+  `<key>: Extra inputs are not permitted`.
 - **Safety.** The agent runs with no permission prompts and may run anything inside its
   workspace. Keep it in the container, give it a repository-scoped token, and keep the
   dashboard on loopback. The agent's environment is minimal: `PATH`, `HOME`, the
