@@ -46,8 +46,11 @@ USER issuebot
 ENV HOME=/home/issuebot \
     PATH="/home/issuebot/.local/bin:/app/.venv/bin:${PATH}"
 
+# The flag assertion is the point of pinning: a release that drops --permission-prompts
+# breaks an unattended worker at runtime, so fail the build instead.
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}" \
- && claude --version
+ && claude --version \
+ && claude --help | grep -q -- '--permission-prompts'
 
 WORKDIR /app
 VOLUME ["/workspaces", "/home/issuebot/.claude"]

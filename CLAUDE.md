@@ -32,6 +32,10 @@ docker compose up                    # db (postgres:18) + worker (issuebot worke
 
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
 a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
+`claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
+Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
+new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
+floor, not the shipped version, and moves by hand.
 
 ## Package layout
 

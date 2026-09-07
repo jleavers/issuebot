@@ -1,0 +1,119 @@
+name: Claude Code version
+
+# Dependabot cannot see CLAUDE_CODE_VERSION: it is not an image reference, so the Docker
+# ecosystem never looks at it. This job is that missing update PR. It only moves the pin in
+# the Dockerfile; MIN_CLAUDE_VERSION in src/issuebot/agent/runner.py is a compatibility floor
+# and rises by hand, when the code starts depending on something newer.
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC, alongside the weekly Dependabot runs.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: claude-code-version
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: check
+        name: Compare the pin with the npm dist-tag
+        run: |
+          set -euo pipefail
+          current="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' Dockerfile)"
+          latest="$(curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code \
+            | jq -r '."dist-tags".latest')"
+          echo "pinned: ${current}; latest: ${latest}"
+          if [ -z "${current}" ]; then
+            echo "::error::no ARG CLAUDE_CODE_VERSION in the Dockerfile"
+            exit 1
+          fi
+          # 'stable' is deliberately not used: it trails 'latest' by weeks and has been below
+          # MIN_CLAUDE_VERSION, which would install a claude that issuebot validate rejects.
+          if ! printf '%s' "${latest}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::dist-tags.latest is not a version: ${latest}"
+            exit 1
+          fi
+          branch="claude-code-${latest}"
+          changed=false
+          if [ "${current}" != "${latest}" ]; then
+            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+              echo "::notice::${branch} already exists; nothing to do"
+            else
+              changed=true
+            fi
+          fi
+          {
+            echo "current=${current}"
+            echo "latest=${latest}"
+            echo "branch=${branch}"
+            echo "changed=${changed}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.check.outputs.changed == 'true'
+
+      # Proof before the PR exists: the build installs that exact version and asserts the
+      # --permission-prompts flag the unattended design rests on is still there.
+      - uses: docker/build-push-action@v7
+        if: steps.check.outputs.changed == 'true'
+        with:
+          context: .
+          push: false
+          load: true
+          tags: issuebot:bump
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ steps.check.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report the installed version
+        if: steps.check.outputs.changed == 'true'
+        run: docker run --rm --entrypoint claude issuebot:bump --version
+
+      - name: Open the pull request
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git commit -am "build: pin Claude Code ${LATEST}"
+          git push -u origin "${BRANCH}"
+          cat > /tmp/pr-body.md <<BODY
+          Claude Code ${CURRENT} → ${LATEST} (npm \`dist-tags.latest\` for
+          \`@anthropic-ai/claude-code\`).
+
+          The image was built with this version before the pull request was opened, so the
+          install succeeded and \`claude --help\` still lists \`--permission-prompts\`.
+
+          \`MIN_CLAUDE_VERSION\` in \`src/issuebot/agent/runner.py\` is untouched: it is the
+          oldest claude issuebot works with, not the one it ships. Raise it by hand only when
+          the code starts depending on something newer.
+
+          Read the [changelog](https://code.claude.com/docs/en/changelog) before merging.
+
+          Note: pull requests opened with \`GITHUB_TOKEN\` do not start the CI workflow. Close
+          and reopen this pull request, or push to the branch, to run it.
+          BODY
+          gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
+            -f title="build: pin Claude Code ${LATEST}" \
+            -f head="${BRANCH}" \
+            -f base="${GITHUB_REF_NAME}" \
+            -F body=@/tmp/pr-body.md \
+            --jq '.html_url'
