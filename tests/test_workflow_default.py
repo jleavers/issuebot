@@ -45,18 +45,18 @@ def dispatched(make_issue: Callable[..., Issue], **overrides: object) -> Issue:
     return make_issue(**fields)
 
 
-def test_front_matter_pins_the_dogfood_settings() -> None:
+def test_front_matter_holds_what_the_design_needs() -> None:
+    """Only settings the shipped file must have, never an operator's preferences.
+
+    `github.repo`, `claude.model`, the budget, the turn and agent limits and `self_review`
+    are all things a copy of this file is expected to change, so pinning them here would
+    make following step 1 of the README a test failure.
+    """
     cfg = load().config
-    assert cfg.github.repo == "jleavers/issuebot"
-    assert cfg.claude.model == "opus"
+    # Nobody can answer a permission prompt in an unattended run.
     assert cfg.claude.permission_mode == "auto"
+    # The README promises the agent reads the target repository's .claude/settings.json.
     assert cfg.claude.setting_sources == ["project"]
-    # max_budget_usd is not pinned: it is an operator preference that varies by repository
-    # and by plan (an API key makes it a spend guard, a subscription an effort limit), so
-    # the committed number is a starting point, not a contract.
-    assert cfg.agent.self_review is True
-    assert cfg.agent.max_turns == 5
-    assert cfg.agent.max_concurrent_agents == 2
 
 
 def test_renders_for_a_fresh_issue(make_issue: Callable[..., Issue]) -> None:
@@ -69,11 +69,12 @@ def test_renders_for_a_fresh_issue(make_issue: Callable[..., Issue]) -> None:
     assert "Closes #42" in text
     assert "Add a subtract function." in text
     assert "Labels: issuebot/in-progress, bug" in text
+    repo = workflow.config.github.repo
     assert (
-        "gh issue edit 42 -R jleavers/issuebot --add-label "
+        f"gh issue edit 42 -R {repo} --add-label "
         '"issuebot/review" --remove-label "issuebot/in-progress"' in text
     )
-    assert "gh issue develop 42 -R jleavers/issuebot --name issuebot/42-" in text
+    assert f"gh issue develop 42 -R {repo} --name issuebot/42-" in text
     assert "## Step 4: self-review" in text
     assert "## Follow-up context" not in text
     assert "## Rework context" not in text
