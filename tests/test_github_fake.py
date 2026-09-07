@@ -186,6 +186,15 @@ async def test_ensure_and_missing_labels(fake: FakeGitHub) -> None:
     assert fake.repo_labels["issuebot/review"] == LABEL_STYLES[StateLabel.REVIEW]
 
 
+async def test_ensure_labels_creates_the_extra_labels_too(fake: FakeGitHub) -> None:
+    style = LabelStyle("BFD4F2", "Run this issue with the sonnet model")
+    results = await fake.ensure_labels({"issuebot/model/sonnet": style})
+    assert results[-1].name == "issuebot/model/sonnet"
+    assert results[-1].outcome == "created"
+    assert fake.repo_labels["issuebot/model/sonnet"] == style
+    assert await fake.missing_labels() == []
+
+
 def test_preseed_labels_can_be_disabled() -> None:
     fake = FakeGitHub(SETTINGS, preseed_labels=False)
     assert fake.repo_labels == {}

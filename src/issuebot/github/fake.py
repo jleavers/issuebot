@@ -1,7 +1,7 @@
 """In-memory GitHubAdapter with GitHub-like semantics and helpers for tests."""
 
 import copy
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -173,12 +173,14 @@ class FakeGitHub:
 
     # --- protocol: labels and probes ---------------------------------------------
 
-    async def ensure_labels(self) -> list[LabelEnsured]:
+    async def ensure_labels(
+        self, extra: Mapping[str, LabelStyle] | None = None
+    ) -> list[LabelEnsured]:
         self._enter("ensure_labels")
+        wanted = [(label_name(self.labels, role), LABEL_STYLES[role]) for role in StateLabel]
+        wanted += list((extra or {}).items())
         results: list[LabelEnsured] = []
-        for role in StateLabel:
-            name = label_name(self.labels, role)
-            style = LABEL_STYLES[role]
+        for name, style in wanted:
             current = self.repo_labels.get(name)
             if current is None:
                 outcome = "created"

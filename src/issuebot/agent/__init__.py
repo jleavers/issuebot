@@ -18,6 +18,8 @@ from issuebot.agent.runner import (
     agent_environment,
     classify_result,
     parse_claude_version,
+    settings_for_labels,
+    settings_with_model,
 )
 from issuebot.agent.session import RunResult, StopReason, new_run_id, run_session
 from issuebot.agent.workspace import (
@@ -58,5 +60,7 @@ __all__ = [
     "run_log_dir",
     "run_session",
     "session_path",
+    "settings_for_labels",
+    "settings_with_model",
     "workspace_key",
 ]

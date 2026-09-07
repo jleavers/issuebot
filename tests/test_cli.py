@@ -15,7 +15,7 @@ import pytest
 
 from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
-from issuebot.agent import RunResult, SessionRecord, WorkspaceManager
+from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
 from issuebot.cli import (
     StatsView,
     main,
@@ -723,6 +723,23 @@ def test_labels_ensure_reports_each_label(
     assert all(line.endswith(": unchanged") for line in capsys.readouterr().out.splitlines())
 
 
+def test_labels_ensure_creates_the_model_labels_too(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.repo_labels.clear()
+    path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
+    assert main(["labels", "ensure", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[-1] == "[ OK ] issuebot/model/sonnet: created"
+    assert fake_github.repo_labels["issuebot/model/sonnet"].description == (
+        "Run this issue with the sonnet model"
+    )
+
+
 def test_labels_ensure_reports_github_error(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, fake_github: FakeGitHub
 ) -> None:
@@ -975,6 +992,57 @@ def test_run_once_rework_sets_the_flag(
     assert state_changed.to_label == "issuebot/in-progress"
     assert state_changed.actor == "issuebot"
     assert state_changed.issue_number == 42
+
+
+class RecordingRunners:
+    """Stands in for _runner_factory: records the settings each runner was built from."""
+
+    def __init__(self) -> None:
+        self.settings: list[Settings] = []
+
+    def __call__(self, settings: Settings) -> ClaudeRunner:
+        self.settings.append(settings)
+        return ClaudeRunner(settings)
+
+
+@pytest.fixture
+def recording_runners(monkeypatch: pytest.MonkeyPatch) -> RecordingRunners:
+    runners = RecordingRunners()
+    monkeypatch.setattr("issuebot.cli._runner_factory", runners)
+    return runners
+
+
+MODEL_CLAUDE_BLOCK = "claude:\n  model: opus\n  model_labels:\n    issuebot/model/sonnet: sonnet"
+
+
+def test_run_once_uses_the_model_the_issue_label_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_runners: RecordingRunners,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    labels = ("issuebot/todo", "issuebot/model/sonnet")
+    fake_github.add_issue("Add retry backoff", labels=labels, number=42)
+    path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    assert [settings.claude.model for settings in recording_runners.settings] == ["sonnet"]
+
+
+def test_run_once_model_option_beats_the_label_and_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_runners: RecordingRunners,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    labels = ("issuebot/todo", "issuebot/model/sonnet")
+    fake_github.add_issue("Add retry backoff", labels=labels, number=42)
+    path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
+    assert main(["run-once", "42", "--workflow", str(path), "--model", "fable"]) == 0
+    assert [settings.claude.model for settings in recording_runners.settings] == ["fable"]
 
 
 def test_run_once_in_progress_issue_is_not_reclaimed(

@@ -46,6 +46,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.claude.allowed_tools == []
     assert s.claude.disallowed_tools == []
     assert s.claude.append_system_prompt is None
+    assert s.claude.model_labels == {}
     assert s.database.url is None
     assert s.notifications.slack.webhook_url is None
     assert s.notifications.slack.events == ["state_changed", "blocked"]
@@ -213,3 +214,24 @@ def test_state_label_names_that_break_gh_are_rejected(value: str, needle: str) -
     with pytest.raises(ValidationError, match=needle) as exc:
         GitHubLabels(review=value)
     assert "review" in _locs(exc.value)
+
+
+def test_model_labels_map_a_label_name_to_a_model() -> None:
+    s = Settings.model_validate(
+        {**MINIMAL, "claude": {"model_labels": {"issuebot/model/sonnet": "sonnet"}}}
+    )
+    assert s.claude.model_labels == {"issuebot/model/sonnet": "sonnet"}
+
+
+@pytest.mark.parametrize(
+    ("value", "needle"),
+    [
+        ({"  ": "sonnet"}, "label name"),
+        ({"issuebot/model/sonnet": " "}, "model name"),
+        ({"issuebot/model/sonnet": "sonnet", "Issuebot/Model/Sonnet": "opus"}, "distinct"),
+    ],
+)
+def test_model_labels_rejects_unusable_entries(value: dict[str, str], needle: str) -> None:
+    with pytest.raises(ValidationError, match=needle) as exc:
+        Settings.model_validate({**MINIMAL, "claude": {"model_labels": value}})
+    assert any(loc.startswith("claude.model_labels") for loc in _locs(exc.value))

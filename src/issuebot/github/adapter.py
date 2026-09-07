@@ -1,6 +1,6 @@
 """The protocol every GitHub implementation satisfies (the gh-backed adapter and the fake)."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Protocol
 
 from issuebot.config import GitHubLabels
@@ -13,6 +13,7 @@ from issuebot.github.models import (
     RepoInfo,
     StateLabel,
 )
+from issuebot.github.state import LabelStyle
 
 
 class GitHubAdapter(Protocol):
@@ -50,8 +51,10 @@ class GitHubAdapter(Protocol):
 
     async def update_comment(self, comment_id: int, body: str) -> Comment: ...
 
-    async def ensure_labels(self) -> list[LabelEnsured]:
-        """Create or update the five state labels; idempotent."""
+    async def ensure_labels(
+        self, extra: Mapping[str, LabelStyle] | None = None
+    ) -> list[LabelEnsured]:
+        """Create or update the five state labels and any extra ones; idempotent."""
         ...
 
     async def missing_labels(self) -> list[str]:

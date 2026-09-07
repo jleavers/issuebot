@@ -56,7 +56,7 @@ claude:
   command: {claude}
   turn_timeout_ms: 30000
   stall_timeout_ms: {stall_timeout_ms}
-hooks:
+{claude_extra}hooks:
   timeout_ms: 5000
 {hooks}---
 {prompt}
@@ -192,11 +192,16 @@ class Harness:
         claude: str = "claude",
         real_sessions: bool = False,
         observe_issues: bool = False,
+        model: str | None = None,
+        model_labels: dict[str, str] | None = None,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
         self.root = tmp_path / "workspaces"
         self.claude = claude
+        self.model = model
+        self.model_labels = model_labels or {}
+        self.runner_settings: list[Settings] = []
         self.environ = {
             "GH_TOKEN": "fake-token",
             "PATH": os.environ["PATH"],
@@ -226,7 +231,7 @@ class Harness:
             bus=self.bus,
             adapter_factory=lambda _settings: self.github,
             workspaces_factory=self.make_workspaces,
-            runner_factory=lambda settings: ClaudeRunner(settings, environ=self.environ),
+            runner_factory=self.make_runner,
             run_session=run_session if real_sessions else self.sessions,
             which=self.which,
             clock=self.clock,
@@ -246,6 +251,10 @@ class Harness:
 
     def which(self, name: str) -> str | None:
         return None if name in self.which_missing else f"/usr/bin/{name}"
+
+    def make_runner(self, settings: Settings) -> ClaudeRunner:
+        self.runner_settings.append(settings)
+        return ClaudeRunner(settings, environ=self.environ)
 
     def make_workspaces(self, settings: Settings) -> WorkspaceManager:
         return WorkspaceManager(
@@ -274,6 +283,7 @@ class Harness:
             max_attempts=max_attempts,
             max_retry_backoff_ms=max_retry_backoff_ms,
             claude=self.claude,
+            claude_extra=self.claude_extra(),
             stall_timeout_ms=stall_timeout_ms,
             hooks=hook_lines,
             prompt=prompt,
@@ -284,13 +294,29 @@ class Harness:
         self._mtime = previous + 1
         os.utime(self.path, ns=(self._mtime * 1_000_000_000, self._mtime * 1_000_000_000))
 
+    def claude_extra(self) -> str:
+        lines = [f"  model: {self.model}\n"] if self.model else []
+        if self.model_labels:
+            lines.append("  model_labels:\n")
+            lines += [f"    {name}: {model}\n" for name, model in self.model_labels.items()]
+        return "".join(lines)
+
     @property
     def labels(self) -> Any:
         return self.workflow.config.github.labels
 
-    def add_issue(self, number: int, state: str = "todo", *, title: str | None = None) -> Issue:
+    def add_issue(
+        self,
+        number: int,
+        state: str = "todo",
+        *,
+        title: str | None = None,
+        extra_labels: tuple[str, ...] = (),
+    ) -> Issue:
         label = getattr(self.labels, state)
-        return self.github.add_issue(title or f"Issue {number}", labels=(label,), number=number)
+        return self.github.add_issue(
+            title or f"Issue {number}", labels=(label, *extra_labels), number=number
+        )
 
     def workspace_dir(self, identifier: str) -> Path:
         path = self.root / identifier
@@ -467,6 +493,21 @@ async def test_dispatch_order_claims_and_slots(tmp_path: Path) -> None:
     assert len(h.sessions.runs) == 2
     assert h.github.issue(1).state is StateLabel.TODO
     assert h.github.issue(2).state is StateLabel.TODO
+
+
+async def test_a_model_label_picks_the_model_for_that_issue(tmp_path: Path) -> None:
+    h = Harness(
+        tmp_path,
+        max_concurrent=2,
+        model="opus",
+        model_labels={"issuebot/model/sonnet": "sonnet"},
+    )
+    h.add_issue(1, "todo", extra_labels=("issuebot/model/sonnet",))
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [1, 2]
+    assert [settings.claude.model for settings in h.runner_settings] == ["sonnet", "opus"]
 
 
 async def test_non_candidates_are_skipped(tmp_path: Path) -> None:

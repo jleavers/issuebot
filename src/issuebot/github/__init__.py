@@ -29,6 +29,7 @@ from issuebot.github.state import (
     is_active,
     is_allowed,
     is_terminal,
+    model_label_style,
     next_state_for,
 )
 
@@ -63,6 +64,7 @@ __all__ = [
     "is_workpad_body",
     "issue_from_node",
     "label_name",
+    "model_label_style",
     "next_state_for",
     "repo_short_name",
     "role_for",
