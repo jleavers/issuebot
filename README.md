@@ -70,6 +70,17 @@ Fill in `.env`: `GH_TOKEN`, `ANTHROPIC_API_KEY` (or leave it empty and log in on
 the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values, and optionally `SLACK_WEBHOOK_URL`.
 `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is taken on your host.
 
+Leave the two email addresses as something that is not your own. If you set them to your real
+address and your account has **Keep my email addresses private** turned on, its *Block command
+line pushes that expose my email* option makes GitHub reject the agent's push with
+`GH007: Your push would publish a private email address` — mid-run, so the agent burns turns
+retrying and the issue escalates to `issuebot/review` with an obscure cause. Your own
+`ID+user@users.noreply.github.com` address pushes cleanly but attributes every agent commit to
+you. For linked commits under a separate identity, use a
+[machine account](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#3-account-requirements)
+— GitHub's terms allow one free machine account alongside a free personal account — and its
+noreply address.
+
 Then edit the front matter of `WORKFLOW.md`. The one required change is `github.repo`; the
 checked-in file points at this repository. Unknown keys are rejected, so a typo fails at
 `validate` rather than being silently ignored.
