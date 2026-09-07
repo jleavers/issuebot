@@ -241,6 +241,25 @@ def test_every_chart_token_the_script_asks_for_exists_in_both_themes() -> None:
     assert "getComputedStyle(document.documentElement)" in APP_JS
 
 
+def test_every_axis_line_the_charts_draw_is_themed() -> None:
+    """Chart.js paints anything left unset from its own light-theme defaults.
+
+    `border` is a separate option from `grid` and does not inherit from it: unset, it
+    routes to Chart.defaults.borderColor, "rgba(0,0,0,0.1)", which is invisible on the
+    dark panel. Both scales must set ticks, grid and border, on creation and on update.
+    """
+    for scale in ("x", "y"):
+        for part in ("grid", "border"):
+            assert f"scales.{scale}.{part}.color = colors.grid" in APP_JS, (scale, part)
+        assert f"scales.{scale}.ticks.color = colors.ink" in APP_JS, scale
+    # the creation path states the same three, once per scale
+    options = APP_JS[APP_JS.index("scales: {") :]
+    options = options[: options.index("\n      }")]
+    assert options.count("border: { color: colors.grid }") == 2, options
+    assert options.count("grid: { color: colors.grid }") == 2, options
+    assert options.count("color: colors.ink") == 2, options
+
+
 def test_the_two_scripts_agree_on_the_repaint_event() -> None:
     """theme.js fires it and app.js listens; a rename in one file only would go unnoticed."""
     fired = set(re.findall(r'CustomEvent\("([a-z:]+)"', THEME_JS))

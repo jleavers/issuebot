@@ -62,8 +62,10 @@
       chart.data.datasets[0].backgroundColor = color;
       chart.options.scales.x.ticks.color = colors.ink;
       chart.options.scales.x.grid.color = colors.grid;
+      chart.options.scales.x.border.color = colors.grid;
       chart.options.scales.y.ticks.color = colors.ink;
       chart.options.scales.y.grid.color = colors.grid;
+      chart.options.scales.y.border.color = colors.grid;
       chart.update();
       return;
     }
@@ -76,11 +78,19 @@
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-          x: { ticks: { color: colors.ink }, grid: { color: colors.grid } },
+          // border is its own option in Chart.js 4, and it does not follow grid.color: left
+          // alone it routes to Chart.defaults.borderColor, a near-transparent black that
+          // disappears against the dark panel. It is the same line as the grid, so same token.
+          x: {
+            ticks: { color: colors.ink },
+            grid: { color: colors.grid },
+            border: { color: colors.grid }
+          },
           y: {
             beginAtZero: true,
             ticks: { precision: 0, color: colors.ink },
-            grid: { color: colors.grid }
+            grid: { color: colors.grid },
+            border: { color: colors.grid }
           }
         }
       }
