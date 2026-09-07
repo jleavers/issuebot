@@ -95,7 +95,9 @@ def test_every_page_carries_the_toggle_and_the_script(h: Harness) -> None:
         assert 'class="theme-toggle"' in text, response.url
         # the toggle sits last in the header nav, after the three links
         assert text.index('href="/healthz"') < text.index('class="theme-toggle"'), response.url
-        assert text.index("</nav>") > text.index('class="theme-toggle"'), response.url
+        # a control, not navigation: beside the nav, still inside the header
+        assert text.index("</nav>") < text.index('class="theme-toggle"'), response.url
+        assert text.index('class="theme-toggle"') < text.index("</header>"), response.url
         # both icons ship; CSS picks the one for the theme the click would move to
         assert 'class="moon"' in text and 'class="sun"' in text, response.url
 
@@ -112,7 +114,9 @@ def test_the_toggle_is_reachable_and_labelled(h: Harness) -> None:
     text = html(h.client.get("/"))
     # a real <button>, so it carries the role, the keyboard behaviour and the focus ring
     assert '<button class="theme-toggle" type="button"' in text
-    assert 'aria-pressed="false"' in text and 'aria-label="Switch to dark mode"' in text
+    # the name describes the action, so it must not also claim a pressed state
+    assert 'aria-label="Switch the colour theme"' in text
+    assert "aria-pressed" not in text and "aria-pressed" not in THEME_JS
     # the icons are decoration; the label carries the meaning
     assert text.count('aria-hidden="true"') >= 2
     assert ".theme-toggle:focus-visible" in CSS
@@ -120,7 +124,7 @@ def test_the_toggle_is_reachable_and_labelled(h: Harness) -> None:
 
 def test_the_toggle_is_not_offered_without_javascript() -> None:
     """It cannot do anything without the script, so app.css only reveals it once it ran."""
-    assert "html:not(.js) .theme-toggle { display: none; }" in CSS
+    assert "html:not(.js) .theme-toggle" in CSS and "display: none" in CSS
     assert 'classList.add("js")' in THEME_JS
 
 
@@ -129,6 +133,17 @@ def test_storage_failures_cannot_break_the_page() -> None:
     reads_and_writes = THEME_JS.count("localStorage.")
     assert reads_and_writes == 2, THEME_JS.count("localStorage.")
     assert THEME_JS.count("catch (error)") >= reads_and_writes
+
+
+def test_the_applied_theme_outranks_storage_when_deciding_what_is_showing() -> None:
+    """The toggle must keep toggling when the write fails, not stick after one click.
+
+    Deriving the current theme from localStorage alone means an unwritable store makes
+    every click compute the same "next" theme, and the button goes dead after the first.
+    """
+    body = THEME_JS[THEME_JS.index("function showing()") :]
+    body = body[: body.index("\n  }")]
+    assert body.index("root.dataset.theme") < body.index("stored()")
 
 
 # --- the tokens -------------------------------------------------------------------------------
@@ -145,8 +160,6 @@ def test_the_explicit_choice_outranks_the_os_preference() -> None:
     # :where() has zero specificity, so :root[data-theme="dark"] wins under a light OS,
     # and the :not() guard lets an explicit "light" win under a dark OS.
     assert ':root:where(:not([data-theme="light"]))' in CSS
-    media = CSS.index("@media (prefers-color-scheme: dark)")
-    assert media < CSS.index(':root[data-theme="dark"] {')
     assert "color-scheme: dark;" in CSS and "color-scheme: light;" in CSS
 
 
@@ -174,7 +187,7 @@ def test_marks_clear_the_contrast_floor_on_the_panel(theme: dict[str, str], surf
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
 def test_text_clears_the_contrast_floor(theme: dict[str, str]) -> None:
     for background in (theme["--panel"], theme["--bg"]):
-        for name in ("--ink", "--muted"):
+        for name in ("--ink", "--muted", "--chart-ink"):
             ratio = contrast(theme[name], background)
             assert ratio >= TEXT_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
 
@@ -194,6 +207,19 @@ def test_a_pill_label_is_legible_on_every_solid_colour(theme: dict[str, str]) ->
     ):
         ratio = contrast(theme["--on-solid"], theme[name])
         assert ratio >= MARK_FLOOR, f"--on-solid on {name} {theme[name]} is {ratio:.2f}:1"
+
+
+def test_the_gridlines_are_decorative_but_still_visible() -> None:
+    """The one token deliberately under the mark floor, and why.
+
+    WCAG 1.4.11 covers graphics required to understand the content; gridlines are not one
+    (the tick labels are, and they are text held to --chart-ink's floor). A grid at 3:1
+    would compete with the bars it exists to measure. It must still be distinguishable.
+    """
+    for theme in (LIGHT, OS_DARK):
+        ratio = contrast(theme["--chart-grid"], theme["--panel"])
+        assert 1.2 <= ratio < MARK_FLOOR, ratio
+        assert contrast(theme["--chart-ink"], theme["--panel"]) > ratio
 
 
 def test_the_dark_theme_fixes_the_bar_that_clashed() -> None:

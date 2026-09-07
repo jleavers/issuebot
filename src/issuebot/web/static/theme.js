@@ -32,7 +32,14 @@
     }
   }
 
+  // What the page is actually displaying. The applied attribute comes first, so that a
+  // click still works when localStorage cannot be written: the choice would not be
+  // remembered across pages, but the toggle keeps toggling.
   function showing() {
+    var applied = root.dataset.theme;
+    if (applied === "light" || applied === "dark") {
+      return applied;
+    }
     var choice = stored();
     if (choice) {
       return choice;
@@ -49,8 +56,10 @@
   function announce(theme) {
     var button = document.querySelector(".theme-toggle");
     if (button) {
+      // The name describes the action, so the button must not also expose a pressed
+      // state: a screen reader would say "switch to light mode, pressed", which is
+      // nonsense. Two ARIA patterns, and this is the one an icon toggle wants.
       var label = "Switch to " + (theme === "dark" ? "light" : "dark") + " mode";
-      button.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
       button.setAttribute("title", label);
       button.setAttribute("aria-label", label);
     }
@@ -69,17 +78,18 @@
       try {
         window.localStorage.setItem(KEY, next);
       } catch (error) {
-        // the choice still holds for this page
+        // it will not be remembered, but the stamp below still switches this page
       }
       root.dataset.theme = next;
       announce(next);
     });
   });
 
-  // Nothing is stored while the OS is in charge, so follow it as it changes.
+  // The OS is in charge only while nothing is stored and nothing has been stamped, so
+  // follow it as it changes; a theme the operator picked must not be overridden.
   if (media && media.addEventListener) {
     media.addEventListener("change", function () {
-      if (!stored()) {
+      if (!stored() && !root.dataset.theme) {
         announce(showing());
       }
     });

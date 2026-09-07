@@ -27,7 +27,11 @@
   --complete: #5319e7;
   /* the label a badge or pill wears on top of one of the solid colours above */
   --on-solid: #ffffff;
-  /* the charts: bars, and the axis furniture Chart.js would otherwise paint near-black */
+  /* The charts: the bars and the axis furniture Chart.js would otherwise paint near-black.
+   * --chart-ink is held to the text floor, since the tick labels are what a reader must
+   * resolve. --chart-grid is deliberately below the 3:1 mark floor: gridlines carry no
+   * information of their own (WCAG 1.4.11 covers graphics "required to understand the
+   * content"), and a grid at 3:1 would compete with the bars it exists to measure. */
   --chart-closed: #5319e7;
   --chart-runs: #1d76db;
   --chart-ink: #6b7280;
@@ -115,15 +119,16 @@ header.top .repo { color: var(--muted); }
 header.top nav { margin-left: auto; display: flex; gap: 14px; }
 
 /*
- * The theme toggle, last in the header nav. It is hidden until theme.js marks the document
- * (html.js): without the script the button could not do anything, so it is not offered.
+ * The theme toggle: a control rather than a link, so it sits beside the header nav and
+ * after it, at the top right. It is hidden until theme.js marks the document (html.js):
+ * without the script the button could not do anything, so it is not offered.
  * Both icons are in the markup; CSS shows the one for the theme you would switch to.
  */
 html:not(.js) .theme-toggle { display: none; }
 .theme-toggle {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0; margin: -4px 0;
-  border: 1px solid var(--line); border-radius: 999px;
+  border: 1px solid var(--muted); border-radius: 999px;
   background: var(--panel); color: var(--muted); cursor: pointer;
 }
 .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }

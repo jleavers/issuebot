@@ -38,12 +38,11 @@
   // Chart.js paints on a canvas, so the theme tokens cannot reach it through CSS: read
   // them off the document instead, and read them again whenever the theme changes. The
   // bar colours are the same ones the Kanban columns use for "complete" and "review".
-  function token(name, fallback) {
-    var value = window.getComputedStyle(document.documentElement).getPropertyValue(name);
-    return value.trim() || fallback;
-  }
-
   function palette() {
+    var style = window.getComputedStyle(document.documentElement);
+    function token(name, fallback) {
+      return style.getPropertyValue(name).trim() || fallback;
+    }
     return {
       closed: token("--chart-closed", "#5319e7"),
       runs: token("--chart-runs", "#1d76db"),
@@ -52,7 +51,8 @@
     };
   }
 
-  function draw(canvas, key, label, color, points, colors) {
+  function draw(canvas, key, label, points, colors) {
+    var color = colors[key];
     var labels = points.map(function (point) { return point.day.slice(5); });
     var values = points.map(function (point) { return point[key]; });
     if (charts[key]) {
@@ -92,8 +92,8 @@
       return;
     }
     var colors = palette();
-    draw(closedCanvas, "closed", "issues closed", colors.closed, series, colors);
-    draw(runsCanvas, "runs", "agent runs", colors.runs, series, colors);
+    draw(closedCanvas, "closed", "issues closed", series, colors);
+    draw(runsCanvas, "runs", "agent runs", series, colors);
   }
 
   function refresh() {
