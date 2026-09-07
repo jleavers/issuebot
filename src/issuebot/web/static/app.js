@@ -33,14 +33,38 @@
   var windowText = script.dataset.chartWindow || "30d";
   var pollSeconds = Number(script.dataset.chartPollS) || 60;
   var charts = {};
+  var series = null;
 
-  function draw(canvas, key, label, color, series) {
-    var labels = series.map(function (point) { return point.day.slice(5); });
-    var values = series.map(function (point) { return point[key]; });
+  // Chart.js paints on a canvas, so the theme tokens cannot reach it through CSS: read
+  // them off the document instead, and read them again whenever the theme changes. The
+  // bar colours are the same ones the Kanban columns use for "complete" and "review".
+  function token(name, fallback) {
+    var value = window.getComputedStyle(document.documentElement).getPropertyValue(name);
+    return value.trim() || fallback;
+  }
+
+  function palette() {
+    return {
+      closed: token("--chart-closed", "#5319e7"),
+      runs: token("--chart-runs", "#1d76db"),
+      ink: token("--chart-ink", "#6b7280"),
+      grid: token("--chart-grid", "#d9dee5")
+    };
+  }
+
+  function draw(canvas, key, label, color, points, colors) {
+    var labels = points.map(function (point) { return point.day.slice(5); });
+    var values = points.map(function (point) { return point[key]; });
     if (charts[key]) {
-      charts[key].data.labels = labels;
-      charts[key].data.datasets[0].data = values;
-      charts[key].update();
+      var chart = charts[key];
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = values;
+      chart.data.datasets[0].backgroundColor = color;
+      chart.options.scales.x.ticks.color = colors.ink;
+      chart.options.scales.x.grid.color = colors.grid;
+      chart.options.scales.y.ticks.color = colors.ink;
+      chart.options.scales.y.grid.color = colors.grid;
+      chart.update();
       return;
     }
     charts[key] = new Chart(canvas, {
@@ -51,20 +75,39 @@
         responsive: true,
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+        scales: {
+          x: { ticks: { color: colors.ink }, grid: { color: colors.grid } },
+          y: {
+            beginAtZero: true,
+            ticks: { precision: 0, color: colors.ink },
+            grid: { color: colors.grid }
+          }
+        }
       }
     });
+  }
+
+  function render() {
+    if (!series) {
+      return;
+    }
+    var colors = palette();
+    draw(closedCanvas, "closed", "issues closed", colors.closed, series, colors);
+    draw(runsCanvas, "runs", "agent runs", colors.runs, series, colors);
   }
 
   function refresh() {
     fetch("/api/v1/stats?window=" + encodeURIComponent(windowText), { headers: { Accept: "application/json" } })
       .then(function (response) { return response.ok ? response.json() : Promise.reject(response.status); })
       .then(function (body) {
-        draw(closedCanvas, "closed", "issues closed", "#5319e7", body.series);
-        draw(runsCanvas, "runs", "agent runs", "#1d76db", body.series);
+        series = body.series;
+        render();
       })
       .catch(function () { /* the next poll tries again */ });
   }
+
+  // theme.js fires this after the toggle, and after an OS change while it is in charge
+  document.addEventListener("issuebot:themechange", render);
 
   refresh();
   window.setInterval(refresh, pollSeconds * 1000);

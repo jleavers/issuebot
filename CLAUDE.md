@@ -150,7 +150,14 @@ floor, not the shipped version, and moves by hand.
   omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
   `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One
   connection per request through `Database.queries()`. Constants, not settings; the web reads
-  `WORKFLOW.md` once at start.
+  `WORKFLOW.md` once at start. Light and dark are role tokens in `app.css`, declared once for
+  light and twice for dark (`@media (prefers-color-scheme: dark)` for the OS preference,
+  `:root[data-theme="dark"]` for the operator's own choice, which wins); `static/theme.js` is
+  loaded synchronously from `<head>` so the stamp lands before the first paint, persists the
+  choice in `localStorage` (`issuebot-theme`; storing nothing keeps the OS in charge) and
+  fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
+  reach. Both themes' marks and text are held to WCAG contrast floors by
+  `tests/test_web_theme.py`.
 - `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
   adapter, the labels one covering `claude.model_labels` as well as the five state labels,
   a `claude --version` floor of 2.1.259, a `claude auth status --json` probe run under
