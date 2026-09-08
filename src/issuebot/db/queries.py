@@ -9,7 +9,8 @@ from psycopg.rows import dict_row
 
 from issuebot.github import StateLabel
 
-COMPLETE_LIMIT = 50
+BOARD_LIMIT = 5
+ISSUE_LIST_LIMIT = 200
 MAX_WINDOW_DAYS = 365
 
 
@@ -169,6 +170,16 @@ SELECT * FROM issues WHERE github_state = 'closed' AND state = 'complete'
 ORDER BY closed_at DESC NULLS LAST, number DESC LIMIT %(limit)s
 """
 
+# The list page's query. `roles` carries both jobs: it filters to the column asked for, and
+# it is what keeps a role this issuebot does not know off the page, the way the board does.
+# One ordering for every column, because the page mixes them: a closed issue sorts on when
+# it closed, an open one on when it last moved.
+ISSUE_LIST = """
+SELECT * FROM issues
+WHERE state = ANY(%(roles)s) AND (github_state = 'open' OR state = 'complete')
+ORDER BY coalesce(closed_at, updated_at) DESC, number DESC LIMIT %(limit)s
+"""
+
 RUNS_FOR_ISSUE = """
 SELECT * FROM runs WHERE issue_number = %(number)s ORDER BY started_at DESC, run_id DESC
 """
@@ -228,14 +239,32 @@ class Queries:
         return [DailyPoint(day=row["day"], closed=row["closed"], runs=row["runs"]) for row in rows]
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
-        """Open issues with a state, by StateLabel value, plus the latest complete ones."""
+        """The board's columns, newest first and at most ``BOARD_LIMIT`` rows each.
+
+        Every column is capped, not just complete: one long column sets the height of the
+        whole board, and an open column falls behind the same way a closed one piles up.
+        What the column headers count is ``state_counts``, which is not capped.
+        """
         groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
         for row in await self._rows(OPEN_ISSUES):
-            if row["state"] in groups:  # a role this issuebot does not know is on no column
-                groups[row["state"]].append(IssueRow(**row))
-        for row in await self._rows(COMPLETE_ISSUES, {"limit": COMPLETE_LIMIT}):
+            rows = groups.get(row["state"])  # a role this issuebot does not know is on no column
+            if rows is not None and len(rows) < BOARD_LIMIT:
+                rows.append(IssueRow(**row))
+        for row in await self._rows(COMPLETE_ISSUES, {"limit": BOARD_LIMIT}):
             groups[StateLabel.COMPLETE.value].append(IssueRow(**row))
         return groups
+
+    async def issues_for_state(self, state: str | None) -> list[IssueRow]:
+        """One column in full up to ``ISSUE_LIST_LIMIT``, or every column when ``state`` is None."""
+        known = [role.value for role in StateLabel]
+        if state is None:
+            roles = known
+        elif state in known:
+            roles = [state]
+        else:  # a role this issuebot does not know is on no column, so it lists nothing
+            return []
+        rows = await self._rows(ISSUE_LIST, {"roles": roles, "limit": ISSUE_LIST_LIMIT})
+        return [IssueRow(**row) for row in rows]
 
     async def state_counts(self) -> dict[str, int]:
         """Issues per StateLabel value over the Kanban's predicate; every role key present."""

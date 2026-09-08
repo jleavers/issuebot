@@ -30,7 +30,8 @@ from issuebot.db.migrate import (
     schema_version,
 )
 from issuebot.db.queries import (
-    COMPLETE_LIMIT,
+    BOARD_LIMIT,
+    ISSUE_LIST_LIMIT,
     MAX_WINDOW_DAYS,
     DailyPoint,
     EventRow,
@@ -48,9 +49,10 @@ from issuebot.db.store import IssueSnapshot, PostgresStore, Store
 __all__ = [
     "ADVISORY_LOCK_KEY",
     "APPLICATION_NAME",
-    "COMPLETE_LIMIT",
+    "BOARD_LIMIT",
     "CONNECT_TIMEOUT_S",
     "DRAIN_TIMEOUT_S",
+    "ISSUE_LIST_LIMIT",
     "MAX_WINDOW_DAYS",
     "MIGRATIONS_ROOT",
     "OMITTED_TYPE",

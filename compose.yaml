@@ -17,6 +17,40 @@ services:
       timeout: 5s
       retries: 10
 
+  # A throwaway PostgreSQL for the local test run, isolated from the `db` above so the suite
+  # never writes to the database the worker and the web are using. Behind a profile, so a
+  # plain `docker compose up` does not start it:
+  #
+  #   docker compose --profile test up -d --wait test-db
+  #   DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot \
+  #     uv run pytest
+  #   docker compose rm -sf test-db
+  #
+  # That last line, not `docker compose down`: `down` is project-wide, so it would stop the
+  # long-lived db, worker and web along with the throwaway.
+  test-db:
+    image: postgres:18
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: issuebot
+      POSTGRES_PASSWORD: issuebot
+      POSTGRES_DB: issuebot
+    # No named volume: the cluster lives in RAM and goes when the container does, which is
+    # the point of a throwaway. tmpfs at the parent, as pgdata is mounted for `db`.
+    tmpfs:
+      - /var/lib/postgresql
+    ports:
+      # No host port named. This host runs a database per project and the low 543x numbers
+      # are taken; letting Docker pick an ephemeral one means a test run can never collide
+      # with them, or with whatever the next project claims. `docker compose port test-db
+      # 5432` reads back the one it chose.
+      - "127.0.0.1::5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U issuebot -d issuebot"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   worker:
     build: .
     # The worker applies pending database migrations when it starts (issuebot migrate is the

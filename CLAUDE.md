@@ -10,8 +10,10 @@ Python 3.14 with `uv`; `src` layout; package `issuebot`.
 uv sync                              # create .venv and install (uses uv.lock)
 uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
-ISSUEBOT_DB_PORT=5440 docker compose up -d db   # a local postgres:18 (5432 is taken on this host)
-DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5440/issuebot uv run pytest   # + the DB tests
+docker compose --profile test up -d --wait test-db   # a throwaway postgres:18 on an ephemeral port
+DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
+docker compose rm -sf test-db        # throw it away (not `compose down`: that is project-wide)
+docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB_PORT (5434 here)
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
@@ -29,6 +31,23 @@ docker compose build                 # image: git, gh, claude, app venv
 docker compose up                    # db (postgres:18) + worker (issuebot worker) + web (issuebot web,
                                      #   http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
+
+**Run the DB tests against `test-db`, not against the long-lived `db`.** It sits behind a
+`test` profile, so a plain `docker compose up` never starts it; its cluster is tmpfs, so
+nothing survives the container; and it publishes an *ephemeral* host port, so it cannot
+collide with `db` or with the other projects on this host. `docker compose port test-db
+5432` reads back the port Docker chose -- and that 5432 is the port *inside* the container,
+where postgres listens whatever the host publishes. Throw it away with `docker compose rm
+-sf test-db`, **not** `docker compose down`: `down` is project-wide and would stop the live
+`db`, `worker` and `web` too.
+
+**Do not pass `ISSUEBOT_DB_PORT=...` inline to `docker compose`.** That is the long-lived
+`db`'s port, and it belongs to the project's env file (5432 in `.env.example`, 5434 on this
+host) where compose reads it on its own. An inline value that disagrees with the configured
+one is a different *published* port, so compose recreates the `db` container -- which may be
+live and serving the worker and the web. 5434 is neither arbitrary nor a collision: this
+host runs a database per project, and `docker ps` shows 5432, 5433 and 5435 held by three of
+the others. Leave it there.
 
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
 a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
@@ -177,7 +196,10 @@ floor, not the shipped version, and moves by hand.
   up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
   callback per NOTIFY, reconnects). `queries.py`: `Queries` over one connection (`closed_count`,
   `runs_count`, `run_totals` (tokens and cost summed over the runs `runs_count` counts),
-  `daily_series`, `issues_by_state` (unknown roles skipped), `state_counts`,
+  `daily_series`, `issues_by_state` (unknown roles skipped, every column capped at
+  `BOARD_LIMIT = 5`), `state_counts` (uncapped, which is what the board's headers count),
+  `issues_for_state` (one column in full up to `ISSUE_LIST_LIMIT = 200`, or every column
+  when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
   `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
@@ -188,8 +210,8 @@ floor, not the shipped version, and moves by hand.
   `FakeDatabase` the CLI and web tests share.
 - `issuebot.web`: the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
   `log`. `app.py`: `create_app(database, settings, *, clock=, now=)` (FastAPI; pages `/`,
-  `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus `/prompt|stream|stderr` as
-  `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
+  `/issues[?state=<role>]`, `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus
+  `/prompt|stream|stderr` as `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
   `/api/v1/issues/<n>`, `/api/v1/stats?window=<N>d`, `POST /api/v1/refresh` (NOTIFY, throttled to
   one per 5 s, Symphony's `coalesced`), `/healthz` (503 only when the database does not answer;
   `worker` is `ok`, `held` while the worker ticks without claiming, `stale` past three poll
@@ -199,7 +221,11 @@ floor, not the shipped version, and moves by hand.
   security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
   and template filters (`state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
-  `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, ...). A snapshot's
+  `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, `is_board_state`,
+  `issue_filters`, ...). A board column draws at most `BOARD_LIMIT` cards, so its header
+  counts `state_counts` rather than the rows it drew, and the difference is an overflow
+  link to `/issues?state=<role>` — the list page, which is outside the live region so a
+  filter survives the ten-second swap that would collapse an expander or reset a scroll. A snapshot's
   `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,

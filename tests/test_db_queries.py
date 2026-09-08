@@ -11,7 +11,8 @@ from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, connect, migrate
 from issuebot.db.database import Database
 from issuebot.db.queries import (
-    COMPLETE_LIMIT,
+    BOARD_LIMIT,
+    ISSUE_LIST_LIMIT,
     DailyPoint,
     EventRow,
     IssueRow,
@@ -320,9 +321,10 @@ async def test_issues_by_state_groups_every_role(seeded: Database) -> None:
     assert row.seen_at == NOW
 
 
-async def test_issues_by_state_caps_the_complete_column(
+async def test_issues_by_state_caps_every_column(
     db_url: str, make_issue: Callable[..., Issue]
 ) -> None:
+    """Not just complete: an open column that piles up would stretch the board just as far."""
     await migrate(db_url)
     store = PostgresStore(db_url, labels=GitHubLabels())
     await store.connect()
@@ -337,14 +339,92 @@ async def test_issues_by_state_caps_the_complete_column(
             ),
             seen_at=NOW,
         )
-        for n in range(1, COMPLETE_LIMIT + 6)
+        for n in range(1, BOARD_LIMIT + 6)
+    ] + [
+        IssueSnapshot(
+            issue=make_issue(
+                number=100 + n,
+                identifier=f"repo-{100 + n}",
+                state=StateLabel.TODO,
+                updated_at=NOW - n * HOUR,
+            ),
+            seen_at=NOW,
+        )
+        for n in range(1, BOARD_LIMIT + 6)
     ]
     await store.upsert_issues(snapshots)
     await store.close()
     async with Database(db_url).queries() as q:
         groups = await q.issues_by_state()
-    assert len(groups["complete"]) == COMPLETE_LIMIT
-    assert groups["complete"][0].number == 1
+    assert len(groups["complete"]) == BOARD_LIMIT
+    assert [row.number for row in groups["complete"]] == list(range(1, BOARD_LIMIT + 1))
+    assert len(groups["todo"]) == BOARD_LIMIT
+    assert [row.number for row in groups["todo"]] == list(range(101, 101 + BOARD_LIMIT))
+
+
+async def test_issues_for_state_returns_one_column_past_the_board_cap(seeded: Database) -> None:
+    """What the list page is for: the column in full, not the board's five."""
+    async with seeded.queries() as q:
+        rows = await q.issues_for_state("complete")
+        todo = await q.issues_for_state("todo")
+    assert [row.number for row in rows] == [10, 11, 12]  # closed_at desc
+    assert all(isinstance(row, IssueRow) for row in rows)
+    assert [row.number for row in todo] == [1, 4]  # updated_at desc
+
+
+async def test_issues_for_state_without_a_state_returns_every_column(seeded: Database) -> None:
+    async with seeded.queries() as q:
+        rows = await q.issues_for_state(None)
+    assert {row.number for row in rows} == {1, 2, 3, 4, 10, 11, 12}
+    assert 5 not in {row.number for row in rows}  # unlabelled: on no column
+    assert 13 not in {row.number for row in rows}  # closed in review: awaiting the sweep
+    assert 14 not in {row.number for row in rows}  # cancelled
+
+
+async def test_issues_for_state_skips_an_unknown_role(seeded: Database, db_url: str) -> None:
+    conn = await connect(db_url)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO issues (number, identifier, title, state, state_label, github_state, url,
+                                created_at, updated_at, seen_at)
+            VALUES (78, 'repo-78', 'Mystery', 'mystery', 'issuebot/mystery', 'open',
+                    'https://github.com/example/repo/issues/78', now(), now(), now())
+            """
+        )
+    finally:
+        await conn.close()
+    async with seeded.queries() as q:
+        assert 78 not in {row.number for row in await q.issues_for_state(None)}
+        assert await q.issues_for_state("mystery") == []
+
+
+async def test_issues_for_state_stops_at_the_list_limit(
+    db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await migrate(db_url)
+    store = PostgresStore(db_url, labels=GitHubLabels())
+    await store.connect()
+    await store.upsert_issues(
+        [
+            IssueSnapshot(
+                issue=make_issue(
+                    number=n,
+                    identifier=f"repo-{n}",
+                    state=StateLabel.COMPLETE,
+                    github_state="closed",
+                    closed_at=NOW - n * HOUR,
+                ),
+                seen_at=NOW,
+            )
+            for n in range(1, ISSUE_LIST_LIMIT + 4)
+        ]
+    )
+    await store.close()
+    async with Database(db_url).queries() as q:
+        rows = await q.issues_for_state("complete")
+    assert len(rows) == ISSUE_LIST_LIMIT
+    assert rows[0].number == 1
 
 
 async def test_runs_for_issue_newest_first(seeded: Database) -> None:

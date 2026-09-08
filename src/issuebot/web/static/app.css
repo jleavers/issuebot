@@ -186,6 +186,16 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .column { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 120px; }
 .column h3 { margin: 0 0 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
 .column h3 .count { color: var(--muted); font-weight: 500; }
+/*
+ * The overflow link. A column draws BOARD_LIMIT cards and this is the way to the rest, so
+ * it sits where the next card would: a block with the card's own left inset. It is --muted
+ * rather than the link --accent because it is the column's footnote, not a sixth card
+ * competing with the five above it - and --muted is the token held to the text floor on
+ * --panel (tests/test_web_theme.py), which --accent is not.
+ */
+.column .more { display: block; margin-top: 2px; padding: 4px 9px 4px 12px; font-size: 12px; color: var(--muted); }
+.column .more:hover { color: var(--accent); text-decoration: underline; }
+.column .more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .column.todo h3 { color: var(--todo); }
 .column.in_progress h3 { color: var(--in_progress); }
 .column.review h3 { color: var(--review); }
@@ -286,6 +296,20 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .card .meta { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 /* the chip and the pull request's state are one unit at the left end of the row */
 .card .meta .pr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/*
+ * The issues list page. The filter row is chips rather than a select: five columns and an
+ * "all" fit on one line, every one of them is a plain link the browser can be sent to, and
+ * the current one is marked by the same --accent the rest of the page uses for a link.
+ */
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.filter { padding: 4px 10px; border: 1px solid var(--line); border-radius: 14px; font-size: 12px; color: var(--muted); }
+.filter:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.filter.current { border-color: var(--accent); color: var(--accent); }
+.filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.filter .n { font-variant-numeric: tabular-nums; opacity: 0.75; }
+/* the number is a column of its own here, so it aligns instead of being chipped like a card */
+.issues td.num, .issues th.num { color: var(--muted); white-space: nowrap; text-align: left; }
 
 /* banners */
 .banner { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}issuebot: issues{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <h1>Issues</h1>
+</div>
+{# The board draws BOARD_LIMIT cards a column; this page is the rest of them. It is outside
+   the live region on purpose: nothing here is swapped on a timer, so a filter chosen stays
+   chosen, and the page can be linked to. The table gives the number its own column, so the
+   card's chip is not needed to keep it out of the title's way. #}
+<nav class="filters" aria-label="Filter by state">
+  {% for entry in filters %}
+  <a class="filter{% if entry.current %} current{% endif %}" href="{{ entry.href }}">{{ entry.label }} <span class="n">{{ entry.total }}</span></a>
+  {% endfor %}
+</nav>
+{% if rows %}
+<table class="issues">
+  <tr><th class="num">issue</th><th>title</th><th>state</th><th>PR</th><th>last moved</th></tr>
+  {% for row in rows %}
+  <tr>
+    <td class="num">#{{ row.number }}</td>
+    <td><a href="/issues/{{ row.number }}">{{ row.title }}</a></td>
+    <td>{% if row.state %}<span class="state {{ row.state }}">{{ row.state_label }}</span>{% endif %}</td>
+    <td>{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}PR#{{ row.pr_number }}{% endif %}{% if row.pr_state %} <span class="muted">{{ row.pr_state }}</span>{% endif %}{% endif %}</td>
+    <td>{{ (row.closed_at or row.updated_at)|age(now) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if truncated %}<p class="muted">showing the {{ limit }} most recent</p>{% endif %}
+{% else %}
+<p class="muted">no issues here</p>
+{% endif %}
+{% endblock %}
