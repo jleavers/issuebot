@@ -232,6 +232,33 @@ def test_the_card_number_chip_is_drawn_by_its_border(theme: dict[str, str]) -> N
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_worker_line_is_legible_in_both_themes(theme: dict[str, str]) -> None:
+    """The restyled status line (#47) sits on --panel: chip ink, alert ink and the dot.
+
+    The chip's border is --line and only has to be visible, exactly as the kanban card's
+    number chip is: it delimits the chip, the text inside carries the meaning. --bad is
+    read as text here (a config error, a held dispatch), so it is held to the text floor
+    rather than the 3:1 the marks elsewhere in the stylesheet are measured against.
+    """
+    panel = theme["--panel"]
+    assert contrast(theme["--muted"], panel) >= TEXT_FLOOR
+    assert contrast(theme["--bad"], panel) >= TEXT_FLOOR
+    assert contrast(theme["--ok"], panel) >= MARK_FLOOR  # the verdict's dot
+    assert 1.2 <= contrast(theme["--line"], panel) < MARK_FLOOR
+
+
+def test_the_worker_line_names_no_colour_of_its_own() -> None:
+    """Token-only, like the card: a literal would go wrong, or invisible, in dark."""
+    rules = CSS[CSS.index(".worker {") : CSS.index("/* the poll button */")]
+    used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
+    assert used <= set(LIGHT), used - set(LIGHT)
+    assert used <= set(OS_DARK), used - set(OS_DARK)
+    for declaration in re.findall(r"(?:color|background|border|border-color):[^;]+;", rules):
+        assert "var(--" in declaration, declaration
+        assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
 def test_text_clears_the_contrast_floor(theme: dict[str, str]) -> None:
     for background in (theme["--panel"], theme["--bg"]):
         for name in ("--ink", "--muted", "--chart-ink"):

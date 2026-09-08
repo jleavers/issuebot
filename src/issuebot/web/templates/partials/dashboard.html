@@ -6,17 +6,21 @@
 <section class="panel worker {{ worker.status }}">
   <span class="badge">worker {{ worker.status }}</span>
   {% if worker.status == "none" %}
-  <span>no report yet (has the worker run against this database?)</span>
+  <span class="reported">no report yet (has the worker run against this database?)</span>
   {% else %}
-  <span>reported {{ worker.written_at|age(now) }}</span>
-  <span class="muted">tick {{ worker.tick_count }}, poll {{ worker.poll_interval_ms }} ms, {{ worker.max_concurrent_agents }} slots</span>
+  <span class="reported">reported {{ worker.written_at|age(now) }}</span>
+  <span class="facts">
+    <span class="fact">tick {{ worker.tick_count }}</span>
+    <span class="fact">poll {{ worker.poll_interval_ms }} ms</span>
+    <span class="fact">{{ worker.max_concurrent_agents }} slots</span>
+  </span>
   {% if worker.config_valid %}
-  <span class="muted">config valid</span>
+  <span class="verdict">config valid</span>
   {% else %}
-  <span class="config-error">config error: {{ worker.config_error }}</span>
+  <span class="fact alert config-error">config error: {{ worker.config_error }}</span>
   {% endif %}
   {% if worker.dispatch_hold %}
-  <span class="dispatch-hold">not claiming ({{ worker.dispatch_hold.kind }}, held since {{ worker.dispatch_hold.since|stamp }}): {{ worker.dispatch_hold.reason }}</span>
+  <span class="fact alert dispatch-hold">not claiming ({{ worker.dispatch_hold.kind }}, held since {{ worker.dispatch_hold.since|stamp }}): {{ worker.dispatch_hold.reason }}</span>
   {% endif %}
   {% endif %}
 </section>

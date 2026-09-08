@@ -189,6 +189,45 @@ def test_the_live_partial_marks_a_stale_worker(h: Harness) -> None:
     assert 'class="panel worker stale"' in text and "3 min ago" in text
 
 
+def test_the_worker_facts_are_bounded_rather_than_run_together(h: Harness) -> None:
+    """The reported defect (#47): the runtime facts and the verdict read as one sentence.
+
+    They were one `.muted` span and another sitting side by side, so nothing but the flex
+    gap divided "2 slots" from "config valid" and the pair read as prose with a double
+    space in it. Each fact is its own bounded chip now and the verdict is a different shape
+    entirely, so no two neighbours on the line share a treatment.
+    """
+    h.queries.snapshot_row = snapshot()
+    text = html(h.client.get("/partials/dashboard"))
+    line = text[text.index('<section class="panel worker') :]
+    line = line[: line.index("</section>")]
+    assert '<span class="fact">tick 41</span>' in line
+    assert '<span class="fact">poll 30000 ms</span>' in line
+    assert '<span class="fact">2 slots</span>' in line
+    # the verdict is not a fourth fact, and no `.muted` run is left to blur into it
+    assert '<span class="verdict">config valid</span>' in line
+    assert "muted" not in line
+    # each chip is drawn, not merely spaced: a border delimits it, as it does the card chip
+    fact = css_declarations(".worker .fact {")
+    assert fact["border"] == "1px solid var(--line)"
+    assert fact["color"] == "var(--muted)"
+    # and the verdict is a dot and a word, a shape the facts do not have
+    assert '.worker .verdict::before { content: "";' in CSS
+
+
+def test_an_alerting_worker_chip_is_drawn_in_the_bad_token(h: Harness) -> None:
+    """A config error and a dispatch hold are facts too, but ones that must be noticed."""
+    row = snapshot(dispatch_hold=HOLD)
+    row.data["config_valid"] = False
+    row.data["config_error"] = "polling.interval_ms must be >= 1000"
+    h.queries.snapshot_row = row
+    text = html(h.client.get("/partials/dashboard"))
+    assert '<span class="fact alert config-error">' in text
+    assert '<span class="fact alert dispatch-hold">' in text
+    assert "verdict" not in text
+    assert ".worker .fact.alert { border-color: var(--bad); }" in CSS
+
+
 def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     """The number is metadata and the title is the content, so they are separate elements.
 
