@@ -23,6 +23,7 @@ from issuebot.agent import (
     MIN_CLAUDE_VERSION,
     AgentError,
     ClaudeAuth,
+    ClaudeAuthVerdict,
     ClaudeRunner,
     PromptContext,
     PromptRenderer,
@@ -415,7 +416,7 @@ def _claude_check(command: str) -> Check:
     return Check("claude.command", "ok", f"{found} ({text})")
 
 
-_AUTH_LEVELS: dict[str, CheckStatus] = {
+_AUTH_LEVELS: dict[ClaudeAuthVerdict, CheckStatus] = {
     "ok": "ok",
     "ambiguous": "warn",
     "unreadable": "warn",

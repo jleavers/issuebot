@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
 from issuebot.agent import (
     AgentError,
@@ -271,13 +271,14 @@ class Orchestrator:
             workspace_root=str(settings.workspace.root),
         )
 
-    def _startup_failed(self, problems: list[str]) -> None:
+    def _startup_failed(self, problems: list[str]) -> NoReturn:
         self._log.error("orchestrator_startup_failed", problems=problems)
         raise OrchestratorStartupError(problems)
 
     async def _probe_claude_auth(self, command: str) -> ClaudeAuth:
         """``claude auth status`` under the agent's environment, off the event loop."""
-        found = self._which(command) or command
+        found = self._which(command)
+        assert found is not None, "preflight resolves claude.command before the probe runs"
         output = await asyncio.to_thread(self._claude_auth, found, self._environ)
         return describe_claude_auth(output)
 

@@ -85,8 +85,8 @@ floor, not the shipped version, and moves by hand.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
-  restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll interval of
-  grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
+  restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
+  interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
   tick; mtime reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
