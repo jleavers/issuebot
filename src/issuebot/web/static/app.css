@@ -16,7 +16,16 @@
   --ink: #1f2328;
   --muted: #6b7280;
   --line: #d9dee5;
-  --accent: #1d76db;
+  /* Primer blue-600, the light-theme sibling of the dark --accent below. It is a step
+   * darker than the --review/--chart-runs blue it used to share a hex with, because it is
+   * the one blue in the set that is read as *type* and so owes 4.5:1 rather than the 3:1
+   * a border or a bar owes: a hovered issue title (.issue-ref:hover), an issue title in
+   * the /issues table (a plain `a`) and the chosen filter chip (.filter.current) are all
+   * --accent on --bg, the darker of the two surfaces. #1d76db was 4.20:1 there - under
+   * the floor - and 4.5002:1 on --panel, which is at it rather than over it (#43). The
+   * state and chart blues keep the old hex: they are marks, and they belong to the
+   * GitHub label palette --todo, --rework and --complete come from, not to this role. */
+  --accent: #0969da;
   --ok: #0e8a16;
   --warn: #b7791f;
   --bad: #c62828;
@@ -259,12 +268,13 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
   color: var(--muted);
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
 }
-/* Hover moves the border, not the ink. --accent is a mark here, not text: 4.20:1 on the
- * card's --bg and 4.50:1 on a panel in light, over the 3:1 mark floor either way but only
- * just over the 4.5:1 one the chip's digits are held to, so lighting the border keeps the
- * label at --muted where it is legible on both. The underline `a:hover` would otherwise
- * add is dropped for the same reason the border is the shape here: a rule under the text
- * would cut across the box. */
+/* Hover moves the border, not the ink. --accent is a mark here rather than text, so it
+ * only owes the 3:1 floor, and it clears the text floor as well now that #43 has darkened
+ * it (4.84:1 on the card's --bg, 5.19:1 on a panel). The ink still stays --muted: the
+ * chip is subordinate to the title beside it, which is what the hover is really about, and
+ * a number that changed colour as well would compete with it. The underline `a:hover`
+ * would otherwise add is dropped for the same reason the border is the shape here: a rule
+ * under the text would cut across the box. */
 a.chip:hover { border-color: var(--accent); text-decoration: none; }
 a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /*
@@ -294,8 +304,8 @@ a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
  * The overflow link. A column draws BOARD_LIMIT cards and this is the way to the rest, so
  * it sits where the next card would: a block with the card's own left inset. It is --muted
  * rather than the link --accent because it is the column's footnote, not a sixth card
- * competing with the five above it - and --muted is the token held to the text floor on
- * --panel (tests/test_web_theme.py), which --accent is not.
+ * competing with the five above it. (--accent is held to the text floor on both surfaces
+ * since #43, so that is now the only reason; it used to be the second of two.)
  */
 .column .more { display: block; margin-top: 2px; padding: 4px 9px 4px 12px; font-size: 12px; color: var(--muted); }
 .column .more:hover { color: var(--accent); text-decoration: underline; }

@@ -203,20 +203,30 @@ def test_the_issue_reference_and_the_card_name_no_colour_of_their_own() -> None:
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_a_hovered_issue_reference_is_text_on_the_panel(theme: dict[str, str]) -> None:
-    """`.issue-ref:hover` paints the title --accent, and in a table that lands on --panel.
+@pytest.mark.parametrize("surface", ["--bg", "--panel"])
+def test_accent_is_legible_as_body_text_on_both_surfaces(
+    theme: dict[str, str], surface: str
+) -> None:
+    """--accent is read as text, not only as a mark, so it owes the 4.5:1 floor (#43).
 
-    This is the one new colour pairing the shared reference introduces: everywhere else
-    --accent is a mark (a border, an outline, a bar) held to 3:1, but a hovered title is
-    body text and owes the 4.5:1 floor. Light clears it by 0.0002, so the assertion is
-    doing real work: a single step of either token would take it under.
+    Everywhere it draws a border, an outline or a bar it is a mark at 3:1, and the tests
+    above cover those. But several rules paint *type* with it, on both of the surfaces the
+    dashboard uses:
 
-    The card's copy of the same hover lands on --bg instead, where --accent is 4.20:1 and
-    under this floor. That predates the change and is not touched by it - the card hovered
-    its title to --accent before the rule was shared - and is filed as its own issue.
+      - `.issue-ref:hover` hovers an issue title to --accent, on --panel in the Running and
+        Retrying tables and on --bg on a Kanban card;
+      - `a` is --accent by default, so an issue title in the /issues table is --accent at
+        rest, on --bg;
+      - `.filter.current` marks the chosen filter the same way, also on --bg and also at
+        rest.
+
+    --bg is the tighter of the two in light, being a step darker than --panel, and it is
+    the one that used to fail: #1d76db was 4.20:1 there. Both are asserted because the
+    same token lands on both, and because --panel cleared the floor by 0.0002 - a margin
+    that made the assertion true without making the colour legible.
     """
-    ratio = contrast(theme["--accent"], theme["--panel"])
-    assert ratio >= TEXT_FLOOR, f"--accent on --panel is {ratio:.4f}:1"
+    ratio = contrast(theme["--accent"], theme[surface])
+    assert ratio >= TEXT_FLOOR, f"--accent on {surface} is {ratio:.4f}:1"
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
