@@ -14,6 +14,7 @@ from fakes.web import (
     RUN_ID,
     Harness,
     issue_row,
+    limits,
     retry_row,
     run_row,
     running_row,
@@ -134,15 +135,16 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
     h.queries.runs = {1: 8, 7: 7}
     h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
     h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
+    h.queries.snapshot_row = snapshot(rate_limits=limits(0.42, 0.32))
     section = hero(html(h.client.get("/partials/dashboard")))
     assert section.count('<div class="tile">') == 6
     assert re.findall(r'<div class="label">([^<]+)</div>', section) == [
         "closed",
         "agents run",
-        "cost",
+        "cost (effort)",
         "tokens",
-        "running now",
-        "retrying",
+        "limits",
+        "activity",
     ]
     assert re.findall(r'<div class="value">([^<]+)</div>', section) == [
         "6",
@@ -153,12 +155,53 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
         "$42.66",
         "203K",
         "1.2M",
+        "42%",
+        "32%",
         "0",
         "0",
     ]
     assert 'title="203,000"' in section and 'title="1,209,000"' in section
     assert section.count('<div class="span">1 day</div>') == 4
     assert section.count('<div class="span">7 days</div>') == 4
+    assert section.count('<div class="span">5-hour</div>') == 1
+    assert section.count('<div class="span">7-day</div>') == 1
+    assert section.count('<div class="span">running</div>') == 1
+    assert section.count('<div class="span">retrying</div>') == 1
+    assert 'class="meter"' in section
+
+
+def test_every_hero_tile_carries_two_windows(h: Harness) -> None:
+    """The merge of running and retrying is what makes the layout uniform."""
+    h.queries.snapshot_row = snapshot(rate_limits=limits())
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert section.count('<div class="windows">') == 6
+    assert section.count('<div class="window"') == 12
+
+
+def test_the_limits_tile_is_not_available_on_an_api_key(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(credential="api_key", rate_limits=limits())
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert "cost (actual)" in section and "cost (effort)" not in section
+    assert "N/A" in section
+    assert 'class="meter"' not in section
+    assert section.count('<div class="tile">') == 6
+
+
+def test_the_limits_tile_is_not_available_before_any_reading(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot()
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert "N/A" in section and 'class="meter"' not in section
+
+
+def test_a_window_past_its_reset_draws_an_empty_meter(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(
+        rate_limits=limits(0.42, 0.32, five_resets_in=-timedelta(minutes=1))
+    )
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert '<div class="value">0%</div>' in section
+    # A <progress>, not a styled div: the CSP has no unsafe-inline, so a width cannot be
+    # an inline style, and the element announces itself to a screen reader for free.
+    assert 'value="0" max="100"' in section and 'value="32" max="100"' in section
 
 
 def test_the_hero_columns_always_divide_the_tiles() -> None:
@@ -744,8 +787,10 @@ def test_dashboard_context() -> None:
         "retrying": 0,
         "cost_1d": 0.25,
         "cost_7d": 0.35,
+        "cost_label": "cost (effort)",
         "tokens_1d": 220,
         "tokens_7d": 231,
+        "limits": [],
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
@@ -768,6 +813,7 @@ def test_dashboard_context() -> None:
     )
     assert empty["worker"] == {"status": "none"}
     assert empty["hero"]["cost_7d"] == 0.0 and empty["running"] == []
+    assert empty["hero"]["cost_label"] == "cost" and empty["hero"]["limits"] == []
 
 
 def test_dashboard_context_carries_a_held_dispatch() -> None:

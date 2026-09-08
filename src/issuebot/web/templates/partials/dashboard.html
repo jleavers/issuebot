@@ -36,7 +36,7 @@
     </div>
   </div>
   <div class="tile">
-    <div class="label">cost</div>
+    <div class="label">{{ live.hero.cost_label }}</div>
     <div class="windows">
       <div class="window"><div class="value">{{ live.hero.cost_1d|money }}</div><div class="span">1 day</div></div>
       <div class="window"><div class="value">{{ live.hero.cost_7d|money }}</div><div class="span">7 days</div></div>
@@ -50,12 +50,28 @@
     </div>
   </div>
   <div class="tile">
-    <div class="label">running now</div>
-    <div class="value">{{ live.hero.running }}</div>
+    <div class="label">limits</div>
+    <div class="windows">
+      {% if live.hero.limits %}
+      {% for window in live.hero.limits %}
+      <div class="window" title="{{ window.label }}: {{ window.percent }}% used, resets {{ window.resets_at|stamp }}, read {{ window.observed_at|age(now) }}">
+        <div class="value">{{ window.percent }}%</div>
+        <progress class="meter" value="{{ window.percent }}" max="100">{{ window.percent }}%</progress>
+        <div class="span">{{ window.label }}</div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="window"><div class="value">N/A</div><div class="span">5-hour</div></div>
+      <div class="window"><div class="value">N/A</div><div class="span">7-day</div></div>
+      {% endif %}
+    </div>
   </div>
   <div class="tile">
-    <div class="label">retrying</div>
-    <div class="value">{{ live.hero.retrying }}</div>
+    <div class="label">activity</div>
+    <div class="windows">
+      <div class="window"><div class="value">{{ live.hero.running }}</div><div class="span">running</div></div>
+      <div class="window"><div class="value">{{ live.hero.retrying }}</div><div class="span">retrying</div></div>
+    </div>
   </div>
 </section>
 <section class="panel running">

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
+from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.session import run_session
 from issuebot.config import Settings, load_workflow
 from issuebot.events import (
@@ -452,6 +453,101 @@ def test_run_observer_feeds_the_entry(tmp_path: Path, make_issue: Any) -> None:
     assert entry.last_event == "turn_activity:user"
     observer.on_turn_event(activity(turn=2, kind="turn_completed"))
     assert (entry.turns, entry.last_event) == (2, "turn_completed")
+
+
+def rate_limits(five: float = 0.42, seven: float = 0.32, *, at: datetime = START) -> RateLimits:
+    return RateLimits(
+        five_hour=RateLimitWindow(utilization=five, resets_at=at + timedelta(hours=2)),
+        seven_day=RateLimitWindow(utilization=seven, resets_at=at + timedelta(days=3)),
+        observed_at=at,
+    )
+
+
+def test_run_observer_reports_rate_limits(tmp_path: Path, make_issue: Any) -> None:
+    """An account-wide reading goes to the callback, not into the per-issue entry."""
+    h = Harness(tmp_path)
+    entry = RunningEntry(
+        issue=make_issue(),
+        attempt=1,
+        rework=False,
+        resumed=False,
+        run_id="run-1",
+        started_mono=h.clock(),
+        started_at=h.now(),
+        cancel=asyncio.Event(),
+    )
+    seen: list[RateLimits] = []
+    observer = RunObserver(entry, clock=h.clock, now=h.now, on_rate_limits=seen.append)
+    limits = rate_limits()
+    observer.on_turn_event(activity(kind="rate_limits", rate_limits=limits))
+    assert seen == [limits]
+    assert entry.last_event == "rate_limits"
+    assert entry.last_activity_mono == START_MONO
+
+
+def test_run_observer_without_a_callback_still_records_activity(
+    tmp_path: Path, make_issue: Any
+) -> None:
+    h = Harness(tmp_path)
+    entry = RunningEntry(
+        issue=make_issue(),
+        attempt=1,
+        rework=False,
+        resumed=False,
+        run_id="run-1",
+        started_mono=h.clock(),
+        started_at=h.now(),
+        cancel=asyncio.Event(),
+    )
+    observer = RunObserver(entry, clock=h.clock, now=h.now)
+    observer.on_turn_event(activity(kind="rate_limits", rate_limits=rate_limits()))
+    assert entry.last_event == "rate_limits"
+
+
+@pytest.mark.parametrize(
+    ("status", "credential"),
+    [
+        (LOGGED_IN, "subscription"),
+        ('{"loggedIn": true, "authMethod": "oauth_token"}', "subscription"),
+        (
+            '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}',
+            "api_key",
+        ),
+        (
+            '{"loggedIn": true, "authMethod": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"}',
+            "unknown",
+        ),
+        (None, "unknown"),
+    ],
+)
+async def test_snapshot_names_the_credential_from_startup(
+    tmp_path: Path, status: str | None, credential: str
+) -> None:
+    h = Harness(tmp_path)
+    h.claude_auth_output = status
+    await h.orchestrator.startup()
+    assert h.orchestrator.snapshot().credential == credential
+
+
+async def test_snapshot_carries_the_latest_rate_limit_reading(tmp_path: Path) -> None:
+    """Readings are account-wide, so the newest wins and it outlives the run that saw it."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert h.orchestrator.snapshot().rate_limits is None
+    run = h.run_for(1)
+    later = START + timedelta(seconds=30)
+    run.observer.on_turn_event(
+        activity(kind="rate_limits", rate_limits=rate_limits(0.55, at=later))
+    )
+    run.observer.on_turn_event(activity(kind="rate_limits", rate_limits=rate_limits(0.10)))
+    limits = h.orchestrator.snapshot().rate_limits
+    assert limits is not None and limits.five_hour is not None
+    assert limits.five_hour.utilization == 0.55, "an older reading must not overwrite a newer one"
+    await h.exit(run)
+    kept = h.orchestrator.snapshot().rate_limits
+    assert kept is not None and kept.five_hour is not None
+    assert kept.five_hour.utilization == 0.55
 
 
 async def test_startup_succeeds_and_logs(tmp_path: Path) -> None:

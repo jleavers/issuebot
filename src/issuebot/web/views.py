@@ -81,6 +81,79 @@ def dispatch_hold(row: SnapshotRow | None) -> dict[str, Any] | None:
     }
 
 
+# The hero's limits tile, left to right. `claude` reports usage as a share of each window.
+_RATE_LIMIT_WINDOWS: tuple[tuple[str, str], ...] = (("five_hour", "5-hour"), ("seven_day", "7-day"))
+
+
+def rate_limit_windows(row: SnapshotRow | None, now: datetime) -> list[dict[str, Any]]:
+    """The account's usage windows for the hero tile, or [] when there is nothing to show.
+
+    A reading only arrives while a turn is running, so between runs the newest one ages. Age
+    alone is not staleness here: a window whose ``resets_at`` has passed has genuinely rolled
+    over, and nothing has run since to spend the new one, so it reads 0% rather than repeating
+    a figure that stopped being true at the reset.
+
+    [] means the tile says N/A: a definite API key, which has no such windows, or no reading
+    yet. An ``unknown`` credential with a reading still shows it -- a probe issuebot could not
+    read is no reason to hide data claude did report. The data is JSON, so it is read
+    defensively, like ``dispatch_hold``.
+    """
+    if row is None or row.data.get("credential") == "api_key":
+        return []
+    limits = row.data.get("rate_limits")
+    if not isinstance(limits, dict):
+        return []
+    observed_at = limits.get("observed_at")
+    windows = []
+    for key, label in _RATE_LIMIT_WINDOWS:
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        percent = _window_percent(window, now)
+        if percent is None:
+            continue
+        windows.append(
+            {
+                "key": key,
+                "label": label,
+                "percent": percent,
+                "resets_at": window.get("resets_at"),
+                "observed_at": observed_at if isinstance(observed_at, str) else None,
+            }
+        )
+    return windows
+
+
+def _window_percent(window: dict[str, Any], now: datetime) -> int | None:
+    utilization = window.get("utilization")
+    if not isinstance(utilization, int | float) or isinstance(utilization, bool):
+        return None
+    resets_at = _moment(window.get("resets_at"))
+    if resets_at is not None and resets_at <= now:
+        return 0
+    return round(min(max(float(utilization), 0.0), 1.0) * 100)
+
+
+def _moment(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def cost_label(row: SnapshotRow | None) -> str:
+    """What the cost tile is called: a subscription spends effort, an API key spends money."""
+    credential = row.data.get("credential") if row is not None else None
+    if credential == "subscription":
+        return "cost (effort)"
+    if credential == "api_key":
+        return "cost (actual)"
+    return "cost"
+
+
 def worker_status(row: SnapshotRow | None, now: datetime) -> WorkerStatus:
     """``none`` without a snapshot, ``stale`` past STALE_FACTOR poll intervals, ``held``
     while the worker ticks without claiming, else ``ok``.
@@ -247,8 +320,10 @@ def dashboard_context(
             "retrying": len(retrying),
             "cost_1d": totals_1d.cost_usd,
             "cost_7d": totals_7d.cost_usd,
+            "cost_label": cost_label(row),
             "tokens_1d": totals_1d.total_tokens,
             "tokens_7d": totals_7d.total_tokens,
+            "limits": rate_limit_windows(row, now),
         },
         "running": running,
         "retrying": retrying,
@@ -371,6 +446,8 @@ def state_document(row: SnapshotRow | None, now: datetime) -> dict[str, Any]:
             "seconds_running": _float(totals.get("seconds_running")),
         },
         "counters": {key: _int(counters.get(key)) for key in _COUNTER_KEYS},
+        "credential": data.get("credential", "unknown"),
+        "rate_limits": rate_limit_windows(row, now),
     }
 
 
