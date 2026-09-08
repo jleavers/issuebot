@@ -8,7 +8,9 @@ from issuebot.agent.prompt import (
     issue_variables,
 )
 from issuebot.agent.runner import (
+    CLAUDE_PROBE_TIMEOUT_S,
     MIN_CLAUDE_VERSION,
+    ClaudeAuth,
     ClaudeRunner,
     StreamParser,
     TurnEvent,
@@ -17,6 +19,8 @@ from issuebot.agent.runner import (
     TurnRunner,
     agent_environment,
     classify_result,
+    claude_auth_status,
+    describe_claude_auth,
     parse_claude_version,
     settings_for_labels,
     settings_with_model,
@@ -33,10 +37,12 @@ from issuebot.agent.workspace import (
 )
 
 __all__ = [
+    "CLAUDE_PROBE_TIMEOUT_S",
     "CONTINUATION_TEMPLATE",
     "MIN_CLAUDE_VERSION",
     "AgentError",
     "AgentErrorCategory",
+    "ClaudeAuth",
     "ClaudeRunner",
     "HookResult",
     "PromptContext",
@@ -53,6 +59,8 @@ __all__ = [
     "WorkspaceManager",
     "agent_environment",
     "classify_result",
+    "claude_auth_status",
+    "describe_claude_auth",
     "issue_variables",
     "new_run_id",
     "outcome_for",

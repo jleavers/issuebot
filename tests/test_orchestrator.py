@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ from issuebot.orchestrator.state import RunningEntry
 
 START = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 START_MONO = 1000.0
+LOGGED_IN = '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}'
+LOGGED_OUT = '{"loggedIn": false, "authMethod": "none"}'
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "claude"
 posix = pytest.mark.skipif(sys.platform == "win32", reason="the fakes are POSIX scripts")
 
@@ -226,6 +229,8 @@ class Harness:
         self.snapshots: list[Any] = []
         self.polled: list[list[Issue]] = []
         self.which_missing: set[str] = set()
+        self.claude_auth_output: str | None = LOGGED_IN
+        self.claude_auth_calls: list[tuple[str, Mapping[str, str]]] = []
         self.orchestrator = Orchestrator(
             self.workflow,
             bus=self.bus,
@@ -234,6 +239,7 @@ class Harness:
             runner_factory=self.make_runner,
             run_session=run_session if real_sessions else self.sessions,
             which=self.which,
+            claude_auth=self.claude_auth,
             clock=self.clock,
             now=self.now,
             environ=self.environ,
@@ -251,6 +257,10 @@ class Harness:
 
     def which(self, name: str) -> str | None:
         return None if name in self.which_missing else f"/usr/bin/{name}"
+
+    def claude_auth(self, command: str, environ: Mapping[str, str]) -> str | None:
+        self.claude_auth_calls.append((command, environ))
+        return self.claude_auth_output
 
     def make_runner(self, settings: Settings) -> ClaudeRunner:
         self.runner_settings.append(settings)
@@ -443,9 +453,67 @@ def test_run_observer_feeds_the_entry(tmp_path: Path, make_issue: Any) -> None:
 
 
 async def test_startup_succeeds_and_logs(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
     h = Harness(tmp_path)
     await h.orchestrator.startup()
     assert [name for name, _ in h.github.calls] == ["auth_status", "missing_labels"]
+    # The probe runs the resolved command under the worker's own environment, once.
+    assert h.claude_auth_calls == [("/usr/bin/claude", h.environ)]
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    started = [line for line in lines if line["event"] == "orchestrator_started"]
+    assert started[0]["claude_auth"] == "logged in (claude.ai, max)"
+    assert not [line for line in lines if line["event"] == "orchestrator_startup_warning"]
+
+
+async def test_startup_fails_when_claude_is_logged_out(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.claude_auth_output = LOGGED_OUT
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await h.orchestrator.startup()
+    assert exc.value.problems == [
+        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+    ]
+    # Nothing was fetched or claimed: the probe ran after the gh probes and before any tick.
+    assert [name for name, _ in h.github.calls] == ["auth_status", "missing_labels"]
+
+
+@pytest.mark.parametrize(
+    ("output", "warning"),
+    [
+        (None, "could not read auth status (no output)"),
+        ("error: unknown command auth\n", "could not read auth status (unparseable output "),
+        (
+            '{"loggedIn": true, "authMethod": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"}',
+            "logged in (claude.ai) with ANTHROPIC_API_KEY also set; ",
+        ),
+    ],
+)
+async def test_startup_warns_but_starts_when_the_claude_probe_is_inconclusive(
+    tmp_path: Path, output: str | None, warning: str
+) -> None:
+    """A timeout, an older claude, or an ambiguous login warns; only a definite logout fails."""
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
+    h = Harness(tmp_path)
+    h.claude_auth_output = output
+    await h.orchestrator.startup()
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    warned = [line for line in lines if line["event"] == "orchestrator_startup_warning"]
+    assert len(warned) == 1
+    assert warned[0]["claude_auth"].startswith(warning)
+    started = [line for line in lines if line["event"] == "orchestrator_started"]
+    assert started[0]["claude_auth"] == warned[0]["claude_auth"]
+
+
+async def test_startup_skips_the_claude_probe_when_preflight_fails(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.which_missing = {"claude"}
+    h.claude_auth_output = LOGGED_OUT
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await h.orchestrator.startup()
+    assert exc.value.problems == ["claude.command 'claude' not found on PATH"]
+    assert h.claude_auth_calls == []
 
 
 async def test_startup_fails_on_preflight_auth_or_labels(
@@ -467,6 +535,14 @@ async def test_startup_fails_on_preflight_auth_or_labels(
     with pytest.raises(OrchestratorStartupError) as exc:
         await h.orchestrator.startup()
     assert exc.value.problems == ["labels missing: issuebot/review; run issuebot labels ensure"]
+    # Every probe reports, so one restart fixes everything at once.
+    h.claude_auth_output = LOGGED_OUT
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await h.orchestrator.startup()
+    assert exc.value.problems == [
+        "labels missing: issuebot/review; run issuebot labels ensure",
+        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+    ]
 
 
 # --- dispatch -----------------------------------------------------------------------------

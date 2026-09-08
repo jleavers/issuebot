@@ -168,6 +168,13 @@ Setting both a login and `ANTHROPIC_API_KEY` is a warning rather than an error: 
 which credential gets billed is not obvious from the outside, so unset one. An empty
 `ANTHROPIC_API_KEY=` counts as unset, which is what you want when you have logged in.
 
+The worker runs the same probe at startup, so a worker with no usable credential prints
+`[FAIL] startup: claude auth: not logged in; ...` and exits rather than claiming issues it
+cannot work on. Under Compose that means `docker compose ps` shows the worker restarting until
+the login is in place; `docker compose logs worker` has the line. Only a definite "not logged
+in" stops it: a `claude` that does not answer in time is logged as a warning and the worker
+starts anyway.
+
 To ask `claude` directly, without going through issuebot:
 
 ```bash
@@ -204,8 +211,8 @@ docker compose logs -f worker
 
 That starts PostgreSQL, the worker and the dashboard at http://127.0.0.1:8080 (loopback only;
 it has no authentication). At startup the worker applies the database migrations, checks the
-`gh` login and the labels, and prints `[FAIL] startup:` lines and exits if anything is wrong.
-From then on it polls the repository every `polling.interval_ms`.
+`gh` login, the labels and the Claude login, and prints `[FAIL] startup:` lines and exits if
+anything is wrong. From then on it polls the repository every `polling.interval_ms`.
 
 To run on the host instead:
 
