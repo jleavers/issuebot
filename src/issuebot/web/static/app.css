@@ -29,8 +29,8 @@
    * five state tokens are GitHub's own label hexes (LABEL_STYLES in
    * src/issuebot/github/state.py sets review to 1D76DB), so the board reads as the
    * labels GitHub renders. That pins them at the floor rather than over it, which is
-   * its own question and not this one (#51). --accent answers to
-   * nothing outside the stylesheet, so it is free to move. */
+   * its own question and not this one (#51). --accent answers to nothing outside the
+   * stylesheet, so it is free to move. */
   --accent: #0969da;
   --ok: #0e8a16;
   --warn: #b7791f;
