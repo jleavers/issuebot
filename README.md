@@ -255,7 +255,10 @@ the worker creates it.
    keeps one workpad comment on the issue with its plan, checklist and notes, edited in
    place. `issuebot issues list` and `issuebot status` show the same from the terminal.
 4. When the PR is open and its checks are green, the agent labels the issue
-   `issuebot/review`. If Slack is configured, that state change is posted.
+   `issuebot/review`. If Slack is configured, that state change is posted. An issue whose
+   reported behaviour no longer happens reaches the same label by the other route: the agent
+   records the reproduction it ran and what it found instead in the workpad, and hands over
+   with no PR attached.
 
 To try one issue in the foreground before leaving the worker running:
 `docker compose run --rm worker run-once <number>` (host: `uv run issuebot run-once <number>`)
