@@ -235,7 +235,13 @@ floor, not the shipped version, and moves by hand.
   `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,
-  `stale` still winning, since a snapshot too old to trust is too old to trust about its hold. The hero's cost and token tiles are 1d/7d
+  `stale` still winning, since a snapshot too old to trust is too old to trust about its hold.
+  The worker line separates its parts by drawing them rather than spacing them (#47): the
+  runtime figures are `.fact` chips, bounded and `nowrap` like the card's number chip, while
+  a verdict (`config valid`, a config error, a held dispatch) is a dot and prose that wraps,
+  because `config_error` is one line per invalid setting and no pill would hold it. Two
+  same-coloured runs of text a flex gap apart read as one sentence with a double space in it,
+  which is what the line used to do. The hero's cost and token tiles are 1d/7d
   sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
   survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
   `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
