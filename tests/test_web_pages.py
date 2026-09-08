@@ -21,7 +21,8 @@ from fakes.web import (
 )
 from issuebot.config import GitHubLabels
 from issuebot.db import (
-    COMPLETE_LIMIT,
+    BOARD_LIMIT,
+    ISSUE_LIST_LIMIT,
     PROMPT_LIMIT,
     STDERR_LIMIT,
     RunTotals,
@@ -34,6 +35,7 @@ from issuebot.web.views import (
     compact,
     dashboard_context,
     duration_text,
+    issue_filters,
     money,
     stamp_text,
     thousands,
@@ -350,15 +352,27 @@ def test_a_held_worker_badge_is_marked_up_like_the_other_states() -> None:
     assert ".worker .config-error, .worker .dispatch-hold { color: var(--bad); }" in CSS
 
 
-def test_the_live_partial_notes_the_complete_cap(h: Harness) -> None:
+def test_a_capped_column_counts_them_all_and_links_to_the_rest(h: Harness) -> None:
+    """The header counts the whole column; the footer links to what the board left off."""
     h.queries.groups["complete"] = [
         issue_row(number=n, state="complete", github_state="closed")
-        for n in range(1, COMPLETE_LIMIT + 1)
+        for n in range(1, BOARD_LIMIT + 1)
     ]
+    h.queries.counts["complete"] = 44
     text = html(h.client.get("/partials/dashboard"))
-    assert f"{COMPLETE_LIMIT} most recent" in text
-    h.queries.groups["complete"].pop()
-    assert "most recent" not in html(h.client.get("/partials/dashboard"))
+    assert '<span class="count">44</span>' in text
+    assert 'href="/issues?state=complete"' in text
+    assert "39 more" in text
+
+
+def test_a_column_inside_the_cap_has_no_overflow_link(h: Harness) -> None:
+    h.queries.groups["complete"] = [
+        issue_row(number=n, state="complete", github_state="closed") for n in range(1, 4)
+    ]
+    h.queries.counts["complete"] = 3
+    text = html(h.client.get("/partials/dashboard"))
+    assert '<span class="count">3</span>' in text
+    assert "more</a>" not in text
 
 
 def test_the_live_partial_survives_a_database_error(h: Harness) -> None:
@@ -421,6 +435,104 @@ def test_the_issue_page_escapes_the_title(h: Harness) -> None:
     text = html(h.client.get("/issues/7"))
     assert HOSTILE not in text and ESCAPED in text
     assert "no runs recorded" in text and "no events recorded" in text
+
+
+# --- the issues list page ---------------------------------------------------------------------
+
+
+def test_the_issues_page_lists_a_row_per_issue(h: Harness) -> None:
+    h.queries.issue_list = [
+        issue_row(number=7),
+        issue_row(
+            number=12,
+            state="complete",
+            state_label="issuebot/complete",
+            github_state="closed",
+            closed_at=NOW - timedelta(hours=2),
+            pr_number=None,
+            pr_url=None,
+            pr_state=None,
+            title="Cache the workflow",
+        ),
+    ]
+    response = h.client.get("/issues")
+    assert response.status_code == 200
+    text = html(response)
+    assert 'href="/issues/7"' in text and 'href="/issues/12"' in text
+    assert "Add a power function" in text and "Cache the workflow" in text
+    assert 'class="state review"' in text and 'class="state complete"' in text
+    assert h.queries.state_asked is None  # no filter: every column
+
+
+def test_the_issues_page_filters_to_one_state(h: Harness) -> None:
+    h.queries.counts["complete"] = 44
+    h.queries.issue_list = [issue_row(number=12, state="complete", github_state="closed")]
+    text = html(h.client.get("/issues?state=complete"))
+    assert h.queries.state_asked == "complete"
+    assert 'class="filter current" href="/issues?state=complete"' in text
+    assert "44" in text
+
+
+def test_the_issues_page_offers_a_filter_per_column_and_an_all(h: Harness) -> None:
+    text = html(h.client.get("/issues"))
+    for role in ("todo", "in_progress", "review", "rework", "complete"):
+        assert f'href="/issues?state={role}"' in text
+    assert 'class="filter current" href="/issues"' in text
+
+
+def test_an_unknown_state_filter_is_a_404_page(h: Harness) -> None:
+    response = h.client.get("/issues?state=mystery")
+    assert response.status_code == 404
+    text = html(response)
+    assert "<h1>404</h1>" in text and "mystery" in text
+    assert "issues_for_state" not in h.queries.calls
+
+
+def test_the_issues_page_notes_a_truncated_list(h: Harness) -> None:
+    h.queries.issue_list = [issue_row(number=n) for n in range(ISSUE_LIST_LIMIT)]
+    text = html(h.client.get("/issues"))
+    assert f"the {ISSUE_LIST_LIMIT} most recent" in text
+    h.queries.issue_list.pop()
+    assert "most recent" not in html(h.client.get("/issues"))
+
+
+def test_the_issues_page_says_when_a_column_is_empty(h: Harness) -> None:
+    text = html(h.client.get("/issues?state=rework"))
+    assert "no issues" in text
+
+
+def test_the_issues_page_escapes_the_title(h: Harness) -> None:
+    h.queries.issue_list = [issue_row(title=HOSTILE)]
+    text = html(h.client.get("/issues"))
+    assert HOSTILE not in text and ESCAPED in text
+
+
+def test_the_issues_page_survives_a_database_error(h: Harness) -> None:
+    h.queries.error = StoreUnavailableError("cannot connect: refused")
+    response = h.client.get("/issues")
+    assert response.status_code == 503
+
+
+def test_every_page_links_to_the_issues_list(h: Harness) -> None:
+    for path in ("/", "/issues"):
+        assert '<a href="/issues">issues</a>' in html(h.client.get(path))
+
+
+def test_issue_filters_mark_the_current_column() -> None:
+    filters = issue_filters("review", {"todo": 2, "review": 1, "complete": 44}, GitHubLabels())
+    assert [entry["label"] for entry in filters] == [
+        "all",
+        "issuebot/todo",
+        "issuebot/in-progress",
+        "issuebot/review",
+        "issuebot/rework",
+        "issuebot/complete",
+    ]
+    assert [entry["current"] for entry in filters] == [False, False, False, True, False, False]
+    assert [entry["total"] for entry in filters] == [47, 2, 0, 1, 0, 44]
+    assert filters[0]["href"] == "/issues"
+    assert filters[3]["href"] == "/issues?state=review"
+    assert issue_filters(None, {}, GitHubLabels())[0]["current"] is True
 
 
 def test_an_unknown_issue_is_a_404_page(h: Harness) -> None:
@@ -605,10 +717,12 @@ def test_compact_abbreviates_large_counts() -> None:
 
 def test_dashboard_context() -> None:
     groups = {role: [] for role in ("todo", "in_progress", "review", "rework", "complete")}
-    groups["complete"] = [issue_row(number=n, state="complete") for n in range(COMPLETE_LIMIT)]
+    groups["complete"] = [issue_row(number=n, state="complete") for n in range(BOARD_LIMIT)]
+    counts = dict.fromkeys(groups, 0) | {"complete": 44}
     live = dashboard_context(
         snapshot(running=(running_row(),)),
         groups,
+        counts=counts,
         closed_1d=1,
         closed_7d=2,
         runs_1d=3,
@@ -635,12 +749,14 @@ def test_dashboard_context() -> None:
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
-    assert [column["capped"] for column in live["columns"]] == [False, False, False, False, True]
+    assert [column["total"] for column in live["columns"]] == [0, 0, 0, 0, 44]
+    assert [column["overflow"] for column in live["columns"]] == [0, 0, 0, 0, 39]
     assert live["running"][0]["issue_number"] == 7
     zero = RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0)
     empty = dashboard_context(
         None,
         groups,
+        counts=counts,
         closed_1d=0,
         closed_7d=0,
         runs_1d=0,
@@ -658,6 +774,7 @@ def test_dashboard_context_carries_a_held_dispatch() -> None:
     live = dashboard_context(
         snapshot(dispatch_hold=HOLD),
         {role: [] for role in ("todo", "in_progress", "review", "rework", "complete")},
+        counts={},
         closed_1d=0,
         closed_7d=0,
         runs_1d=0,

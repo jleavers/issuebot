@@ -177,7 +177,10 @@ floor, not the shipped version, and moves by hand.
   up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
   callback per NOTIFY, reconnects). `queries.py`: `Queries` over one connection (`closed_count`,
   `runs_count`, `run_totals` (tokens and cost summed over the runs `runs_count` counts),
-  `daily_series`, `issues_by_state` (unknown roles skipped), `state_counts`,
+  `daily_series`, `issues_by_state` (unknown roles skipped, every column capped at
+  `BOARD_LIMIT = 5`), `state_counts` (uncapped, which is what the board's headers count),
+  `issues_for_state` (one column in full up to `ISSUE_LIST_LIMIT = 200`, or every column
+  when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
   `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
@@ -188,8 +191,8 @@ floor, not the shipped version, and moves by hand.
   `FakeDatabase` the CLI and web tests share.
 - `issuebot.web`: the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
   `log`. `app.py`: `create_app(database, settings, *, clock=, now=)` (FastAPI; pages `/`,
-  `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus `/prompt|stream|stderr` as
-  `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
+  `/issues[?state=<role>]`, `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus
+  `/prompt|stream|stderr` as `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
   `/api/v1/issues/<n>`, `/api/v1/stats?window=<N>d`, `POST /api/v1/refresh` (NOTIFY, throttled to
   one per 5 s, Symphony's `coalesced`), `/healthz` (503 only when the database does not answer;
   `worker` is `ok`, `held` while the worker ticks without claiming, `stale` past three poll
@@ -199,7 +202,11 @@ floor, not the shipped version, and moves by hand.
   security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
   and template filters (`state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
-  `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, ...). A snapshot's
+  `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, `is_board_state`,
+  `issue_filters`, ...). A board column draws at most `BOARD_LIMIT` cards, so its header
+  counts `state_counts` rather than the rows it drew, and the difference is an overflow
+  link to `/issues?state=<role>` — the list page, which is outside the live region so a
+  filter survives the ten-second swap that would collapse an expander or reset a scroll. A snapshot's
   `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,

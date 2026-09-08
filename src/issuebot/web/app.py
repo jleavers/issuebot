@@ -20,7 +20,14 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from issuebot.config import Settings
-from issuebot.db import MAX_WINDOW_DAYS, PROMPT_LIMIT, STDERR_LIMIT, Database, DatabaseError
+from issuebot.db import (
+    ISSUE_LIST_LIMIT,
+    MAX_WINDOW_DAYS,
+    PROMPT_LIMIT,
+    STDERR_LIMIT,
+    Database,
+    DatabaseError,
+)
 from issuebot.db.queries import IssueRow, RunRow, TurnRow, TurnSummaryRow
 from issuebot.log import get_logger
 from issuebot.web.transcript import parse_transcript
@@ -36,8 +43,10 @@ from issuebot.web.views import (
     describe_event,
     dispatch_hold,
     duration_text,
+    is_board_state,
     iso,
     issue_document,
+    issue_filters,
     money,
     safe_href,
     snapshot_age_s,
@@ -175,6 +184,7 @@ def create_app(
         async with database.queries() as queries:
             row = await queries.snapshot()
             groups = await queries.issues_by_state()
+            counts = await queries.state_counts()
             closed_1d = await queries.closed_count(timedelta(days=1))
             closed_7d = await queries.closed_count(timedelta(days=7))
             runs_1d = await queries.runs_count(timedelta(days=1))
@@ -184,6 +194,7 @@ def create_app(
         return dashboard_context(
             row,
             groups,
+            counts=counts,
             closed_1d=closed_1d,
             closed_7d=closed_7d,
             runs_1d=runs_1d,
@@ -219,6 +230,22 @@ def create_app(
             live = {"unavailable": exc.message}
             return render("partials/dashboard.html", live=live, status_code=503)
         return render("partials/dashboard.html", live=live)
+
+    @app.get("/issues")
+    async def issues_page(state: str | None = None) -> HTMLResponse:
+        """One column in full, or every column: what the board's overflow links point at."""
+        if state is not None and not is_board_state(state):
+            raise HTTPException(404, f"there is no {state} column")
+        async with database.queries() as queries:
+            counts = await queries.state_counts()
+            rows = await queries.issues_for_state(state)
+        return render(
+            "issues.html",
+            rows=rows,
+            filters=issue_filters(state, counts, labels),
+            truncated=len(rows) >= ISSUE_LIST_LIMIT,
+            limit=ISSUE_LIST_LIMIT,
+        )
 
     @app.get("/issues/{number}")
     async def issue_page(number: int) -> HTMLResponse:

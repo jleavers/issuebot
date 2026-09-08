@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
-    COMPLETE_LIMIT,
     MAX_WINDOW_DAYS,
     DailyPoint,
     EventRow,
@@ -193,6 +192,7 @@ def dashboard_context(
     row: SnapshotRow | None,
     groups: dict[str, list[IssueRow]],
     *,
+    counts: dict[str, int],
     closed_1d: int,
     closed_7d: int,
     runs_1d: int,
@@ -218,12 +218,22 @@ def dashboard_context(
             dispatch_hold=dispatch_hold(row),
         )
     names = labels.model_dump()
+    # `total` is the whole column (state_counts, uncapped); `rows` is the BOARD_LIMIT the
+    # board draws. The header counts the first so it never understates the board, and the
+    # difference is what the overflow link offers. `max` because the two reads are separate
+    # queries: a column that grew between them must not count backwards.
     columns = []
     for role in StateLabel:
         rows = groups.get(role.value, [])
-        capped = role is StateLabel.COMPLETE and len(rows) >= COMPLETE_LIMIT
+        total = counts.get(role.value, len(rows))
         columns.append(
-            {"role": role.value, "label": names[role.value], "rows": rows, "capped": capped}
+            {
+                "role": role.value,
+                "label": names[role.value],
+                "rows": rows,
+                "total": total,
+                "overflow": max(total - len(rows), 0),
+            }
         )
     return {
         "unavailable": None,
@@ -244,6 +254,46 @@ def dashboard_context(
         "retrying": retrying,
         "columns": columns,
     }
+
+
+# --- the issues list page ---------------------------------------------------------------------
+
+
+def is_board_state(state: str) -> bool:
+    """Whether ``state`` names one of the board's columns (so the list page will show it)."""
+    return state in {role.value for role in StateLabel}
+
+
+def issue_filters(
+    state: str | None, counts: dict[str, int], labels: GitHubLabels
+) -> list[dict[str, Any]]:
+    """The list page's filter row: "all" first, then one per column, each with its count.
+
+    ``counts`` is ``state_counts``, the same uncapped read the board's headers use, so a
+    filter and the column header it came from never disagree. "all" sums the five rather
+    than counting rows, because the page itself stops at ``ISSUE_LIST_LIMIT``.
+    """
+    names = labels.model_dump()
+    filters: list[dict[str, Any]] = [
+        {
+            "role": None,
+            "label": "all",
+            "href": "/issues",
+            "current": state is None,
+            "total": sum(counts.get(role.value, 0) for role in StateLabel),
+        }
+    ]
+    for role in StateLabel:
+        filters.append(
+            {
+                "role": role.value,
+                "label": names[role.value],
+                "href": f"/issues?state={role.value}",
+                "current": state == role.value,
+                "total": counts.get(role.value, 0),
+            }
+        )
+    return filters
 
 
 # --- the API documents ----------------------------------------------------------------------

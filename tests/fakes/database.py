@@ -64,6 +64,8 @@ class FakeQueries:
         self.totals = {1: zero, 7: zero}
         self.groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
         self.counts: dict[str, int] = {role.value: 0 for role in StateLabel}
+        self.issue_list: list[IssueRow] = []
+        self.state_asked: str | None = None
         self.series: list[DailyPoint] = []
         self.issue_rows: dict[int, IssueRow] = {}
         self.runs_by_issue: dict[int, list[RunRow]] = {}
@@ -102,6 +104,11 @@ class FakeQueries:
     async def state_counts(self) -> dict[str, int]:
         self._check("state_counts")
         return self.counts
+
+    async def issues_for_state(self, state: str | None) -> list[IssueRow]:
+        self._check("issues_for_state")
+        self.state_asked = state
+        return self.issue_list
 
     async def daily_series(self, days: int) -> list[DailyPoint]:
         self._check("daily_series")
