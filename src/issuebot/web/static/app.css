@@ -154,34 +154,46 @@ section { margin-bottom: 20px; }
  * The facts used to be one muted span and the verdict another, side by side with nothing
  * between them but the flex gap. Two runs of text in the same colour, a gap apart, read as
  * one sentence with a double space in it - which is how #47 transcribed "2 slots  config
- * valid". So the separation is drawn now rather than spaced: each fact is a bounded chip
- * (the same border-only treatment the kanban card's number chip uses, and for the same
- * reason - no token is both a step off --panel and dark enough to keep --muted legible on
- * top), and the verdict is not a chip at all but a dot and a word, so the eye stops.
+ * valid". So the separation is drawn now rather than spaced: each fact is a bounded chip,
+ * and a verdict is a dot and a sentence, a shape no fact has, so the eye stops there.
  */
 .worker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 8px; }
 .worker .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--on-solid); background: var(--muted); }
 .worker.ok .badge { background: var(--ok); }
 .worker.stale .badge, .worker.held .badge { background: var(--warn); }
 .worker.none .badge { background: var(--muted); }
-/* the freshness is the one thing on the line worth reading first, so it keeps --ink */
-.worker .reported { font-size: 13px; }
+/* how fresh the report is: the one thing on the line worth reading first, so it keeps --ink */
+.worker .freshness { font-size: 13px; }
 /* the facts are one unit, set tighter than the gap that separates them from the verdict */
 .worker .facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/*
+ * A fact is drawn, not merely spaced - the same border-only treatment the kanban card's
+ * number chip has, and for the same reason: no token is both a step off --panel and dark
+ * enough to keep --muted legible on top, so the border delimits the chip and the text
+ * inside carries it. `nowrap` for the card chip's reason as well: "poll 30000 ms" broken
+ * across two lines inside a 999px pill would not read as a chip at all. Every fact is a
+ * short fixed phrase, so `flex: none` can never push the line past the panel.
+ */
 .worker .fact {
+  flex: none; white-space: nowrap;
   padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
   font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
 }
-/* a chip that has to be noticed rather than merely delimited: the border carries it */
-.worker .fact.alert { border-color: var(--bad); }
-.worker .config-error, .worker .dispatch-hold { color: var(--bad); }
 /*
- * The verdict. A dot rather than a chip, because "everything is fine" should be the
- * quietest thing on the line - and a shape the facts do not have is what keeps it from
- * being read as a fourth fact.
+ * The verdict: what the worker makes of itself, as opposed to what it counted. Deliberately
+ * not a chip - a pill is a shape for a short fixed phrase, and a verdict is a sentence.
+ * `config_error` alone is multi-line (one line per invalid setting) and a held dispatch
+ * names its reason, so both have to wrap like prose. The dot is the mark instead, aligned
+ * to the first line rather than centred on the block.
  */
-.worker .verdict { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-.worker .verdict::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.worker .verdict { display: inline-flex; align-items: flex-start; gap: 6px; font-size: 12px; }
+.worker .verdict::before { content: ""; flex: none; margin-top: 0.4em; width: 8px; height: 8px; border-radius: 50%; }
+.worker .verdict.ok { color: var(--muted); }
+.worker .verdict.ok::before { background: var(--ok); }
+/* a green dot beside a red one is a mixed signal: valid config is not a healthy worker */
+.worker:not(.ok) .verdict.ok::before { background: var(--muted); }
+.worker .config-error, .worker .dispatch-hold { color: var(--bad); }
+.worker .verdict.alert::before { background: var(--bad); }
 
 /* the poll button */
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }

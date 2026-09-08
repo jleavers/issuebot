@@ -205,27 +205,37 @@ def test_the_worker_facts_are_bounded_rather_than_run_together(h: Harness) -> No
     assert '<span class="fact">poll 30000 ms</span>' in line
     assert '<span class="fact">2 slots</span>' in line
     # the verdict is not a fourth fact, and no `.muted` run is left to blur into it
-    assert '<span class="verdict">config valid</span>' in line
+    assert '<span class="verdict ok">config valid</span>' in line
     assert "muted" not in line
     # each chip is drawn, not merely spaced: a border delimits it, as it does the card chip
     fact = css_declarations(".worker .fact {")
     assert fact["border"] == "1px solid var(--line)"
     assert fact["color"] == "var(--muted)"
-    # and the verdict is a dot and a word, a shape the facts do not have
+    # and it holds its shape, as the card chip does: a pill broken over two lines is not one
+    assert fact["white-space"] == "nowrap"
+    # the verdict is a dot and a sentence, a shape the facts do not have
     assert '.worker .verdict::before { content: "";' in CSS
 
 
-def test_an_alerting_worker_chip_is_drawn_in_the_bad_token(h: Harness) -> None:
-    """A config error and a dispatch hold are facts too, but ones that must be noticed."""
+def test_an_alerting_verdict_is_prose_in_the_bad_token(h: Harness) -> None:
+    """A config error and a held dispatch are verdicts, not facts, and they are sentences.
+
+    `config_error` is `str(ConfigError)`, which runs to one line per invalid setting, and a
+    hold names its reason; neither would survive being squeezed into a fully rounded pill.
+    """
     row = snapshot(dispatch_hold=HOLD)
     row.data["config_valid"] = False
     row.data["config_error"] = "polling.interval_ms must be >= 1000"
     h.queries.snapshot_row = row
     text = html(h.client.get("/partials/dashboard"))
-    assert '<span class="fact alert config-error">' in text
-    assert '<span class="fact alert dispatch-hold">' in text
-    assert "verdict" not in text
-    assert ".worker .fact.alert { border-color: var(--bad); }" in CSS
+    line = text[text.index('<section class="panel worker') :]
+    line = line[: line.index("</section>")]
+    assert '<span class="verdict alert config-error">' in line
+    assert '<span class="verdict alert dispatch-hold">' in line
+    assert "verdict ok" not in line
+    assert ".worker .verdict.alert::before { background: var(--bad); }" in CSS
+    # a verdict wraps like the prose it is: a config error runs to one line per bad setting
+    assert "nowrap" not in css_declarations(".worker .verdict {").values()
 
 
 def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:

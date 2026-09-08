@@ -253,7 +253,9 @@ def test_the_worker_line_names_no_colour_of_its_own() -> None:
     used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
     assert used <= set(LIGHT), used - set(LIGHT)
     assert used <= set(OS_DARK), used - set(OS_DARK)
-    for declaration in re.findall(r"(?:color|background|border|border-color):[^;]+;", rules):
+    for declaration in re.findall(
+        r"(?:color|background(?:-color)?|border(?:-color)?):[^;]+;", rules
+    ):
         assert "var(--" in declaration, declaration
         assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
 
