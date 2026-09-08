@@ -8,15 +8,19 @@
   {% if worker.status == "none" %}
   <span>no report yet (has the worker run against this database?)</span>
   {% else %}
-  <span>reported {{ worker.written_at|age(now) }}</span>
-  <span class="muted">tick {{ worker.tick_count }}, poll {{ worker.poll_interval_ms }} ms, {{ worker.max_concurrent_agents }} slots</span>
+  <span class="freshness">reported {{ worker.written_at|age(now) }}</span>
+  <span class="facts">
+    <span class="fact">tick {{ worker.tick_count }}</span>
+    <span class="fact">poll {{ worker.poll_interval_ms }} ms</span>
+    <span class="fact">{{ worker.max_concurrent_agents }} slots</span>
+  </span>
   {% if worker.config_valid %}
-  <span class="muted">config valid</span>
+  <span class="verdict ok">config valid</span>
   {% else %}
-  <span class="config-error">config error: {{ worker.config_error }}</span>
+  <span class="verdict alert config-error">config error: {{ worker.config_error }}</span>
   {% endif %}
   {% if worker.dispatch_hold %}
-  <span class="dispatch-hold">not claiming ({{ worker.dispatch_hold.kind }}, held since {{ worker.dispatch_hold.since|stamp }}): {{ worker.dispatch_hold.reason }}</span>
+  <span class="verdict alert dispatch-hold">not claiming ({{ worker.dispatch_hold.kind }}, held since {{ worker.dispatch_hold.since|stamp }}): {{ worker.dispatch_hold.reason }}</span>
   {% endif %}
   {% endif %}
 </section>
@@ -36,7 +40,7 @@
     </div>
   </div>
   <div class="tile">
-    <div class="label">cost</div>
+    <div class="label">{{ live.hero.cost_label }}</div>
     <div class="windows">
       <div class="window"><div class="value">{{ live.hero.cost_1d|money }}</div><div class="span">1 day</div></div>
       <div class="window"><div class="value">{{ live.hero.cost_7d|money }}</div><div class="span">7 days</div></div>
@@ -50,12 +54,28 @@
     </div>
   </div>
   <div class="tile">
-    <div class="label">running now</div>
-    <div class="value">{{ live.hero.running }}</div>
+    <div class="label">limits</div>
+    <div class="windows">
+      {% if live.hero.limits %}
+      {% for window in live.hero.limits %}
+      <div class="window" title="{{ window.label }}: {{ window.percent }}% used, resets {{ window.resets_at|stamp }}, read {{ window.observed_at|age(now) }}">
+        <div class="value">{{ window.percent }}%</div>
+        <progress class="meter" value="{{ window.percent }}" max="100">{{ window.percent }}%</progress>
+        <div class="span">{{ window.label }}</div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="window"><div class="value">N/A</div><div class="span">5-hour</div></div>
+      <div class="window"><div class="value">N/A</div><div class="span">7-day</div></div>
+      {% endif %}
+    </div>
   </div>
   <div class="tile">
-    <div class="label">retrying</div>
-    <div class="value">{{ live.hero.retrying }}</div>
+    <div class="label">activity</div>
+    <div class="windows">
+      <div class="window"><div class="value">{{ live.hero.running }}</div><div class="span">running</div></div>
+      <div class="window"><div class="value">{{ live.hero.retrying }}</div><div class="span">retrying</div></div>
+    </div>
   </div>
 </section>
 <section class="panel running">
@@ -65,7 +85,7 @@
     <tr><th>issue</th><th>attempt</th><th class="num">turns</th><th>last event</th><th>last activity</th><th>started</th><th>stop</th></tr>
     {% for entry in live.running %}
     <tr>
-      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title }}{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
+      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
       <td>{{ entry.attempt }}</td>
       <td class="num">{{ entry.turn_count }}</td>
       <td>{{ entry.last_event or "-" }}</td>
@@ -86,7 +106,7 @@
     <tr><th>issue</th><th>kind</th><th>attempt</th><th>due</th><th>error</th></tr>
     {% for entry in live.retrying %}
     <tr>
-      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title or "-" }}</td>
+      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title or "-" }}</span></a></td>
       <td>{{ entry.kind }}</td>
       <td>{{ entry.attempt }}</td>
       <td>{{ entry.due_at|stamp }}</td>
@@ -102,7 +122,7 @@
     <h3><span>{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
-      <a class="title" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
+      <a class="issue-ref" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
       <div class="meta">
         <span class="pr">{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a class="chip" href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}<span class="chip">PR#{{ row.pr_number }}</span>{% endif %}{% if row.pr_state %}<span>{{ row.pr_state }}</span>{% endif %}{% endif %}</span>
         <span>{{ row.updated_at|age(now) }}</span>

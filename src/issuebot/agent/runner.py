@@ -47,6 +47,7 @@ _VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
 TurnEventKind = Literal[
     "session_started",
+    "rate_limits",
     "turn_activity",
     "turn_completed",
     "turn_failed",
@@ -99,18 +100,28 @@ def claude_auth_status(command: str, environ: Mapping[str, str]) -> str | None:
 
 
 ClaudeAuthVerdict = Literal["ok", "ambiguous", "unreadable", "logged_out"]
+# Which kind of credential the agent spends: a Claude subscription (a claude.ai login or
+# the OAuth token, both of which have usage windows and no per-token charge), an API key
+# (billed per token, no windows), or an answer too unclear to label either way.
+Credential = Literal["subscription", "api_key", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
 class ClaudeAuth:
-    """What ``claude auth status --json`` said, reduced to a verdict and one line of detail.
+    """What ``claude auth status --json`` said, reduced to a verdict, a line of detail and
+    which kind of credential the agent will spend.
 
     ``logged_out`` is the definite answer; ``ambiguous`` is a login with an API key also set;
     ``unreadable`` means the probe gave no usable answer, which each caller decides how to treat.
+
+    ``credential`` is what the dashboard labels cost by. Only a definite answer names one: an
+    ``ambiguous`` probe is exactly the case where issuebot declines to guess which credential is
+    used (``validate`` says as much), so it is ``unknown`` rather than a coin toss.
     """
 
     verdict: ClaudeAuthVerdict
     detail: str
+    credential: Credential = "unknown"
 
 
 def describe_claude_auth(output: str | None) -> ClaudeAuth:
@@ -130,7 +141,8 @@ def describe_claude_auth(output: str | None) -> ClaudeAuth:
             "unset one to be sure which credential is used"
         )
         return ClaudeAuth("ambiguous", detail)
-    return ClaudeAuth("ok", f"logged in ({method})")
+    credential: Credential = "api_key" if status.get("authMethod") == "api_key" else "subscription"
+    return ClaudeAuth("ok", f"logged in ({method})", credential)
 
 
 def _parse_auth_status(output: str | None) -> dict[str, Any] | None:
@@ -166,6 +178,62 @@ def _utcnow() -> datetime:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class RateLimitWindow:
+    """One of the account's usage windows: how much of it is spent, and when it rolls over."""
+
+    utilization: float  # 0.0 to 1.0, as claude reports it
+    resets_at: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RateLimits:
+    """A `rate_limit_event` reading. About the account, not the issue whose turn saw it."""
+
+    five_hour: RateLimitWindow | None
+    seven_day: RateLimitWindow | None
+    observed_at: datetime
+
+
+def parse_rate_limits(message: dict[str, Any], *, at: datetime) -> RateLimits | None:
+    """Read the windows out of a `rate_limit_event` line, or return None.
+
+    The line's shape is claude's, undocumented and free to change, and a worker must not fall
+    over because a field moved. So this is total: anything it cannot read is no reading at all,
+    which the dashboard already has to handle for a worker that has run nothing yet.
+    """
+    info = message.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    windows = info.get("unifiedWindows")
+    if not isinstance(windows, dict):
+        return None
+    five_hour = _rate_limit_window(windows.get("five_hour"))
+    seven_day = _rate_limit_window(windows.get("seven_day"))
+    if five_hour is None and seven_day is None:
+        return None
+    return RateLimits(five_hour=five_hour, seven_day=seven_day, observed_at=at)
+
+
+def _rate_limit_window(value: object) -> RateLimitWindow | None:
+    if not isinstance(value, dict):
+        return None
+    utilization = _number(value.get("utilization"))
+    resets = _number(value.get("resetsAt"))
+    if utilization is None or resets is None:
+        return None
+    try:
+        resets_at = datetime.fromtimestamp(resets, tz=UTC)
+    except OSError, OverflowError, ValueError:
+        return None
+    # A share of a window cannot be outside 0..1, and the tile renders it as a bar's width.
+    return RateLimitWindow(utilization=min(max(utilization, 0.0), 1.0), resets_at=resets_at)
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class TurnEvent:
     """A runtime event of one turn, reported to the observer and the log, never to the bus."""
 
@@ -176,6 +244,7 @@ class TurnEvent:
     message_type: str | None = None
     tool_name: str | None = None
     detail: str | None = None
+    rate_limits: RateLimits | None = None
 
 
 class TurnObserver(Protocol):
@@ -241,6 +310,7 @@ class StreamParser:
         self.model: str | None = None
         self.api_key_source: str | None = None
         self.result: dict[str, Any] | None = None
+        self.rate_limits: RateLimits | None = None
         self.unparseable = 0
         self._log = get_logger(__name__)
 
@@ -266,6 +336,8 @@ class StreamParser:
         if kind == "result":
             self.result = message
             return []
+        if kind == "rate_limit_event":
+            return [self._rate_limits(message)]
         return [self._activity(str(kind) if kind is not None else "unknown")]
 
     def overrun(self) -> TurnEvent:
@@ -302,6 +374,19 @@ class StreamParser:
         if not tools:
             return [self._activity("assistant")]
         return [self._activity("assistant", tool_name=name) for name in tools]
+
+    def _rate_limits(self, message: dict[str, Any]) -> TurnEvent:
+        limits = parse_rate_limits(message, at=_utcnow())
+        if limits is None:
+            return self._activity("rate_limit_event")
+        self.rate_limits = limits
+        return TurnEvent(
+            kind="rate_limits",
+            turn_number=self.turn_number,
+            session_id=self.session_id,
+            message_type="rate_limit_event",
+            rate_limits=limits,
+        )
 
     def _activity(self, message_type: str, *, tool_name: str | None = None) -> TurnEvent:
         return TurnEvent(

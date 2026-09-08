@@ -25,7 +25,7 @@ from issuebot.agent import (
     run_session,
     settings_for_labels,
 )
-from issuebot.agent.runner import TERMINATE_GRACE_S
+from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits
 from issuebot.config import ConfigError, GitHubSettings, Settings, Workflow, load_workflow
 from issuebot.events import EventBus
 from issuebot.github import (
@@ -115,15 +115,21 @@ class RunObserver:
         *,
         clock: Callable[[], float],
         now: Callable[[], datetime],
+        on_rate_limits: Callable[[RateLimits], None] | None = None,
     ) -> None:
         self._entry = entry
         self._clock = clock
         self._now = now
+        self._on_rate_limits = on_rate_limits
 
     def on_turn_event(self, event: TurnEvent) -> None:
         entry = self._entry
         entry.last_activity_mono = self._clock()
         entry.last_activity_at = self._now()
+        # A usage reading is about the account, so it goes past the entry to the orchestrator
+        # rather than into it: it has to outlive the run that happened to see it.
+        if event.rate_limits is not None and self._on_rate_limits is not None:
+            self._on_rate_limits(event.rate_limits)
         suffix = event.tool_name or event.message_type
         if event.kind == "turn_activity" and suffix:
             entry.last_event = f"{event.kind}:{suffix}"
@@ -192,6 +198,8 @@ class Orchestrator:
         self._reported_preflight: str | None = None
         self._auth_block: str | None = None
         self._reported_auth_block: str | None = None
+        self._credential: Credential = "unknown"
+        self._rate_limits: RateLimits | None = None
         self._unreadable_auth_probes = 0
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
@@ -240,6 +248,8 @@ class Orchestrator:
                 self._totals, seconds_running=round(self._totals.seconds_running + active, 3)
             ),
             counters=self._counters,
+            credential=self._credential,
+            rate_limits=self._rate_limits,
         )
 
     # --- startup ----------------------------------------------------------------------
@@ -269,6 +279,7 @@ class Orchestrator:
                 names = ", ".join(missing)
                 problems.append(f"labels missing: {names}; run issuebot labels ensure")
         auth = await self._probe_claude_auth(settings.claude.command)
+        self._credential = auth.credential
         if auth.verdict == "logged_out":
             problems.append(f"claude auth: {auth.detail}")
         elif auth.verdict != "ok":
@@ -278,6 +289,7 @@ class Orchestrator:
         self._log.info(
             "orchestrator_started",
             claude_auth=auth.detail,
+            credential=auth.credential,
             repo=settings.github.repo,
             workflow=str(self._workflow.path),
             poll_interval_ms=settings.polling.interval_ms,
@@ -292,6 +304,12 @@ class Orchestrator:
     def _startup_failed(self, problems: list[str]) -> NoReturn:
         self._log.error("orchestrator_startup_failed", problems=problems)
         raise OrchestratorStartupError(problems)
+
+    def _record_rate_limits(self, limits: RateLimits) -> None:
+        """Keep the newest reading. Sessions run concurrently, so they can arrive out of order."""
+        current = self._rate_limits
+        if current is None or limits.observed_at >= current.observed_at:
+            self._rate_limits = limits
 
     async def _probe_claude_auth(self, command: str) -> ClaudeAuth:
         """``claude auth status`` under the agent's environment, off the event loop."""
@@ -584,7 +602,9 @@ class Orchestrator:
             rework=entry.rework,
             resume_session_id=resume_session_id,
             cancel=entry.cancel,
-            observer=RunObserver(entry, clock=self._clock, now=self._now),
+            observer=RunObserver(
+                entry, clock=self._clock, now=self._now, on_rate_limits=self._record_rate_limits
+            ),
             run_id=entry.run_id,
         )
 

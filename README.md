@@ -379,9 +379,13 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   right value is yours to pick and the checked-in `5.0` is only a starting point: on an API
   key it is real money and a tight cap is a real guard, while on a Claude subscription there
   is no per-token charge and the cap acts as a cheap-and-cheerful effort limit instead, so a
-  larger number costs nothing but a longer leash. A turn that hits the cap ends as
-  `budget_exceeded` and counts as a failed attempt. The dashboard and the `run_ended` Slack
-  line (opt in via `notifications.slack.events`) show each run's cost.
+  larger number costs nothing but a longer leash. The cap ends the turn, not the run: the
+  turn is recorded as `budget_exceeded`, and the next one resumes the same Claude session
+  with a fresh cap rather than failing the attempt, which would start a replacement session
+  from cold and pay the cap again to reach what this one had already pushed. A run whose
+  every turn hits the cap therefore stops at `agent.max_turns` and is escalated like any
+  other. The dashboard and the `run_ended` Slack line (opt in via
+  `notifications.slack.events`) show each run's cost.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
 - **Configuration changes.** A running worker re-reads `WORKFLOW.md` when it changes.
@@ -441,6 +445,26 @@ of the worker's last report. It needs `DATABASE_URL` and nothing else, reads `WO
 once at start, and has no authentication: keep it on loopback (`server.bind: 127.0.0.1` outside
 Docker) or behind a reverse proxy. Turn logs are captured into the database when a run ends,
 so they outlive the workspace.
+
+**The hero's six tiles.** Closed, agents run, cost, tokens, limits and activity, each showing
+two figures: 1 day and 7 days for the first four, the two usage windows for limits, and
+running against retrying for activity.
+
+The limits tile is what a Claude subscription is actually rationed by. `claude` reports the
+share of each usage window an account has spent, every worker session forwards the newest
+reading it sees, and the tile shows the two as percentages used with a depletion bar. A
+reading only arrives while a turn is running, so between runs the last one ages — but a window
+whose reset time has passed has genuinely rolled over and nothing has run since to spend the
+new one, so it reads 0% rather than repeating a figure that stopped being true at the reset.
+Each window's tooltip carries the reset time and how old the reading is.
+
+The cost tile is labelled for what is being spent, from the same `claude auth status` probe the
+worker runs at startup: `cost (effort)` on a subscription, where there is no per-token charge
+and the figure is an effort measure, `cost (actual)` on an API key, where it is money. An API
+key has no usage windows at all, so the limits tile reads N/A; so does a worker that has not
+run a turn yet. A probe too ambiguous to call — a login with `ANTHROPIC_API_KEY` also set,
+which `validate` warns about — leaves the tile labelled plainly `cost`, but still shows any
+reading it has.
 
 **What "issues closed" counts.** The hero's 1d/7d closed tiles, the closed series on the
 30-day chart and `issuebot stats` all count issues the worker resolved: closed by a merged

@@ -90,12 +90,23 @@ floor, not the shipped version, and moves by hand.
   by the issue replaces `claude.model`; no match, or two labels naming different models,
   keeps the default) and `settings_with_model`; `claude_auth_status(command, environ)` (the
   `claude auth status --json` probe under `agent_environment`, 10 s, stdout or `None`) and
-  `describe_claude_auth(output)` → `ClaudeAuth(verdict, detail)` with verdict `ok`,
+  `describe_claude_auth(output)` → `ClaudeAuth(verdict, detail, credential)` with verdict `ok`,
   `ambiguous` (a login and an API key both set), `unreadable` (no output, a timeout, or an older
   `claude` without the subcommand) or `logged_out`, shared by `validate` and the worker's
-  startup; `run_session` (turns, refresh between turns, `RunResult`, publishes
+  startup, and carrying `credential` (`subscription`, `api_key` or `unknown` — only a definite
+  probe names one, so `ambiguous` stays `unknown`), which is what the dashboard labels cost by;
+  `parse_rate_limits` reads a `rate_limit_event` line into `RateLimits(five_hour, seven_day,
+  observed_at)` of `RateLimitWindow(utilization, resets_at)`, total like `turnlog` because the
+  line's shape is claude's and undocumented, and `StreamParser` reports it as a `rate_limits`
+  turn event carrying the reading; `run_session` (turns, refresh between turns, `RunResult`, publishes
   `RunStarted`/`RunEnded`); `classify_result` maps a turn's last result (or its absence) to an
   `AgentErrorCategory`, `auth_failed` among them (see `issuebot.orchestrator`).
+  `budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
+  caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
+  same session with a fresh ledger. Failing there would end the run, and the retry after it
+  never resumes, so the replacement session would re-read the repository from cold and spend
+  the cap again reaching what the first had already committed and pushed; a run whose every
+  turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
   Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
   `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
@@ -126,6 +137,11 @@ floor, not the shipped version, and moves by hand.
   `in_progress` or `max_attempts` failures → the blocked escape).
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
   that session's model.
+  A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
+  through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
+  concurrently, so they arrive out of order) and carries it, with the startup probe's
+  `credential`, in the snapshot — both new fields on `RuntimeSnapshot`, which `to_dict` walks
+  generically into the existing `jsonb`, so neither needed a migration.
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -222,20 +238,36 @@ floor, not the shipped version, and moves by hand.
   and template filters (`state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
   `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, `is_board_state`,
-  `issue_filters`, ...). A board column draws at most `BOARD_LIMIT` cards, so its header
+  `issue_filters`, `rate_limit_windows`, `cost_label`, ...). A board column draws at most `BOARD_LIMIT` cards, so its header
   counts `state_counts` rather than the rows it drew, and the difference is an overflow
   link to `/issues?state=<role>` — the list page, which is outside the live region so a
   filter survives the ten-second swap that would collapse an expander or reset a scroll. A snapshot's
   `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,
-  `stale` still winning, since a snapshot too old to trust is too old to trust about its hold. The hero's cost and token tiles are 1d/7d
+  `stale` still winning, since a snapshot too old to trust is too old to trust about its hold.
+  The worker line separates its parts by drawing them rather than spacing them (#47): the
+  runtime figures are `.fact` chips, bounded and `nowrap` like the card's number chip, while
+  a verdict (`config valid`, a config error, a held dispatch) is a dot and prose that wraps,
+  because `config_error` is one line per invalid setting and no pill would hold it. Two
+  same-coloured runs of text a flex gap apart read as one sentence with a double space in it,
+  which is what the line used to do. The hero's cost and token tiles are 1d/7d
   sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
   survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
   `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
-  and mean it. The hero is one tile per metric with both windows inside it, and `.hero` pins its
+  and mean it. The hero is six tiles, each with two windows inside it — closed, agents run,
+  cost, tokens, limits, activity — and `.hero` pins its
   column count (6, 3, 2) instead of auto-fitting, because every count has to divide the six
-  tiles: an auto-fit grid that lands on five orphans the last one. The token figures there go
+  tiles: an auto-fit grid that lands on five orphans the last one. `activity` is running and
+  retrying in one tile, which is what leaves room for `limits`: the account's usage windows
+  from `rate_limit_windows`, as percentages used with a `<progress>` bar (a bar's width cannot
+  be an inline style under the CSP, and the element narrates itself). That builder holds the
+  reset-aware rule — a window whose `resets_at` has passed reads 0% rather than repeating a
+  reading that stopped being true at the reset — and yields `[]`, which the tile draws as N/A,
+  for a definite `api_key` or no reading at all; an `unknown` credential with a reading still
+  shows it, since a probe issuebot could not read is no reason to hide data claude did report.
+  `cost_label` names the cost tile `cost (effort)`, `cost (actual)` or plain `cost` from the
+  same credential. `/api/v1/state` carries both as `credential` and `rate_limits`. The token figures there go
   through `compact` (`39.2M`), the exact number staying as the window's `title`.
   `transcript.py`: `parse_transcript(stream)`
   turns the stored stream-json into `Block`s (init, text, thinking, tool_use, tool_result, result,

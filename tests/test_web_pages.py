@@ -14,6 +14,7 @@ from fakes.web import (
     RUN_ID,
     Harness,
     issue_row,
+    limits,
     retry_row,
     run_row,
     running_row,
@@ -134,15 +135,16 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
     h.queries.runs = {1: 8, 7: 7}
     h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
     h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
+    h.queries.snapshot_row = snapshot(rate_limits=limits(0.42, 0.32))
     section = hero(html(h.client.get("/partials/dashboard")))
     assert section.count('<div class="tile">') == 6
     assert re.findall(r'<div class="label">([^<]+)</div>', section) == [
         "closed",
         "agents run",
-        "cost",
+        "cost (effort)",
         "tokens",
-        "running now",
-        "retrying",
+        "limits",
+        "activity",
     ]
     assert re.findall(r'<div class="value">([^<]+)</div>', section) == [
         "6",
@@ -153,12 +155,53 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
         "$42.66",
         "203K",
         "1.2M",
+        "42%",
+        "32%",
         "0",
         "0",
     ]
     assert 'title="203,000"' in section and 'title="1,209,000"' in section
     assert section.count('<div class="span">1 day</div>') == 4
     assert section.count('<div class="span">7 days</div>') == 4
+    assert section.count('<div class="span">5-hour</div>') == 1
+    assert section.count('<div class="span">7-day</div>') == 1
+    assert section.count('<div class="span">running</div>') == 1
+    assert section.count('<div class="span">retrying</div>') == 1
+    assert 'class="meter"' in section
+
+
+def test_every_hero_tile_carries_two_windows(h: Harness) -> None:
+    """The merge of running and retrying is what makes the layout uniform."""
+    h.queries.snapshot_row = snapshot(rate_limits=limits())
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert section.count('<div class="windows">') == 6
+    assert section.count('<div class="window"') == 12
+
+
+def test_the_limits_tile_is_not_available_on_an_api_key(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(credential="api_key", rate_limits=limits())
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert "cost (actual)" in section and "cost (effort)" not in section
+    assert "N/A" in section
+    assert 'class="meter"' not in section
+    assert section.count('<div class="tile">') == 6
+
+
+def test_the_limits_tile_is_not_available_before_any_reading(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot()
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert "N/A" in section and 'class="meter"' not in section
+
+
+def test_a_window_past_its_reset_draws_an_empty_meter(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(
+        rate_limits=limits(0.42, 0.32, five_resets_in=-timedelta(minutes=1))
+    )
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert '<div class="value">0%</div>' in section
+    # A <progress>, not a styled div: the CSP has no unsafe-inline, so a width cannot be
+    # an inline style, and the element announces itself to a screen reader for free.
+    assert 'value="0" max="100"' in section and 'value="32" max="100"' in section
 
 
 def test_the_hero_columns_always_divide_the_tiles() -> None:
@@ -175,17 +218,80 @@ def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
     assert "Retrying" in text and "turn_failed: boom" in text
 
 
+def test_the_running_row_draws_its_issue_the_way_a_card_does(h: Harness) -> None:
+    """#41: the number was a bare accent link and the title a run of body text.
+
+    It is the same reference a Kanban card carries, so it is the same markup: the number
+    as the chip, the title with the weight, both inside the one link to the issue page.
+    """
+    h.queries.snapshot_row = snapshot(running=(running_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="issue-ref" href="/issues/7">'
+        '<span class="chip">#7</span>'
+        '<span class="text">Add a power function</span></a>'
+    ) in text
+    # the old shape: the number linked on its own, with the title loose beside it
+    assert '<a href="/issues/7">#7</a>' not in text
+
+
+def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
+    """The identical cell one panel below; a styled row above a plain one is the defect.
+
+    The `.text` slot holds the issue's title, which is what #42 gave the row to put there.
+    """
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="issue-ref" href="/issues/9">'
+        '<span class="chip">#9</span>'
+        '<span class="text">Retry the flaky import</span></a>'
+    ) in text
+    assert '<a href="/issues/9">#9</a>' not in text
+
+
+def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
+    """(rework) and (resumed) sit outside the <a>, so the link must not be a block.
+
+    `inline-flex` shrinks it to its contents, which puts the markers beside a title that
+    fits on one line (an inline-flex box is atomic, so a title long enough to wrap pushes
+    them below it, which is where they belong). The card overrides the display to a block
+    `flex`, being the one surface where the link is the full width and nothing follows it.
+    """
+    h.queries.snapshot_row = snapshot(running=(running_row(rework=True, resumed=True),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert '</a> <span class="muted">(rework)</span> <span class="muted">(resumed)</span>' in text
+    assert css_declarations(".issue-ref {")["display"] == "inline-flex"
+    assert css_declarations(".card .issue-ref {")["display"] == "flex"
+
+
+def test_the_running_title_is_still_escaped(h: Harness) -> None:
+    """The title moved into a new element; it must not have picked up markup on the way."""
+    h.queries.snapshot_row = snapshot(running=(running_row(title=HOSTILE),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
+def test_one_rule_gives_the_card_and_the_tables_their_hover_and_focus() -> None:
+    """The states are on .issue-ref, not on .card .title, or the tables would not get them."""
+    assert ".issue-ref:hover { color: var(--accent); text-decoration: none; }" in CSS
+    assert ".issue-ref:hover .text { text-decoration: underline; }" in CSS
+    assert ".card .title" not in CSS, "`title` is gone; .issue-ref is the one hook"
+    assert ".card:has(.issue-ref:hover) {" in CSS
+
+
 def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harness) -> None:
     """The cell used to read `#9 repo-9`: the identifier is the number again (#42).
 
-    `identifier` is `<repo>-<number>`, so beside a link that already states the number it
-    said nothing about the issue. The row carries the title now, the way the Running row
-    beside it does, and the identifier is not drawn in its place.
+    `identifier` is `<repo>-<number>`, so beside a chip that already states the number it
+    said nothing about the issue. The `.text` slot #41 gave the row is a title's slot, and
+    the row carries a title to put in it now; the identifier is not drawn anywhere.
     """
     h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
     text = html(h.client.get("/partials/dashboard"))
     row = text.split("Retrying", 1)[1].split("</table>", 1)[0]
-    assert '<a href="/issues/9">#9</a> Retry the flaky import' in row
+    assert '<span class="text">Retry the flaky import</span>' in row
     assert "repo-9" not in row
 
 
@@ -200,7 +306,7 @@ def test_a_retrying_row_written_before_the_title_existed(h: Harness) -> None:
     h.queries.snapshot_row = row
     text = html(h.client.get("/partials/dashboard"))
     retrying = text.split("Retrying", 1)[1].split("</table>", 1)[0]
-    assert '<a href="/issues/9">#9</a> -' in retrying and "None" not in retrying
+    assert '<span class="text">-</span>' in retrying and "None" not in retrying
 
 
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
@@ -217,6 +323,55 @@ def test_the_live_partial_marks_a_stale_worker(h: Harness) -> None:
     assert 'class="panel worker stale"' in text and "3 min ago" in text
 
 
+def test_the_worker_facts_are_bounded_rather_than_run_together(h: Harness) -> None:
+    """The reported defect (#47): the runtime facts and the verdict read as one sentence.
+
+    They were one `.muted` span and another sitting side by side, so nothing but the flex
+    gap divided "2 slots" from "config valid" and the pair read as prose with a double
+    space in it. Each fact is its own bounded chip now and the verdict is a different shape
+    entirely, so no two neighbours on the line share a treatment.
+    """
+    h.queries.snapshot_row = snapshot()
+    text = html(h.client.get("/partials/dashboard"))
+    line = text[text.index('<section class="panel worker') :]
+    line = line[: line.index("</section>")]
+    assert '<span class="fact">tick 41</span>' in line
+    assert '<span class="fact">poll 30000 ms</span>' in line
+    assert '<span class="fact">2 slots</span>' in line
+    # the verdict is not a fourth fact, and no `.muted` run is left to blur into it
+    assert '<span class="verdict ok">config valid</span>' in line
+    assert "muted" not in line
+    # each chip is drawn, not merely spaced: a border delimits it, as it does the card chip
+    fact = css_declarations(".worker .fact {")
+    assert fact["border"] == "1px solid var(--line)"
+    assert fact["color"] == "var(--muted)"
+    # and it holds its shape, as the card chip does: a pill broken over two lines is not one
+    assert fact["white-space"] == "nowrap"
+    # the verdict is a dot and a sentence, a shape the facts do not have
+    assert '.worker .verdict::before { content: "";' in CSS
+
+
+def test_an_alerting_verdict_is_prose_in_the_bad_token(h: Harness) -> None:
+    """A config error and a held dispatch are verdicts, not facts, and they are sentences.
+
+    `config_error` is `str(ConfigError)`, which runs to one line per invalid setting, and a
+    hold names its reason; neither would survive being squeezed into a fully rounded pill.
+    """
+    row = snapshot(dispatch_hold=HOLD)
+    row.data["config_valid"] = False
+    row.data["config_error"] = "polling.interval_ms must be >= 1000"
+    h.queries.snapshot_row = row
+    text = html(h.client.get("/partials/dashboard"))
+    line = text[text.index('<section class="panel worker') :]
+    line = line[: line.index("</section>")]
+    assert '<span class="verdict alert config-error">' in line
+    assert '<span class="verdict alert dispatch-hold">' in line
+    assert "verdict ok" not in line
+    assert ".worker .verdict.alert::before { background: var(--bad); }" in CSS
+    # a verdict wraps like the prose it is: a config error runs to one line per bad setting
+    assert "nowrap" not in css_declarations(".worker .verdict {").values()
+
+
 def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     """The number is metadata and the title is the content, so they are separate elements.
 
@@ -226,7 +381,7 @@ def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
     text = html(h.client.get("/partials/dashboard"))
     assert (
-        '<a class="title" href="/issues/23">'
+        '<a class="issue-ref" href="/issues/23">'
         '<span class="chip">#23</span>'
         '<span class="text">Add a status badge to the README</span></a>'
     ) in text
@@ -273,10 +428,14 @@ def test_a_pull_request_with_no_state_renders_the_chip_alone(h: Harness) -> None
     assert "None" not in text
 
 
-def test_both_card_chips_are_drawn_by_one_rule() -> None:
-    """Two rules would drift; the issue asked for the pull request to match the number."""
-    assert ".card .number" not in CSS
-    declarations = css_declarations(".card .chip {")
+def test_every_chip_is_drawn_by_one_rule() -> None:
+    """Two rules would drift; #28 asked the pull request to match the card's number, and
+
+    #41 asked the Running table to match the card. The selector is unscoped for that
+    reason: a `.card`-scoped rule is what would have made the tables plain again.
+    """
+    assert ".card .number" not in CSS and ".card .chip {" not in CSS
+    declarations = css_declarations(".chip {")
     assert declarations["font-family"].startswith("ui-monospace")
     assert declarations["font-variant-numeric"] == "tabular-nums"
     assert declarations["border"] == "1px solid var(--line)"
@@ -289,8 +448,8 @@ def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
     Hover lights the border and leaves the label at --muted; --accent is a mark on the
     card, not text (see tests/test_web_theme.py), so it must not become the chip's ink.
     """
-    assert ".card a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
-    assert ".card a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
+    assert "a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
+    assert "a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_the_meta_row_wraps_around_a_chip_that_cannot() -> None:
@@ -317,7 +476,7 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
 
 def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
     """The chips and the title are their own elements; the CSP forbids styling them inline."""
-    assert ".card .chip {" in CSS and ".card .title .text {" in CSS
+    assert ".chip {" in CSS and ".issue-ref .text {" in CSS and ".card .issue-ref .text {" in CSS
     assert ' style="' not in html(h.client.get("/partials/dashboard"))
 
 
@@ -327,11 +486,12 @@ def test_a_long_card_title_cannot_stretch_its_column() -> None:
     The standard `line-clamp` is checked as a whole declaration: as a bare substring it is
     also inside `-webkit-line-clamp`, so it could be deleted with the test still green.
     """
-    declarations = css_declarations(".card .title .text {")
+    declarations = css_declarations(".card .issue-ref .text {")
     assert declarations["-webkit-line-clamp"] == "3"
     assert declarations["line-clamp"] == "3", "the standard property must ship beside the prefix"
     assert declarations["overflow"] == "hidden"
-    assert declarations["overflow-wrap"] == "anywhere"
+    # shared with the tables, which need it just as much: it is what breaks a branch name
+    assert css_declarations(".issue-ref .text {")["overflow-wrap"] == "anywhere"
 
 
 def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
@@ -340,17 +500,21 @@ def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
     Aligning the two on the baseline would therefore drop the chip to the last line of a
     wrapped title - the case the clamp exists for. They are aligned to the top instead.
     """
-    assert css_declarations(".card .title {")["align-items"] == "flex-start"
+    assert css_declarations(".card .issue-ref {")["align-items"] == "flex-start"
 
 
-def test_the_card_link_is_reachable_by_keyboard() -> None:
-    """The card is the primary navigation on the dashboard, so its focus must be visible."""
-    assert ".card .title:focus-visible { outline: 2px solid var(--accent);" in CSS
+def test_an_issue_reference_is_reachable_by_keyboard() -> None:
+    """The card and the two tables are the dashboard's navigation; focus must be visible."""
+    assert ".issue-ref:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_only_the_link_lights_the_card_up() -> None:
-    """A bare .card:hover would offer a click on the meta row and the padding as well."""
-    assert ".card:has(.title:hover) {" in CSS
+    """A bare .card:hover would offer a click on the meta row and the padding as well.
+
+    The chip inside the reference is not itself an .issue-ref, so the pull request chip -
+    a link off the dashboard rather than a click on this card - cannot match either.
+    """
+    assert ".card:has(.issue-ref:hover) {" in CSS
     assert ".card:hover {" not in CSS
 
 
@@ -772,8 +936,10 @@ def test_dashboard_context() -> None:
         "retrying": 0,
         "cost_1d": 0.25,
         "cost_7d": 0.35,
+        "cost_label": "cost (effort)",
         "tokens_1d": 220,
         "tokens_7d": 231,
+        "limits": [],
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
@@ -796,6 +962,7 @@ def test_dashboard_context() -> None:
     )
     assert empty["worker"] == {"status": "none"}
     assert empty["hero"]["cost_7d"] == 0.0 and empty["running"] == []
+    assert empty["hero"]["cost_label"] == "cost" and empty["hero"]["limits"] == []
 
 
 def test_dashboard_context_carries_a_held_dispatch() -> None:

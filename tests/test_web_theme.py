@@ -184,14 +184,15 @@ def test_marks_clear_the_contrast_floor_on_the_panel(theme: dict[str, str], surf
         assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
 
 
-def test_the_card_names_no_colour_of_its_own() -> None:
+def test_the_issue_reference_and_the_card_name_no_colour_of_their_own() -> None:
     """The restyle is token-only, which is the whole reason it follows into dark.
 
     A literal (a hex, an rgb(), a named colour) or a token that only one theme declares
     would light up in light and go wrong, or invisible, in dark - and neither the drift
-    check above nor the contrast checks below would see it.
+    check above nor the contrast checks below would see it. The slice starts at the shared
+    .chip rule so that the tables' half of the restyle is covered too, not just the card's.
     """
-    rules = CSS[CSS.index(".card {") : CSS.index("/* banners */")]
+    rules = CSS[CSS.index(".chip {") : CSS.index("/* banners */")]
     used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
     assert used <= set(LIGHT), used - set(LIGHT)
     assert used <= set(OS_DARK), used - set(OS_DARK)
@@ -199,6 +200,23 @@ def test_the_card_names_no_colour_of_its_own() -> None:
     for declaration in re.findall(r"(?:color|background|box-shadow|outline):[^;]+;", rules):
         assert "var(--" in declaration, declaration
         assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_a_hovered_issue_reference_is_text_on_the_panel(theme: dict[str, str]) -> None:
+    """`.issue-ref:hover` paints the title --accent, and in a table that lands on --panel.
+
+    This is the one new colour pairing the shared reference introduces: everywhere else
+    --accent is a mark (a border, an outline, a bar) held to 3:1, but a hovered title is
+    body text and owes the 4.5:1 floor. Light clears it by 0.0002, so the assertion is
+    doing real work: a single step of either token would take it under.
+
+    The card's copy of the same hover lands on --bg instead, where --accent is 4.20:1 and
+    under this floor. That predates the change and is not touched by it - the card hovered
+    its title to --accent before the rule was shared - and is filed as its own issue.
+    """
+    ratio = contrast(theme["--accent"], theme["--panel"])
+    assert ratio >= TEXT_FLOOR, f"--accent on --panel is {ratio:.4f}:1"
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
@@ -217,18 +235,54 @@ def test_the_kanban_card_marks_clear_the_mark_floor(theme: dict[str, str]) -> No
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_the_card_number_chip_is_drawn_by_its_border(theme: dict[str, str]) -> None:
+@pytest.mark.parametrize("surface", ["--bg", "--panel"])
+def test_the_number_chip_is_drawn_by_its_border(theme: dict[str, str], surface: str) -> None:
     """The chip has no fill, so --line has to carry it, as the gridlines carry the charts.
 
-    No token in the set is both a perceptible step off the card's --bg and dark enough to
-    keep --muted legible on top (--panel is 1.07:1 off --bg in light, and --line drops
-    --muted to 3.58:1), so the chip is drawn with a border and read as monospace instead.
-    That border only has to be visible, not to clear the mark floor: it delimits the chip,
-    it does not carry the number, and the digits themselves are held to the text floor.
+    No token in the set is both a perceptible step off the surface and dark enough to keep
+    --muted legible on top (--panel is 1.07:1 off --bg in light, and --line drops --muted
+    to 3.58:1), so the chip is drawn with a border and read as monospace instead. That
+    border only has to be visible, not to clear the mark floor: it delimits the chip, it
+    does not carry the number, and the digits themselves are held to the text floor.
+
+    Both surfaces, because one rule now draws the chip on a card (--bg) and in the
+    Running and Retrying tables, which are .panel (--panel). The --line half is what is
+    new here; --muted on both is also covered by test_text_clears_the_contrast_floor, and
+    is restated because it is half of why the chip can go without a fill.
     """
-    edge = contrast(theme["--line"], theme["--bg"])
-    assert 1.2 <= edge < MARK_FLOOR, edge
-    assert contrast(theme["--muted"], theme["--bg"]) >= TEXT_FLOOR
+    background = theme[surface]
+    edge = contrast(theme["--line"], background)
+    assert 1.2 <= edge < MARK_FLOOR, f"--line on {surface} is {edge:.2f}:1"
+    assert contrast(theme["--muted"], background) >= TEXT_FLOOR
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_worker_line_is_legible_in_both_themes(theme: dict[str, str]) -> None:
+    """The restyled status line (#47) sits on --panel: chip ink, alert ink and the dot.
+
+    The chip's border is --line and only has to be visible, exactly as the kanban card's
+    number chip is: it delimits the chip, the text inside carries the meaning. --bad is
+    read as text here (a config error, a held dispatch), so it is held to the text floor
+    rather than the 3:1 the marks elsewhere in the stylesheet are measured against.
+    """
+    panel = theme["--panel"]
+    assert contrast(theme["--muted"], panel) >= TEXT_FLOOR
+    assert contrast(theme["--bad"], panel) >= TEXT_FLOOR
+    assert contrast(theme["--ok"], panel) >= MARK_FLOOR  # the verdict's dot
+    assert 1.2 <= contrast(theme["--line"], panel) < MARK_FLOOR
+
+
+def test_the_worker_line_names_no_colour_of_its_own() -> None:
+    """Token-only, like the card: a literal would go wrong, or invisible, in dark."""
+    rules = CSS[CSS.index(".worker {") : CSS.index("/* the poll button */")]
+    used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
+    assert used <= set(LIGHT), used - set(LIGHT)
+    assert used <= set(OS_DARK), used - set(OS_DARK)
+    for declaration in re.findall(
+        r"(?:color|background(?:-color)?|border(?:-color)?):[^;]+;", rules
+    ):
+        assert "var(--" in declaration, declaration
+        assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])

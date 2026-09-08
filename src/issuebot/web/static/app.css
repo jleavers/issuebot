@@ -148,13 +148,54 @@ main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
 section { margin-bottom: 20px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 
-/* the worker line and the poll button */
-.worker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/*
+ * The worker line: a badge, how fresh the report is, the runtime facts, and the verdict.
+ *
+ * The facts used to be one muted span and the verdict another, side by side with nothing
+ * between them but the flex gap. Two runs of text in the same colour, a gap apart, read as
+ * one sentence with a double space in it - which is how #47 transcribed "2 slots  config
+ * valid". So the separation is drawn now rather than spaced: each fact is a bounded chip,
+ * and a verdict is a dot and a sentence, a shape no fact has, so the eye stops there.
+ */
+.worker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 8px; }
 .worker .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--on-solid); background: var(--muted); }
 .worker.ok .badge { background: var(--ok); }
 .worker.stale .badge, .worker.held .badge { background: var(--warn); }
 .worker.none .badge { background: var(--muted); }
+/* how fresh the report is: the one thing on the line worth reading first, so it keeps --ink */
+.worker .freshness { font-size: 13px; }
+/* the facts are one unit, set tighter than the gap that separates them from the verdict */
+.worker .facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/*
+ * A fact is drawn, not merely spaced - the same border-only treatment the kanban card's
+ * number chip has, and for the same reason: no token is both a step off --panel and dark
+ * enough to keep --muted legible on top, so the border delimits the chip and the text
+ * inside carries it. `nowrap` for the card chip's reason as well: "poll 30000 ms" broken
+ * across two lines inside a 999px pill would not read as a chip at all. Every fact is a
+ * short fixed phrase, so `flex: none` can never push the line past the panel.
+ */
+.worker .fact {
+  flex: none; white-space: nowrap;
+  padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+/*
+ * The verdict: what the worker makes of itself, as opposed to what it counted. Deliberately
+ * not a chip - a pill is a shape for a short fixed phrase, and a verdict is a sentence.
+ * `config_error` alone is multi-line (one line per invalid setting) and a held dispatch
+ * names its reason, so both have to wrap like prose. The dot is the mark instead, aligned
+ * to the first line rather than centred on the block.
+ */
+.worker .verdict { display: inline-flex; align-items: flex-start; gap: 6px; font-size: 12px; }
+.worker .verdict::before { content: ""; flex: none; margin-top: 0.4em; width: 8px; height: 8px; border-radius: 50%; }
+.worker .verdict.ok { color: var(--muted); }
+.worker .verdict.ok::before { background: var(--ok); }
+/* a green dot beside a red one is a mixed signal: valid config is not a healthy worker */
+.worker:not(.ok) .verdict.ok::before { background: var(--muted); }
 .worker .config-error, .worker .dispatch-hold { color: var(--bad); }
+.worker .verdict.alert::before { background: var(--bad); }
+
+/* the poll button */
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 button.poll { padding: 5px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--panel); color: var(--accent); cursor: pointer; }
 button.poll:hover { background: var(--accent); color: var(--on-solid); }
@@ -175,11 +216,74 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .tile .windows { display: flex; gap: 10px; }
 .tile .window { flex: 1 1 0; min-width: 0; }
 .tile .span { color: var(--muted); font-size: 11px; }
+/*
+ * The limits tile's depletion bar. A <progress> rather than a div with a width, because the
+ * CSP has no unsafe-inline: a per-window width cannot be an inline style, and the element
+ * carries the number to a screen reader without any help. Track and fill reuse --line and
+ * --accent, which every theme block already defines and tests/test_web_theme.py already holds
+ * to its contrast floors. The vendor pseudo-elements cannot be combined into one rule: a
+ * selector list is dropped whole by any browser that does not know one of its parts.
+ */
+.tile .meter { display: block; width: 100%; height: 4px; margin: 4px 0 2px; border: 0; border-radius: 2px; appearance: none; background: var(--line); color: var(--accent); }
+.tile .meter::-webkit-progress-bar { background: var(--line); border-radius: 2px; }
+.tile .meter::-webkit-progress-value { background: var(--accent); border-radius: 2px; }
+.tile .meter::-moz-progress-bar { background: var(--accent); border-radius: 2px; }
 
 /* charts */
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 12px; }
 .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 .chart canvas { width: 100%; max-height: 220px; }
+
+/*
+ * The issue reference: a number and a title inside one link. It is the same object
+ * wherever it appears - on a Kanban card, and in the Running and Retrying tables above
+ * the board - so it is drawn once here, and the card adds only what a card needs. Before
+ * this, the two tables rendered the number as the sheet's default accent link and the
+ * title as a run of body text, which read as nothing at all (#41).
+ *
+ * The chip carries no fill. No token in the set is both a perceptible step off the
+ * surfaces it lands on (--bg on a card, --panel in a table) and dark enough to keep
+ * --muted legible on top, so --line draws the box and the monospace, tabular face does
+ * the rest. --muted clears the 4.5:1 text floor on both surfaces, and --line only has to
+ * be visible on both; tests/test_web_theme.py holds all four measurements.
+ *
+ * The label has no space to break at, but `nowrap` stays: a chip broken across two lines
+ * would not read as a chip at all, and the rule says that of the chip rather than
+ * leaving it to the shape of whatever the label happens to be.
+ */
+.chip {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; font-weight: 600; line-height: 15px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+}
+/* Hover moves the border, not the ink. --accent is a mark here, not text: 4.20:1 on the
+ * card's --bg and 4.50:1 on a panel in light, over the 3:1 mark floor either way but only
+ * just over the 4.5:1 one the chip's digits are held to, so lighting the border keeps the
+ * label at --muted where it is legible on both. The underline `a:hover` would otherwise
+ * add is dropped for the same reason the border is the shape here: a rule under the text
+ * would cut across the box. */
+a.chip:hover { border-color: var(--accent); text-decoration: none; }
+a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/*
+ * The reference itself: the chip pinned left and out of the way, the title carrying the
+ * weight. `inline-flex` because in a table cell the link is content, not the width of the
+ * cell: it shrinks to what it holds, so the markers the Running row puts after it
+ * ((rework), (resumed)) sit beside it rather than under a full-width block. An inline-flex
+ * box is atomic, so once the title inside it wraps the markers go below it - which is the
+ * right place for them, and the card overrides the display anyway, being the one surface
+ * where the link *is* the full width and nothing follows it. Aligning on the baseline puts
+ * the chip beside the first line of a title that wraps; the card cannot and says why below.
+ */
+.issue-ref { display: inline-flex; align-items: baseline; gap: 7px; max-width: 100%; color: var(--ink); }
+.issue-ref .text { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+/* underline the title alone; on the flex row the link's own underline would run under
+ * the chip and the gap as well */
+.issue-ref:hover { color: var(--accent); text-decoration: none; }
+.issue-ref:hover .text { text-decoration: underline; }
+.issue-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
 /* kanban */
 .kanban { display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 10px; }
@@ -202,21 +306,17 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .column.rework h3 { color: var(--rework); }
 .column.complete h3 { color: var(--complete); }
 /*
- * The card. The number and the title used to be one run of body text differing only in
- * colour, so neither read as anything. They are given different jobs instead: the number
- * becomes a small monospace chip, pinned left and out of the title's way, and the title
- * takes the weight. Both stay inside the one link, so the whole line is still the target.
- * The pull request on the meta row is the same kind of reference - a number on a GitHub
- * object - so it is the same chip, keeping its `PR ` prefix to say which number it is.
+ * The card. Its title is an .issue-ref like the tables' (the number as a chip pinned left
+ * and out of the way, the title taking the weight, both inside the one link) plus the two
+ * overrides below. The pull request on the meta row is the same kind of reference - a
+ * number on a GitHub object - so it is the same chip, keeping its `PR` prefix to say
+ * which number it is.
  *
  * The colours are the role tokens the rest of the dashboard already uses, which is what
  * makes this follow into dark for free, and tests/test_web_theme.py holds each of them to
  * the floor for the surface it lands on: the stripe is the column's own state colour on
- * the card's --bg (3.40:1 at worst, over the 3:1 mark floor), the chip's ink is --muted
- * on the same --bg (4.51:1, over the 4.5:1 text floor) and the chip's border is --line,
- * which only has to be visible. The chip is deliberately not given a fill: no token in
- * the set is both a perceptible step off --bg and dark enough to keep --muted legible on
- * top, so the border draws the chip and the monospace face does the rest.
+ * the card's --bg (3.40:1 at worst, over the 3:1 mark floor), and the chip's ink and
+ * border are measured on --bg and on --panel, since the same chip now lands on both.
  *
  * The stripe is an inset shadow rather than a border so that hover can restate
  * border-color without having to name the four sides, and so the border radius clips it.
@@ -237,56 +337,29 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .column.review .card { box-shadow: inset 3px 0 0 var(--review); }
 .column.rework .card { box-shadow: inset 3px 0 0 var(--rework); }
 .column.complete .card { box-shadow: inset 3px 0 0 var(--complete); }
-/* the title is the card's own target, so only the title may light the card up: a plain
+/* the reference is the card's own target, so only it may light the card up: a plain
  * .card:hover would promise a click on the meta row and the padding as well, and the
- * pull request chip is a link off the dashboard rather than a click on this card */
-.card:has(.title:hover) { border-color: var(--accent); }
+ * pull request chip is a link off the dashboard rather than a click on this card. The
+ * chip inside the reference is not itself an .issue-ref, so it cannot match here. */
+.card:has(.issue-ref:hover) { border-color: var(--accent); }
 
-/* Not `baseline`: .text sets overflow, which makes it a scroll container, and a scroll
- * container synthesises its baseline from the bottom of its border box - so on a
+/* The card's own overrides of .issue-ref above; everything else it needs is shared.
+ *
+ * Not `baseline`: .text sets overflow here, which makes it a scroll container, and a
+ * scroll container synthesises its baseline from the bottom of its border box - so on a
  * two- or three-line title the chip would sink to the last line. Aligning both to the
  * top and giving the chip a box the height of one title line (15 + 2 padding + 2 border
  * = 19px, against 14px x 1.35 = 18.9px) puts it beside the first line and keeps it
- * there however many lines follow. */
-.card .title { display: flex; align-items: flex-start; gap: 7px; color: var(--ink); }
-/*
- * One rule for both chips. A card carries two references to a GitHub object - the issue
- * number beside the title and the pull request on the meta row - and drawing them once
- * means they cannot drift apart. The label has no space to break at, but `nowrap` stays:
- * a chip broken across two lines would not read as a chip at all, and the rule says that
- * of the chip rather than leaving it to the shape of whatever the label happens to be.
- */
-.card .chip {
-  flex: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px; font-weight: 600; line-height: 15px; font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  color: var(--muted);
-  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
-}
-/* Only the pull request chip is a link, and it leaves the dashboard, so it answers the
- * pointer and the keyboard itself - the title's states cover the number chip instead.
- *
- * Hover moves the border, not the ink. --accent is a mark here, not text: it is 4.20:1 on
- * the card's --bg in light, over the 3:1 mark floor but under the 4.5:1 one the chip's
- * digits are held to, so lighting the border keeps the label at --muted where it is
- * legible. It is also the same move the card itself makes on hover. The underline
- * `a:hover` would otherwise add is dropped for the same reason the border is the shape
- * here: a rule under the text would cut across the box. */
-.card a.chip:hover { border-color: var(--accent); text-decoration: none; }
-.card a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* three lines, then an ellipsis: a long title must not stretch the column it sits in,
- * and `anywhere` breaks the unspaced strings (a branch name, a URL) that otherwise would */
-.card .title .text {
+ * there however many lines follow. Block `flex` rather than the shared `inline-flex`,
+ * because the link is the full width of the card and nothing follows it on the line. */
+.card .issue-ref { display: flex; align-items: flex-start; }
+/* three lines, then an ellipsis: a long title must not stretch the 180px column it sits
+ * in. The `overflow-wrap: anywhere` that breaks the unspaced strings (a branch name, a
+ * URL) is shared, since a table cell needs it just as much. */
+.card .issue-ref .text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
-  overflow: hidden; overflow-wrap: anywhere;
-  font-weight: 600; line-height: 1.35;
+  overflow: hidden;
 }
-/* underline the title alone; on the flex row the link's own underline would run under
- * the chip and the gap as well */
-.card .title:hover { color: var(--accent); text-decoration: none; }
-.card .title:hover .text { text-decoration: underline; }
-.card .title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 /* `center` so the age sits on the middle of the chip beside it, not on its top edge.
  * Both rows wrap, because the chip inside them cannot: a column is a grid track with a
  * 180px floor, and `PR#26` + `merged` + an age does not fit one line of that. Without

@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from issuebot.agent.runner import (
     MIN_CLAUDE_VERSION,
     ClaudeAuth,
     ClaudeRunner,
+    RateLimitWindow,
     StreamParser,
     TurnEvent,
     TurnResult,
@@ -204,54 +206,65 @@ def test_minimum_version_is_the_permission_prompts_release() -> None:
 @pytest.mark.parametrize(
     ("output", "expected"),
     [
-        (None, ClaudeAuth("unreadable", "could not read auth status (no output)")),
-        ("", ClaudeAuth("unreadable", "could not read auth status (no output)")),
+        (None, ClaudeAuth("unreadable", "could not read auth status (no output)", "unknown")),
+        ("", ClaudeAuth("unreadable", "could not read auth status (no output)", "unknown")),
         (
             "error: unknown command auth\n",
             ClaudeAuth(
                 "unreadable",
                 "could not read auth status (unparseable output 'error: unknown command auth')",
+                "unknown",
             ),
         ),
         (
             "[1, 2]",
-            ClaudeAuth("unreadable", "could not read auth status (unparseable output '[1, 2]')"),
+            ClaudeAuth(
+                "unreadable", "could not read auth status (unparseable output '[1, 2]')", "unknown"
+            ),
         ),
         (
             '{"loggedIn": false, "authMethod": "none"}',
             ClaudeAuth(
-                "logged_out", "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+                "logged_out",
+                "not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+                "unknown",
             ),
         ),
         (
             "{}",
             ClaudeAuth(
-                "logged_out", "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+                "logged_out",
+                "not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+                "unknown",
             ),
         ),
         (
             '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}',
-            ClaudeAuth("ok", "logged in (claude.ai, max)"),
+            ClaudeAuth("ok", "logged in (claude.ai, max)", "subscription"),
         ),
         (
             '{"loggedIn": true, "authMethod": "claude.ai"}',
-            ClaudeAuth("ok", "logged in (claude.ai)"),
+            ClaudeAuth("ok", "logged in (claude.ai)", "subscription"),
         ),
         (
             '{"loggedIn": true, "authMethod": "oauth_token"}',
-            ClaudeAuth("ok", "logged in (CLAUDE_CODE_OAUTH_TOKEN)"),
+            ClaudeAuth("ok", "logged in (CLAUDE_CODE_OAUTH_TOKEN)", "subscription"),
         ),
         (
             '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}',
-            ClaudeAuth("ok", "logged in (API key from ANTHROPIC_API_KEY)"),
+            ClaudeAuth("ok", "logged in (API key from ANTHROPIC_API_KEY)", "api_key"),
         ),
-        ('{"loggedIn": true, "authMethod": "api_key"}', ClaudeAuth("ok", "logged in (API key)")),
+        (
+            '{"loggedIn": true, "authMethod": "api_key"}',
+            ClaudeAuth("ok", "logged in (API key)", "api_key"),
+        ),
         (
             '{"loggedIn": true, "authMethod": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"}',
             ClaudeAuth(
                 "ambiguous",
                 "logged in (claude.ai) with ANTHROPIC_API_KEY also set; "
                 "unset one to be sure which credential is used",
+                "unknown",
             ),
         ),
     ],
@@ -296,15 +309,14 @@ def test_parser_reads_init_activity_and_result() -> None:
         events.extend(parser.feed(line))
     assert [event.kind for event in events] == [
         "session_started",
-        "turn_activity",
+        "rate_limits",
         "turn_activity",
         "turn_activity",
         "turn_activity",
     ]
     assert events[0].session_id == RECORDED_SESSION_ID
     assert events[0].detail == "claude-opus-5[1m]"
-    assert [event.message_type for event in events[1:]] == [
-        "rate_limit_event",
+    assert [event.message_type for event in events[2:]] == [
         "assistant",
         "user",
         "assistant",
@@ -316,6 +328,89 @@ def test_parser_reads_init_activity_and_result() -> None:
     assert parser.result is not None
     assert parser.result["subtype"] == "success"
     assert parser.unparseable == 0
+
+
+def test_parser_reads_the_rate_limit_windows() -> None:
+    parser = StreamParser(turn_number=1, expected_session_id=RECORDED_SESSION_ID)
+    for line in _lines("success"):
+        events = parser.feed(line)
+        if events and events[0].kind == "rate_limits":
+            break
+    else:  # pragma: no cover - the fixture carries one
+        pytest.fail("the success fixture has no rate_limit_event line")
+    limits = events[0].rate_limits
+    assert limits is not None
+    assert limits.five_hour == RateLimitWindow(
+        utilization=0.13, resets_at=datetime(2026, 9, 3, 11, 50, tzinfo=UTC)
+    )
+    assert limits.seven_day == RateLimitWindow(
+        utilization=0.3, resets_at=datetime(2026, 9, 4, 5, 0, tzinfo=UTC)
+    )
+    assert parser.rate_limits == limits
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        None,
+        "not a mapping",
+        {"unifiedWindows": None},
+        {"unifiedWindows": {}},
+        {"unifiedWindows": {"five_hour": {"utilization": "lots", "resetsAt": 1788436200}}},
+        {"unifiedWindows": {"five_hour": {"utilization": 0.5}}},
+        {"unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": 1e30}}},
+    ],
+)
+def test_parser_shrugs_off_a_rate_limit_event_it_cannot_read(info: object) -> None:
+    """The shape is undocumented, so an unreadable one is activity, never an exception."""
+    parser = StreamParser(turn_number=1, expected_session_id="x")
+    line = json.dumps({"type": "rate_limit_event", "rate_limit_info": info})
+    [event] = parser.feed(line)
+    assert event.kind == "turn_activity"
+    assert event.message_type == "rate_limit_event"
+    assert event.rate_limits is None
+    assert parser.rate_limits is None
+
+
+def test_parser_keeps_the_latest_rate_limit_reading() -> None:
+    parser = StreamParser(turn_number=1, expected_session_id="x")
+    for utilization in (0.10, 0.55):
+        parser.feed(
+            json.dumps(
+                {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "unifiedWindows": {
+                            "five_hour": {"utilization": utilization, "resetsAt": 1788436200}
+                        }
+                    },
+                }
+            )
+        )
+    assert parser.rate_limits is not None
+    assert parser.rate_limits.five_hour is not None
+    assert parser.rate_limits.five_hour.utilization == 0.55
+    assert parser.rate_limits.seven_day is None
+
+
+def test_rate_limits_clamp_a_utilization_outside_the_unit_range() -> None:
+    parser = StreamParser(turn_number=1, expected_session_id="x")
+    [event] = parser.feed(
+        json.dumps(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "unifiedWindows": {
+                        "five_hour": {"utilization": 1.4, "resetsAt": 1788436200},
+                        "seven_day": {"utilization": -0.2, "resetsAt": 1788498000},
+                    }
+                },
+            }
+        )
+    )
+    limits = event.rate_limits
+    assert limits is not None and limits.five_hour is not None and limits.seven_day is not None
+    assert (limits.five_hour.utilization, limits.seven_day.utilization) == (1.0, 0.0)
 
 
 def test_parser_tolerates_blank_and_unparseable_lines() -> None:
@@ -578,13 +673,14 @@ async def test_run_turn_success_parses_everything(workspace: Path, tmp_path: Pat
     assert recorded["env"]["SSH_AUTH_SOCK"] is None
     assert recorder.kinds == [
         "session_started",
-        "turn_activity",
+        "rate_limits",
         "turn_activity",
         "turn_activity",
         "turn_activity",
         "process_exit",
         "turn_completed",
     ]
+    assert recorder.events[1].rate_limits is not None
     assert recorder.events[2].tool_name == "Read"
     assert recorder.events[-2].detail == "0"
     assert turn.stdout_path == log_dir / "turn-1.jsonl"
