@@ -420,6 +420,10 @@ before. The worker applies pending migrations when it starts and fails fast if t
 is configured but unreachable; `validate` reports the schema version. The tests that need a
 database read `DATABASE_URL` and are skipped when it is unset.
 
+Upgrading an existing worker to a version that adds a label — `issuebot/no-fault` is the most
+recent — needs `issuebot labels ensure` run once against the target repository first. The worker
+checks its labels at startup and refuses to start while one is missing, naming it and the remedy.
+
 The dashboard (`issuebot web`; the compose `web` service publishes it on the host's loopback
 at `ISSUEBOT_WEB_PORT`, default 8080) shows the Kanban of the five label columns, the hero
 stats, two 30-day charts, the running agents and, per issue, its runs with the transcript of
@@ -433,7 +437,8 @@ so they outlive the workspace.
 **What "issues closed" counts.** The hero's 1d/7d closed tiles, the closed series on the
 30-day chart and `issuebot stats` all count issues the worker resolved: closed by a merged
 pull request, or closed after a session found no fault. Both end up labelled
-`issuebot/complete`, and the counts are exactly the issues in that column. An issue closed
+`issuebot/complete`, so they are the issues that end up in that column (the tiles are windowed
+on the GitHub close time; the column itself is not). An issue closed
 without either — abandoned rather than investigated — loses its state label and is counted
 nowhere; the `issue_cancelled` event on its timeline is the record of it.
 

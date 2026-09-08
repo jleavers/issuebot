@@ -49,7 +49,7 @@ class GitHubLabels(_Model):
     def _labels_are_distinct(self) -> Self:
         values = (*self.as_tuple(), *self.markers())
         if len({value.lower() for value in values}) != len(values):
-            raise ValueError("state labels must be distinct (compared case-insensitively)")
+            raise ValueError("label names must be distinct (compared case-insensitively)")
         return self
 
 
