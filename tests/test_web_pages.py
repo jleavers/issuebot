@@ -200,12 +200,14 @@ def test_a_kanban_card_draws_its_pull_request_as_the_same_chip(h: Harness) -> No
     """The two numbers on a card are the same kind of reference, so they are one object.
 
     The prefix stays inside the chip: a card showing a bare `#24` and a bare `#26` would
-    not say which of the two is the issue and which is the pull request.
+    not say which of the two is the issue and which is the pull request. It carries no
+    space, so the two halves of the reference read as the one token they are.
     """
     h.queries.groups["review"] = [issue_row(number=24, pr_number=26, pr_url=PR_URL)]
     text = html(h.client.get("/partials/dashboard"))
     assert f'<a class="chip" href="{PR_URL}">PR#26</a>' in text
     assert '<span class="chip">#24</span>' in text
+    assert "PR #" not in text
 
 
 def test_an_unsafe_pull_request_url_still_draws_the_chip(h: Harness) -> None:

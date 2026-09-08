@@ -242,9 +242,9 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 /*
  * One rule for both chips. A card carries two references to a GitHub object - the issue
  * number beside the title and the pull request on the meta row - and drawing them once
- * means they cannot drift apart. `nowrap` keeps `PR#26` on one line: the label has no
- * space in it to break at, but a chip broken across two lines would not read as a chip at
- * all, so the rule says so rather than relying on the label's shape.
+ * means they cannot drift apart. The label has no space to break at, but `nowrap` stays:
+ * a chip broken across two lines would not read as a chip at all, and the rule says that
+ * of the chip rather than leaving it to the shape of whatever the label happens to be.
  */
 .card .chip {
   flex: none;
