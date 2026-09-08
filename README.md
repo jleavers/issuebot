@@ -446,6 +446,26 @@ once at start, and has no authentication: keep it on loopback (`server.bind: 127
 Docker) or behind a reverse proxy. Turn logs are captured into the database when a run ends,
 so they outlive the workspace.
 
+**The hero's six tiles.** Closed, agents run, cost, tokens, limits and activity, each showing
+two figures: 1 day and 7 days for the first four, the two usage windows for limits, and
+running against retrying for activity.
+
+The limits tile is what a Claude subscription is actually rationed by. `claude` reports the
+share of each usage window an account has spent, every worker session forwards the newest
+reading it sees, and the tile shows the two as percentages used with a depletion bar. A
+reading only arrives while a turn is running, so between runs the last one ages — but a window
+whose reset time has passed has genuinely rolled over and nothing has run since to spend the
+new one, so it reads 0% rather than repeating a figure that stopped being true at the reset.
+Each window's tooltip carries the reset time and how old the reading is.
+
+The cost tile is labelled for what is being spent, from the same `claude auth status` probe the
+worker runs at startup: `cost (effort)` on a subscription, where there is no per-token charge
+and the figure is an effort measure, `cost (actual)` on an API key, where it is money. An API
+key has no usage windows at all, so the limits tile reads N/A; so does a worker that has not
+run a turn yet. A probe too ambiguous to call — a login with `ANTHROPIC_API_KEY` also set,
+which `validate` warns about — leaves the tile labelled plainly `cost`, but still shows any
+reading it has.
+
 **What "issues closed" counts.** The hero's 1d/7d closed tiles, the closed series on the
 30-day chart and `issuebot stats` all count issues the worker resolved: closed by a merged
 pull request, or closed after a session found no fault. Both end up labelled

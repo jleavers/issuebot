@@ -12,6 +12,7 @@ from fakes.web import (
     Harness,
     event_row,
     issue_row,
+    limits,
     retry_row,
     running_row,
     snapshot,
@@ -21,8 +22,10 @@ from issuebot.db.queries import DailyPoint
 from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import REFRESH_MIN_INTERVAL_S, SECURITY_HEADERS, STALE_FACTOR
 from issuebot.web.views import (
+    cost_label,
     describe_event,
     dispatch_hold,
+    rate_limit_windows,
     safe_href,
     window_days,
     worker_status,
@@ -382,6 +385,89 @@ def test_a_worker_that_is_ticking_but_not_claiming_is_held_not_ok() -> None:
     assert worker_status(snapshot(age_s=5.0, dispatch_hold=HOLD), NOW) == "held"
     # A snapshot too old to trust says stale first: its hold is as old as the rest of it.
     assert worker_status(snapshot(age_s=100.0, dispatch_hold=HOLD), NOW) == "stale"
+
+
+def test_state_reports_the_credential_and_the_windows(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(rate_limits=limits(0.42, 0.32))
+    body = h.client.get("/api/v1/state").json()
+    assert body["credential"] == "subscription"
+    assert [(w["key"], w["percent"]) for w in body["rate_limits"]] == [
+        ("five_hour", 42),
+        ("seven_day", 32),
+    ]
+
+
+def test_state_without_a_snapshot_says_the_credential_is_unknown(h: Harness) -> None:
+    h.queries.snapshot_row = None
+    body = h.client.get("/api/v1/state").json()
+    assert body["credential"] == "unknown"
+    assert body["rate_limits"] == []
+
+
+def test_rate_limit_windows_read_the_latest_reading() -> None:
+    windows = rate_limit_windows(snapshot(rate_limits=limits(0.42, 0.32)), NOW)
+    assert windows == [
+        {
+            "key": "five_hour",
+            "label": "5-hour",
+            "percent": 42,
+            "resets_at": (NOW + timedelta(hours=2)).isoformat(),
+            "observed_at": (NOW - timedelta(minutes=4)).isoformat(),
+        },
+        {
+            "key": "seven_day",
+            "label": "7-day",
+            "percent": 32,
+            "resets_at": (NOW + timedelta(days=3)).isoformat(),
+            "observed_at": (NOW - timedelta(minutes=4)).isoformat(),
+        },
+    ]
+
+
+def test_a_window_past_its_reset_reads_zero() -> None:
+    """Nothing ran since it rolled over, so the reading is not stale -- it is spent."""
+    row = snapshot(
+        rate_limits=limits(
+            0.42, 0.32, five_resets_in=-timedelta(minutes=1), observed_ago=timedelta(hours=6)
+        )
+    )
+    five, seven = rate_limit_windows(row, NOW)
+    assert five["percent"] == 0
+    assert seven["percent"] == 32, "the seven-day window has not reset, so it keeps its reading"
+
+
+def test_a_window_resetting_exactly_now_reads_zero() -> None:
+    row = snapshot(rate_limits=limits(0.42, five_resets_in=timedelta(0)))
+    assert rate_limit_windows(row, NOW)[0]["percent"] == 0
+
+
+def test_rate_limit_windows_are_empty_without_a_usable_reading() -> None:
+    assert rate_limit_windows(None, NOW) == []
+    assert rate_limit_windows(snapshot(), NOW) == []
+    assert rate_limit_windows(snapshot(credential="api_key", rate_limits=limits()), NOW) == []
+    for value in ("nonsense", 5, [], {}, {"five_hour": "x", "seven_day": None}):
+        row = snapshot()
+        row.data["rate_limits"] = value
+        assert rate_limit_windows(row, NOW) == []
+
+
+def test_an_unknown_credential_still_shows_a_reading_it_has() -> None:
+    """N/A is for a definite API key; an unreadable probe must not hide real data."""
+    row = snapshot(credential="unknown", rate_limits=limits(0.42))
+    assert rate_limit_windows(row, NOW)[0]["percent"] == 42
+    assert rate_limit_windows(snapshot(credential="unknown"), NOW) == []
+
+
+@pytest.mark.parametrize(
+    ("credential", "label"),
+    [("subscription", "cost (effort)"), ("api_key", "cost (actual)"), ("unknown", "cost")],
+)
+def test_cost_label_follows_the_credential(credential: str, label: str) -> None:
+    assert cost_label(snapshot(credential=credential)) == label
+
+
+def test_cost_label_without_a_snapshot_is_bare() -> None:
+    assert cost_label(None) == "cost"
 
 
 def test_dispatch_hold_ignores_a_snapshot_that_names_no_reason() -> None:

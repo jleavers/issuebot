@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from issuebot.agent import RunResult
+from issuebot.agent.runner import Credential, RateLimits
 from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
@@ -294,6 +295,12 @@ class RuntimeSnapshot:
     retrying: tuple[RetryRow, ...]
     totals: ClaudeTotals
     counters: Counters
+    # What the agent spends, from the startup auth probe, and the newest usage reading any
+    # session has seen. The reading is about the account, not an issue, so one worker holds
+    # one; it is None until a turn reports one, and stays None for the whole life of a worker
+    # on an API key, where claude reports no windows at all.
+    credential: Credential = "unknown"
+    rate_limits: RateLimits | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe: datetimes as ISO 8601, enums as values, tuples as lists."""

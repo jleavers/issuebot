@@ -6,6 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from fakes.database import FakeDatabase
+from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.config import GitHubSettings, Settings
 from issuebot.db.queries import (
     EventRow,
@@ -26,6 +27,24 @@ from issuebot.orchestrator.state import (
 from issuebot.web import create_app
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+
+
+def limits(
+    five: float = 0.42,
+    seven: float = 0.32,
+    *,
+    five_resets_in: timedelta = timedelta(hours=2),
+    seven_resets_in: timedelta = timedelta(days=3),
+    observed_ago: timedelta = timedelta(minutes=4),
+) -> RateLimits:
+    """A rate-limit reading, by default a live one with both windows still open."""
+    return RateLimits(
+        five_hour=RateLimitWindow(utilization=five, resets_at=NOW + five_resets_in),
+        seven_day=RateLimitWindow(utilization=seven, resets_at=NOW + seven_resets_in),
+        observed_at=NOW - observed_ago,
+    )
+
+
 RUN_ID = "20260904T202535Z-0964cd"
 SETTINGS = Settings(github=GitHubSettings(repo="example/repo"))
 
@@ -85,6 +104,8 @@ def snapshot(
     age_s: float = 5.0,
     poll_interval_ms: int = 30_000,
     dispatch_hold: DispatchHold | None = None,
+    credential: str = "subscription",
+    rate_limits: RateLimits | None = None,
 ) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=NOW - timedelta(seconds=age_s + 1),
@@ -103,6 +124,8 @@ def snapshot(
             input_tokens=1000, output_tokens=50, cost_usd=1.25, seconds_running=90.0
         ),
         counters=Counters(runs_started=3, runs_ended=2, issues_completed=1),
+        credential=credential,  # type: ignore[arg-type]
+        rate_limits=rate_limits,
     ).to_dict()
     at = NOW - timedelta(seconds=age_s + 1)
     return SnapshotRow(at=at, written_at=NOW - timedelta(seconds=age_s), data=data)
