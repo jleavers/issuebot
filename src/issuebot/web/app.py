@@ -176,6 +176,8 @@ def create_app(
             closed_7d = await queries.closed_count(timedelta(days=7))
             runs_1d = await queries.runs_count(timedelta(days=1))
             runs_7d = await queries.runs_count(timedelta(days=7))
+            totals_1d = await queries.run_totals(timedelta(days=1))
+            totals_7d = await queries.run_totals(timedelta(days=7))
         return dashboard_context(
             row,
             groups,
@@ -183,6 +185,8 @@ def create_app(
             closed_7d=closed_7d,
             runs_1d=runs_1d,
             runs_7d=runs_7d,
+            totals_1d=totals_1d,
+            totals_7d=totals_7d,
             now=now(),
             labels=labels,
         )
