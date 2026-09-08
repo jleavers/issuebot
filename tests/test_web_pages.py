@@ -189,6 +189,20 @@ def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harn
     assert "repo-9" not in row
 
 
+def test_a_retrying_row_written_before_the_title_existed(h: Harness) -> None:
+    """A snapshot from an older worker has no title, and the cell must not read `None`.
+
+    The identifier it used to fall back on is gone, and a worker that fails startup never
+    overwrites the snapshot it found - so this is not always one poll interval long.
+    """
+    row = snapshot(retrying=(retry_row(),))
+    del row.data["retrying"][0]["title"]
+    h.queries.snapshot_row = row
+    text = html(h.client.get("/partials/dashboard"))
+    retrying = text.split("Retrying", 1)[1].split("</table>", 1)[0]
+    assert '<a href="/issues/9">#9</a> -' in retrying and "None" not in retrying
+
+
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
     text = html(h.client.get("/partials/dashboard"))
     assert text.startswith('<div id="live"')

@@ -86,7 +86,7 @@
     <tr><th>issue</th><th>kind</th><th>attempt</th><th>due</th><th>error</th></tr>
     {% for entry in live.retrying %}
     <tr>
-      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title }}</td>
+      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title or "-" }}</td>
       <td>{{ entry.kind }}</td>
       <td>{{ entry.attempt }}</td>
       <td>{{ entry.due_at|stamp }}</td>
