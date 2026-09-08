@@ -23,7 +23,7 @@ claude:
     issuebot/model/sonnet: sonnet
     issuebot/model/fable: claude-fable-5-1
   permission_mode: auto
-  max_budget_usd: 5.0
+  max_budget_usd: 10.0
   setting_sources: [project]
 notifications:
   slack:
