@@ -71,7 +71,7 @@
     <h3><span>{{ column.label }}</span><span class="count">{{ column.rows|length }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
-      <a class="title" href="/issues/{{ row.number }}"><span class="number">#{{ row.number }}</span> {{ row.title }}</a>
+      <a class="title" href="/issues/{{ row.number }}"><span class="number">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
       <div class="meta">
         <span>{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a href="{{ pr }}">PR #{{ row.pr_number }}</a>{% else %}PR #{{ row.pr_number }}{% endif %} {{ row.pr_state }}{% endif %}</span>
         <span>{{ row.updated_at|age(now) }}</span>

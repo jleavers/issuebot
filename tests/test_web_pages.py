@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
+from importlib.resources import files
 from typing import Any
 
 import pytest
@@ -28,6 +29,8 @@ from issuebot.web.views import (
     stamp_text,
     thousands,
 )
+
+CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
 
 RUN_ID_2 = "20260904T210000Z-abcdef"
 HOSTILE = "<script>alert(1)</script>"
@@ -98,6 +101,51 @@ def test_the_live_partial_marks_a_stale_worker(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(age_s=200.0)
     text = html(h.client.get("/partials/dashboard"))
     assert 'class="panel worker stale"' in text and "3 min ago" in text
+
+
+def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
+    """The number is metadata and the title is the content, so they are separate elements.
+
+    Both stay inside the one link to the issue page, which is what lets the stylesheet lay
+    the chip and the title out as a row without giving up a single click target.
+    """
+    h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="title" href="/issues/23">'
+        '<span class="number">#23</span>'
+        '<span class="text">Add a status badge to the README</span></a>'
+    ) in text
+
+
+def test_the_card_title_is_still_escaped(h: Harness) -> None:
+    """The title moved into a new element; it must not have picked up any markup on the way."""
+    h.queries.groups["todo"] = [issue_row(title=HOSTILE)]
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
+def test_the_card_styling_uses_only_existing_role_tokens(h: Harness) -> None:
+    """Each column's cards take that column's state colour, so dark follows for free."""
+    for role in ("todo", "in_progress", "review", "rework", "complete"):
+        assert f".column.{role} .card {{ box-shadow: inset 3px 0 0 var(--{role}); }}" in CSS
+    # the chip and the title are laid out by the stylesheet, never by an inline style
+    assert ".card .number {" in CSS and ".card .title .text {" in CSS
+    assert ' style="' not in html(h.client.get("/partials/dashboard"))
+
+
+def test_a_long_card_title_cannot_stretch_its_column(h: Harness) -> None:
+    """A column is a grid track with a 180px floor; an unbroken title would blow past it."""
+    block = CSS[CSS.index(".card .title .text {") :]
+    block = block[: block.index("}")]
+    assert "-webkit-line-clamp: 3" in block and "line-clamp: 3" in block
+    assert "overflow: hidden" in block and "overflow-wrap: anywhere" in block
+
+
+def test_the_card_link_is_reachable_by_keyboard() -> None:
+    """The card is the primary navigation on the dashboard, so its focus must be visible."""
+    assert ".card .title:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_the_live_partial_shows_a_config_error(h: Harness) -> None:

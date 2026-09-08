@@ -185,6 +185,28 @@ def test_marks_clear_the_contrast_floor_on_the_panel(theme: dict[str, str], surf
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_kanban_card_stripe_clears_the_mark_floor(theme: dict[str, str]) -> None:
+    """A card sits on --bg, not on the --panel its column is painted with.
+
+    The stripe down a card's left edge is the column's own state colour, so it is measured
+    against the card, one surface further in. Light is the tighter of the two (--bg is
+    darker than --panel there, and the marks are dark); --in_progress is the closest.
+    """
+    background = theme["--bg"]
+    for name in ("--todo", "--in_progress", "--review", "--rework", "--complete", "--accent"):
+        ratio = contrast(theme[name], background)
+        assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_card_number_chip_is_legible_on_its_own_surface(theme: dict[str, str]) -> None:
+    """The chip inverts the card: --muted ink on --panel, a step up out of the --bg card."""
+    ratio = contrast(theme["--muted"], theme["--panel"])
+    assert ratio >= TEXT_FLOOR, ratio
+    assert theme["--panel"] != theme["--bg"], "the chip would be invisible against the card"
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
 def test_text_clears_the_contrast_floor(theme: dict[str, str]) -> None:
     for background in (theme["--panel"], theme["--bg"]):
         for name in ("--ink", "--muted", "--chart-ink"):
