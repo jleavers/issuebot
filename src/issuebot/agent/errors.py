@@ -11,6 +11,7 @@ AgentErrorCategory = Literal[
     "process_exit",
     "turn_failed",
     "budget_exceeded",
+    "auth_failed",
     "prompt_error",
     "workspace_error",
     "hook_error",

@@ -491,6 +491,19 @@ In this order (Symphony §8.1 with the roadmap's additions):
    the next dispatch (Symphony §6.2).
 3. `preflight(settings)`; problems log `dispatch_preflight_failed` at ERROR
    (once per distinct message) and skip steps 4 to 6.
+   *Amended by #20:* with preflight clean, an authentication hold set by a
+   failed run (§6.8) also skips steps 4 to 6. The hold re-probes
+   `claude auth status --json` through the `claude_auth` seam once per tick;
+   a verdict of `ok` or `ambiguous` clears it and logs
+   `dispatch_auth_recovered`, anything else keeps it and logs
+   `dispatch_auth_held` (ERROR on the first and on a changed error, WARNING
+   thereafter). An `unreadable` answer holds too, unlike at startup -- a run
+   has already failed to authenticate, so no answer is not an answer to
+   resume on -- but only for `MAX_UNREADABLE_AUTH_PROBES` (10) consecutive
+   ticks, after which the hold is abandoned
+   (`dispatch_auth_hold_abandoned`) so a `claude` that can never answer
+   cannot hold dispatch for good. `logged_out` does not count towards that
+   bound.
 4. `fetch_issues_by_states([IN_PROGRESS, REWORK, TODO])`; a `GitHubError`
    logs `candidates_fetch_failed` at WARNING and skips steps 5 and 6.
    *Amended by Phase 6 (spec §8.1):* with an `on_issues` observer attached the
@@ -620,6 +633,7 @@ any existing entry for the issue (Symphony §8.4) and logs `retry_scheduled`
 | `failure` | `backoff_ms(attempt, agent.max_retry_backoff_ms)`: 20 s for attempt 2, 40 s for 3, capped |
 | `escape` | `backoff_ms(attempt, ...)` with the entry's attempt counting escape tries from 1: 10 s, 20 s, ..., capped, unbounded in count |
 | `slots` | `polling.interval_ms` |
+| `auth` (#20) | `polling.interval_ms` |
 
 `fire_due_retries()` handles every entry with `due_mono <= clock()`, oldest
 due first, logging `retry_fired`:
@@ -627,17 +641,20 @@ due first, logging `retry_fired`:
 1. Pop it. `kind == "escape"`: `blocked_escape(...)` with the stored context
    (it refreshes the issue itself); `"failed"` re-schedules kind `escape`
    with `attempt + 1`. Done either way, before any refresh.
-2. `fetch_issues_by_ids([issue_id])`; a `GitHubError` re-schedules the same
+2. *Amended by #20:* an authentication hold re-schedules the same attempt as
+   kind `auth` after `polling.interval_ms`, before any refresh, so a due
+   retry cannot claim what a tick would not.
+3. `fetch_issues_by_ids([issue_id])`; a `GitHubError` re-schedules the same
    kind and attempt after `polling.interval_ms` with error `retry refresh
    failed: <message>` (never counted as an attempt).
-3. Missing: release (log `retry_released`, reason `missing`).
-4. Closed: `finish_terminal`; release.
-5. Not active, or not dispatchable: release (reason `not_active`).
-6. Active and no slot free: re-schedule kind `slots`, same attempt, error
+4. Missing: release (log `retry_released`, reason `missing`).
+5. Closed: `finish_terminal`; release.
+6. Not active, or not dispatchable: release (reason `not_active`).
+7. Active and no slot free: re-schedule kind `slots`, same attempt, error
    `no available orchestrator slots` (Symphony §8.4 step 4; the attempt is
    not incremented so a busy worker can never push an issue into the
    blocked escape).
-7. Active: `_dispatch(issue, attempt=entry.attempt if issue.state is
+8. Active: `_dispatch(issue, attempt=entry.attempt if issue.state is
    IN_PROGRESS else 1, resume_session_id=None)`. A human who moved the issue
    back to `todo` or to `rework` gets a fresh attempt 1.
 
@@ -660,6 +677,7 @@ totals and `seconds_running`, bumps `runs_ended`, logs `worker_exited`
 | `outcome == "succeeded"` otherwise | schedule `continuation`, attempt 1 |
 | failed, `entry.attempt < max_attempts` | schedule `failure`, `attempt + 1`, error `<category>: <message>` |
 | failed, `entry.attempt >= max_attempts` | blocked escape with reason `<n> consecutive worker sessions failed; last error: ...`; on `"failed"`, schedule kind `escape`, attempt 1 |
+| failed with `error_category == "auth_failed"` (#20), whatever the attempt | log `dispatch_auth_failed`, hold dispatch (§6.3), blocked escape with reason `Claude could not authenticate in attempt <n> ...`; on `"failed"`, schedule kind `escape`, attempt 1 |
 
 "Failed" covers `failed`, `timed_out` and a `cancelled` outcome the
 orchestrator did not cause. The escape's `BlockedContext` carries the run
