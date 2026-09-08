@@ -186,6 +186,8 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
  * colour, so neither read as anything. They are given different jobs instead: the number
  * becomes a small monospace chip, pinned left and out of the title's way, and the title
  * takes the weight. Both stay inside the one link, so the whole line is still the target.
+ * The pull request on the meta row is the same kind of reference - a number on a GitHub
+ * object - so it is the same chip, keeping its `PR ` prefix to say which number it is.
  *
  * The colours are the role tokens the rest of the dashboard already uses, which is what
  * makes this follow into dark for free, and tests/test_web_theme.py holds each of them to
@@ -226,13 +228,26 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
  * = 19px, against 14px x 1.35 = 18.9px) puts it beside the first line and keeps it
  * there however many lines follow. */
 .card .title { display: flex; align-items: flex-start; gap: 7px; color: var(--ink); }
-.card .number {
+/*
+ * One rule for both chips. A card carries two references to a GitHub object - the issue
+ * number beside the title and the pull request on the meta row - and drawing them once
+ * means they cannot drift apart. `nowrap` keeps `PR #26` on one line: it is two words in
+ * a 180px column, and a chip broken across two lines would not read as a chip at all.
+ */
+.card .chip {
   flex: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px; font-weight: 600; line-height: 15px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   color: var(--muted);
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
 }
+/* only the pull request chip is a link, and it leaves the dashboard, so it answers the
+ * pointer and the keyboard itself - the title's states cover the number chip instead.
+ * The underline `a:hover` would otherwise add is dropped: the border is the shape here,
+ * and a rule under the text would cut across the box. */
+.card a.chip:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+.card a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* three lines, then an ellipsis: a long title must not stretch the column it sits in,
  * and `anywhere` breaks the unspaced strings (a branch name, a URL) that otherwise would */
 .card .title .text {
@@ -245,7 +260,10 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .card .title:hover { color: var(--accent); text-decoration: none; }
 .card .title:hover .text { text-decoration: underline; }
 .card .title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.card .meta { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+/* `center` so the age sits on the middle of the chip beside it, not on its top edge */
+.card .meta { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* the chip and the pull request's state are one unit at the left end of the row */
+.card .meta .pr { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
 /* banners */
 .banner { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }

@@ -47,6 +47,7 @@ def css_declarations(selector: str) -> dict[str, str]:
 
 RUN_ID_2 = "20260904T210000Z-abcdef"
 HOSTILE = "<script>alert(1)</script>"
+PR_URL = "https://github.com/jleavers/issuebot/pull/26"
 ESCAPED = "&lt;script&gt;alert(1)&lt;/script&gt;"
 
 
@@ -126,9 +127,53 @@ def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     text = html(h.client.get("/partials/dashboard"))
     assert (
         '<a class="title" href="/issues/23">'
-        '<span class="number">#23</span>'
+        '<span class="chip">#23</span>'
         '<span class="text">Add a status badge to the README</span></a>'
     ) in text
+
+
+def test_a_kanban_card_draws_its_pull_request_as_the_same_chip(h: Harness) -> None:
+    """The two numbers on a card are the same kind of reference, so they are one object.
+
+    The prefix stays inside the chip: a card showing a bare `#24` and a bare `#26` would
+    not say which of the two is the issue and which is the pull request.
+    """
+    h.queries.groups["review"] = [issue_row(number=24, pr_number=26, pr_url=PR_URL)]
+    text = html(h.client.get("/partials/dashboard"))
+    assert f'<a class="chip" href="{PR_URL}">PR #26</a>' in text
+    assert '<span class="chip">#24</span>' in text
+
+
+def test_an_unsafe_pull_request_url_still_draws_the_chip(h: Harness) -> None:
+    """`safe_href` refuses the scheme, so the chip loses its link, not its shape."""
+    h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url="javascript:alert(1)")]
+    text = html(h.client.get("/partials/dashboard"))
+    assert '<span class="chip">PR #4</span>' in text
+    assert "javascript:" not in text
+
+
+def test_a_card_without_a_pull_request_keeps_the_meta_row_balanced(h: Harness) -> None:
+    """The empty cell is what holds the age at the right end of a `space-between` row."""
+    h.queries.groups["todo"] = [issue_row(number=9, pr_number=None, pr_url=None, pr_state=None)]
+    text = html(h.client.get("/partials/dashboard"))
+    assert '<span class="pr"></span>' in text
+    assert "None" not in text
+
+
+def test_both_card_chips_are_drawn_by_one_rule() -> None:
+    """Two rules would drift; the issue asked for the pull request to match the number."""
+    assert ".card .number" not in CSS
+    declarations = css_declarations(".card .chip {")
+    assert declarations["font-family"].startswith("ui-monospace")
+    assert declarations["font-variant-numeric"] == "tabular-nums"
+    assert declarations["border"] == "1px solid var(--line)"
+    assert declarations["white-space"] == "nowrap", "`PR #26` must not break across lines"
+
+
+def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
+    """It is the one chip that is a link, and it leaves the dashboard for GitHub."""
+    assert ".card a.chip:hover { color: var(--accent); border-color: var(--accent);" in CSS
+    assert ".card a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_the_card_title_is_still_escaped(h: Harness) -> None:
@@ -140,8 +185,8 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
 
 
 def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
-    """The chip and the title are new elements; the CSP forbids styling them inline."""
-    assert ".card .number {" in CSS and ".card .title .text {" in CSS
+    """The chips and the title are their own elements; the CSP forbids styling them inline."""
+    assert ".card .chip {" in CSS and ".card .title .text {" in CSS
     assert ' style="' not in html(h.client.get("/partials/dashboard"))
 
 
