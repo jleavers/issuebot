@@ -180,7 +180,11 @@ floor, not the shipped version, and moves by hand.
   sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
   survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
   `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
-  and mean it. `transcript.py`: `parse_transcript(stream)`
+  and mean it. The hero is one tile per metric with both windows inside it, and `.hero` pins its
+  column count (6, 3, 2) instead of auto-fitting, because every count has to divide the six
+  tiles: an auto-fit grid that lands on five orphans the last one. The token figures there go
+  through `compact` (`39.2M`), the exact number staying as the window's `title`.
+  `transcript.py`: `parse_transcript(stream)`
   turns the stored stream-json into `Block`s (init, text, thinking, tool_use, tool_result, result,
   omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
   `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One

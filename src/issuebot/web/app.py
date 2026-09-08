@@ -31,6 +31,7 @@ from issuebot.web.views import (
     REFRESH_MIN_INTERVAL_S,
     RUN_ID_PATTERN,
     age_text,
+    compact,
     dashboard_context,
     describe_event,
     duration_text,
@@ -90,6 +91,7 @@ def template_environment() -> Environment:
     env.filters["age"] = age_text
     env.filters["stamp"] = stamp_text
     env.filters["duration"] = duration_text
+    env.filters["compact"] = compact
     env.filters["money"] = money
     env.filters["thousands"] = thousands
     return env

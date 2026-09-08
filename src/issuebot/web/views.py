@@ -133,6 +133,20 @@ def thousands(value: object) -> str:
     return f"{_int(value):,}"
 
 
+def compact(value: object) -> str:
+    """A magnitude at a glance: ``950``, ``1.0K``, ``203K``, ``39.2M``, ``1.2B``.
+
+    The hero's token figures run to ten digits, which no tile that size can hold. The exact
+    number stays on the tile as its ``title``; ``thousands`` renders it everywhere else.
+    """
+    number = _int(value)
+    for suffix, size in (("B", 10**9), ("M", 10**6), ("K", 10**3)):
+        if abs(number) >= size:
+            scaled = number / size
+            return f"{scaled:.1f}{suffix}" if abs(scaled) < 100 else f"{scaled:,.0f}{suffix}"
+    return f"{number:,}"
+
+
 def _datetime(value: object) -> datetime | None:
     if isinstance(value, datetime):
         moment = value
