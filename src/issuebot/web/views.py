@@ -329,6 +329,7 @@ def retry_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "issue_identifier": entry.get("identifier"),
         "issue_number": number,
         "issue_url": entry.get("url"),
+        "title": entry.get("title"),
         "attempt": entry.get("attempt"),
         "kind": entry.get("kind"),
         "due_at": entry.get("due_at"),

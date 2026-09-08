@@ -68,6 +68,7 @@ def retry_row(**overrides: Any) -> RetryRow:
     fields: dict[str, Any] = {
         "issue_number": 9,
         "identifier": "repo-9",
+        "title": "Retry the flaky import",
         "url": "https://github.com/example/repo/issues/9",
         "attempt": 2,
         "kind": "failure",

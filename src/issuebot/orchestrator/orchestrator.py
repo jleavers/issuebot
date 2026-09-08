@@ -887,6 +887,7 @@ class Orchestrator:
             identifier=issue.identifier,
             issue_number=issue.number,
             issue_url=issue.url,
+            title=issue.title,
             attempt=attempt,
             kind=kind,
             due_mono=self._clock() + delay_ms / 1000,

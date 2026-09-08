@@ -175,6 +175,20 @@ def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
     assert "Retrying" in text and "turn_failed: boom" in text
 
 
+def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harness) -> None:
+    """The cell used to read `#9 repo-9`: the identifier is the number again (#42).
+
+    `identifier` is `<repo>-<number>`, so beside a link that already states the number it
+    said nothing about the issue. The row carries the title now, the way the Running row
+    beside it does, and the identifier is not drawn in its place.
+    """
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    row = text.split("Retrying", 1)[1].split("</table>", 1)[0]
+    assert '<a href="/issues/9">#9</a> Retry the flaky import' in row
+    assert "repo-9" not in row
+
+
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
     text = html(h.client.get("/partials/dashboard"))
     assert text.startswith('<div id="live"')

@@ -156,6 +156,7 @@ class RetryEntry:
     identifier: str
     issue_number: int
     issue_url: str
+    title: str
     attempt: int
     kind: RetryKind
     due_mono: float
@@ -257,6 +258,7 @@ class RunningRow:
 class RetryRow:
     issue_number: int
     identifier: str
+    title: str
     url: str
     attempt: int
     kind: RetryKind
@@ -268,6 +270,7 @@ class RetryRow:
         return cls(
             issue_number=entry.issue_number,
             identifier=entry.identifier,
+            title=entry.title,
             url=entry.issue_url,
             attempt=entry.attempt,
             kind=entry.kind,
