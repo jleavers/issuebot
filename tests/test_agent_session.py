@@ -290,7 +290,6 @@ async def test_failed_turn_fails_the_run_and_still_runs_after_run(tmp_path: Path
     [
         ("turn_timeout", "timed_out", "failure"),
         ("cancelled", "cancelled", "cancelled"),
-        ("budget_exceeded", "failed", "failure"),
     ],
 )
 async def test_turn_categories_map_to_outcomes(
@@ -301,6 +300,34 @@ async def test_turn_categories_map_to_outcomes(
     assert result.outcome == outcome
     assert result.stop_reason == stop_reason
     assert result.error_category == category
+
+
+async def test_budget_exhausted_turn_continues_on_the_next_turn(tmp_path: Path) -> None:
+    """`--max-budget-usd` is a per-turn cap, so the next turn resumes with a fresh one."""
+    h = Harness(tmp_path, max_turns=3)
+    runner = ScriptedRunner("budget_exceeded")
+    result = await h.run(runner)
+    assert result.outcome == "succeeded"
+    assert result.stop_reason == "max_turns"
+    assert result.error_category is None
+    assert result.error is None
+    assert result.turns == 3
+    assert [call["turn_number"] for call in runner.calls] == [1, 2, 3]
+    assert [call["resume"] for call in runner.calls] == [False, True, True]
+    assert {call["session_id"] for call in runner.calls} == {result.session_id}
+
+
+async def test_every_turn_over_budget_ends_at_max_turns(tmp_path: Path) -> None:
+    """Nothing is retried behind the cap: the run ends for the orchestrator to escalate."""
+    h = Harness(tmp_path, max_turns=2)
+    result = await h.run(ScriptedRunner("budget_exceeded", "budget_exceeded"))
+    assert result.outcome == "succeeded"
+    assert result.stop_reason == "max_turns"
+    assert result.turns == 2
+    assert result.final_state is StateLabel.IN_PROGRESS
+    record = h.workspaces.read_session(h.workspace)
+    assert record is not None
+    assert record.last_outcome == "succeeded"
 
 
 async def test_refresh_failure_is_github_error(tmp_path: Path) -> None:
