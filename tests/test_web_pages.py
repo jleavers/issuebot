@@ -27,6 +27,7 @@ from issuebot.db import (
     RunTotals,
     StoreUnavailableError,
 )
+from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
     age_text,
@@ -39,6 +40,11 @@ from issuebot.web.views import (
 )
 
 CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
+HOLD = DispatchHold(
+    kind="auth",
+    reason="claude authentication unavailable: not logged in",
+    since=NOW - timedelta(minutes=4),
+)
 
 
 def css_declarations(selector: str) -> dict[str, str]:
@@ -325,6 +331,23 @@ def test_the_live_partial_shows_a_config_error(h: Harness) -> None:
     assert "config error: polling.interval_ms must be &gt;= 1000" in text
 
 
+def test_the_live_partial_names_a_held_dispatch(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(dispatch_hold=HOLD)
+    text = html(h.client.get("/partials/dashboard"))
+    assert 'class="panel worker held"' in text
+    assert "worker held" in text
+    assert "not claiming (auth, held since 2026-09-04T11:56:00Z)" in text
+    assert "claude authentication unavailable: not logged in" in text
+    # Nothing is held by default, so the line appears only when it should.
+    h.queries.snapshot_row = snapshot()
+    assert "not claiming" not in html(h.client.get("/partials/dashboard"))
+
+
+def test_a_held_worker_badge_is_marked_up_like_the_other_states() -> None:
+    assert ".worker.held .badge { background: var(--warn); }" in CSS
+    assert ".worker .config-error, .worker .dispatch-hold { color: var(--bad); }" in CSS
+
+
 def test_the_live_partial_notes_the_complete_cap(h: Harness) -> None:
     h.queries.groups["complete"] = [
         issue_row(number=n, state="complete", github_state="closed")
@@ -595,6 +618,7 @@ def test_dashboard_context() -> None:
     )
     assert live["unavailable"] is None
     assert (live["worker"]["status"], live["worker"]["tick_count"]) == ("ok", 41)
+    assert live["worker"]["dispatch_hold"] is None
     assert live["hero"] == {
         "closed_1d": 1,
         "closed_7d": 2,
@@ -626,3 +650,24 @@ def test_dashboard_context() -> None:
     )
     assert empty["worker"] == {"status": "none"}
     assert empty["hero"]["cost_7d"] == 0.0 and empty["running"] == []
+
+
+def test_dashboard_context_carries_a_held_dispatch() -> None:
+    live = dashboard_context(
+        snapshot(dispatch_hold=HOLD),
+        {role: [] for role in ("todo", "in_progress", "review", "rework", "complete")},
+        closed_1d=0,
+        closed_7d=0,
+        runs_1d=0,
+        runs_7d=0,
+        totals_1d=RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0),
+        totals_7d=RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0),
+        now=NOW,
+        labels=GitHubLabels(),
+    )
+    assert live["worker"]["status"] == "held"
+    assert live["worker"]["dispatch_hold"] == {
+        "kind": "auth",
+        "reason": "claude authentication unavailable: not logged in",
+        "since": (NOW - timedelta(minutes=4)).isoformat(),
+    }

@@ -15,6 +15,9 @@
   {% else %}
   <span class="config-error">config error: {{ worker.config_error }}</span>
   {% endif %}
+  {% if worker.dispatch_hold %}
+  <span class="dispatch-hold">not claiming ({{ worker.dispatch_hold.kind }}, held since {{ worker.dispatch_hold.since|stamp }}): {{ worker.dispatch_hold.reason }}</span>
+  {% endif %}
   {% endif %}
 </section>
 <section class="hero">

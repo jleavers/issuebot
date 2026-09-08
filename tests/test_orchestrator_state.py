@@ -227,6 +227,7 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
         workflow_mtime_ns=5,
         config_valid=True,
         config_error=None,
+        dispatch_hold=None,
         poll_interval_ms=30_000,
         max_concurrent_agents=2,
         tick_count=3,

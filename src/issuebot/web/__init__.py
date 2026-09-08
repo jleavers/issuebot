@@ -8,6 +8,7 @@ from issuebot.web.views import (
     REFRESH_MIN_INTERVAL_S,
     RUN_ID_PATTERN,
     STALE_FACTOR,
+    dispatch_hold,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "SECURITY_HEADERS",
     "STALE_FACTOR",
     "create_app",
+    "dispatch_hold",
 ]

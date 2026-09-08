@@ -79,7 +79,7 @@ floor, not the shipped version, and moves by hand.
   `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7), kept byte-for-byte
   (pre-commit excludes it).
 - `issuebot.orchestrator`: one asyncio task owns the schedule. `state.py` (pure): `RunningEntry`,
-  `RetryEntry`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
+  `RetryEntry`, `DispatchHold`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
   attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
   otherwise, plus `PrOpened`). `actions.py`: `claim`, `blocked_escape` (workpad block then
@@ -123,8 +123,17 @@ floor, not the shipped version, and moves by hand.
   cannot answer must not keep a worker down applies here too — the fallback is the per-run
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
-  an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts; like a
-  preflight problem it is not carried in the snapshot.
+  an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
+  Both holds are carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
+  reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
+  builds) or `auth` (`claude authentication unavailable: <the probe's detail>`), and `since`
+  is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
+  one restarts it. A held worker keeps ticking, so without it `issuebot status`, `/api/v1/state`,
+  the dashboard and `/healthz` all read as a healthy worker while the board stops moving.
+  An authentication hold still polls issues (`_poll_issues`, the same fetch dispatch uses
+  without the claiming), so the history the dashboard renders stays current for as long as the
+  hold lasts; a preflight hold polls nothing, since the fetch needs the very executables and
+  token it is reporting missing.
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
@@ -170,13 +179,18 @@ floor, not the shipped version, and moves by hand.
   `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
   `/api/v1/issues/<n>`, `/api/v1/stats?window=<N>d`, `POST /api/v1/refresh` (NOTIFY, throttled to
   one per 5 s, Symphony's `coalesced`), `/healthz` (503 only when the database does not answer;
-  `worker` is `ok`, `stale` past three poll intervals, or `none`); `/static` (vendored htmx
+  `worker` is `ok`, `held` while the worker ticks without claiming, `stale` past three poll
+  intervals, or `none`, and `dispatch_hold` names the reason for a held one); `/static` (vendored htmx
   2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept byte-for-byte); JSON error envelopes
   under `/api/` and `/healthz`, `error.html` elsewhere; `DatabaseError` is 503; the four
   security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
   and template filters (`state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
-  `worker_status`, `age_text`, `stamp_text`, ...). The hero's cost and token tiles are 1d/7d
+  `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, ...). A snapshot's
+  `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
+  `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
+  hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,
+  `stale` still winning, since a snapshot too old to trust is too old to trust about its hold. The hero's cost and token tiles are 1d/7d
   sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
   survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
   `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
@@ -212,7 +226,8 @@ floor, not the shipped version, and moves by hand.
   runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
   `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
   and exit 1 when the startup probes fail, `claude auth: not logged in; ...` among them), `migrate`,
-  `status`, `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
+  `status` (the snapshot as text, with a `dispatch: held (<kind>) since ...` line while
+  dispatch is held), `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
   `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
   `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is
   `[FAIL] database:` and exit 1); `run-once` and `worker` start the Slack and PostgreSQL sinks
