@@ -28,7 +28,7 @@ RUN_ID_PATTERN = r"^\d{8}T\d{6}Z-[0-9a-f]{6}$"
 DEFAULT_WINDOW_DAYS = 7
 DEFAULT_POLL_INTERVAL_MS = 30_000
 
-WorkerStatus = Literal["ok", "stale", "none"]
+WorkerStatus = Literal["ok", "held", "stale", "none"]
 
 _WINDOW = re.compile(r"^(\d+)d$")
 _WORKER_KEYS = (
@@ -60,11 +60,37 @@ def poll_interval_s(row: SnapshotRow) -> float:
     return DEFAULT_POLL_INTERVAL_MS / 1000
 
 
+def dispatch_hold(row: SnapshotRow | None) -> dict[str, Any] | None:
+    """The snapshot's dispatch hold when it names a reason, else None (the data is JSON).
+
+    A worker holding dispatch keeps ticking, so nothing else in the snapshot says it has
+    stopped claiming issues (#29).
+    """
+    if row is None:
+        return None
+    hold = row.data.get("dispatch_hold")
+    if not isinstance(hold, dict):
+        return None
+    reason = hold.get("reason")
+    if not isinstance(reason, str) or not reason:
+        return None
+    kind = hold.get("kind")
+    return {
+        "kind": kind if isinstance(kind, str) and kind else "unknown",
+        "reason": reason,
+        "since": hold.get("since"),
+    }
+
+
 def worker_status(row: SnapshotRow | None, now: datetime) -> WorkerStatus:
-    """``none`` without a snapshot, ``stale`` past STALE_FACTOR poll intervals, else ``ok``."""
+    """``none`` without a snapshot, ``stale`` past STALE_FACTOR poll intervals, ``held``
+    while the worker ticks without claiming, else ``ok``.
+    """
     if row is None:
         return "none"
-    return "stale" if snapshot_age_s(row, now) > STALE_FACTOR * poll_interval_s(row) else "ok"
+    if snapshot_age_s(row, now) > STALE_FACTOR * poll_interval_s(row):
+        return "stale"
+    return "held" if dispatch_hold(row) is not None else "ok"
 
 
 def window_days(text: str | None) -> int | None:
@@ -189,6 +215,7 @@ def dashboard_context(
             max_concurrent_agents=data.get("max_concurrent_agents"),
             config_valid=data.get("config_valid"),
             config_error=data.get("config_error"),
+            dispatch_hold=dispatch_hold(row),
         )
     names = labels.model_dump()
     columns = []
@@ -275,8 +302,11 @@ def state_document(row: SnapshotRow | None, now: datetime) -> dict[str, Any]:
     counters = data.get("counters") if isinstance(data.get("counters"), dict) else {}
     worker = None
     if row is not None:
+        status = worker_status(row, now)
         worker = {key: data.get(key) for key in _WORKER_KEYS}
-        worker["stale"] = worker_status(row, now) == "stale"
+        worker["dispatch_hold"] = dispatch_hold(row)
+        worker["status"] = status
+        worker["stale"] = status == "stale"
     return {
         "generated_at": iso(row.at) if row is not None else None,
         "written_at": iso(row.written_at) if row is not None else None,

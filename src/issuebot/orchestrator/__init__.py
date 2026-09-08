@@ -18,6 +18,7 @@ from issuebot.orchestrator.orchestrator import (
     OrchestratorStartupError,
     RunObserver,
     RunSessionFn,
+    fetch_preflight,
     preflight,
 )
 from issuebot.orchestrator.state import (
@@ -27,6 +28,8 @@ from issuebot.orchestrator.state import (
     BlockedContext,
     ClaudeTotals,
     Counters,
+    DispatchHold,
+    DispatchHoldKind,
     RetryEntry,
     RetryKind,
     RetryRow,
@@ -53,6 +56,8 @@ __all__ = [
     "ClaudeAuthProbe",
     "ClaudeTotals",
     "Counters",
+    "DispatchHold",
+    "DispatchHoldKind",
     "EscapeOutcome",
     "FinishOutcome",
     "Orchestrator",
@@ -71,6 +76,7 @@ __all__ = [
     "blocked_escape",
     "claim",
     "claimed_snapshot",
+    "fetch_preflight",
     "finish_terminal",
     "observe_transition",
     "pr_url",

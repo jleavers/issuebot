@@ -74,7 +74,7 @@ from issuebot.notifications import (
     urllib_post,
 )
 from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
-from issuebot.web import create_app
+from issuebot.web import create_app, dispatch_hold
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
 
@@ -1128,8 +1128,14 @@ def render_status(row: SnapshotRow, *, now: datetime) -> str:
         f"workflow: {data.get('workflow_path')} ({config})",
         f"tick {data.get('tick_count')}, last tick {_stamp(data.get('last_tick_at'))}, "
         f"poll {data.get('poll_interval_ms')} ms, {data.get('max_concurrent_agents')} slots",
-        f"running: {len(running)}",
     ]
+    hold = dispatch_hold(row)
+    if hold is not None:
+        # A held worker keeps ticking, so the lines above alone read as a healthy one (#29).
+        lines.append(
+            f"dispatch: held ({hold['kind']}) since {_stamp(hold['since'])}: {hold['reason']}"
+        )
+    lines.append(f"running: {len(running)}")
     if running:
         table = [("  NUMBER", "ATTEMPT", "TURNS", "RUN_ID", "LAST_EVENT", "STARTED", "IDENTIFIER")]
         table.extend(

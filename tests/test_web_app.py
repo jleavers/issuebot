@@ -18,8 +18,22 @@ from fakes.web import (
 )
 from issuebot.db import MAX_WINDOW_DAYS, StoreUnavailableError
 from issuebot.db.queries import DailyPoint
+from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import REFRESH_MIN_INTERVAL_S, SECURITY_HEADERS, STALE_FACTOR
-from issuebot.web.views import describe_event, safe_href, window_days, worker_status
+from issuebot.web.views import (
+    describe_event,
+    dispatch_hold,
+    safe_href,
+    window_days,
+    worker_status,
+)
+
+HELD_SINCE = NOW - timedelta(minutes=4)
+HOLD = DispatchHold(
+    kind="auth",
+    reason="claude authentication unavailable: not logged in",
+    since=HELD_SINCE,
+)
 
 
 @pytest.fixture
@@ -48,6 +62,8 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "workflow_path": "/app/WORKFLOW.md",
         "config_valid": True,
         "config_error": None,
+        "dispatch_hold": None,
+        "status": "ok",
         "stale": False,
     }
     assert body["counts"] == {"running": 1, "retrying": 1}
@@ -254,6 +270,7 @@ def test_healthz_ok_stale_and_none(h: Harness) -> None:
         "snapshot_at": None,
         "snapshot_age_s": None,
         "worker": "none",
+        "dispatch_hold": None,
     }
     h.queries.snapshot_row = snapshot(age_s=5.0)
     body = h.client.get("/healthz").json()
@@ -359,6 +376,46 @@ def test_worker_status() -> None:
     row = snapshot(age_s=100.0)
     row.data.pop("poll_interval_ms")  # an older worker's snapshot: assume 30 s
     assert worker_status(row, NOW) == "stale"
+
+
+def test_a_worker_that_is_ticking_but_not_claiming_is_held_not_ok() -> None:
+    assert worker_status(snapshot(age_s=5.0, dispatch_hold=HOLD), NOW) == "held"
+    # A snapshot too old to trust says stale first: its hold is as old as the rest of it.
+    assert worker_status(snapshot(age_s=100.0, dispatch_hold=HOLD), NOW) == "stale"
+
+
+def test_dispatch_hold_ignores_a_snapshot_that_names_no_reason() -> None:
+    assert dispatch_hold(None) is None
+    assert dispatch_hold(snapshot()) is None
+    row = snapshot()
+    for value in ("not a mapping", {}, {"kind": "auth", "reason": ""}, {"kind": "auth"}):
+        row.data["dispatch_hold"] = value
+        assert dispatch_hold(row) is None
+    row.data["dispatch_hold"] = {"kind": "auth", "reason": "no login", "since": None}
+    assert dispatch_hold(row) == {"kind": "auth", "reason": "no login", "since": None}
+    # A reason is enough to report; a kind another worker's snapshot does not carry is not.
+    row.data["dispatch_hold"] = {"reason": "no login"}
+    assert dispatch_hold(row) == {"kind": "unknown", "reason": "no login", "since": None}
+
+
+def test_state_names_the_reason_dispatch_is_held(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(dispatch_hold=HOLD)
+    worker = h.client.get("/api/v1/state").json()["worker"]
+    assert worker["status"] == "held"
+    assert worker["stale"] is False
+    assert worker["dispatch_hold"] == {
+        "kind": "auth",
+        "reason": "claude authentication unavailable: not logged in",
+        "since": HELD_SINCE.isoformat(),
+    }
+
+
+def test_healthz_reports_a_held_worker_and_why(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(dispatch_hold=HOLD)
+    body = h.client.get("/healthz").json()
+    assert body["status"] == "ok"  # the service is fine; the worker is not claiming
+    assert body["worker"] == "held"
+    assert body["dispatch_hold"]["reason"].startswith("claude authentication unavailable")
 
 
 @pytest.mark.parametrize(

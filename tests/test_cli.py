@@ -1785,6 +1785,33 @@ def test_render_status_lists_running_and_retrying_entries() -> None:
     ]
 
 
+def test_render_status_names_a_held_dispatch() -> None:
+    """A held worker keeps ticking, so nothing else in the snapshot says it has stopped."""
+    data = dict(SNAPSHOT_DATA)
+    data["dispatch_hold"] = {
+        "kind": "auth",
+        "reason": "claude authentication unavailable: not logged in",
+        "since": "2026-09-04T11:55:00+00:00",
+    }
+    row = SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data=data)
+    lines = render_status(row, now=SNAPSHOT_AT).splitlines()
+    assert lines[3] == (
+        "dispatch: held (auth) since 2026-09-04T11:55:00Z: "
+        "claude authentication unavailable: not logged in"
+    )
+    # A snapshot without a hold, or with a hold naming no reason, says nothing.
+    assert not any(
+        line.startswith("dispatch:")
+        for line in render_status(
+            SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data=SNAPSHOT_DATA), now=SNAPSHOT_AT
+        ).splitlines()
+    )
+    data["dispatch_hold"] = {"kind": "auth"}
+    assert not any(
+        line.startswith("dispatch:") for line in render_status(row, now=SNAPSHOT_AT).splitlines()
+    )
+
+
 def test_render_status_copes_with_an_empty_or_broken_snapshot() -> None:
     row = SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data={"config_error": "bad yaml"})
     text = render_status(row, now=SNAPSHOT_AT - timedelta(seconds=5))

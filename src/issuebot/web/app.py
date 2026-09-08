@@ -34,6 +34,7 @@ from issuebot.web.views import (
     compact,
     dashboard_context,
     describe_event,
+    dispatch_hold,
     duration_text,
     iso,
     issue_document,
@@ -335,6 +336,7 @@ def create_app(
                 "snapshot_at": iso(row.at) if row is not None else None,
                 "snapshot_age_s": snapshot_age_s(row, current) if row is not None else None,
                 "worker": worker_status(row, current),
+                "dispatch_hold": dispatch_hold(row),
             }
         )
 

@@ -180,8 +180,12 @@ starts anyway.
 A credential that stops working *after* startup — an expired `CLAUDE_CODE_OAUTH_TOKEN`, a
 revoked API key — is caught by the run that hits it. That issue is moved to `issuebot/review`
 at once with a workpad block naming authentication, rather than after `agent.max_attempts`
-opaque failures, and the worker stops claiming anything else: `docker compose logs worker`
-shows `dispatch_auth_held` and no new dispatches. It re-checks the credential every poll and
+opaque failures, and the worker stops claiming anything else. A worker holding dispatch says
+so wherever you look: `issuebot status` prints a `dispatch: held (auth) since ...` line, the
+dashboard's worker line reads `worker held` with the reason, `/healthz` reports
+`"worker": "held"` with the same reason under `dispatch_hold`, and `docker compose logs
+worker` shows `dispatch_auth_held`. The board keeps updating while the hold lasts, since the
+hold stops `claude`, not `gh`. It re-checks the credential every poll and
 picks up where it left off once `claude auth status` reports a login again, so fixing the
 credential is enough and no restart is needed. A `claude` that cannot answer the probe at all
 holds it up for ten polls at most, and then the worker goes back to failing one issue at a

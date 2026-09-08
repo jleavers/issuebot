@@ -13,6 +13,7 @@ from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
 
 RetryKind = Literal["continuation", "failure", "escape", "slots", "auth"]
+DispatchHoldKind = Literal["preflight", "auth"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 
 CONTINUATION_DELAY_MS = 1_000
@@ -200,6 +201,20 @@ class Counters:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class DispatchHold:
+    """Why a worker that is still ticking will not claim an issue (#29).
+
+    ``preflight`` is a missing executable or token, ``auth`` the authentication hold of #20.
+    ``since`` is when this reason first held dispatch, so a hold that outlives its cause is
+    visible as one; a changed reason starts it again.
+    """
+
+    kind: DispatchHoldKind
+    reason: str
+    since: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RunningRow:
     issue_number: int
     identifier: str
@@ -270,6 +285,7 @@ class RuntimeSnapshot:
     workflow_mtime_ns: int
     config_valid: bool
     config_error: str | None
+    dispatch_hold: DispatchHold | None
     poll_interval_ms: int
     max_concurrent_agents: int
     tick_count: int

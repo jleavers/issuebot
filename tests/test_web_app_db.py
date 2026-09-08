@@ -101,6 +101,7 @@ async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator
         workflow_mtime_ns=1,
         config_valid=True,
         config_error=None,
+        dispatch_hold=None,
         poll_interval_ms=30_000,
         max_concurrent_agents=2,
         tick_count=12,

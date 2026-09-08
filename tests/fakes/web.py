@@ -18,6 +18,7 @@ from issuebot.db.queries import (
 from issuebot.orchestrator.state import (
     ClaudeTotals,
     Counters,
+    DispatchHold,
     RetryRow,
     RunningRow,
     RuntimeSnapshot,
@@ -83,6 +84,7 @@ def snapshot(
     retrying: tuple[RetryRow, ...] = (),
     age_s: float = 5.0,
     poll_interval_ms: int = 30_000,
+    dispatch_hold: DispatchHold | None = None,
 ) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=NOW - timedelta(seconds=age_s + 1),
@@ -90,6 +92,7 @@ def snapshot(
         workflow_mtime_ns=1,
         config_valid=True,
         config_error=None,
+        dispatch_hold=dispatch_hold,
         poll_interval_ms=poll_interval_ms,
         max_concurrent_agents=2,
         tick_count=41,

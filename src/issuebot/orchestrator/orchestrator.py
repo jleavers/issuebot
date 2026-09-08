@@ -44,6 +44,8 @@ from issuebot.orchestrator.state import (
     BlockedContext,
     ClaudeTotals,
     Counters,
+    DispatchHold,
+    DispatchHoldKind,
     RetryEntry,
     RetryKind,
     RetryRow,
@@ -85,15 +87,22 @@ class OrchestratorStartupError(Exception):
         self.problems = problems
 
 
+def fetch_preflight(settings: Settings, *, which: Callable[[str], str | None]) -> list[str]:
+    """The preflight problems that stop the GitHub fetch, as opposed to only the agent."""
+    problems: list[str] = []
+    if which("gh") is None:
+        problems.append("'gh' not found on PATH")
+    if settings.github.token is None:
+        problems.append("github.token not set; export GH_TOKEN or set github.token: $VAR")
+    return problems
+
+
 def preflight(settings: Settings, *, which: Callable[[str], str | None]) -> list[str]:
     """Problems that block dispatch: the executables and the token the worker needs."""
     problems: list[str] = []
     if which(settings.claude.command) is None:
         problems.append(f"claude.command {settings.claude.command!r} not found on PATH")
-    if which("gh") is None:
-        problems.append("'gh' not found on PATH")
-    if settings.github.token is None:
-        problems.append("github.token not set; export GH_TOKEN or set github.token: $VAR")
+    problems.extend(fetch_preflight(settings, which=which))
     return problems
 
 
@@ -177,6 +186,8 @@ class Orchestrator:
         self._tick_count = 0
         self._last_tick_at: datetime | None = None
         self._config_error: str | None = None
+        self._dispatch_hold: DispatchHold | None = None
+        self._hold_identity: tuple[str, str] | None = None
         self._reported_reload_error: str | None = None
         self._reported_preflight: str | None = None
         self._auth_block: str | None = None
@@ -215,6 +226,7 @@ class Orchestrator:
             workflow_mtime_ns=self._workflow.source_mtime_ns,
             config_valid=self._config_error is None,
             config_error=self._config_error,
+            dispatch_hold=self._dispatch_hold,
             poll_interval_ms=settings.polling.interval_ms,
             max_concurrent_agents=settings.agent.max_concurrent_agents,
             tick_count=self._tick_count,
@@ -324,6 +336,9 @@ class Orchestrator:
                 )
                 self._release_hold()
                 return False
+        self._hold_snapshot(
+            "auth", f"claude authentication unavailable: {auth.detail}", key=auth.verdict
+        )
         if self._auth_block != self._reported_auth_block:
             self._log.error("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
             self._reported_auth_block = self._auth_block
@@ -342,6 +357,26 @@ class Orchestrator:
         self._reported_auth_block = None
         self._unreadable_auth_probes = 0
 
+    def _hold_snapshot(
+        self, kind: DispatchHoldKind, reason: str, *, key: str | None = None
+    ) -> None:
+        """Carry why dispatch is held into the snapshot; a hold that lasts keeps its ``since``.
+
+        ``key`` is what makes two holds the same one when the wording is not: an unreadable
+        ``claude`` can garble its output differently on every probe, and the operator should
+        still see how long the hold has really lasted.
+        """
+        identity = (kind, reason if key is None else key)
+        if self._dispatch_hold is not None and identity == self._hold_identity:
+            self._dispatch_hold = replace(self._dispatch_hold, reason=reason)
+            return
+        self._hold_identity = identity
+        self._dispatch_hold = DispatchHold(kind=kind, reason=reason, since=self._now())
+
+    def _release_snapshot_hold(self) -> None:
+        self._dispatch_hold = None
+        self._hold_identity = None
+
     # --- tick -------------------------------------------------------------------------
 
     async def tick(self) -> None:
@@ -352,12 +387,21 @@ class Orchestrator:
         problems = preflight(self._workflow.config, which=self._which)
         if problems:
             message = "; ".join(problems)
+            self._hold_snapshot("preflight", message)
             if message != self._reported_preflight:
                 self._log.error("dispatch_preflight_failed", problems=problems)
                 self._reported_preflight = message
+            if not fetch_preflight(self._workflow.config, which=self._which):
+                # Only `claude` is missing, so the board can still be kept current (#29).
+                await self._poll_issues()
         else:
             self._reported_preflight = None
-            if not await self._auth_held():
+            if await self._auth_held():
+                # _auth_held has recorded the hold; the fetch still works, so the board stays
+                # fresh while nothing is claimed (#29).
+                await self._poll_issues()
+            else:
+                self._release_snapshot_hold()
                 dispatched = await self._dispatch_candidates()
         self._tick_count += 1
         self._last_tick_at = self._now()
@@ -420,14 +464,33 @@ class Orchestrator:
         self._reported_reload_error = message
         self._log.error("workflow_reload_failed", path=str(self._workflow.path), error=message)
 
-    async def _dispatch_candidates(self) -> int:
+    async def _fetch_issues(self) -> Sequence[Issue] | None:
+        """The polled issues, reported to the observer; None when the fetch failed."""
         states = OBSERVED_STATES if self._on_issues is not None else CANDIDATE_STATES
         try:
             issues = await self._adapter.fetch_issues_by_states(states)
         except GitHubError as exc:
             self._log.warning("candidates_fetch_failed", error=str(exc))
-            return 0
+            return None
         self._report_issues(issues)
+        return issues
+
+    async def _poll_issues(self) -> None:
+        """Keep the history store current while dispatch is held, so the board does not go stale.
+
+        An authentication hold stops ``claude``, not ``gh``, and a preflight hold may name only
+        ``claude.command``; either way the fetch still works and the board can stay current. A
+        hold that ``fetch_preflight`` reports on skips this, since the request would only fail.
+        The request is worth making at all only when an observer is watching.
+        """
+        if self._on_issues is None:
+            return
+        await self._fetch_issues()
+
+    async def _dispatch_candidates(self) -> int:
+        issues = await self._fetch_issues()
+        if issues is None:
+            return 0
         dispatched = 0
         for issue in sort_candidates(issues):
             if self._slots() <= 0:
