@@ -19,7 +19,13 @@ from fakes.web import (
     snapshot,
 )
 from issuebot.config import GitHubLabels
-from issuebot.db import COMPLETE_LIMIT, PROMPT_LIMIT, STDERR_LIMIT, StoreUnavailableError
+from issuebot.db import (
+    COMPLETE_LIMIT,
+    PROMPT_LIMIT,
+    STDERR_LIMIT,
+    RunTotals,
+    StoreUnavailableError,
+)
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
     age_text,
@@ -93,6 +99,19 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     assert "javascript:" not in text and "PR #4" in text
     assert "<script>" not in text and ' style="' not in text  # the CSP forbids inline code
     assert "example/repo" in text
+
+
+def test_the_dashboard_costs_the_windows_not_the_worker_process(h: Harness) -> None:
+    """The snapshot's totals restart with the worker; the tiles must survive a restart."""
+    h.queries.snapshot_row = snapshot()  # ClaudeTotals: $1.25 and 1,050 tokens this process
+    h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
+    h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
+    text = html(h.client.get("/partials/dashboard"))
+    assert "cost, 1 day" in text and "$4.50" in text
+    assert "cost, 7 days" in text and "$42.66" in text
+    assert "tokens, 1 day" in text and "203,000" in text
+    assert "tokens, 7 days" in text and "1,209,000" in text
+    assert "since start" not in text and "$1.25" not in text and "1,050" not in text
 
 
 def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
@@ -513,6 +532,8 @@ def test_dashboard_context() -> None:
         closed_7d=2,
         runs_1d=3,
         runs_7d=4,
+        totals_1d=RunTotals(input_tokens=200, output_tokens=20, cost_usd=0.25),
+        totals_7d=RunTotals(input_tokens=210, output_tokens=21, cost_usd=0.35),
         now=NOW,
         labels=GitHubLabels(),
     )
@@ -525,15 +546,27 @@ def test_dashboard_context() -> None:
         "runs_7d": 4,
         "running": 1,
         "retrying": 0,
-        "cost_usd": 1.25,
-        "total_tokens": 1050,
+        "cost_1d": 0.25,
+        "cost_7d": 0.35,
+        "tokens_1d": 220,
+        "tokens_7d": 231,
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
     assert [column["capped"] for column in live["columns"]] == [False, False, False, False, True]
     assert live["running"][0]["issue_number"] == 7
+    zero = RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0)
     empty = dashboard_context(
-        None, groups, closed_1d=0, closed_7d=0, runs_1d=0, runs_7d=0, now=NOW, labels=GitHubLabels()
+        None,
+        groups,
+        closed_1d=0,
+        closed_7d=0,
+        runs_1d=0,
+        runs_7d=0,
+        totals_1d=zero,
+        totals_7d=zero,
+        now=NOW,
+        labels=GitHubLabels(),
     )
     assert empty["worker"] == {"status": "none"}
-    assert empty["hero"]["cost_usd"] == 0.0 and empty["running"] == []
+    assert empty["hero"]["cost_7d"] == 0.0 and empty["running"] == []

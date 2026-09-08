@@ -13,6 +13,7 @@ from issuebot.db.queries import (
     EventRow,
     IssueRow,
     RunRow,
+    RunTotals,
     SnapshotRow,
     TurnSummaryRow,
 )
@@ -156,6 +157,8 @@ def dashboard_context(
     closed_7d: int,
     runs_1d: int,
     runs_7d: int,
+    totals_1d: RunTotals,
+    totals_7d: RunTotals,
     now: datetime,
     labels: GitHubLabels,
 ) -> dict[str, Any]:
@@ -163,7 +166,6 @@ def dashboard_context(
     running = [running_entry(entry) for entry in _entries(row, "running")]
     retrying = [retry_entry(entry) for entry in _entries(row, "retrying")]
     data = row.data if row is not None else {}
-    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
     worker: dict[str, Any] = {"status": worker_status(row, now)}
     if row is not None:
         worker.update(
@@ -192,8 +194,10 @@ def dashboard_context(
             "runs_7d": runs_7d,
             "running": len(running),
             "retrying": len(retrying),
-            "cost_usd": _float(totals.get("cost_usd")),
-            "total_tokens": _int(totals.get("total_tokens")),
+            "cost_1d": totals_1d.cost_usd,
+            "cost_7d": totals_7d.cost_usd,
+            "tokens_1d": totals_1d.total_tokens,
+            "tokens_7d": totals_7d.total_tokens,
         },
         "running": running,
         "retrying": retrying,

@@ -154,7 +154,8 @@ floor, not the shipped version, and moves by hand.
   `db_turns_capture_failed`); statement failures are dropped and counted; `close()` drains for
   up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
   callback per NOTIFY, reconnects). `queries.py`: `Queries` over one connection (`closed_count`,
-  `runs_count`, `daily_series`, `issues_by_state` (unknown roles skipped), `state_counts`,
+  `runs_count`, `run_totals` (tokens and cost summed over the runs `runs_count` counts),
+  `daily_series`, `issues_by_state` (unknown roles skipped), `state_counts`,
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
   `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
@@ -175,7 +176,11 @@ floor, not the shipped version, and moves by hand.
   security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
   and template filters (`state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
-  `worker_status`, `age_text`, `stamp_text`, ...). `transcript.py`: `parse_transcript(stream)`
+  `worker_status`, `age_text`, `stamp_text`, ...). The hero's cost and token tiles are 1d/7d
+  sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
+  survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
+  `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
+  and mean it. `transcript.py`: `parse_transcript(stream)`
   turns the stored stream-json into `Block`s (init, text, thinking, tool_use, tool_result, result,
   omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
   `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One

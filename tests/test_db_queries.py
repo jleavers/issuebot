@@ -16,6 +16,7 @@ from issuebot.db.queries import (
     EventRow,
     IssueRow,
     RunRow,
+    RunTotals,
     TurnRow,
     TurnSummaryRow,
 )
@@ -184,6 +185,45 @@ async def test_counts_by_window(seeded: Database) -> None:
         assert await q.runs_count(DAY) == 1
         assert await q.runs_count(7 * DAY) == 2
         assert await q.runs_count(30 * DAY) == 3
+
+
+async def test_run_totals_by_window(seeded: Database, db_url: str) -> None:
+    """Cost and tokens over the runs runs_count counts: the ones started inside the window."""
+    store = PostgresStore(db_url, labels=GitHubLabels())
+    await store.connect()
+    await store.apply_event(
+        RunStarted(
+            issue_number=2,
+            issue_identifier="repo-2",
+            run_id="r4",
+            attempt=2,
+            session_id="s4",
+            workspace_path="/w",
+            at=NOW - HOUR,
+        )
+    )
+    await store.apply_event(
+        run_ended(
+            "r4",
+            2,
+            NOW - HOUR + timedelta(seconds=30),
+            input_tokens=200,
+            output_tokens=20,
+            cost_usd=0.25,
+        )
+    )
+    await store.close()
+    async with seeded.queries() as q:
+        day = await q.run_totals(DAY)
+        week = await q.run_totals(7 * DAY)
+        nothing = await q.run_totals(timedelta(seconds=1))
+    assert isinstance(day, RunTotals)
+    assert (day.input_tokens, day.output_tokens, day.total_tokens) == (200, 20, 220)
+    assert day.cost_usd == pytest.approx(0.25)
+    assert (week.input_tokens, week.output_tokens, week.total_tokens) == (210, 21, 231)
+    assert week.cost_usd == pytest.approx(0.35)
+    assert (nothing.input_tokens, nothing.output_tokens, nothing.total_tokens) == (0, 0, 0)
+    assert nothing.cost_usd == 0.0
 
 
 async def test_daily_series_zero_fills_and_ends_today(seeded: Database, db_url: str) -> None:

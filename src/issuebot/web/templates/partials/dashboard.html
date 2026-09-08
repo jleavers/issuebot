@@ -24,8 +24,10 @@
   <div class="tile"><div class="label">agents run, 7 days</div><div class="value">{{ live.hero.runs_7d }}</div></div>
   <div class="tile"><div class="label">running now</div><div class="value">{{ live.hero.running }}</div></div>
   <div class="tile"><div class="label">retrying</div><div class="value">{{ live.hero.retrying }}</div></div>
-  <div class="tile"><div class="label">cost since start</div><div class="value">{{ live.hero.cost_usd|money }}</div></div>
-  <div class="tile"><div class="label">tokens since start</div><div class="value">{{ live.hero.total_tokens|thousands }}</div></div>
+  <div class="tile"><div class="label">cost, 1 day</div><div class="value">{{ live.hero.cost_1d|money }}</div></div>
+  <div class="tile"><div class="label">cost, 7 days</div><div class="value">{{ live.hero.cost_7d|money }}</div></div>
+  <div class="tile"><div class="label">tokens, 1 day</div><div class="value">{{ live.hero.tokens_1d|thousands }}</div></div>
+  <div class="tile"><div class="label">tokens, 7 days</div><div class="value">{{ live.hero.tokens_7d|thousands }}</div></div>
 </section>
 <section class="panel running">
   <h2>Running</h2>

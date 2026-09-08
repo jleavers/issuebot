@@ -13,6 +13,7 @@ from issuebot.db.queries import (
     EventRow,
     IssueRow,
     RunRow,
+    RunTotals,
     SnapshotRow,
     TurnRow,
     TurnSummaryRow,
@@ -59,6 +60,8 @@ class FakeQueries:
         self.snapshot_row: SnapshotRow | None = None
         self.closed = {1: 0, 7: 0}
         self.runs = {1: 0, 7: 0}
+        zero = RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0)
+        self.totals = {1: zero, 7: zero}
         self.groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
         self.counts: dict[str, int] = {role.value: 0 for role in StateLabel}
         self.series: list[DailyPoint] = []
@@ -87,6 +90,10 @@ class FakeQueries:
     async def runs_count(self, window: timedelta) -> int:
         self._check("runs_count")
         return self.runs[window.days]
+
+    async def run_totals(self, window: timedelta) -> RunTotals:
+        self._check("run_totals")
+        return self.totals[window.days]
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
         self._check("issues_by_state")

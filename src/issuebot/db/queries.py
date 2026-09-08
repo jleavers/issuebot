@@ -54,6 +54,19 @@ class RunRow:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class RunTotals:
+    """What the runs of one window cost, summed; zeroes when the window holds no run."""
+
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class EventRow:
     id: int
     at: datetime
@@ -121,6 +134,13 @@ WHERE state = 'complete' AND closed_at >= now() - %(window)s
 """
 
 RUNS_COUNT = "SELECT count(*) AS n FROM runs WHERE started_at >= now() - %(window)s"
+
+RUN_TOTALS = """
+SELECT coalesce(sum(input_tokens), 0) AS input_tokens,
+       coalesce(sum(output_tokens), 0) AS output_tokens,
+       coalesce(sum(cost_usd), 0) AS cost_usd
+FROM runs WHERE started_at >= now() - %(window)s
+"""
 
 DAILY_SERIES = """
 WITH days AS (
@@ -191,6 +211,16 @@ class Queries:
     async def runs_count(self, window: timedelta) -> int:
         """Worker sessions started inside the window ("agents spun up")."""
         return await self._count(RUNS_COUNT, {"window": window})
+
+    async def run_totals(self, window: timedelta) -> RunTotals:
+        """Tokens and cost summed over the same runs ``runs_count`` counts."""
+        rows = await self._rows(RUN_TOTALS, {"window": window})
+        row = rows[0]
+        return RunTotals(
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            cost_usd=float(row["cost_usd"]),
+        )
 
     async def daily_series(self, days: int) -> list[DailyPoint]:
         """One point per UTC day for the last ``days`` days, today last, zero-filled."""
