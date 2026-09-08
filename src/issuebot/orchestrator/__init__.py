@@ -13,6 +13,7 @@ from issuebot.orchestrator.actions import (
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     OBSERVED_STATES,
+    ClaudeAuthProbe,
     Orchestrator,
     OrchestratorStartupError,
     RunObserver,
@@ -49,6 +50,7 @@ __all__ = [
     "OBSERVED_STATES",
     "TERMINAL_SWEEP_EVERY_TICKS",
     "BlockedContext",
+    "ClaudeAuthProbe",
     "ClaudeTotals",
     "Counters",
     "EscapeOutcome",

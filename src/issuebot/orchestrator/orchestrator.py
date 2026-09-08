@@ -9,15 +9,18 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
 from issuebot.agent import (
     AgentError,
+    ClaudeAuth,
     ClaudeRunner,
     RunResult,
     TurnEvent,
     TurnRunner,
     WorkspaceManager,
+    claude_auth_status,
+    describe_claude_auth,
     new_run_id,
     run_session,
     settings_for_labels,
@@ -63,6 +66,10 @@ CANDIDATE_STATES: tuple[StateLabel, ...] = (
 # for the history store only; the dispatch loop never runs it (Phase 6 spec §8.1).
 OBSERVED_STATES: tuple[StateLabel, ...] = (*CANDIDATE_STATES, StateLabel.REVIEW)
 SHUTDOWN_MARGIN_S = 10.0
+
+# `claude auth status --json` as the startup probe runs it: the resolved command and the parent
+# environment, stdout or None. A seam like `which`, so tests never spawn a process.
+ClaudeAuthProbe = Callable[[str, Mapping[str, str]], str | None]
 
 
 def _utcnow() -> datetime:
@@ -138,6 +145,7 @@ class Orchestrator:
         runner_factory: Callable[[Settings], TurnRunner] = ClaudeRunner,
         run_session: RunSessionFn = run_session,
         which: Callable[[str], str | None] = shutil.which,
+        claude_auth: ClaudeAuthProbe = claude_auth_status,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
@@ -151,6 +159,7 @@ class Orchestrator:
         self._runner_factory = runner_factory
         self._run_session = run_session
         self._which = which
+        self._claude_auth = claude_auth
         self._clock = clock
         self._now = now
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
@@ -218,27 +227,39 @@ class Orchestrator:
     # --- startup ----------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Symphony §6.3 startup validation plus the two probes; raises on any problem."""
+        """Symphony §6.3 startup validation plus the three probes; raises on any problem.
+
+        The Claude probe fails startup only on a definite "not logged in". A probe that gives
+        no usable answer (a timeout, no output, an older ``claude`` without ``auth status``)
+        is logged as a warning and the worker starts, so a slow ``claude`` cannot keep a
+        worker down; a real credential problem then surfaces per run as it did before.
+        """
         settings = self._workflow.config
         problems = preflight(settings, which=self._which)
-        if not problems:
-            try:
-                await self._adapter.auth_status()
-            except GitHubError as exc:
-                problems.append(f"gh auth: {exc.message}; run gh auth login or set GH_TOKEN")
-            try:
-                missing = await self._adapter.missing_labels()
-            except GitHubError as exc:
-                problems.append(f"github.labels: {exc.message}")
-            else:
-                if missing:
-                    names = ", ".join(missing)
-                    problems.append(f"labels missing: {names}; run issuebot labels ensure")
         if problems:
-            self._log.error("orchestrator_startup_failed", problems=problems)
-            raise OrchestratorStartupError(problems)
+            self._startup_failed(problems)
+        try:
+            await self._adapter.auth_status()
+        except GitHubError as exc:
+            problems.append(f"gh auth: {exc.message}; run gh auth login or set GH_TOKEN")
+        try:
+            missing = await self._adapter.missing_labels()
+        except GitHubError as exc:
+            problems.append(f"github.labels: {exc.message}")
+        else:
+            if missing:
+                names = ", ".join(missing)
+                problems.append(f"labels missing: {names}; run issuebot labels ensure")
+        auth = await self._probe_claude_auth(settings.claude.command)
+        if auth.verdict == "logged_out":
+            problems.append(f"claude auth: {auth.detail}")
+        elif auth.verdict != "ok":
+            self._log.warning("orchestrator_startup_warning", claude_auth=auth.detail)
+        if problems:
+            self._startup_failed(problems)
         self._log.info(
             "orchestrator_started",
+            claude_auth=auth.detail,
             repo=settings.github.repo,
             workflow=str(self._workflow.path),
             poll_interval_ms=settings.polling.interval_ms,
@@ -249,6 +270,17 @@ class Orchestrator:
             stall_timeout_ms=settings.claude.stall_timeout_ms,
             workspace_root=str(settings.workspace.root),
         )
+
+    def _startup_failed(self, problems: list[str]) -> NoReturn:
+        self._log.error("orchestrator_startup_failed", problems=problems)
+        raise OrchestratorStartupError(problems)
+
+    async def _probe_claude_auth(self, command: str) -> ClaudeAuth:
+        """``claude auth status`` under the agent's environment, off the event loop."""
+        found = self._which(command)
+        assert found is not None, "preflight resolves claude.command before the probe runs"
+        output = await asyncio.to_thread(self._claude_auth, found, self._environ)
+        return describe_claude_auth(output)
 
     # --- tick -------------------------------------------------------------------------
 

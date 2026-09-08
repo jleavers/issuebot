@@ -62,9 +62,13 @@ floor, not the shipped version, and moves by hand.
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
   `.issuebot/runs/<run_id>/`); `settings_for_labels` (a `claude.model_labels` entry carried
   by the issue replaces `claude.model`; no match, or two labels naming different models,
-  keeps the default) and `settings_with_model`; `run_session` (turns, refresh between turns,
-  `RunResult`, publishes `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`,
-  not the bus.
+  keeps the default) and `settings_with_model`; `claude_auth_status(command, environ)` (the
+  `claude auth status --json` probe under `agent_environment`, 10 s, stdout or `None`) and
+  `describe_claude_auth(output)` → `ClaudeAuth(verdict, detail)` with verdict `ok`,
+  `ambiguous` (a login and an API key both set), `unreadable` (no output, a timeout, or an older
+  `claude` without the subcommand) or `logged_out`, shared by `validate` and the worker's
+  startup; `run_session` (turns, refresh between turns, `RunResult`, publishes
+  `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
   `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
   `TurnCapture`s, capped (prompt 256 KiB head; a stream line over 64 KiB becomes an
@@ -79,8 +83,10 @@ floor, not the shipped version, and moves by hand.
   otherwise, plus `PrOpened`). `actions.py`: `claim`, `blocked_escape` (workpad block then
   `review`, idempotent per run id), `finish_terminal` (complete or cancelled, workspace removed).
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
-  `missing_labels`), then `tick()` (reconcile: stalls, running refresh with one poll interval of
-  grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
+  `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
+  `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
+  restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
+  interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
   tick; mtime reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
@@ -94,7 +100,15 @@ floor, not the shipped version, and moves by hand.
   orchestrator importing `db`.
   Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
   never resume. Tests drive `tick()`, `handle_worker_exit()` and `fire_due_retries()` directly
-  with a fake clock and a scripted `run_session`.
+  with a fake clock, a scripted `run_session` and a scripted `claude_auth`.
+  Two startup choices made on purpose (#17): a definite `logged_out` is a startup failure, so
+  under compose's `restart: unless-stopped` a logged-out worker restart-loops until the
+  `claude-home` volume holds a login (visible in `docker compose ps`, costs nothing, heals
+  itself), rather than claiming issues it cannot work; and only that definite answer fails,
+  while `unreadable` and `ambiguous` log `orchestrator_startup_warning` and the worker starts,
+  so a slow or wedged `claude` cannot keep a worker down. The verdict is logged on
+  `orchestrator_started` as `claude_auth`. A credential that lapses while the worker is up is
+  not covered (per-run failures escalate as before).
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
@@ -160,8 +174,8 @@ floor, not the shipped version, and moves by hand.
   `tests/test_web_theme.py`.
 - `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
   adapter, the labels one covering `claude.model_labels` as well as the five state labels,
-  a `claude --version` floor of 2.1.259, a `claude auth status --json` probe run under
-  `agent_environment` that names the credential the agent would use (`claude.ai`,
+  a `claude --version` floor of 2.1.259, the `claude auth status --json` probe (shared with the
+  worker's startup, see `issuebot.agent`) that names the credential the agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
@@ -172,7 +186,7 @@ floor, not the shipped version, and moves by hand.
   `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
   runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
   `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
-  and exit 1 when the startup probes fail), `migrate`,
+  and exit 1 when the startup probes fail, `claude auth: not logged in; ...` among them), `migrate`,
   `status`, `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
   `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
   `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is

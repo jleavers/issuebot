@@ -462,6 +462,10 @@ the runner's `_Emitter` isolation and holds no other state.
    issuebot labels ensure`) raises `OrchestratorStartupError(problems)`.
    Symphony §6.3: startup validation fails startup. `issuebot validate`
    remains the full diagnostic; this is the minimum to poll and launch.
+   Since #17 the Claude login is probed too (`claude auth status --json`
+   through the `claude_auth` seam): a definite "not logged in" is a problem
+   (`claude auth: not logged in; run claude auth login or set
+   ANTHROPIC_API_KEY`); an unreadable or ambiguous answer only warns.
 2. Log `orchestrator_started` (repo, poll interval, slots, max turns and
    attempts, stall timeout, workspace root; never the token).
 3. The first tick runs immediately (Symphony §8.1); its reconcile carries

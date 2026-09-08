@@ -12,12 +12,15 @@ from pydantic import SecretStr
 
 from issuebot.agent.runner import (
     MIN_CLAUDE_VERSION,
+    ClaudeAuth,
     ClaudeRunner,
     StreamParser,
     TurnEvent,
     TurnResult,
     agent_environment,
     classify_result,
+    claude_auth_status,
+    describe_claude_auth,
     parse_claude_version,
     settings_for_labels,
 )
@@ -195,6 +198,87 @@ def test_parse_claude_version(text: str | None, expected: tuple[int, int, int] |
 
 def test_minimum_version_is_the_permission_prompts_release() -> None:
     assert MIN_CLAUDE_VERSION == (2, 1, 259)
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (None, ClaudeAuth("unreadable", "could not read auth status (no output)")),
+        ("", ClaudeAuth("unreadable", "could not read auth status (no output)")),
+        (
+            "error: unknown command auth\n",
+            ClaudeAuth(
+                "unreadable",
+                "could not read auth status (unparseable output 'error: unknown command auth')",
+            ),
+        ),
+        (
+            "[1, 2]",
+            ClaudeAuth("unreadable", "could not read auth status (unparseable output '[1, 2]')"),
+        ),
+        (
+            '{"loggedIn": false, "authMethod": "none"}',
+            ClaudeAuth(
+                "logged_out", "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+            ),
+        ),
+        (
+            "{}",
+            ClaudeAuth(
+                "logged_out", "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+            ),
+        ),
+        (
+            '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}',
+            ClaudeAuth("ok", "logged in (claude.ai, max)"),
+        ),
+        (
+            '{"loggedIn": true, "authMethod": "claude.ai"}',
+            ClaudeAuth("ok", "logged in (claude.ai)"),
+        ),
+        (
+            '{"loggedIn": true, "authMethod": "oauth_token"}',
+            ClaudeAuth("ok", "logged in (CLAUDE_CODE_OAUTH_TOKEN)"),
+        ),
+        (
+            '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}',
+            ClaudeAuth("ok", "logged in (API key from ANTHROPIC_API_KEY)"),
+        ),
+        ('{"loggedIn": true, "authMethod": "api_key"}', ClaudeAuth("ok", "logged in (API key)")),
+        (
+            '{"loggedIn": true, "authMethod": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"}',
+            ClaudeAuth(
+                "ambiguous",
+                "logged in (claude.ai) with ANTHROPIC_API_KEY also set; "
+                "unset one to be sure which credential is used",
+            ),
+        ),
+    ],
+)
+def test_describe_claude_auth(output: str | None, expected: ClaudeAuth) -> None:
+    assert describe_claude_auth(output) == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stub is a POSIX script")
+def test_claude_auth_status_runs_under_the_agent_environment(tmp_path: Path) -> None:
+    stub = tmp_path / "claude"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'test "$1 $2 $3" = "auth status --json" || exit 2\n'
+        'printf \'{"args": "%s", "secret": "%s", "home": "%s"}\' "$*" "$SECRET" "$HOME"\n'
+    )
+    stub.chmod(0o755)
+    environ = {"PATH": "/usr/bin:/bin", "HOME": "/home/agent", "SECRET": "leaked?"}
+    output = claude_auth_status(str(stub), environ)
+    assert json.loads(output or "") == {
+        "args": "auth status --json",
+        "secret": "",
+        "home": "/home/agent",
+    }
+
+
+def test_claude_auth_status_is_none_when_the_command_cannot_run(tmp_path: Path) -> None:
+    assert claude_auth_status(str(tmp_path / "missing"), {"PATH": "/usr/bin"}) is None
 
 
 # --- stream parsing --------------------------------------------------------------------

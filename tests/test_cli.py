@@ -68,7 +68,7 @@ def executables(monkeypatch: pytest.MonkeyPatch) -> Callable[[set[str]], None]:
             "issuebot.cli._which", lambda name: f"/usr/bin/{name}" if name in names else None
         )
         monkeypatch.setattr("issuebot.cli._claude_version", lambda command: version)
-        monkeypatch.setattr("issuebot.cli._claude_auth", lambda command: auth)
+        monkeypatch.setattr("issuebot.cli._claude_auth", lambda command, environ: auth)
 
     install({"claude", "gh"})
     return install
@@ -1550,10 +1550,19 @@ def test_worker_reports_startup_failures(
     stub_orchestrator: type[StubOrchestrator],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    stub_orchestrator.next_problems = ["'gh' not found on PATH", "labels missing: a"]
+    stub_orchestrator.next_problems = [
+        "'gh' not found on PATH",
+        "labels missing: a",
+        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+    ]
     assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     out = capsys.readouterr().out.splitlines()
-    assert out == ["[FAIL] startup: 'gh' not found on PATH", "[FAIL] startup: labels missing: a"]
+    assert out == [
+        "[FAIL] startup: 'gh' not found on PATH",
+        "[FAIL] startup: labels missing: a",
+        "[FAIL] startup: claude auth: not logged in; run claude auth login or set "
+        "ANTHROPIC_API_KEY",
+    ]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM handling is POSIX")
@@ -1573,6 +1582,7 @@ def test_worker_stops_on_sigterm_and_wires_the_seams(
     assert kwargs["adapter_factory"](None) is fake_github  # type: ignore[operator]
     assert kwargs["run_session"] is stub_session
     assert kwargs["which"]("gh") == "/usr/bin/gh"  # type: ignore[operator]
+    assert kwargs["claude_auth"]("/usr/bin/claude", {}) == LOGGED_IN  # type: ignore[operator]
     assert [sink.name for sink in kwargs["bus"].sinks] == ["log"]  # type: ignore[attr-defined]
 
 

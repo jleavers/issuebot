@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from issuebot.log import get_logger
 # whatever claude is on PATH, not the version the image ships: raise it only when the
 # code starts depending on something newer.
 MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 259)
+# `claude --version` and `claude auth status` are quick; past this they are treated as unanswered.
+CLAUDE_PROBE_TIMEOUT_S = 10
 STREAM_LINE_LIMIT = 10 * 1024 * 1024
 TERMINATE_GRACE_S = 10.0
 PASSTHROUGH_NAMES: frozenset[str] = frozenset(
@@ -72,6 +75,89 @@ def parse_claude_version(text: str | None) -> tuple[int, int, int] | None:
     if match is None:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def claude_auth_status(command: str, environ: Mapping[str, str]) -> str | None:
+    """Run ``<command> auth status --json`` and return its stdout, or None when it cannot run.
+
+    The probe runs under the same filtered environment ``ClaudeRunner`` gives the agent, so it
+    answers "can the agent authenticate", not "can this shell".
+    """
+    try:
+        completed = subprocess.run(
+            [command, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_PROBE_TIMEOUT_S,
+            check=False,
+            env=agent_environment(environ, token=None),
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return completed.stdout or None
+
+
+ClaudeAuthVerdict = Literal["ok", "ambiguous", "unreadable", "logged_out"]
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeAuth:
+    """What ``claude auth status --json`` said, reduced to a verdict and one line of detail.
+
+    ``logged_out`` is the definite answer; ``ambiguous`` is a login with an API key also set;
+    ``unreadable`` means the probe gave no usable answer, which each caller decides how to treat.
+    """
+
+    verdict: ClaudeAuthVerdict
+    detail: str
+
+
+def describe_claude_auth(output: str | None) -> ClaudeAuth:
+    """The auth line ``validate`` prints and the worker's startup checks."""
+    status = _parse_auth_status(output)
+    if status is None:
+        reason = "no output" if not output else f"unparseable output {output.strip()[:40]!r}"
+        return ClaudeAuth("unreadable", f"could not read auth status ({reason})")
+    if not status.get("loggedIn"):
+        detail = "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        return ClaudeAuth("logged_out", detail)
+    method = _auth_method_text(status)
+    source = status.get("apiKeySource")
+    if source and status.get("authMethod") != "api_key":
+        detail = (
+            f"logged in ({method}) with {source} also set; "
+            "unset one to be sure which credential is used"
+        )
+        return ClaudeAuth("ambiguous", detail)
+    return ClaudeAuth("ok", f"logged in ({method})")
+
+
+def _parse_auth_status(output: str | None) -> dict[str, Any] | None:
+    """``claude auth status --json`` stdout as a mapping; None when it is not one."""
+    if not output:
+        return None
+    try:
+        parsed = json.loads(output)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _auth_method_text(status: Mapping[str, Any]) -> str:
+    """How the agent authenticates, as the check prints it.
+
+    ``claude auth status`` names the Claude Code login after the site it came from, so
+    ``claude.ai`` is passed through as-is; the two variable-borne credentials are named after
+    the variable that carries them, which is what a reader has to go and change.
+    """
+    method = status.get("authMethod")
+    if method == "api_key":
+        source = status.get("apiKeySource")
+        return f"API key from {source}" if source else "API key"
+    if method == "oauth_token":
+        return "CLAUDE_CODE_OAUTH_TOKEN"
+    subscription = status.get("subscriptionType")
+    return f"{method}, {subscription}" if subscription else str(method)
 
 
 def _utcnow() -> datetime:
