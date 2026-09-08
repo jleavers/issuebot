@@ -141,7 +141,12 @@ floor, not the shipped version, and moves by hand.
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's
   `credential`, in the snapshot — both new fields on `RuntimeSnapshot`, which `to_dict` walks
-  generically into the existing `jsonb`, so neither needed a migration.
+  generically into the existing `jsonb`, so neither needed a migration. The reading lives only
+  in memory, and restarting is how the worker is deployed, so `initial_rate_limits` seeds it:
+  `cli`'s `_last_rate_limits` reads the stored snapshot back through `rate_limits_from_dict`
+  (`state.py`, the total inverse of `to_dict` for one reading) and passes it in, which keeps the
+  orchestrator free of `db` the way `on_snapshot` and `on_issues` do. A database that will not
+  answer logs `rate_limits_seed_failed` and costs the tile its last figure, never the start.
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -263,9 +268,12 @@ floor, not the shipped version, and moves by hand.
   from `rate_limit_windows`, as percentages used with a `<progress>` bar (a bar's width cannot
   be an inline style under the CSP, and the element narrates itself). That builder holds the
   reset-aware rule — a window whose `resets_at` has passed reads 0% rather than repeating a
-  reading that stopped being true at the reset — and yields `[]`, which the tile draws as N/A,
-  for a definite `api_key` or no reading at all; an `unknown` credential with a reading still
+  reading that stopped being true at the reset — and yields `[]` for a definite `api_key` or no
+  reading at all; an `unknown` credential with a reading still
   shows it, since a probe issuebot could not read is no reason to hide data claude did report.
+  `limits_unavailable` then says which blank it is, because the two are not the same thing:
+  `N/A` for an API key, which has no windows and never will, and an em dash for a worker that
+  has not seen a reading yet, which fills in on its own; the tooltip says so either way.
   `cost_label` names the cost tile `cost (effort)`, `cost (actual)` or plain `cost` from the
   same credential. `/api/v1/state` carries both as `credential` and `rate_limits`. The token figures there go
   through `compact` (`39.2M`), the exact number staying as the window's `title`.

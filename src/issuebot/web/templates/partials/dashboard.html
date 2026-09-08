@@ -65,8 +65,8 @@
       </div>
       {% endfor %}
       {% else %}
-      <div class="window"><div class="value">N/A</div><div class="span">5-hour</div></div>
-      <div class="window"><div class="value">N/A</div><div class="span">7-day</div></div>
+      <div class="window" title="{{ live.hero.limits_unavailable.title }}"><div class="value">{{ live.hero.limits_unavailable.value }}</div><div class="span">5-hour</div></div>
+      <div class="window" title="{{ live.hero.limits_unavailable.title }}"><div class="value">{{ live.hero.limits_unavailable.value }}</div><div class="span">7-day</div></div>
       {% endif %}
     </div>
   </div>

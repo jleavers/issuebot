@@ -456,13 +456,16 @@ reading it sees, and the tile shows the two as percentages used with a depletion
 reading only arrives while a turn is running, so between runs the last one ages — but a window
 whose reset time has passed has genuinely rolled over and nothing has run since to spend the
 new one, so it reads 0% rather than repeating a figure that stopped being true at the reset.
-Each window's tooltip carries the reset time and how old the reading is.
+Each window's tooltip carries the reset time and how old the reading is. The worker reads its
+last reading back out of the stored snapshot when it starts, so a restart — which is how it is
+deployed — does not blank the tile until the next dispatch.
 
 The cost tile is labelled for what is being spent, from the same `claude auth status` probe the
 worker runs at startup: `cost (effort)` on a subscription, where there is no per-token charge
 and the figure is an effort measure, `cost (actual)` on an API key, where it is money. An API
-key has no usage windows at all, so the limits tile reads N/A; so does a worker that has not
-run a turn yet. A probe too ambiguous to call — a login with `ANTHROPIC_API_KEY` also set,
+key has no usage windows at all, so the limits tile reads N/A there. A worker that has never
+seen a reading shows an em dash instead — nothing has run, rather than nothing can ever apply,
+and it fills in on its own. A probe too ambiguous to call — a login with `ANTHROPIC_API_KEY` also set,
 which `validate` warns about — leaves the tile labelled plainly `cost`, but still shows any
 reading it has.
 

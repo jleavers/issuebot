@@ -167,6 +167,7 @@ class Orchestrator:
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
+        initial_rate_limits: RateLimits | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
     ) -> None:
@@ -199,7 +200,9 @@ class Orchestrator:
         self._auth_block: str | None = None
         self._reported_auth_block: str | None = None
         self._credential: Credential = "unknown"
-        self._rate_limits: RateLimits | None = None
+        # Seeded from the last stored snapshot by the caller that has a database, so a restart
+        # keeps the last reading instead of blanking the limits tile until the next dispatch.
+        self._rate_limits: RateLimits | None = initial_rate_limits
         self._unreadable_auth_probes = 0
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
