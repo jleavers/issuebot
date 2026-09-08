@@ -177,6 +177,14 @@ the login is in place; `docker compose logs worker` has the line. Only a definit
 in" stops it: a `claude` that does not answer in time is logged as a warning and the worker
 starts anyway.
 
+A credential that stops working *after* startup — an expired `CLAUDE_CODE_OAUTH_TOKEN`, a
+revoked API key — is caught by the run that hits it. That issue is moved to `issuebot/review`
+at once with a workpad block naming authentication, rather than after `agent.max_attempts`
+opaque failures, and the worker stops claiming anything else: `docker compose logs worker`
+shows `dispatch_auth_held` and no new dispatches. It re-checks the credential every poll and
+picks up where it left off once `claude auth status` reports a login again, so fixing the
+credential is enough and no restart is needed.
+
 To ask `claude` directly, without going through issuebot:
 
 ```bash

@@ -68,7 +68,9 @@ floor, not the shipped version, and moves by hand.
   `ambiguous` (a login and an API key both set), `unreadable` (no output, a timeout, or an older
   `claude` without the subcommand) or `logged_out`, shared by `validate` and the worker's
   startup; `run_session` (turns, refresh between turns, `RunResult`, publishes
-  `RunStarted`/`RunEnded`). Runtime turn events go to a `TurnObserver`, not the bus.
+  `RunStarted`/`RunEnded`); `classify_result` maps a turn's last result (or its absence) to an
+  `AgentErrorCategory`, `auth_failed` among them (see `issuebot.orchestrator`).
+  Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
   `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
   `TurnCapture`s, capped (prompt 256 KiB head; a stream line over 64 KiB becomes an
@@ -107,8 +109,18 @@ floor, not the shipped version, and moves by hand.
   itself), rather than claiming issues it cannot work; and only that definite answer fails,
   while `unreadable` and `ambiguous` log `orchestrator_startup_warning` and the worker starts,
   so a slow or wedged `claude` cannot keep a worker down. The verdict is logged on
-  `orchestrator_started` as `claude_auth`. A credential that lapses while the worker is up is
-  not covered (per-run failures escalate as before).
+  `orchestrator_started` as `claude_auth`. A credential that lapses *after* startup (#20) is
+  caught by the run instead: `classify_result` reads an authentication failure out of claude's
+  own words (`is_auth_failure`, `AUTH_FAILURE_MARKERS`) and gives it the `auth_failed`
+  category, and a run that ends with it escapes the issue at once, with a blocker naming
+  authentication rather than after `max_attempts` opaque failures. The same exit holds
+  dispatch: no issue is claimed (`_dispatch_candidates` is skipped, a due retry requeues as
+  kind `auth` at one poll interval) until a probe through the same `claude_auth` seam reports
+  a login, which lifts the hold and resumes dispatch with no restart. Only `ok` or `ambiguous`
+  lifts it: startup treats an `unreadable` answer as "start anyway", but here a run has
+  already failed and an answer showing nothing has changed is no reason to claim again. The
+  hold is logged as `dispatch_auth_held` (once per distinct error, then per tick at debug) and
+  `dispatch_auth_recovered`; like a preflight problem it is not carried in the snapshot.
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib

@@ -21,6 +21,7 @@ from issuebot.agent.runner import (
     classify_result,
     claude_auth_status,
     describe_claude_auth,
+    is_auth_failure,
     parse_claude_version,
     settings_for_labels,
 )
@@ -374,6 +375,26 @@ def test_parser_reports_one_activity_per_tool_use_block() -> None:
         ({"subtype": "success", "is_error": True, "result": "bad"}, 0, "turn_failed", "bad"),
         ({"subtype": "success", "is_error": False}, 1, "process_exit", "reported success"),
         ({}, 0, "turn_failed", "unknown subtype"),
+        # A lapsed credential, as claude reports it: in a failing result, or on stderr with no
+        # result at all. Either way the category names authentication (#20).
+        (
+            {
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": 'API Error: 401 {"type":"authentication_error"}',
+            },
+            1,
+            "auth_failed",
+            "authentication_error",
+        ),
+        ({"subtype": "error_during_execution", "is_error": True}, 1, "turn_failed", "execution"),
+        # The agent's own final message is not read for markers: only a failing result is.
+        (
+            {"subtype": "success", "is_error": True, "result": "invalid api key"},
+            0,
+            "turn_failed",
+            "invalid api key",
+        ),
     ],
 )
 def test_classify_result(
@@ -386,6 +407,42 @@ def test_classify_result(
     else:
         assert message is not None
         assert needle in message
+
+
+def test_classify_result_reads_stderr_for_a_credential_that_stopped_working() -> None:
+    """claude that exits before any result: its stderr is the only evidence there is."""
+    category, message = classify_result(None, 1, "Invalid API key \u00b7 Please run /login")
+    assert category == "auth_failed"
+    assert message is not None and "Please run /login" in message
+
+
+def test_classify_result_stderr_makes_a_failing_result_an_auth_failure() -> None:
+    result = {"subtype": "error_during_execution", "is_error": True, "result": "stopped"}
+    category, _ = classify_result(result, 1, "OAuth token has expired")
+    assert category == "auth_failed"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("API Error: 401 authentication_error", True),
+        ("Invalid API key \u00b7 Please run /login", True),
+        ("your OAuth token has expired", True),
+        ("run claude auth login to fix it", True),
+        ("AUTHENTICATION FAILED", True),
+        ("tool execution failed", False),
+        ("the issue asks about a revoked API key", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_auth_failure(text: str | None, expected: bool) -> None:
+    assert is_auth_failure(text) is expected
+
+
+def test_is_auth_failure_reads_every_text_it_is_given() -> None:
+    assert is_auth_failure("nothing here", None, "Invalid API key") is True
+    assert is_auth_failure("nothing here", None, "still nothing") is False
 
 
 # --- run_turn against the fake claude ---------------------------------------------------

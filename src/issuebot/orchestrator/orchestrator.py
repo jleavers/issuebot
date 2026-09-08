@@ -176,6 +176,8 @@ class Orchestrator:
         self._config_error: str | None = None
         self._reported_reload_error: str | None = None
         self._reported_preflight: str | None = None
+        self._auth_block: str | None = None
+        self._reported_auth_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
@@ -282,6 +284,37 @@ class Orchestrator:
         output = await asyncio.to_thread(self._claude_auth, found, self._environ)
         return describe_claude_auth(output)
 
+    async def _auth_held(self) -> bool:
+        """True while an authentication failure holds dispatch; re-probes once per tick.
+
+        A run that failed to authenticate (#20) is evidence the worker cannot work any issue,
+        so it stops claiming rather than escalating one issue after another with an opaque
+        blocker. Only a probe that reports a login lifts the hold: unlike startup, where an
+        unreadable answer must not keep a worker down, here a failure has already happened and
+        an answer that shows nothing has changed is no reason to start claiming again. The
+        caller has just run preflight, so ``claude.command`` resolves.
+        """
+        if self._auth_block is None:
+            return False
+        auth = await self._probe_claude_auth(self._workflow.config.claude.command)
+        if auth.verdict in ("ok", "ambiguous"):
+            self._log.info(
+                "dispatch_auth_recovered", claude_auth=auth.detail, error=self._auth_block
+            )
+            self._auth_block = None
+            self._reported_auth_block = None
+            return False
+        if self._auth_block != self._reported_auth_block:
+            self._log.error("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
+            self._reported_auth_block = self._auth_block
+        else:
+            self._log.debug("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
+        return True
+
+    def _hold_dispatch(self, error: str) -> None:
+        """Stop claiming issues until a probe reports the credential works again."""
+        self._auth_block = error
+
     # --- tick -------------------------------------------------------------------------
 
     async def tick(self) -> None:
@@ -297,7 +330,8 @@ class Orchestrator:
                 self._reported_preflight = message
         else:
             self._reported_preflight = None
-            dispatched = await self._dispatch_candidates()
+            if not await self._auth_held():
+                dispatched = await self._dispatch_candidates()
         self._tick_count += 1
         self._last_tick_at = self._now()
         self._log.debug(
@@ -661,7 +695,33 @@ class Orchestrator:
                 error=None,
             )
             return
+        if result.error_category == "auth_failed":
+            await self._auth_failed(entry, result)
+            return
         await self._after_failure(entry, f"{result.error_category}: {result.error}", result)
+
+    async def _auth_failed(self, entry: RunningEntry, result: RunResult) -> None:
+        """#20: hold dispatch, then escalate this issue with a blocker that names the cause.
+
+        Retrying is pointless while the credential is the problem, and the attempts would only
+        spread opaque blockers over every issue in the queue, so the escape happens at once.
+        """
+        error = result.error or "claude could not authenticate"
+        self._log.error(
+            "dispatch_auth_failed",
+            issue_number=entry.issue.number,
+            issue_identifier=entry.identifier,
+            run_id=entry.run_id,
+            attempt=entry.attempt,
+            error=error,
+        )
+        self._hold_dispatch(error)
+        reason = (
+            f"Claude could not authenticate in attempt {entry.attempt}, so the run failed: "
+            f"{error}. The worker has stopped claiming issues and re-checks the credential "
+            "every poll; it resumes on its own once `claude auth status` reports a login."
+        )
+        await self._escape(entry, reason, result)
 
     def _publish_final_transition(self, entry: RunningEntry, result: RunResult) -> None:
         """What changed between the entry's snapshot and the session's last refresh (§4.2).
@@ -821,6 +881,14 @@ class Orchestrator:
                     delay_ms=backoff_ms(entry.attempt + 1, settings.agent.max_retry_backoff_ms),
                     error="blocked escape failed",
                 )
+            return
+        if self._auth_block is not None:
+            self._requeue(
+                entry,
+                kind="auth",
+                delay_ms=settings.polling.interval_ms,
+                error=f"claude authentication unavailable: {self._auth_block}",
+            )
             return
         try:
             issues = await self._adapter.fetch_issues_by_ids([entry.issue_id])

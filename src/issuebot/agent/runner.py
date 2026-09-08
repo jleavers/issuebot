@@ -312,20 +312,54 @@ class StreamParser:
         )
 
 
+# What a lapsed or revoked Claude credential says, lowercased. These are claude's own words,
+# from its stderr or from a failing result, never the agent's prose (see classify_result).
+AUTH_FAILURE_MARKERS: tuple[str, ...] = (
+    "authentication_error",
+    "authentication failed",
+    "invalid api key",
+    "invalid x-api-key",
+    "invalid_api_key",
+    "invalid bearer token",
+    "oauth token has expired",
+    "oauth token is invalid",
+    "expired oauth token",
+    "invalid oauth token",
+    "please run /login",
+    "claude auth login",
+)
+
+
+def is_auth_failure(*texts: str | None) -> bool:
+    """True when any text carries a marker of a credential claude could not authenticate with."""
+    for text in texts:
+        if text and any(marker in text.lower() for marker in AUTH_FAILURE_MARKERS):
+            return True
+    return False
+
+
 def classify_result(
     result: dict[str, Any] | None, exit_code: int | None, stderr_tail: str
 ) -> tuple[AgentErrorCategory | None, str | None]:
     """Map the final result (or its absence) and the exit code to a failure category."""
     if result is None:
         message = f"claude exited with status {exit_code} before reporting a result"
-        return "process_exit", _with_tail(message, stderr_tail)
+        category: AgentErrorCategory = (
+            "auth_failed" if is_auth_failure(stderr_tail) else "process_exit"
+        )
+        return category, _with_tail(message, stderr_tail)
     subtype = _string(result.get("subtype")) or ""
     is_error = bool(result.get("is_error"))
     text = _result_text(result)
     if subtype == "error_max_budget_usd":
         return "budget_exceeded", text or "claude stopped at the --max-budget-usd cap"
     if is_error or subtype != "success":
-        return "turn_failed", _with_tail(subtype or "unknown subtype", text)
+        # A failing subtype's text is claude reporting why it stopped, so it can be read for a
+        # credential problem; a "success" result carries the agent's own final message, which
+        # may discuss API keys without one having failed, so only stderr is read there.
+        failed = is_auth_failure(text) if subtype != "success" else False
+        category = "auth_failed" if failed or is_auth_failure(stderr_tail) else "turn_failed"
+        return category, _with_tail(subtype or "unknown subtype", text)
     if exit_code != 0:
         message = f"claude reported success but exited with status {exit_code}"
         return "process_exit", _with_tail(message, stderr_tail)
