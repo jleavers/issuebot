@@ -461,8 +461,10 @@ def test_every_chip_is_drawn_by_one_rule() -> None:
 def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
     """It is the one chip that is a link, and it leaves the dashboard for GitHub.
 
-    Hover lights the border and leaves the label at --muted; --accent is a mark on the
-    card, not text (see tests/test_web_theme.py), so it must not become the chip's ink.
+    Hover lights the border and leaves the label at --muted: the chip is subordinate to
+    the title beside it, which is what the hover is really about, and a number that also
+    changed colour would compete with it. (--accent is legible as text on both surfaces
+    since #43, so this is a matter of emphasis rather than of contrast.)
     """
     assert "a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
     assert "a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
