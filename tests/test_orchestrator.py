@@ -1017,7 +1017,7 @@ async def test_every_retry_kind_carries_the_issue_title(tmp_path: Path) -> None:
     # auth: the requeue of a due retry while the credential is held.
     h.add_issue(5, "todo", title="Teach the parser about tabs")
     await h.tick()
-    await h.exit(h.run_for(5), **AUTH_FAILURE)
+    await h.exit(h.run_for(5), **AUTH_FAILURE)  # defined with the #20 tests further down
     await h.fire(20)
     assert (h.retry(1).kind, h.retry(1).title) == ("auth", "Add a power function")
 

@@ -104,6 +104,9 @@
   <h2>Retrying</h2>
   <table>
     <tr><th>issue</th><th>kind</th><th>attempt</th><th>due</th><th>error</th></tr>
+    {# The one thing this row does not share with the Running one above: a snapshot written
+       before the title existed (#42) has none, and the identifier it used to fall back on is
+       gone. A running row's title has been there since Phase 4, so it needs no fallback. #}
     {% for entry in live.retrying %}
     <tr>
       <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title or "-" }}</span></a></td>
