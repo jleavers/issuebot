@@ -184,14 +184,15 @@ def test_marks_clear_the_contrast_floor_on_the_panel(theme: dict[str, str], surf
         assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
 
 
-def test_the_card_names_no_colour_of_its_own() -> None:
+def test_the_issue_reference_and_the_card_name_no_colour_of_their_own() -> None:
     """The restyle is token-only, which is the whole reason it follows into dark.
 
     A literal (a hex, an rgb(), a named colour) or a token that only one theme declares
     would light up in light and go wrong, or invisible, in dark - and neither the drift
-    check above nor the contrast checks below would see it.
+    check above nor the contrast checks below would see it. The slice starts at the shared
+    .chip rule so that the tables' half of the restyle is covered too, not just the card's.
     """
-    rules = CSS[CSS.index(".card {") : CSS.index("/* banners */")]
+    rules = CSS[CSS.index(".chip {") : CSS.index("/* banners */")]
     used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
     assert used <= set(LIGHT), used - set(LIGHT)
     assert used <= set(OS_DARK), used - set(OS_DARK)
@@ -199,6 +200,20 @@ def test_the_card_names_no_colour_of_its_own() -> None:
     for declaration in re.findall(r"(?:color|background|box-shadow|outline):[^;]+;", rules):
         assert "var(--" in declaration, declaration
         assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_chip_hover_border_clears_the_mark_floor_on_both_surfaces(
+    theme: dict[str, str],
+) -> None:
+    """`a.chip:hover` lights the border to --accent wherever the chip is drawn.
+
+    On a card that is --bg, and in the tables --panel; the ink stays --muted either way,
+    which is why the hover is a mark measurement and not a text one.
+    """
+    for surface in ("--bg", "--panel"):
+        ratio = contrast(theme["--accent"], theme[surface])
+        assert ratio >= MARK_FLOOR, f"--accent on {surface} is {ratio:.2f}:1"
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
@@ -217,18 +232,23 @@ def test_the_kanban_card_marks_clear_the_mark_floor(theme: dict[str, str]) -> No
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_the_card_number_chip_is_drawn_by_its_border(theme: dict[str, str]) -> None:
+@pytest.mark.parametrize("surface", ["--bg", "--panel"])
+def test_the_number_chip_is_drawn_by_its_border(theme: dict[str, str], surface: str) -> None:
     """The chip has no fill, so --line has to carry it, as the gridlines carry the charts.
 
-    No token in the set is both a perceptible step off the card's --bg and dark enough to
-    keep --muted legible on top (--panel is 1.07:1 off --bg in light, and --line drops
-    --muted to 3.58:1), so the chip is drawn with a border and read as monospace instead.
-    That border only has to be visible, not to clear the mark floor: it delimits the chip,
-    it does not carry the number, and the digits themselves are held to the text floor.
+    No token in the set is both a perceptible step off the surface and dark enough to keep
+    --muted legible on top (--panel is 1.07:1 off --bg in light, and --line drops --muted
+    to 3.58:1), so the chip is drawn with a border and read as monospace instead. That
+    border only has to be visible, not to clear the mark floor: it delimits the chip, it
+    does not carry the number, and the digits themselves are held to the text floor.
+
+    Both surfaces, because one rule now draws the chip on a card (--bg) and in the
+    Running and Retrying tables, which are .panel (--panel).
     """
-    edge = contrast(theme["--line"], theme["--bg"])
-    assert 1.2 <= edge < MARK_FLOOR, edge
-    assert contrast(theme["--muted"], theme["--bg"]) >= TEXT_FLOOR
+    background = theme[surface]
+    edge = contrast(theme["--line"], background)
+    assert 1.2 <= edge < MARK_FLOOR, f"--line on {surface} is {edge:.2f}:1"
+    assert contrast(theme["--muted"], background) >= TEXT_FLOOR
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])

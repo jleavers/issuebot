@@ -65,7 +65,7 @@
     <tr><th>issue</th><th>attempt</th><th class="num">turns</th><th>last event</th><th>last activity</th><th>started</th><th>stop</th></tr>
     {% for entry in live.running %}
     <tr>
-      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.title }}{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
+      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
       <td>{{ entry.attempt }}</td>
       <td class="num">{{ entry.turn_count }}</td>
       <td>{{ entry.last_event or "-" }}</td>
@@ -86,7 +86,7 @@
     <tr><th>issue</th><th>kind</th><th>attempt</th><th>due</th><th>error</th></tr>
     {% for entry in live.retrying %}
     <tr>
-      <td><a href="/issues/{{ entry.issue_number }}">#{{ entry.issue_number }}</a> {{ entry.issue_identifier }}</td>
+      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.issue_identifier }}</span></a></td>
       <td>{{ entry.kind }}</td>
       <td>{{ entry.attempt }}</td>
       <td>{{ entry.due_at|stamp }}</td>
@@ -102,7 +102,7 @@
     <h3><span>{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
-      <a class="title" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
+      <a class="issue-ref title" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
       <div class="meta">
         <span class="pr">{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a class="chip" href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}<span class="chip">PR#{{ row.pr_number }}</span>{% endif %}{% if row.pr_state %}<span>{{ row.pr_state }}</span>{% endif %}{% endif %}</span>
         <span>{{ row.updated_at|age(now) }}</span>

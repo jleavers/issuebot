@@ -175,6 +175,65 @@ def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
     assert "Retrying" in text and "turn_failed: boom" in text
 
 
+def test_the_running_row_draws_its_issue_the_way_a_card_does(h: Harness) -> None:
+    """#41: the number was a bare accent link and the title a run of body text.
+
+    It is the same reference a Kanban card carries, so it is the same markup: the number
+    as the chip, the title with the weight, both inside the one link to the issue page.
+    """
+    h.queries.snapshot_row = snapshot(running=(running_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="issue-ref" href="/issues/7">'
+        '<span class="chip">#7</span>'
+        '<span class="text">Add a power function</span></a>'
+    ) in text
+    # the old shape: the number linked on its own, with the title loose beside it
+    assert '<a href="/issues/7">#7</a>' not in text
+
+
+def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
+    """The identical cell one panel below; a styled row above a plain one is the defect."""
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="issue-ref" href="/issues/9">'
+        '<span class="chip">#9</span>'
+        '<span class="text">repo-9</span></a>'
+    ) in text
+    assert '<a href="/issues/9">#9</a>' not in text
+
+
+def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
+    """(rework) and (resumed) sit outside the <a>, so they must not drop to a new line.
+
+    That is what `inline-flex` on .issue-ref buys, against the block `flex` the card
+    overrides it with - the one place the two surfaces genuinely differ.
+    """
+    h.queries.snapshot_row = snapshot(running=(running_row(rework=True, resumed=True),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert '</a> <span class="muted">(rework)</span> <span class="muted">(resumed)</span>' in text
+    assert css_declarations(".issue-ref {")["display"] == "inline-flex"
+    assert css_declarations(".card .title {")["display"] == "flex"
+
+
+def test_the_running_title_is_still_escaped(h: Harness) -> None:
+    """The title moved into a new element; it must not have picked up markup on the way."""
+    h.queries.snapshot_row = snapshot(running=(running_row(title=HOSTILE),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
+def test_one_rule_gives_the_card_and_the_tables_their_hover_and_focus() -> None:
+    """The states are on .issue-ref, not on .card .title, or the tables would not get them."""
+    assert ".issue-ref:hover { color: var(--accent); text-decoration: none; }" in CSS
+    assert ".issue-ref:hover .text { text-decoration: underline; }" in CSS
+    assert ".card .title:hover" not in CSS and ".card .title:focus-visible" not in CSS
+    # the card's own hover still keys on .title, which is the class it still carries
+    assert ".card:has(.title:hover) {" in CSS
+
+
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
     text = html(h.client.get("/partials/dashboard"))
     assert text.startswith('<div id="live"')
@@ -198,7 +257,7 @@ def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
     text = html(h.client.get("/partials/dashboard"))
     assert (
-        '<a class="title" href="/issues/23">'
+        '<a class="issue-ref title" href="/issues/23">'
         '<span class="chip">#23</span>'
         '<span class="text">Add a status badge to the README</span></a>'
     ) in text
@@ -245,10 +304,14 @@ def test_a_pull_request_with_no_state_renders_the_chip_alone(h: Harness) -> None
     assert "None" not in text
 
 
-def test_both_card_chips_are_drawn_by_one_rule() -> None:
-    """Two rules would drift; the issue asked for the pull request to match the number."""
-    assert ".card .number" not in CSS
-    declarations = css_declarations(".card .chip {")
+def test_every_chip_is_drawn_by_one_rule() -> None:
+    """Two rules would drift; #28 asked the pull request to match the card's number, and
+
+    #41 asked the Running table to match the card. The selector is unscoped for that
+    reason: a `.card`-scoped rule is what would have made the tables plain again.
+    """
+    assert ".card .number" not in CSS and ".card .chip {" not in CSS
+    declarations = css_declarations(".chip {")
     assert declarations["font-family"].startswith("ui-monospace")
     assert declarations["font-variant-numeric"] == "tabular-nums"
     assert declarations["border"] == "1px solid var(--line)"
@@ -261,8 +324,8 @@ def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
     Hover lights the border and leaves the label at --muted; --accent is a mark on the
     card, not text (see tests/test_web_theme.py), so it must not become the chip's ink.
     """
-    assert ".card a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
-    assert ".card a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
+    assert "a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
+    assert "a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_the_meta_row_wraps_around_a_chip_that_cannot() -> None:
@@ -289,7 +352,7 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
 
 def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
     """The chips and the title are their own elements; the CSP forbids styling them inline."""
-    assert ".card .chip {" in CSS and ".card .title .text {" in CSS
+    assert ".chip {" in CSS and ".issue-ref .text {" in CSS and ".card .title .text {" in CSS
     assert ' style="' not in html(h.client.get("/partials/dashboard"))
 
 
@@ -303,7 +366,8 @@ def test_a_long_card_title_cannot_stretch_its_column() -> None:
     assert declarations["-webkit-line-clamp"] == "3"
     assert declarations["line-clamp"] == "3", "the standard property must ship beside the prefix"
     assert declarations["overflow"] == "hidden"
-    assert declarations["overflow-wrap"] == "anywhere"
+    # shared with the tables, which need it just as much: it is what breaks a branch name
+    assert css_declarations(".issue-ref .text {")["overflow-wrap"] == "anywhere"
 
 
 def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
@@ -315,9 +379,9 @@ def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
     assert css_declarations(".card .title {")["align-items"] == "flex-start"
 
 
-def test_the_card_link_is_reachable_by_keyboard() -> None:
-    """The card is the primary navigation on the dashboard, so its focus must be visible."""
-    assert ".card .title:focus-visible { outline: 2px solid var(--accent);" in CSS
+def test_an_issue_reference_is_reachable_by_keyboard() -> None:
+    """The card and the two tables are the dashboard's navigation; focus must be visible."""
+    assert ".issue-ref:focus-visible { outline: 2px solid var(--accent);" in CSS
 
 
 def test_only_the_link_lights_the_card_up() -> None:
