@@ -188,12 +188,18 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
  * takes the weight. Both stay inside the one link, so the whole line is still the target.
  *
  * The colours are the role tokens the rest of the dashboard already uses, which is what
- * makes this follow into dark for free: the chip is --muted ink on --panel (4.83:1, over
- * the 4.5:1 text floor) and the stripe is the column's own state colour on --bg (3.40:1
- * at worst, over the 3:1 mark floor). tests/test_web_theme.py holds both.
+ * makes this follow into dark for free, and tests/test_web_theme.py holds each of them to
+ * the floor for the surface it lands on: the stripe is the column's own state colour on
+ * the card's --bg (3.40:1 at worst, over the 3:1 mark floor), the chip's ink is --muted
+ * on the same --bg (4.51:1, over the 4.5:1 text floor) and the chip's border is --line,
+ * which only has to be visible. The chip is deliberately not given a fill: no token in
+ * the set is both a perceptible step off --bg and dark enough to keep --muted legible on
+ * top, so the border draws the chip and the monospace face does the rest.
  *
- * The stripe is an inset shadow rather than a border so that :hover can restate
+ * The stripe is an inset shadow rather than a border so that hover can restate
  * border-color without having to name the four sides, and so the border radius clips it.
+ * The --line shadow is a fallback that should never paint: the template always stamps the
+ * column's role on the wrapper, and it is always one of the five below.
  */
 .card {
   border: 1px solid var(--line);
@@ -204,20 +210,27 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
   box-shadow: inset 3px 0 0 var(--line);
   transition: border-color 120ms ease;
 }
-.card:hover { border-color: var(--accent); }
 .column.todo .card { box-shadow: inset 3px 0 0 var(--todo); }
 .column.in_progress .card { box-shadow: inset 3px 0 0 var(--in_progress); }
 .column.review .card { box-shadow: inset 3px 0 0 var(--review); }
 .column.rework .card { box-shadow: inset 3px 0 0 var(--rework); }
 .column.complete .card { box-shadow: inset 3px 0 0 var(--complete); }
+/* the link is the only target on the card, so only the link may light the card up; a
+ * plain .card:hover would promise a click on the meta row and the padding as well */
+.card:has(.title:hover) { border-color: var(--accent); }
 
-/* baseline, not centre: the chip's digits should sit on the title's first line */
-.card .title { display: flex; align-items: baseline; gap: 7px; color: var(--ink); }
+/* Not `baseline`: .text sets overflow, which makes it a scroll container, and a scroll
+ * container synthesises its baseline from the bottom of its border box - so on a
+ * two- or three-line title the chip would sink to the last line. Aligning both to the
+ * top and giving the chip a box the height of one title line (15 + 2 padding + 2 border
+ * = 19px, against 14px x 1.35 = 18.9px) puts it beside the first line and keeps it
+ * there however many lines follow. */
+.card .title { display: flex; align-items: flex-start; gap: 7px; color: var(--ink); }
 .card .number {
   flex: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
-  color: var(--muted); background: var(--panel);
+  font-size: 11px; font-weight: 600; line-height: 15px; font-variant-numeric: tabular-nums;
+  color: var(--muted);
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
 }
 /* three lines, then an ellipsis: a long title must not stretch the column it sits in,
@@ -225,15 +238,14 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .card .title .text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
   overflow: hidden; overflow-wrap: anywhere;
-  font-size: 13px; font-weight: 600; line-height: 1.35;
+  font-weight: 600; line-height: 1.35;
 }
 /* underline the title alone; on the flex row the link's own underline would run under
  * the chip and the gap as well */
 .card .title:hover { color: var(--accent); text-decoration: none; }
 .card .title:hover .text { text-decoration: underline; }
 .card .title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.card .meta { margin-top: 6px; color: var(--muted); font-size: 11.5px; display: flex; justify-content: space-between; gap: 8px; }
-.column .capped { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.card .meta { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
 
 /* banners */
 .banner { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }

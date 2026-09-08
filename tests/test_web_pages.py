@@ -32,6 +32,19 @@ from issuebot.web.views import (
 
 CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
 
+
+def css_declarations(selector: str) -> dict[str, str]:
+    """The declarations of the one rule that starts with ``selector``, property to value."""
+    start = CSS.index(selector)
+    block = CSS[CSS.index("{", start) + 1 : CSS.index("}", start)]
+    found = {}
+    for declaration in block.split(";"):
+        name, sep, value = declaration.partition(":")
+        if sep:
+            found[name.strip()] = value.strip()
+    return found
+
+
 RUN_ID_2 = "20260904T210000Z-abcdef"
 HOSTILE = "<script>alert(1)</script>"
 ESCAPED = "&lt;script&gt;alert(1)&lt;/script&gt;"
@@ -126,26 +139,43 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
     assert f'<span class="text">{ESCAPED}</span>' in text
 
 
-def test_the_card_styling_uses_only_existing_role_tokens(h: Harness) -> None:
-    """Each column's cards take that column's state colour, so dark follows for free."""
-    for role in ("todo", "in_progress", "review", "rework", "complete"):
-        assert f".column.{role} .card {{ box-shadow: inset 3px 0 0 var(--{role}); }}" in CSS
-    # the chip and the title are laid out by the stylesheet, never by an inline style
+def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
+    """The chip and the title are new elements; the CSP forbids styling them inline."""
     assert ".card .number {" in CSS and ".card .title .text {" in CSS
     assert ' style="' not in html(h.client.get("/partials/dashboard"))
 
 
-def test_a_long_card_title_cannot_stretch_its_column(h: Harness) -> None:
-    """A column is a grid track with a 180px floor; an unbroken title would blow past it."""
-    block = CSS[CSS.index(".card .title .text {") :]
-    block = block[: block.index("}")]
-    assert "-webkit-line-clamp: 3" in block and "line-clamp: 3" in block
-    assert "overflow: hidden" in block and "overflow-wrap: anywhere" in block
+def test_a_long_card_title_cannot_stretch_its_column() -> None:
+    """A column is a grid track with a 180px floor; an unbroken title would blow past it.
+
+    The standard `line-clamp` is checked as a whole declaration: as a bare substring it is
+    also inside `-webkit-line-clamp`, so it could be deleted with the test still green.
+    """
+    declarations = css_declarations(".card .title .text {")
+    assert declarations["-webkit-line-clamp"] == "3"
+    assert declarations["line-clamp"] == "3", "the standard property must ship beside the prefix"
+    assert declarations["overflow"] == "hidden"
+    assert declarations["overflow-wrap"] == "anywhere"
+
+
+def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
+    """`overflow` makes the title a scroll container, whose baseline is its bottom edge.
+
+    Aligning the two on the baseline would therefore drop the chip to the last line of a
+    wrapped title - the case the clamp exists for. They are aligned to the top instead.
+    """
+    assert css_declarations(".card .title {")["align-items"] == "flex-start"
 
 
 def test_the_card_link_is_reachable_by_keyboard() -> None:
     """The card is the primary navigation on the dashboard, so its focus must be visible."""
     assert ".card .title:focus-visible { outline: 2px solid var(--accent);" in CSS
+
+
+def test_only_the_link_lights_the_card_up() -> None:
+    """A bare .card:hover would offer a click on the meta row and the padding as well."""
+    assert ".card:has(.title:hover) {" in CSS
+    assert ".card:hover {" not in CSS
 
 
 def test_the_live_partial_shows_a_config_error(h: Harness) -> None:

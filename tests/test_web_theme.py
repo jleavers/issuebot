@@ -184,13 +184,31 @@ def test_marks_clear_the_contrast_floor_on_the_panel(theme: dict[str, str], surf
         assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
 
 
+def test_the_card_names_no_colour_of_its_own() -> None:
+    """The restyle is token-only, which is the whole reason it follows into dark.
+
+    A literal (a hex, an rgb(), a named colour) or a token that only one theme declares
+    would light up in light and go wrong, or invisible, in dark - and neither the drift
+    check above nor the contrast checks below would see it.
+    """
+    rules = CSS[CSS.index(".card {") : CSS.index("/* banners */")]
+    used = set(re.findall(r"var\((--[a-z_-]+)\)", rules))
+    assert used <= set(LIGHT), used - set(LIGHT)
+    assert used <= set(OS_DARK), used - set(OS_DARK)
+    # every colour value in the block is a var(); nothing is written out longhand
+    for declaration in re.findall(r"(?:color|background|box-shadow|outline):[^;]+;", rules):
+        assert "var(--" in declaration, declaration
+        assert not re.search(r"#[0-9a-f]{3}|rgb|hsl", declaration), declaration
+
+
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_the_kanban_card_stripe_clears_the_mark_floor(theme: dict[str, str]) -> None:
+def test_the_kanban_card_marks_clear_the_mark_floor(theme: dict[str, str]) -> None:
     """A card sits on --bg, not on the --panel its column is painted with.
 
-    The stripe down a card's left edge is the column's own state colour, so it is measured
-    against the card, one surface further in. Light is the tighter of the two (--bg is
-    darker than --panel there, and the marks are dark); --in_progress is the closest.
+    The stripe down a card's left edge is the column's own state colour and the hover
+    border is --accent, so both are measured against the card, one surface further in.
+    Light is the tighter of the two (--bg is darker than --panel there, and the marks are
+    dark); --in_progress is the closest.
     """
     background = theme["--bg"]
     for name in ("--todo", "--in_progress", "--review", "--rework", "--complete", "--accent"):
@@ -199,11 +217,18 @@ def test_the_kanban_card_stripe_clears_the_mark_floor(theme: dict[str, str]) -> 
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_the_card_number_chip_is_legible_on_its_own_surface(theme: dict[str, str]) -> None:
-    """The chip inverts the card: --muted ink on --panel, a step up out of the --bg card."""
-    ratio = contrast(theme["--muted"], theme["--panel"])
-    assert ratio >= TEXT_FLOOR, ratio
-    assert theme["--panel"] != theme["--bg"], "the chip would be invisible against the card"
+def test_the_card_number_chip_is_drawn_by_its_border(theme: dict[str, str]) -> None:
+    """The chip has no fill, so --line has to carry it, as the gridlines carry the charts.
+
+    No token in the set is both a perceptible step off the card's --bg and dark enough to
+    keep --muted legible on top (--panel is 1.07:1 off --bg in light, and --line drops
+    --muted to 3.58:1), so the chip is drawn with a border and read as monospace instead.
+    That border only has to be visible, not to clear the mark floor: it delimits the chip,
+    it does not carry the number, and the digits themselves are held to the text floor.
+    """
+    edge = contrast(theme["--line"], theme["--bg"])
+    assert 1.2 <= edge < MARK_FLOOR, edge
+    assert contrast(theme["--muted"], theme["--bg"]) >= TEXT_FLOOR
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
