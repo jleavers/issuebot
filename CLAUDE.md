@@ -96,6 +96,12 @@ floor, not the shipped version, and moves by hand.
   startup; `run_session` (turns, refresh between turns, `RunResult`, publishes
   `RunStarted`/`RunEnded`); `classify_result` maps a turn's last result (or its absence) to an
   `AgentErrorCategory`, `auth_failed` among them (see `issuebot.orchestrator`).
+  `budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
+  caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
+  same session with a fresh ledger. Failing there would end the run, and the retry after it
+  never resumes, so the replacement session would re-read the repository from cold and spend
+  the cap again reaching what the first had already committed and pushed; a run whose every
+  turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
   Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
   `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into

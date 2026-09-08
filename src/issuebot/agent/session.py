@@ -310,8 +310,22 @@ async def _turn_loop(
         state.record_turn(turn)
         _save(workspaces, workspace, state.session_record(turn_number, None))
         if not turn.ok:
-            state.fail(turn.error_category or "turn_failed", turn.error)
-            return
+            if turn.error_category != "budget_exceeded":
+                state.fail(turn.error_category or "turn_failed", turn.error)
+                return
+            # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh
+            # ledger: the cap is a turn boundary, not a failure. Failing here instead would end
+            # the run, and the retry after it never resumes (orchestrator `_schedule`), so the
+            # replacement session would re-read the repository from cold and pay the cap again
+            # to reach the point this one had already committed and pushed.
+            get_logger(__name__).warning(
+                "turn_budget_exhausted",
+                run_id=state.run_id,
+                turn_number=turn_number,
+                max_turns=max_turns,
+                cost_usd=turn.cost_usd,
+                error=turn.error,
+            )
         if cancel is not None and cancel.is_set():
             state.fail("cancelled", "cancelled between turns")
             return

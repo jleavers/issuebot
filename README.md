@@ -379,9 +379,13 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   right value is yours to pick and the checked-in `5.0` is only a starting point: on an API
   key it is real money and a tight cap is a real guard, while on a Claude subscription there
   is no per-token charge and the cap acts as a cheap-and-cheerful effort limit instead, so a
-  larger number costs nothing but a longer leash. A turn that hits the cap ends as
-  `budget_exceeded` and counts as a failed attempt. The dashboard and the `run_ended` Slack
-  line (opt in via `notifications.slack.events`) show each run's cost.
+  larger number costs nothing but a longer leash. The cap ends the turn, not the run: the
+  turn is recorded as `budget_exceeded`, and the next one resumes the same Claude session
+  with a fresh cap rather than failing the attempt, which would start a replacement session
+  from cold and pay the cap again to reach what this one had already pushed. A run whose
+  every turn hits the cap therefore stops at `agent.max_turns` and is escalated like any
+  other. The dashboard and the `run_ended` Slack line (opt in via
+  `notifications.slack.events`) show each run's cost.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
 - **Configuration changes.** A running worker re-reads `WORKFLOW.md` when it changes.
