@@ -10,8 +10,8 @@ Python 3.14 with `uv`; `src` layout; package `issuebot`.
 uv sync                              # create .venv and install (uses uv.lock)
 uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
-docker compose up -d db              # a local postgres:18; host port from ISSUEBOT_DB_PORT (5434 here)
-docker compose port db 5432          # confirm that port before using it in a URL below
+docker compose up -d db              # a local postgres:18 on ISSUEBOT_DB_PORT (5434 here, from the env file)
+docker compose port db 5432          # -> 127.0.0.1:5434; the 5432 is inside the container, not the host
 DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5434/issuebot uv run pytest   # + the DB tests
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
@@ -32,12 +32,17 @@ docker compose up                    # db (postgres:18) + worker (issuebot worke
 ```
 
 **Do not pass `ISSUEBOT_DB_PORT=...` inline to `docker compose`.** The port belongs to the
-project's env file (5432 in `.env.example`, 5434 on this host, because 5432 is taken here),
-and compose reads it from there on its own. An inline value that disagrees with it is a
-different published port, which makes compose *recreate* a `db` container that may be live
-and serving the worker and the web. `docker compose port db 5432` is the way to ask what
-the running container actually published; the DB tests create a schema per test, so they
-are safe to point at it.
+project's env file (5432 in `.env.example`, 5434 on this host) and compose reads it from
+there on its own. An inline value that disagrees with the configured one is a different
+*published* port, so compose recreates the `db` container -- which may be live and serving
+the worker and the web.
+
+5434 is neither arbitrary nor a collision: this host runs a database per project, and
+`docker ps` shows 5432, 5433 and 5435 held by three of the others, so 5434 is issuebot's
+own. Leave it there. To read it back rather than trust this document, `docker compose port
+db 5432` prints the host mapping -- and that 5432 is the port *inside* the container, where
+postgres listens whatever the host publishes. The DB tests create a schema per test, so
+pointing them at the running container is safe.
 
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
 a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
