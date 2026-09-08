@@ -206,20 +206,23 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
   color: var(--muted);
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
 }
-/* Hover moves the border, not the ink. --accent is a mark here, not text: it is 4.20:1 on
- * the card's --bg in light, over the 3:1 mark floor but under the 4.5:1 one the chip's
- * digits are held to, so lighting the border keeps the label at --muted where it is
- * legible. The underline `a:hover` would otherwise add is dropped for the same reason the
- * border is the shape here: a rule under the text would cut across the box. */
+/* Hover moves the border, not the ink. --accent is a mark here, not text: 4.20:1 on the
+ * card's --bg and 4.50:1 on a panel in light, over the 3:1 mark floor either way but only
+ * just over the 4.5:1 one the chip's digits are held to, so lighting the border keeps the
+ * label at --muted where it is legible on both. The underline `a:hover` would otherwise
+ * add is dropped for the same reason the border is the shape here: a rule under the text
+ * would cut across the box. */
 a.chip:hover { border-color: var(--accent); text-decoration: none; }
 a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /*
  * The reference itself: the chip pinned left and out of the way, the title carrying the
- * weight. `inline-flex` is the table's case, where the row may carry a marker after the
- * link ((rework), (resumed)) that has to stay on the same line; the card overrides it to
- * a block `flex` below, because there the link is the whole width of the card. Aligning
- * on the baseline puts the chip beside the first line of a title that wraps - the card
- * cannot do that and says why below.
+ * weight. `inline-flex` because in a table cell the link is content, not the width of the
+ * cell: it shrinks to what it holds, so the markers the Running row puts after it
+ * ((rework), (resumed)) sit beside it rather than under a full-width block. An inline-flex
+ * box is atomic, so once the title inside it wraps the markers go below it - which is the
+ * right place for them, and the card overrides the display anyway, being the one surface
+ * where the link *is* the full width and nothing follows it. Aligning on the baseline puts
+ * the chip beside the first line of a title that wraps; the card cannot and says why below.
  */
 .issue-ref { display: inline-flex; align-items: baseline; gap: 7px; max-width: 100%; color: var(--ink); }
 .issue-ref .text { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
@@ -281,10 +284,11 @@ a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .column.review .card { box-shadow: inset 3px 0 0 var(--review); }
 .column.rework .card { box-shadow: inset 3px 0 0 var(--rework); }
 .column.complete .card { box-shadow: inset 3px 0 0 var(--complete); }
-/* the title is the card's own target, so only the title may light the card up: a plain
+/* the reference is the card's own target, so only it may light the card up: a plain
  * .card:hover would promise a click on the meta row and the padding as well, and the
- * pull request chip is a link off the dashboard rather than a click on this card */
-.card:has(.title:hover) { border-color: var(--accent); }
+ * pull request chip is a link off the dashboard rather than a click on this card. The
+ * chip inside the reference is not itself an .issue-ref, so it cannot match here. */
+.card:has(.issue-ref:hover) { border-color: var(--accent); }
 
 /* The card's own overrides of .issue-ref above; everything else it needs is shared.
  *
@@ -295,11 +299,11 @@ a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
  * = 19px, against 14px x 1.35 = 18.9px) puts it beside the first line and keeps it
  * there however many lines follow. Block `flex` rather than the shared `inline-flex`,
  * because the link is the full width of the card and nothing follows it on the line. */
-.card .title { display: flex; align-items: flex-start; }
+.card .issue-ref { display: flex; align-items: flex-start; }
 /* three lines, then an ellipsis: a long title must not stretch the 180px column it sits
  * in. The `overflow-wrap: anywhere` that breaks the unspaced strings (a branch name, a
  * URL) is shared, since a table cell needs it just as much. */
-.card .title .text {
+.card .issue-ref .text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
   overflow: hidden;
 }

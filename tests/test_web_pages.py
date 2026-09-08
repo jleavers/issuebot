@@ -205,16 +205,18 @@ def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
 
 
 def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
-    """(rework) and (resumed) sit outside the <a>, so they must not drop to a new line.
+    """(rework) and (resumed) sit outside the <a>, so the link must not be a block.
 
-    That is what `inline-flex` on .issue-ref buys, against the block `flex` the card
-    overrides it with - the one place the two surfaces genuinely differ.
+    `inline-flex` shrinks it to its contents, which puts the markers beside a title that
+    fits on one line (an inline-flex box is atomic, so a title long enough to wrap pushes
+    them below it, which is where they belong). The card overrides the display to a block
+    `flex`, being the one surface where the link is the full width and nothing follows it.
     """
     h.queries.snapshot_row = snapshot(running=(running_row(rework=True, resumed=True),))
     text = html(h.client.get("/partials/dashboard"))
     assert '</a> <span class="muted">(rework)</span> <span class="muted">(resumed)</span>' in text
     assert css_declarations(".issue-ref {")["display"] == "inline-flex"
-    assert css_declarations(".card .title {")["display"] == "flex"
+    assert css_declarations(".card .issue-ref {")["display"] == "flex"
 
 
 def test_the_running_title_is_still_escaped(h: Harness) -> None:
@@ -229,9 +231,8 @@ def test_one_rule_gives_the_card_and_the_tables_their_hover_and_focus() -> None:
     """The states are on .issue-ref, not on .card .title, or the tables would not get them."""
     assert ".issue-ref:hover { color: var(--accent); text-decoration: none; }" in CSS
     assert ".issue-ref:hover .text { text-decoration: underline; }" in CSS
-    assert ".card .title:hover" not in CSS and ".card .title:focus-visible" not in CSS
-    # the card's own hover still keys on .title, which is the class it still carries
-    assert ".card:has(.title:hover) {" in CSS
+    assert ".card .title" not in CSS, "`title` is gone; .issue-ref is the one hook"
+    assert ".card:has(.issue-ref:hover) {" in CSS
 
 
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
@@ -257,7 +258,7 @@ def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
     text = html(h.client.get("/partials/dashboard"))
     assert (
-        '<a class="issue-ref title" href="/issues/23">'
+        '<a class="issue-ref" href="/issues/23">'
         '<span class="chip">#23</span>'
         '<span class="text">Add a status badge to the README</span></a>'
     ) in text
@@ -352,7 +353,7 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
 
 def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
     """The chips and the title are their own elements; the CSP forbids styling them inline."""
-    assert ".chip {" in CSS and ".issue-ref .text {" in CSS and ".card .title .text {" in CSS
+    assert ".chip {" in CSS and ".issue-ref .text {" in CSS and ".card .issue-ref .text {" in CSS
     assert ' style="' not in html(h.client.get("/partials/dashboard"))
 
 
@@ -362,7 +363,7 @@ def test_a_long_card_title_cannot_stretch_its_column() -> None:
     The standard `line-clamp` is checked as a whole declaration: as a bare substring it is
     also inside `-webkit-line-clamp`, so it could be deleted with the test still green.
     """
-    declarations = css_declarations(".card .title .text {")
+    declarations = css_declarations(".card .issue-ref .text {")
     assert declarations["-webkit-line-clamp"] == "3"
     assert declarations["line-clamp"] == "3", "the standard property must ship beside the prefix"
     assert declarations["overflow"] == "hidden"
@@ -376,7 +377,7 @@ def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
     Aligning the two on the baseline would therefore drop the chip to the last line of a
     wrapped title - the case the clamp exists for. They are aligned to the top instead.
     """
-    assert css_declarations(".card .title {")["align-items"] == "flex-start"
+    assert css_declarations(".card .issue-ref {")["align-items"] == "flex-start"
 
 
 def test_an_issue_reference_is_reachable_by_keyboard() -> None:
@@ -385,8 +386,12 @@ def test_an_issue_reference_is_reachable_by_keyboard() -> None:
 
 
 def test_only_the_link_lights_the_card_up() -> None:
-    """A bare .card:hover would offer a click on the meta row and the padding as well."""
-    assert ".card:has(.title:hover) {" in CSS
+    """A bare .card:hover would offer a click on the meta row and the padding as well.
+
+    The chip inside the reference is not itself an .issue-ref, so the pull request chip -
+    a link off the dashboard rather than a click on this card - cannot match either.
+    """
+    assert ".card:has(.issue-ref:hover) {" in CSS
     assert ".card:hover {" not in CSS
 
 

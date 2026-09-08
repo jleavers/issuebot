@@ -203,17 +203,20 @@ def test_the_issue_reference_and_the_card_name_no_colour_of_their_own() -> None:
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
-def test_the_chip_hover_border_clears_the_mark_floor_on_both_surfaces(
-    theme: dict[str, str],
-) -> None:
-    """`a.chip:hover` lights the border to --accent wherever the chip is drawn.
+def test_a_hovered_issue_reference_is_text_on_the_panel(theme: dict[str, str]) -> None:
+    """`.issue-ref:hover` paints the title --accent, and in a table that lands on --panel.
 
-    On a card that is --bg, and in the tables --panel; the ink stays --muted either way,
-    which is why the hover is a mark measurement and not a text one.
+    This is the one new colour pairing the shared reference introduces: everywhere else
+    --accent is a mark (a border, an outline, a bar) held to 3:1, but a hovered title is
+    body text and owes the 4.5:1 floor. Light clears it by 0.0002, so the assertion is
+    doing real work: a single step of either token would take it under.
+
+    The card's copy of the same hover lands on --bg instead, where --accent is 4.20:1 and
+    under this floor. That predates the change and is not touched by it - the card hovered
+    its title to --accent before the rule was shared - and is filed as its own issue.
     """
-    for surface in ("--bg", "--panel"):
-        ratio = contrast(theme["--accent"], theme[surface])
-        assert ratio >= MARK_FLOOR, f"--accent on {surface} is {ratio:.2f}:1"
+    ratio = contrast(theme["--accent"], theme["--panel"])
+    assert ratio >= TEXT_FLOOR, f"--accent on --panel is {ratio:.4f}:1"
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
@@ -243,7 +246,9 @@ def test_the_number_chip_is_drawn_by_its_border(theme: dict[str, str], surface: 
     does not carry the number, and the digits themselves are held to the text floor.
 
     Both surfaces, because one rule now draws the chip on a card (--bg) and in the
-    Running and Retrying tables, which are .panel (--panel).
+    Running and Retrying tables, which are .panel (--panel). The --line half is what is
+    new here; --muted on both is also covered by test_text_clears_the_contrast_floor, and
+    is restated because it is half of why the chip can go without a fill.
     """
     background = theme[surface]
     edge = contrast(theme["--line"], background)
