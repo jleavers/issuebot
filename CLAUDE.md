@@ -53,7 +53,8 @@ floor, not the shipped version, and moves by hand.
   merged linked PR, `no_change` when the issue carries `github.labels.no_fault` — the marker a
   no-fault session adds beside `review` — and `cancelled` otherwise. The marker is deliberately
   outside `GitHubLabels.as_tuple()`, which is what `clear_state` strips, so it survives the move
-  to `complete`; both adapters ensure it and report it missing alongside the five roles); frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
+  to `complete`; both adapters ensure it and report it missing alongside the five roles);
+  frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
@@ -206,8 +207,7 @@ floor, not the shipped version, and moves by hand.
   `tests/test_web_theme.py`.
 - `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
-  the five state labels,
-  a `claude --version` floor of 2.1.259, the `claude auth status --json` probe (shared with the
+  the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json` probe (shared with the
   worker's startup, see `issuebot.agent`) that names the credential the agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is

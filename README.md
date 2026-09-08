@@ -19,8 +19,9 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
 
 - **One `WORKFLOW.md` is one worker watching one repository.** Nothing is installed in the
   target repository: it only needs the five `issuebot/*` state labels and the `issuebot/no-fault`
-  marker, which `issuebot labels ensure` creates. To work on several repositories, run one self-contained stack per repository
-  (see "More than one repository" below); there is no shared dashboard.
+  marker, which `issuebot labels ensure` creates. To work on several repositories, run one
+  self-contained stack per repository (see "More than one repository" below); there is no
+  shared dashboard.
 - `WORKFLOW.md` has two parts. The YAML front matter is the configuration; everything after
   it is the prompt the agent receives, a Jinja2 template that works unchanged for any
   repository. Secrets never go in the file: a field is either omitted (and the well-known
