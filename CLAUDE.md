@@ -245,7 +245,7 @@ anything reading or writing issue state goes through these:
 |---|---|
 | `issuebot/todo` | human |
 | `issuebot/in-progress` | agent, when work starts |
-| `issuebot/review` | agent, when PR opened |
+| `issuebot/review` | agent, when PR opened or no fault found |
 | `issuebot/rework` | human, if the PR needs more work |
 | `issuebot/complete` | automatically, when the issue closes via linked-PR merge |
 

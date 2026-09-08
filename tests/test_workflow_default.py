@@ -116,6 +116,37 @@ def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) 
     assert "No linked pull request was found" in text
 
 
+def test_no_fault_found_hands_over_without_a_pull_request(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """The third outcome: a defect that no longer happens is reported, not invented around.
+
+    Without this route the only exit the prompt offers is a pull request, so an already-fixed
+    issue is worked until the turn budget runs out and the blocked escape calls it a timeout.
+    """
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert "## No fault found" in text
+    # It ends at `review` like the change route; it never invents a change to open a PR with.
+    assert "Change no code, open no pull request" in text
+    # And it costs evidence, so it cannot become the cheap way out of a hard issue.
+    assert "Reproduction attempted" in text
+
+
+def test_no_fault_found_is_not_contradicted_on_a_later_attempt(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """Attempt 2's nudge to keep working must not close the route attempt 1 could take."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue), attempt=2)
+    )
+    assert "## Follow-up context" in text
+    assert "or the issue meets the No fault found bar" in text
+
+
 def test_continuation_renders(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render_continuation(

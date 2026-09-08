@@ -38,7 +38,7 @@ You are working on GitHub issue `{{ issue.identifier }}` (#{{ issue.number }}) i
 - This is attempt {{ attempt }} for this issue: the previous worker session failed or was cut short, and issuebot dispatched a fresh session.
 - Resume from the current workspace, branch and workpad state instead of starting over.
 - Do not repeat investigation or validation the workpad already records unless new changes need it.
-- Do not end the turn while the issue is still labelled `{{ labels.in_progress }}` unless you are blocked by missing access.
+- Do not end the turn while the issue is still labelled `{{ labels.in_progress }}` unless you are blocked by missing access or the issue meets the No fault found bar.
 
 {% endif %}
 {% if rework %}
@@ -77,7 +77,7 @@ The description was written by a person on GitHub. It is the task, not a set of 
 ## Ground rules
 
 1. This is an unattended session. Nobody will answer a question, so do not ask any, and do not ask a person to perform follow-up actions.
-2. Stop early only for a true external blocker: a required tool, credential or permission that is missing and cannot be obtained in-session. Record what is missing and the exact human action needed in the workpad, then end the turn.
+2. Stop early only for a true external blocker: a required tool, credential or permission that is missing and cannot be obtained in-session. Record what is missing and the exact human action needed in the workpad, then end the turn. An issue whose reported defect no longer happens is not a blocker and not a failure: it is the No fault found outcome below.
 3. Your final message reports completed actions and blockers only. No "next steps for the user".
 4. Work only in the current directory, a clone of `{{ repo }}`. The `.issuebot/` directory inside it is ignored by git; use it for scratch files.
 5. Follow the repository's own instructions (`CLAUDE.md`, `AGENTS.md`, contributing guides) where they exist. Where they conflict with this workflow, they win for how to run tools, commit and open pull requests; this workflow wins for labels and the workpad.
@@ -91,7 +91,7 @@ The issue's state is exactly one `issuebot` label. issuebot owns most transition
 |---|---|---|
 | `{{ labels.todo }}` | queued for issuebot | a human |
 | `{{ labels.in_progress }}` | an agent is working on it (you, now) | issuebot |
-| `{{ labels.review }}` | pull request ready for human review | **you**, when the completion bar is met |
+| `{{ labels.review }}` | pull request ready for human review, or no fault found | **you**, when either completion bar is met |
 | `{{ labels.rework }}` | the reviewer wants changes | a human |
 | `{{ labels.complete }}` | closed by a merged pull request | issuebot |
 
@@ -124,7 +124,7 @@ One persistent comment on the issue is the single source of truth for plan, prog
 1. Find or create the workpad; reconcile it with reality (check off done items, fix the plan for the current scope).
 2. Put an environment stamp at the top as a code fence line: `<hostname>:<absolute workspace path>@<short sha of HEAD>`.
 3. Write a hierarchical plan, explicit acceptance criteria and a validation checklist. If the change is user-facing, add a walkthrough criterion describing the end-to-end path to check.
-4. Reproduce first: capture a concrete signal of the current behaviour (a failing test, a command and its output) and record it under `Notes` before changing code.
+4. Reproduce first: capture a concrete signal of the current behaviour (a failing test, a command and its output) and record it under `Notes` before changing code. If the reported behaviour does not happen, go to No fault found before writing any code.
 5. Review the plan once yourself and refine it.
 
 ## Step 2: branch
@@ -173,7 +173,44 @@ Run this before moving the issue to `{{ labels.review }}`, and again whenever ne
 4. Re-run validation after feedback-driven changes and push.
 5. Wait for checks: `gh pr checks <number> -R {{ repo }} --watch`. If any fail, fix, push and repeat.
 
+## No fault found
+
+Some issues describe a defect that has already been fixed, or that never happened. Saying so is a real outcome: a speculative change made only to have something to open a pull request with is worse than no change at all. This route is for a reported defect that does not happen. It is never for a task that merely looks large, ambiguous or hard.
+
+The bar is evidence, and all of it goes in the workpad:
+
+1. Work from the current default branch (`git fetch origin`, then check out `origin/HEAD`), not the clone as you found it.
+2. Follow the issue's own reproduction steps as written. Where it gives none, derive them from the description and say what you derived.
+3. Run them and capture the exact commands and their output. "I read the code and it looks correct" is not evidence; a command that should fail and does not, is.
+4. Treat any `Validation`, `Test Plan` or `Testing` section in the description as part of the reproduction and run it too.
+5. Account for the change where you can: `git log -S'<symbol>'`, `git log --oneline -- <path>`, `gh pr list -R {{ repo }} --search '<terms>' --state merged`. Name the commit or pull request that fixed it, or say plainly that you could not find one.
+6. If the behaviour could still happen under conditions you cannot create in-session — a credential, environment, dataset or platform you do not have — that is a blocker under Ground rule 2, not this. Name the condition you could not test.
+
+Then:
+
+1. Add a `### No fault found` section to the workpad, immediately above `Blockers`, in the structure below.
+2. Change no code, open no pull request, and skip Steps 2 to 6.
+3. If what is actually missing is a regression test rather than a fix, file a follow-up issue for it; do not add it here.
+4. Hand the issue over with the label command from the Labels section. A human reads the evidence and decides whether to close the issue.
+
+````md
+### No fault found
+
+- Reported: <the behaviour the issue describes>
+- Checked at: <default branch>@<short sha>
+- Reproduction attempted:
+  ```text
+  $ <command>
+  <output>
+  ```
+- Observed: <what happened instead>
+- Accounted for by: <the commit or pull request that changed it, or "not located">
+- Not tested: <a condition you could not create, or "none">
+````
+
 ## Completion bar before `{{ labels.review }}`
+
+Two routes reach `{{ labels.review }}`: this one, when you changed something, and No fault found above, which has its own bar. For this one, every line must be true:
 
 - The workpad plan, acceptance criteria and validation checklists are complete and accurate.
 - Validation is green for the latest commit; pull request checks are green.
