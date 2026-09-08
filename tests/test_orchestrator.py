@@ -1290,6 +1290,22 @@ async def test_reconcile_cancels_a_closed_unmerged_issue(tmp_path: Path) -> None
     assert h.orchestrator.snapshot().counters.issues_cancelled == 1
 
 
+async def test_reconcile_completes_a_closed_no_fault_issue(tmp_path: Path) -> None:
+    """The #34 case end to end: closing a no-fault handoff counts, and keeps a state label."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "review", extra_labels=("issuebot/no-fault",))
+    h.github.close_issue(1)
+    await h.tick()
+    await h.drain()
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.recorder.of(IssueCancelled) == []
+    completed = h.recorder.of(IssueCompleted)
+    assert len(completed) == 1
+    assert (completed[0].resolution, completed[0].pr_url) == ("no_change", None)
+    counters = h.orchestrator.snapshot().counters
+    assert (counters.issues_completed, counters.issues_cancelled) == (1, 0)
+
+
 async def test_reconcile_releases_a_missing_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -93,13 +93,21 @@ The issue's state is exactly one `issuebot` label. issuebot owns most transition
 | `{{ labels.in_progress }}` | an agent is working on it (you, now) | issuebot |
 | `{{ labels.review }}` | pull request ready for human review, or no fault found | **you**, when either completion bar is met |
 | `{{ labels.rework }}` | the reviewer wants changes | a human |
-| `{{ labels.complete }}` | closed by a merged pull request | issuebot |
+| `{{ labels.complete }}` | closed by a merged pull request, or closed after no fault was found | issuebot |
 
-To hand the issue to review, run exactly:
+To hand the issue to review with a pull request, run exactly:
 
 ```
 gh issue edit {{ issue.number }} -R {{ repo }} --add-label "{{ labels.review }}" --remove-label "{{ labels.in_progress }}"
 ```
+
+To hand it over on the No fault found route instead, add the marker label in the same command:
+
+```
+gh issue edit {{ issue.number }} -R {{ repo }} --add-label "{{ labels.review }}" --add-label "{{ labels.no_fault }}" --remove-label "{{ labels.in_progress }}"
+```
+
+`{{ labels.no_fault }}` is not a state: it records *why* there is no pull request, so that when a human closes the issue issuebot can tell your investigation from an abandonment. Add it only when the No fault found bar below is met.
 
 Never add or remove any other state label, never close the issue, and never put a state label on an issue you create.
 
@@ -191,7 +199,7 @@ Then:
 1. Add a `### No fault found` section to the workpad, immediately above `Blockers`, in the structure below.
 2. Change no code, open no pull request, and skip Steps 2 to 6.
 3. If what is actually missing is a regression test rather than a fix, file a follow-up issue for it; do not add it here.
-4. Hand the issue over with the label command from the Labels section. A human reads the evidence and decides whether to close the issue.
+4. Hand the issue over with the No fault found label command from the Labels section — the one that adds `{{ labels.no_fault }}`. A human reads the evidence and decides whether to close the issue.
 
 ````md
 ### No fault found

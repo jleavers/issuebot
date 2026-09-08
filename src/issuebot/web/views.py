@@ -450,6 +450,8 @@ def describe_event(event: EventRow) -> str:
     if kind == "blocked":
         return f"blocked: {payload.get('reason', '?')}"
     if kind == "issue_completed":
+        if payload.get("resolution") == "no_change":
+            return "completed: no change needed"
         return _with_pr("completed", payload.get("pr_url"))
     if kind == "issue_cancelled":
         return f"cancelled: {payload.get('reason', '?')}"

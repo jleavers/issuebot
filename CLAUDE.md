@@ -16,7 +16,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./WORKFLOW.md and check the environment
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
-uv run issuebot labels ensure        # create/update the five state labels in github.repo
+uv run issuebot labels ensure        # create/update the state labels and markers in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
 uv run issuebot run-once <number>    # one worker session in the foreground (--show-prompt renders only)
 uv run issuebot worker               # the long-running orchestrator; SIGTERM or Ctrl-C stops it
@@ -48,8 +48,15 @@ floor, not the shipped version, and moves by hand.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
   (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
   carries the run's log directory.
-- `issuebot.github`: `StateLabel` roles, the transition table and `model_label_style`
-  (`state.py`); frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
+- `issuebot.github`: `StateLabel` roles, the transition table, `model_label_style` and
+  `marker_label_styles` (`state.py`; `classify_closed(issue, labels)` returns `complete` for a
+  merged linked PR, `no_change` when the issue carries `github.labels.no_fault` — the marker a
+  no-fault session adds beside `review` — and `cancelled` otherwise. The marker is deliberately
+  outside `GitHubLabels.as_tuple()`, which is what `clear_state` strips, so it survives the move
+  to `complete`; `set_state(..., clear_markers=True)` is the one caller that does strip it, which
+  is how `claim` makes the marker the *last* session's verdict rather than a label nothing ever
+  removes; both adapters ensure it and report it missing alongside the five roles);
+  frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
@@ -82,8 +89,12 @@ floor, not the shipped version, and moves by hand.
   `RetryEntry`, `DispatchHold`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
   attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
-  otherwise, plus `PrOpened`). `actions.py`: `claim`, `blocked_escape` (workpad block then
-  `review`, idempotent per run id), `finish_terminal` (complete or cancelled, workspace removed).
+  otherwise, plus `PrOpened`). `actions.py`: `claim` (`in_progress`, markers cleared),
+  `blocked_escape` (workpad block then
+  `review`, idempotent per run id), `finish_terminal` (`complete`, `no_change` or `cancelled`,
+  workspace removed; the first two both rest in the `complete` label and publish
+  `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
+  counts include triage, and only a genuine abandonment still clears the label).
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
@@ -214,16 +225,18 @@ floor, not the shipped version, and moves by hand.
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
 - `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
-  adapter, the labels one covering `claude.model_labels` as well as the five state labels,
-  a `claude --version` floor of 2.1.259, the `claude auth status --json` probe (shared with the
-  worker's startup, see `issuebot.agent`) that names the credential the agent would use (`claude.ai`,
+  adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
+  the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
+  probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the
+  agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
   `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
   and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
-  `labels ensure` (the five state labels plus one per `claude.model_labels` entry),
+  `labels ensure` (the five state labels, the `no_fault` marker, and one per
+  `claude.model_labels` entry),
   `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
   runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
   `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
@@ -264,7 +277,8 @@ anything reading or writing issue state goes through these:
 | `issuebot/in-progress` | agent, when work starts |
 | `issuebot/review` | agent, when PR opened or no fault found |
 | `issuebot/rework` | human, if the PR needs more work |
-| `issuebot/complete` | automatically, when the issue closes via linked-PR merge |
+| `issuebot/no-fault` | agent, beside `review`, when it found no fault (a marker, not a state) |
+| `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault` |
 
 GitHub is reached through the `gh` CLI, not a REST/GraphQL client library.
 

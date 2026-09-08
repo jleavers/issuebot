@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
+from issuebot.config import GitHubLabels
 from issuebot.github.models import Issue, StateLabel
 
 
@@ -13,7 +14,7 @@ class Actor(StrEnum):
     AGENT = "agent"
 
 
-ClosedOutcome = Literal["complete", "cancelled"]
+ClosedOutcome = Literal["complete", "no_change", "cancelled"]
 
 ACTIVE_STATES: frozenset[StateLabel] = frozenset(
     {StateLabel.TODO, StateLabel.REWORK, StateLabel.IN_PROGRESS}
@@ -47,8 +48,19 @@ LABEL_STYLES: dict[StateLabel, LabelStyle] = {
     StateLabel.IN_PROGRESS: LabelStyle("FBCA04", "An issuebot agent is working on it"),
     StateLabel.REVIEW: LabelStyle("1D76DB", "PR opened; waiting for human review"),
     StateLabel.REWORK: LabelStyle("D93F0B", "Reviewer wants changes; issuebot will pick it up"),
-    StateLabel.COMPLETE: LabelStyle("5319E7", "Closed by a merged issuebot PR"),
+    StateLabel.COMPLETE: LabelStyle(
+        "5319E7", "Closed by a merged issuebot PR, or after issuebot found no fault"
+    ),
 }
+
+NO_FAULT_LABEL_STYLE = LabelStyle(
+    "C5DEF5", "issuebot investigated and found nothing to fix; no PR was opened"
+)
+
+
+def marker_label_styles(labels: GitHubLabels) -> dict[str, LabelStyle]:
+    """The non-state labels issuebot owns, keyed by their configured names."""
+    return {labels.no_fault: NO_FAULT_LABEL_STYLE}
 
 
 MODEL_LABEL_COLOR = "BFD4F2"
@@ -78,7 +90,24 @@ def next_state_for(issue: Issue) -> StateLabel | None:
     return None
 
 
-def classify_closed(issue: Issue) -> ClosedOutcome:
-    """A closed issue is complete only when a linked pull request was merged."""
+def carries_no_fault(issue: Issue, labels: GitHubLabels) -> bool:
+    """True when the session's no-fault marker is on the issue (``Issue.labels`` is lowered)."""
+    return labels.no_fault.strip().lower() in issue.labels
+
+
+def classify_closed(issue: Issue, labels: GitHubLabels) -> ClosedOutcome:
+    """How a closed issue was resolved: a merged PR, an investigation, or neither.
+
+    A merged linked pull request is ``complete`` however the issue is labelled. Failing that,
+    the no-fault marker means a session's investigation is the delivered value, so the close is
+    ``no_change`` rather than an abandonment. Everything else is ``cancelled``, as before.
+
+    The marker is trusted whatever pull requests the issue has linked, because ``claim`` clears
+    it: it is always the verdict of the *last* session, and a session that opened a pull request
+    does not add it. So an unmerged pull request under the marker is an earlier attempt that the
+    investigation superseded, not evidence of an abandonment.
+    """
     pr = issue.linked_pr
-    return "complete" if pr is not None and pr.state == "merged" else "cancelled"
+    if pr is not None and pr.state == "merged":
+        return "complete"
+    return "no_change" if carries_no_fault(issue, labels) else "cancelled"

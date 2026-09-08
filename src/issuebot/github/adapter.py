@@ -37,7 +37,9 @@ class GitHubAdapter(Protocol):
         """Closed issues that still carry any state label."""
         ...
 
-    async def set_state(self, number: int, state: StateLabel) -> None:
+    async def set_state(
+        self, number: int, state: StateLabel, *, clear_markers: bool = False
+    ) -> None:
         """Add the target state label and remove every other state label."""
         ...
 
@@ -54,7 +56,7 @@ class GitHubAdapter(Protocol):
     async def ensure_labels(
         self, extra: Mapping[str, LabelStyle] | None = None
     ) -> list[LabelEnsured]:
-        """Create or update the five state labels and any extra ones; idempotent."""
+        """Create or update the state labels, the markers and any extra ones; idempotent."""
         ...
 
     async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:

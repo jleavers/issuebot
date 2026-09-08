@@ -21,10 +21,12 @@ from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
 from issuebot.github.state import (
     ACTIVE_STATES,
     LABEL_STYLES,
+    NO_FAULT_LABEL_STYLE,
     TERMINAL_STATES,
     TRANSITIONS,
     Actor,
     LabelStyle,
+    carries_no_fault,
     classify_closed,
     is_active,
     is_allowed,
@@ -36,6 +38,7 @@ from issuebot.github.state import (
 __all__ = [
     "ACTIVE_STATES",
     "LABEL_STYLES",
+    "NO_FAULT_LABEL_STYLE",
     "TERMINAL_STATES",
     "TRANSITIONS",
     "WORKPAD_MARKER",
@@ -57,6 +60,7 @@ __all__ = [
     "RateLimit",
     "RepoInfo",
     "StateLabel",
+    "carries_no_fault",
     "classify_closed",
     "is_active",
     "is_allowed",

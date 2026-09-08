@@ -196,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     labels = subparsers.add_parser("labels", help="manage the issuebot state labels")
     labels_sub = labels.add_subparsers(dest="labels_command", metavar="<subcommand>", required=True)
     ensure = labels_sub.add_parser(
-        "ensure", help="create or update the five state labels in the repository"
+        "ensure", help="create or update the state labels and markers in the repository"
     )
     _add_workflow_option(ensure)
     ensure.set_defaults(func=cmd_labels_ensure)
@@ -367,11 +367,19 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
 
 def _labels_detail(adapter: GitHubAdapter, model_labels: Sequence[str]) -> str:
     """What `validate` says when every label the workflow names exists."""
-    state = f"{len(adapter.labels.as_tuple())} state labels"
-    if not model_labels:
-        return f"{state} present"
-    plural = "" if len(model_labels) == 1 else "s"
-    return f"{state} and {len(model_labels)} model label{plural} present"
+    markers = adapter.labels.markers()
+    parts = [f"{len(adapter.labels.as_tuple())} state labels"]
+    if markers:
+        parts.append(_plural(len(markers), "marker label"))
+    if model_labels:
+        parts.append(_plural(len(model_labels), "model label"))
+    if len(parts) == 1:
+        return f"{parts[0]} present"
+    return f"{', '.join(parts[:-1])} and {parts[-1]} present"
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _token_check(workflow: Workflow) -> Check:

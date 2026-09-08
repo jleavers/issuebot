@@ -79,10 +79,18 @@ class Blocked(IssueEvent):
     reason: str
 
 
+CompletionResolution = Literal["merged_pr", "no_change"]
+
+
 @dataclass(frozen=True, kw_only=True)
 class IssueCompleted(IssueEvent):
+    """A closed issue issuebot counts as done: a merged PR, or an investigation finding no fault."""
+
     kind: ClassVar[str] = "issue_completed"
     pr_url: str | None
+    # The default is for reading back payloads stored before #34, not for callers: every
+    # construction site says which resolution it means.
+    resolution: CompletionResolution = "merged_pr"
 
 
 @dataclass(frozen=True, kw_only=True)

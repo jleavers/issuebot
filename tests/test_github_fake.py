@@ -30,7 +30,7 @@ def fake() -> FakeGitHub:
 def test_repo_and_labels_come_from_settings(fake: FakeGitHub) -> None:
     assert fake.repo == "example/repo"
     assert fake.labels.todo == "issuebot/todo"
-    assert set(fake.repo_labels) == set(SETTINGS.labels.as_tuple())
+    assert set(fake.repo_labels) == {*SETTINGS.labels.as_tuple(), *SETTINGS.labels.markers()}
 
 
 def test_add_issue_produces_normalised_issue(fake: FakeGitHub) -> None:
@@ -175,7 +175,7 @@ async def test_comments_and_workpad(fake: FakeGitHub) -> None:
 
 async def test_ensure_and_missing_labels(fake: FakeGitHub) -> None:
     assert await fake.missing_labels() == []
-    assert [r.outcome for r in await fake.ensure_labels()] == ["unchanged"] * 5
+    assert [r.outcome for r in await fake.ensure_labels()] == ["unchanged"] * 6
     del fake.repo_labels["issuebot/rework"]
     fake.repo_labels["issuebot/review"] = LabelStyle("000000", "old")
     assert await fake.missing_labels() == ["issuebot/rework"]
@@ -202,6 +202,23 @@ async def test_missing_labels_reports_the_extra_names_too(fake: FakeGitHub) -> N
     assert await fake.missing_labels(extra) == []
     del fake.repo_labels["issuebot/rework"]
     assert await fake.missing_labels(extra) == ["issuebot/rework"]
+
+
+async def test_ensure_and_missing_labels_cover_the_no_fault_marker(fake: FakeGitHub) -> None:
+    """The marker is issuebot's too: `labels ensure` creates it and `validate` misses it."""
+    del fake.repo_labels["issuebot/no-fault"]
+    assert await fake.missing_labels() == ["issuebot/no-fault"]
+    outcomes = {r.name: r.outcome for r in await fake.ensure_labels()}
+    assert outcomes["issuebot/no-fault"] == "created"
+    assert await fake.missing_labels() == []
+
+
+async def test_set_state_leaves_the_no_fault_marker_alone(fake: FakeGitHub) -> None:
+    """The marker has to survive the move to `complete`, or the close cannot be classified."""
+    issue = fake.add_issue("A", labels=("issuebot/review", "issuebot/no-fault"))
+    await fake.set_state(issue.number, StateLabel.COMPLETE)
+    assert fake.issue(issue.number).labels == ("issuebot/no-fault", "issuebot/complete")
+    assert fake.issue(issue.number).state is StateLabel.COMPLETE
 
 
 def test_preseed_labels_can_be_disabled() -> None:

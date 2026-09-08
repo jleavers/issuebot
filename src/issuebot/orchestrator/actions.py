@@ -23,16 +23,22 @@ from issuebot.orchestrator.state import (
 )
 
 EscapeOutcome = Literal["applied", "skipped", "failed"]
-FinishOutcome = Literal["complete", "cancelled", "unchanged", "failed"]
+FinishOutcome = Literal["complete", "no_change", "cancelled", "unchanged", "failed"]
 
 CANCEL_REASON = "closed without a merged pull request"
 
 
 async def claim(adapter: GitHubAdapter, bus: EventBus, issue: Issue) -> Issue | None:
-    """Set ``in_progress`` and publish the claim; ``None`` (logged) when GitHub refuses."""
+    """Set ``in_progress`` and publish the claim; ``None`` (logged) when GitHub refuses.
+
+    The claim also drops the markers, so each of them says what *this* session concluded. A
+    no-fault marker left over from an earlier session would otherwise outlive the finding it
+    records: a reworked issue that this session fixes with a pull request would still be
+    labelled "no fault", and ``classify_closed`` could not tell a fresh verdict from a stale one.
+    """
     log = get_logger(__name__)
     try:
-        await adapter.set_state(issue.number, StateLabel.IN_PROGRESS)
+        await adapter.set_state(issue.number, StateLabel.IN_PROGRESS, clear_markers=True)
     except GitHubError as exc:
         log.warning(
             "dispatch_claim_failed",
@@ -138,15 +144,16 @@ async def finish_terminal(
     workspaces: WorkspaceManager,
     issue: Issue,
 ) -> FinishOutcome:
-    """A closed issue: ``complete`` or cancelled, the events, then the workspace removed."""
+    """A closed issue: ``complete``, no-change or cancelled, the events, workspace removed."""
     log = get_logger(__name__)
     outcome: FinishOutcome
     if issue.state is StateLabel.COMPLETE:
         outcome = "unchanged"
     else:
-        outcome = classify_closed(issue)
+        outcome = classify_closed(issue, adapter.labels)
         try:
-            if outcome == "complete":
+            if outcome in ("complete", "no_change"):
+                # Both rest in `complete`: the resolution, not the state, is what differs.
                 await adapter.set_state(issue.number, StateLabel.COMPLETE)
                 bus.publish(
                     StateChanged(
@@ -163,6 +170,7 @@ async def finish_terminal(
                         issue_number=issue.number,
                         issue_identifier=issue.identifier,
                         pr_url=pr_url(issue),
+                        resolution="merged_pr" if outcome == "complete" else "no_change",
                     )
                 )
             else:

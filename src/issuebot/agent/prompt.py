@@ -44,7 +44,10 @@ class PromptContext:
         return {
             "issue": issue_variables(self.issue),
             "repo": self.repo,
-            "labels": {role.value: getattr(self.labels, role.value) for role in StateLabel},
+            "labels": {
+                **{role.value: getattr(self.labels, role.value) for role in StateLabel},
+                "no_fault": self.labels.no_fault,
+            },
             "workpad_marker": WORKPAD_MARKER,
             "attempt": self.attempt,
             "turn_number": self.turn_number,

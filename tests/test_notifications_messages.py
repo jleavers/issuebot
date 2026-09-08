@@ -198,6 +198,14 @@ def test_issue_completed_with_and_without_a_pull_request() -> None:
     assert fmt(without) == f":tada: {ISSUE} complete"
 
 
+def test_issue_completed_with_no_change_reads_differently_from_a_merge() -> None:
+    """An operator watching Slack must not read a no-fault close as a shipped fix."""
+    event = IssueCompleted(
+        issue_number=42, issue_identifier="repo-42", pr_url=None, resolution="no_change"
+    )
+    assert fmt(event) == f":mag: {ISSUE} closed with no change needed"
+
+
 def test_issue_cancelled() -> None:
     event = IssueCancelled(
         issue_number=42, issue_identifier="repo-42", reason="closed without a merged pull request"
