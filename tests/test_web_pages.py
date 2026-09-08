@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
+from importlib.resources import files
 from typing import Any
 
 import pytest
@@ -28,6 +29,21 @@ from issuebot.web.views import (
     stamp_text,
     thousands,
 )
+
+CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
+
+
+def css_declarations(selector: str) -> dict[str, str]:
+    """The declarations of the one rule that starts with ``selector``, property to value."""
+    start = CSS.index(selector)
+    block = CSS[CSS.index("{", start) + 1 : CSS.index("}", start)]
+    found = {}
+    for declaration in block.split(";"):
+        name, sep, value = declaration.partition(":")
+        if sep:
+            found[name.strip()] = value.strip()
+    return found
+
 
 RUN_ID_2 = "20260904T210000Z-abcdef"
 HOSTILE = "<script>alert(1)</script>"
@@ -98,6 +114,68 @@ def test_the_live_partial_marks_a_stale_worker(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(age_s=200.0)
     text = html(h.client.get("/partials/dashboard"))
     assert 'class="panel worker stale"' in text and "3 min ago" in text
+
+
+def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
+    """The number is metadata and the title is the content, so they are separate elements.
+
+    Both stay inside the one link to the issue page, which is what lets the stylesheet lay
+    the chip and the title out as a row without giving up a single click target.
+    """
+    h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
+    text = html(h.client.get("/partials/dashboard"))
+    assert (
+        '<a class="title" href="/issues/23">'
+        '<span class="number">#23</span>'
+        '<span class="text">Add a status badge to the README</span></a>'
+    ) in text
+
+
+def test_the_card_title_is_still_escaped(h: Harness) -> None:
+    """The title moved into a new element; it must not have picked up any markup on the way."""
+    h.queries.groups["todo"] = [issue_row(title=HOSTILE)]
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
+def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
+    """The chip and the title are new elements; the CSP forbids styling them inline."""
+    assert ".card .number {" in CSS and ".card .title .text {" in CSS
+    assert ' style="' not in html(h.client.get("/partials/dashboard"))
+
+
+def test_a_long_card_title_cannot_stretch_its_column() -> None:
+    """A column is a grid track with a 180px floor; an unbroken title would blow past it.
+
+    The standard `line-clamp` is checked as a whole declaration: as a bare substring it is
+    also inside `-webkit-line-clamp`, so it could be deleted with the test still green.
+    """
+    declarations = css_declarations(".card .title .text {")
+    assert declarations["-webkit-line-clamp"] == "3"
+    assert declarations["line-clamp"] == "3", "the standard property must ship beside the prefix"
+    assert declarations["overflow"] == "hidden"
+    assert declarations["overflow-wrap"] == "anywhere"
+
+
+def test_the_chip_stays_beside_the_first_line_of_a_wrapped_title() -> None:
+    """`overflow` makes the title a scroll container, whose baseline is its bottom edge.
+
+    Aligning the two on the baseline would therefore drop the chip to the last line of a
+    wrapped title - the case the clamp exists for. They are aligned to the top instead.
+    """
+    assert css_declarations(".card .title {")["align-items"] == "flex-start"
+
+
+def test_the_card_link_is_reachable_by_keyboard() -> None:
+    """The card is the primary navigation on the dashboard, so its focus must be visible."""
+    assert ".card .title:focus-visible { outline: 2px solid var(--accent);" in CSS
+
+
+def test_only_the_link_lights_the_card_up() -> None:
+    """A bare .card:hover would offer a click on the meta row and the padding as well."""
+    assert ".card:has(.title:hover) {" in CSS
+    assert ".card:hover {" not in CSS
 
 
 def test_the_live_partial_shows_a_config_error(h: Harness) -> None:
