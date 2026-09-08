@@ -1,5 +1,7 @@
 # issuebot
 
+[![CI](https://github.com/jleavers/issuebot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jleavers/issuebot/actions/workflows/ci.yml?query=branch%3Amain)
+
 Bespoke version of https://github.com/openai/symphony using Claude instead of Codex, GitHub instead of Linear, and with the addition of Slack messaging and a web dashboard.
 
 ## How To Get Started
