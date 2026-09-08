@@ -983,6 +983,73 @@ async def test_retry_requeues_when_no_slot_is_free(tmp_path: Path) -> None:
     assert len(h.sessions.runs) == 3
 
 
+async def test_every_retry_kind_carries_the_issue_title(tmp_path: Path) -> None:
+    """A queued retry knows the issue's title, not just its identifier (#42).
+
+    The Retrying table renders it the way the Running table renders a title, so it has to
+    survive every route a retry is queued by: `_schedule` builds one from the `Issue` it is
+    given, and `_requeue` `replace`s an existing entry, which keeps it.
+    """
+    h = Harness(tmp_path, max_concurrent=1, max_attempts=3)
+    h.add_issue(1, "todo", title="Add a power function")
+    await h.tick()
+
+    # continuation: the session reached `review` and the issue is polled once more.
+    h.github.open_pr(1, pr_number=2)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    assert (h.retry(1).kind, h.retry(1).title) == ("continuation", "Add a power function")
+    await h.fire(1)
+
+    # failure: a run that ended badly with attempts left.
+    h.github.human_set_state(1, StateLabel.TODO)
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    assert (h.retry(1).kind, h.retry(1).title) == ("failure", "Add a power function")
+
+    # auth: the requeue of a due retry while the credential is held.
+    h.add_issue(5, "todo", title="Teach the parser about tabs")
+    await h.tick()
+    await h.exit(h.run_for(5), **AUTH_FAILURE)  # defined with the #20 tests further down
+    await h.fire(20)
+    assert (h.retry(1).kind, h.retry(1).title) == ("auth", "Add a power function")
+
+    # slots: the requeue of a due retry with the one agent busy on another issue.
+    h.claude_auth_output = LOGGED_IN
+    h.add_issue(6, "todo", title="Vendor the stylesheet")
+    await h.tick()
+    assert list(h.orchestrator.running) == ["6"]
+    await h.fire(30)
+    assert (h.retry(1).kind, h.retry(1).title) == ("slots", "Add a power function")
+
+
+async def test_an_escape_retry_carries_the_issue_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fifth kind: the blocked escape, both as scheduled and as requeued (#42)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", title="Add a power function")
+    await h.tick()
+    with monkeypatch.context() as patch:
+        h.fail_on("set_state", patch)
+        await h.exit(
+            h.run_for(1), stop_reason="max_turns", final_state=StateLabel.IN_PROGRESS, turns=3
+        )
+    assert (h.retry(1).kind, h.retry(1).title) == ("escape", "Add a power function")
+    with monkeypatch.context() as patch:
+        h.fail_on("set_state", patch)
+        await h.fire(10)
+    assert (h.retry(1).kind, h.retry(1).attempt) == ("escape", 2)
+    assert h.retry(1).title == "Add a power function"
+
+
 async def test_retry_refresh_failure_requeues_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

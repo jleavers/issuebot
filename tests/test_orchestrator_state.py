@@ -214,6 +214,7 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
         identifier="repo-7",
         issue_number=7,
         issue_url="https://github.com/example/repo/issues/7",
+        title="Add a power function",
         attempt=2,
         kind="failure",
         due_mono=30.0,
@@ -246,6 +247,9 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
     assert row["last_activity_at"] is None
     assert data["retrying"][0]["kind"] == "failure"
     assert data["retrying"][0]["due_at"] == NOW.isoformat()
+    # The title rides the snapshot so the Retrying table has something to say about the
+    # issue; the identifier is the number again and says nothing (#42).
+    assert data["retrying"][0]["title"] == "Add a power function"
     assert data["totals"] == {
         "input_tokens": 5,
         "output_tokens": 6,

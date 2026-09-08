@@ -95,6 +95,7 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "issue_identifier": "repo-9",
         "issue_number": 9,
         "issue_url": "https://github.com/example/repo/issues/9",
+        "title": "Retry the flaky import",
         "attempt": 2,
         "kind": "failure",
         "due_at": (NOW + timedelta(seconds=20)).isoformat(),

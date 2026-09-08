@@ -236,13 +236,16 @@ def test_the_running_row_draws_its_issue_the_way_a_card_does(h: Harness) -> None
 
 
 def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
-    """The identical cell one panel below; a styled row above a plain one is the defect."""
+    """The identical cell one panel below; a styled row above a plain one is the defect.
+
+    The `.text` slot holds the issue's title, which is what #42 gave the row to put there.
+    """
     h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
     text = html(h.client.get("/partials/dashboard"))
     assert (
         '<a class="issue-ref" href="/issues/9">'
         '<span class="chip">#9</span>'
-        '<span class="text">repo-9</span></a>'
+        '<span class="text">Retry the flaky import</span></a>'
     ) in text
     assert '<a href="/issues/9">#9</a>' not in text
 
@@ -276,6 +279,46 @@ def test_one_rule_gives_the_card_and_the_tables_their_hover_and_focus() -> None:
     assert ".issue-ref:hover .text { text-decoration: underline; }" in CSS
     assert ".card .title" not in CSS, "`title` is gone; .issue-ref is the one hook"
     assert ".card:has(.issue-ref:hover) {" in CSS
+
+
+def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harness) -> None:
+    """The cell used to read `#9 repo-9`: the identifier is the number again (#42).
+
+    `identifier` is `<repo>-<number>`, so beside a chip that already states the number it
+    said nothing about the issue. The `.text` slot #41 gave the row is a title's slot, and
+    the row carries a title to put in it now; the identifier is not drawn anywhere.
+    """
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
+    text = html(h.client.get("/partials/dashboard"))
+    row = text.split("Retrying", 1)[1].split("</table>", 1)[0]
+    assert '<span class="text">Retry the flaky import</span>' in row
+    assert "repo-9" not in row
+
+
+def test_a_retrying_title_is_escaped(h: Harness) -> None:
+    """The cell used to hold `identifier`, a sanitised `<repo>-<number>` slug (#42).
+
+    It holds a human-written issue title now, so it is the first arbitrary text to reach
+    this row; autoescape covers it, and this is what says so.
+    """
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(title=HOSTILE),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
+def test_a_retrying_row_written_before_the_title_existed(h: Harness) -> None:
+    """A snapshot from an older worker has no title, and the cell must not read `None`.
+
+    The identifier it used to fall back on is gone, and a worker that fails startup never
+    overwrites the snapshot it found - so this is not always one poll interval long.
+    """
+    row = snapshot(retrying=(retry_row(),))
+    del row.data["retrying"][0]["title"]
+    h.queries.snapshot_row = row
+    text = html(h.client.get("/partials/dashboard"))
+    retrying = text.split("Retrying", 1)[1].split("</table>", 1)[0]
+    assert '<span class="text">-</span>' in retrying and "None" not in retrying
 
 
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
