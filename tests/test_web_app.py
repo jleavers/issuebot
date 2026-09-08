@@ -25,6 +25,7 @@ from issuebot.web.views import (
     cost_label,
     describe_event,
     dispatch_hold,
+    limits_unavailable,
     rate_limit_windows,
     safe_href,
     window_days,
@@ -456,6 +457,17 @@ def test_an_unknown_credential_still_shows_a_reading_it_has() -> None:
     row = snapshot(credential="unknown", rate_limits=limits(0.42))
     assert rate_limit_windows(row, NOW)[0]["percent"] == 42
     assert rate_limit_windows(snapshot(credential="unknown"), NOW) == []
+
+
+def test_limits_unavailable_tells_the_two_blank_cases_apart() -> None:
+    """N/A is "never applicable"; the dash is "not yet", and the tooltip says which."""
+    api_key = limits_unavailable(snapshot(credential="api_key"))
+    assert api_key["value"] == "N/A"
+    assert "API key" in api_key["title"]
+    nothing_yet = limits_unavailable(snapshot())
+    assert nothing_yet["value"] == "\u2014"
+    assert "turn" in nothing_yet["title"]
+    assert limits_unavailable(None) == nothing_yet
 
 
 @pytest.mark.parametrize(

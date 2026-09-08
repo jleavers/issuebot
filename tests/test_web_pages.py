@@ -182,15 +182,19 @@ def test_the_limits_tile_is_not_available_on_an_api_key(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(credential="api_key", rate_limits=limits())
     section = hero(html(h.client.get("/partials/dashboard")))
     assert "cost (actual)" in section and "cost (effort)" not in section
-    assert "N/A" in section
+    assert section.count(">N/A<") == 2
+    assert "has no usage windows" in section
     assert 'class="meter"' not in section
     assert section.count('<div class="tile">') == 6
 
 
-def test_the_limits_tile_is_not_available_before_any_reading(h: Harness) -> None:
+def test_the_limits_tile_says_not_yet_before_any_reading(h: Harness) -> None:
+    """A dash, not N/A: nothing has run, rather than nothing can ever apply."""
     h.queries.snapshot_row = snapshot()
     section = hero(html(h.client.get("/partials/dashboard")))
-    assert "N/A" in section and 'class="meter"' not in section
+    assert section.count(">\u2014<") == 2 and "N/A" not in section
+    assert "no reading yet; one arrives while a turn is running" in section
+    assert 'class="meter"' not in section
 
 
 def test_a_window_past_its_reset_draws_an_empty_meter(h: Harness) -> None:
@@ -909,6 +913,10 @@ def test_dashboard_context() -> None:
         "tokens_1d": 220,
         "tokens_7d": 231,
         "limits": [],
+        "limits_unavailable": {
+            "value": "\u2014",
+            "title": "no reading yet; one arrives while a turn is running",
+        },
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
@@ -932,6 +940,7 @@ def test_dashboard_context() -> None:
     assert empty["worker"] == {"status": "none"}
     assert empty["hero"]["cost_7d"] == 0.0 and empty["running"] == []
     assert empty["hero"]["cost_label"] == "cost" and empty["hero"]["limits"] == []
+    assert empty["hero"]["limits_unavailable"]["value"] == "\u2014"
 
 
 def test_dashboard_context_carries_a_held_dispatch() -> None:

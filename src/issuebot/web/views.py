@@ -144,6 +144,25 @@ def _moment(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def limits_unavailable(row: SnapshotRow | None) -> dict[str, str]:
+    """What the limits tile shows instead of a figure, when `rate_limit_windows` gives none.
+
+    The two blank cases are not the same thing and should not look the same: an API key has no
+    usage windows at all, which is permanent, while a worker that has not run a turn yet simply
+    has nothing to report and will fill in on its own. N/A for the first, an em dash for the
+    second, and the tooltip says which.
+    """
+    if row is not None and row.data.get("credential") == "api_key":
+        return {
+            "value": "N/A",
+            "title": "an API key is billed per token and has no usage windows",
+        }
+    return {
+        "value": "\u2014",
+        "title": "no reading yet; one arrives while a turn is running",
+    }
+
+
 def cost_label(row: SnapshotRow | None) -> str:
     """What the cost tile is called: a subscription spends effort, an API key spends money."""
     credential = row.data.get("credential") if row is not None else None
@@ -308,6 +327,7 @@ def dashboard_context(
                 "overflow": max(total - len(rows), 0),
             }
         )
+    limits = rate_limit_windows(row, now)
     return {
         "unavailable": None,
         "worker": worker,
@@ -323,7 +343,8 @@ def dashboard_context(
             "cost_label": cost_label(row),
             "tokens_1d": totals_1d.total_tokens,
             "tokens_7d": totals_7d.total_tokens,
-            "limits": rate_limit_windows(row, now),
+            "limits": limits,
+            "limits_unavailable": None if limits else limits_unavailable(row),
         },
         "running": running,
         "retrying": retrying,

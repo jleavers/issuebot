@@ -3,12 +3,12 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
 
 from issuebot.agent import RunResult
-from issuebot.agent.runner import Credential, RateLimits
+from issuebot.agent.runner import Credential, RateLimits, RateLimitWindow
 from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
@@ -307,6 +307,51 @@ class RuntimeSnapshot:
         data = _jsonable(self)
         data["totals"]["total_tokens"] = self.totals.total_tokens
         return data
+
+
+def rate_limits_from_dict(value: object) -> RateLimits | None:
+    """The inverse of ``to_dict`` for one reading: what a restarting worker inherits.
+
+    A reading only reaches a worker while a turn is running, and it lives in memory, so
+    without this every restart blanks the dashboard's limits tile until the next dispatch --
+    and restarting is how the worker is deployed. The stored column is JSON written by some
+    earlier version of this code, so like every other reader of it this one is total: anything
+    it cannot read is no reading, and the tile says so.
+    """
+    if not isinstance(value, dict):
+        return None
+    observed_at = _moment(value.get("observed_at"))
+    if observed_at is None:
+        return None
+    five_hour = _window_from_dict(value.get("five_hour"))
+    seven_day = _window_from_dict(value.get("seven_day"))
+    if five_hour is None and seven_day is None:
+        return None
+    return RateLimits(five_hour=five_hour, seven_day=seven_day, observed_at=observed_at)
+
+
+def _window_from_dict(value: object) -> RateLimitWindow | None:
+    if not isinstance(value, dict):
+        return None
+    utilization = value.get("utilization")
+    resets_at = _moment(value.get("resets_at"))
+    if (
+        resets_at is None
+        or not isinstance(utilization, int | float)
+        or isinstance(utilization, bool)
+    ):
+        return None
+    return RateLimitWindow(utilization=float(utilization), resets_at=resets_at)
+
+
+def _moment(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _jsonable(value: Any) -> Any:

@@ -16,6 +16,7 @@ import pytest
 from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
+from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.cli import (
     StatsView,
     main,
@@ -28,6 +29,7 @@ from issuebot.cli import (
 from issuebot.config import GitHubLabels, GitHubSettings, Settings
 from issuebot.db import (
     MAX_WINDOW_DAYS,
+    DatabaseError,
     MigrationResult,
     Probe,
     StoreError,
@@ -45,7 +47,9 @@ from issuebot.github import (
 )
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import OrchestratorStartupError
+from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 
+SEED_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
 GOOD = FIXTURES / "good.md"
 INVALID = FIXTURES / "invalid.md"
@@ -2085,6 +2089,78 @@ def test_worker_wires_the_database_when_configured(
     store = fake_database.store_obj
     assert [event.kind for event in store.events] == ["state_changed"]
     assert store.closed
+
+
+def test_worker_seeds_the_orchestrator_with_the_last_stored_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """Restarting is how the worker is deployed, so the limits tile must survive one."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    limits = RateLimits(
+        five_hour=RateLimitWindow(utilization=0.42, resets_at=SEED_AT),
+        seven_day=RateLimitWindow(utilization=0.32, resets_at=SEED_AT),
+        observed_at=SEED_AT,
+    )
+    fake_database.queries_obj.snapshot_row = _snapshot_row(limits)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_rate_limits"] == limits
+
+
+def test_worker_seeds_nothing_when_the_snapshot_has_no_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.snapshot_row = _snapshot_row(None)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_rate_limits"] is None
+
+
+def test_worker_starts_when_the_seed_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """A tile losing its last figure is no reason to refuse to start."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.error = DatabaseError("connection refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_rate_limits"] is None
+
+
+def test_worker_without_a_database_seeds_nothing(
+    tmp_path: Path, stub_orchestrator: type[StubOrchestrator], fake_database: FakeDatabase
+) -> None:
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_rate_limits"] is None
+
+
+def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:
+    data = RuntimeSnapshot(
+        at=SEED_AT,
+        workflow_path="/app/WORKFLOW.md",
+        workflow_mtime_ns=1,
+        config_valid=True,
+        config_error=None,
+        dispatch_hold=None,
+        poll_interval_ms=30_000,
+        max_concurrent_agents=2,
+        tick_count=1,
+        last_tick_at=SEED_AT,
+        running=(),
+        retrying=(),
+        totals=ClaudeTotals(),
+        counters=Counters(),
+        credential="subscription",
+        rate_limits=limits,
+    ).to_dict()
+    return SnapshotRow(at=SEED_AT, written_at=SEED_AT, data=data)
 
 
 def test_worker_closes_the_sinks_when_the_listener_close_raises(

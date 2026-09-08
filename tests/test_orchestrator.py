@@ -200,6 +200,7 @@ class Harness:
         observe_issues: bool = False,
         model: str | None = None,
         model_labels: dict[str, str] | None = None,
+        initial_rate_limits: RateLimits | None = None,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -248,6 +249,7 @@ class Harness:
             environ=self.environ,
             on_snapshot=self.snapshots.append,
             on_issues=self.record_polled if observe_issues else None,
+            initial_rate_limits=initial_rate_limits,
         )
 
     def record_polled(self, issues: Any) -> None:
@@ -527,6 +529,18 @@ async def test_snapshot_names_the_credential_from_startup(
     h.claude_auth_output = status
     await h.orchestrator.startup()
     assert h.orchestrator.snapshot().credential == credential
+
+
+async def test_a_seeded_reading_shows_before_any_turn_has_run(tmp_path: Path) -> None:
+    """A restart inherits the last reading, so the tile is not blank until the next dispatch."""
+    inherited = rate_limits(0.42, at=START - timedelta(hours=1))
+    h = Harness(tmp_path, initial_rate_limits=inherited)
+    assert h.orchestrator.snapshot().rate_limits == inherited
+    h.add_issue(1, "todo")
+    await h.tick()
+    fresh = rate_limits(0.55)
+    h.run_for(1).observer.on_turn_event(activity(kind="rate_limits", rate_limits=fresh))
+    assert h.orchestrator.snapshot().rate_limits == fresh, "a live reading replaces the seed"
 
 
 async def test_snapshot_carries_the_latest_rate_limit_reading(tmp_path: Path) -> None:

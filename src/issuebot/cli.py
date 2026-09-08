@@ -37,6 +37,7 @@ from issuebot.agent import (
     settings_for_labels,
     settings_with_model,
 )
+from issuebot.agent.runner import RateLimits
 from issuebot.config import (
     ConfigError,
     GitHubLabels,
@@ -74,6 +75,7 @@ from issuebot.notifications import (
     urllib_post,
 )
 from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
+from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
 
 DEFAULT_WORKFLOW = "WORKFLOW.md"
@@ -904,6 +906,24 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return asyncio.run(_run_worker(workflow))
 
 
+async def _last_rate_limits(database: Database | None) -> RateLimits | None:
+    """The reading the previous worker last saw, so a restart does not blank the limits tile.
+
+    A reading reaches a worker only while a turn is running, and it lives in memory; restarting
+    is how the worker is deployed. Reading it back is a convenience, never a reason to refuse to
+    start, so a database that will not answer costs the tile its last figure and nothing else.
+    """
+    if database is None:
+        return None
+    try:
+        async with database.queries() as queries:
+            row = await queries.snapshot()
+    except DatabaseError as exc:
+        get_logger(__name__).warning("rate_limits_seed_failed", error=exc.message)
+        return None
+    return rate_limits_from_dict(row.data.get("rate_limits")) if row is not None else None
+
+
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     try:
@@ -919,6 +939,7 @@ async def _run_worker(workflow: Workflow) -> int:
         run_session=_run_session,
         which=_which,
         claude_auth=_claude_auth,
+        initial_rate_limits=await _last_rate_limits(sinks.database),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,

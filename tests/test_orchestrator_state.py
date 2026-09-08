@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from issuebot.agent import RunResult
+from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.config import GitHubLabels
 from issuebot.events import PrOpened, StateChanged
 from issuebot.github import Issue, LinkedPr, StateLabel
@@ -24,6 +25,7 @@ from issuebot.orchestrator.state import (
     backoff_ms,
     claimed_snapshot,
     observe_transition,
+    rate_limits_from_dict,
     sort_candidates,
     state_label_name,
 )
@@ -255,3 +257,67 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
     }
     assert data["counters"]["runs_started"] == 1
     assert data["at"] == NOW.isoformat()
+
+
+def _snapshot_with(limits: RateLimits | None) -> RuntimeSnapshot:
+    return RuntimeSnapshot(
+        at=NOW,
+        workflow_path="/app/WORKFLOW.md",
+        workflow_mtime_ns=5,
+        config_valid=True,
+        config_error=None,
+        dispatch_hold=None,
+        poll_interval_ms=30_000,
+        max_concurrent_agents=2,
+        tick_count=3,
+        last_tick_at=NOW,
+        running=(),
+        retrying=(),
+        totals=ClaudeTotals(),
+        counters=Counters(),
+        credential="subscription",
+        rate_limits=limits,
+    )
+
+
+def test_rate_limits_round_trip_through_the_snapshot() -> None:
+    """A worker restart reads its last reading back out of the stored snapshot."""
+    limits = RateLimits(
+        five_hour=RateLimitWindow(utilization=0.42, resets_at=NOW),
+        seven_day=RateLimitWindow(utilization=0.32, resets_at=NOW),
+        observed_at=NOW,
+    )
+    data = _snapshot_with(limits).to_dict()
+    assert json.dumps(data)
+    assert rate_limits_from_dict(data["rate_limits"]) == limits
+
+
+def test_rate_limits_from_dict_keeps_a_half_reading() -> None:
+    data = _snapshot_with(
+        RateLimits(
+            five_hour=RateLimitWindow(utilization=0.42, resets_at=NOW),
+            seven_day=None,
+            observed_at=NOW,
+        )
+    ).to_dict()
+    restored = rate_limits_from_dict(data["rate_limits"])
+    assert restored is not None
+    assert restored.five_hour is not None and restored.seven_day is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "nonsense",
+        5,
+        [],
+        {},
+        {"five_hour": {"utilization": 0.4, "resets_at": NOW.isoformat()}},  # no observed_at
+        {"observed_at": NOW.isoformat()},  # no window
+        {"observed_at": "not a time", "five_hour": {"utilization": 0.4, "resets_at": "x"}},
+    ],
+)
+def test_rate_limits_from_dict_refuses_what_it_cannot_read(value: object) -> None:
+    """The column is JSON written by some older version of this code; it may be anything."""
+    assert rate_limits_from_dict(value) is None
