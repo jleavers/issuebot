@@ -393,6 +393,9 @@ def test_dispatch_hold_ignores_a_snapshot_that_names_no_reason() -> None:
         assert dispatch_hold(row) is None
     row.data["dispatch_hold"] = {"kind": "auth", "reason": "no login", "since": None}
     assert dispatch_hold(row) == {"kind": "auth", "reason": "no login", "since": None}
+    # A reason is enough to report; a kind another worker's snapshot does not carry is not.
+    row.data["dispatch_hold"] = {"reason": "no login"}
+    assert dispatch_hold(row) == {"kind": "unknown", "reason": "no login", "since": None}
 
 
 def test_state_names_the_reason_dispatch_is_held(h: Harness) -> None:

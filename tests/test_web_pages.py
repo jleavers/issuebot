@@ -344,7 +344,7 @@ def test_the_live_partial_names_a_held_dispatch(h: Harness) -> None:
 
 
 def test_a_held_worker_badge_is_marked_up_like_the_other_states() -> None:
-    assert ".worker.held .badge { background: var(--warn); }" in CSS
+    assert ".worker.stale .badge, .worker.held .badge { background: var(--warn); }" in CSS
     assert ".worker .config-error, .worker .dispatch-hold { color: var(--bad); }" in CSS
 
 

@@ -1547,7 +1547,7 @@ async def test_issues_are_still_polled_while_authentication_holds_dispatch(tmp_p
     assert h.github.issue(2).state is StateLabel.TODO  # polled, but still not claimed
 
 
-async def test_a_preflight_hold_polls_nothing_since_the_fetch_needs_what_it_reports(
+async def test_a_preflight_hold_polls_nothing_when_the_fetch_is_what_it_reports(
     tmp_path: Path,
 ) -> None:
     h = Harness(tmp_path, observe_issues=True)
@@ -1556,6 +1556,71 @@ async def test_a_preflight_hold_polls_nothing_since_the_fetch_needs_what_it_repo
     await h.tick()
     assert h.polled == []
     assert h.calls("fetch_issues_by_states") == []
+
+
+async def test_a_preflight_hold_still_polls_when_only_claude_is_missing(tmp_path: Path) -> None:
+    """`gh` and the token are fine, so the board can be kept current while nothing is claimed."""
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "todo")
+    h.which_missing = {"claude"}
+    await h.tick()
+    assert [issue.number for issue in h.polled[-1]] == [1]
+    assert h.calls("fetch_issues_by_states") == [(OBSERVED_STATES,)]
+    assert h.github.issue(1).state is StateLabel.TODO  # polled, but still not claimed
+    assert h.snapshots[-1].dispatch_hold is not None
+
+
+async def test_giving_up_on_an_unreadable_probe_clears_the_hold_from_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.claude_auth_output = None  # an older or wedged claude: no usable answer, ever
+    for _ in range(MAX_UNREADABLE_AUTH_PROBES - 1):
+        await h.tick()
+        assert h.snapshots[-1].dispatch_hold is not None
+    await h.tick()
+    assert h.snapshots[-1].dispatch_hold is None
+
+
+async def test_an_unreadable_probe_that_garbles_itself_keeps_the_moment_it_started(
+    tmp_path: Path,
+) -> None:
+    """The reason follows the probe, but `since` must still say how long the hold has lasted."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.claude_auth_output = "garbage one"
+    await h.tick()
+    started = h.snapshots[-1].dispatch_hold
+    assert started is not None and "garbage one" in started.reason
+    h.clock.advance(60.0)
+    h.claude_auth_output = "garbage two"
+    await h.tick()
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and "garbage two" in hold.reason
+    assert hold.since == started.since
+
+
+async def test_a_preflight_hold_gives_way_to_an_authentication_one(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.claude_auth_output = LOGGED_OUT
+    h.which_missing = {"gh"}
+    await h.tick()
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "preflight"
+    h.which_missing = set()
+    h.clock.advance(30.0)
+    await h.tick()
+    changed = h.snapshots[-1].dispatch_hold
+    assert changed is not None and changed.kind == "auth"
+    assert changed.since == h.now() > hold.since
 
 
 # --- snapshot -----------------------------------------------------------------------------

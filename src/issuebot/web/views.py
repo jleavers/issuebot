@@ -74,7 +74,12 @@ def dispatch_hold(row: SnapshotRow | None) -> dict[str, Any] | None:
     reason = hold.get("reason")
     if not isinstance(reason, str) or not reason:
         return None
-    return {"kind": hold.get("kind"), "reason": reason, "since": hold.get("since")}
+    kind = hold.get("kind")
+    return {
+        "kind": kind if isinstance(kind, str) and kind else "unknown",
+        "reason": reason,
+        "since": hold.get("since"),
+    }
 
 
 def worker_status(row: SnapshotRow | None, now: datetime) -> WorkerStatus:

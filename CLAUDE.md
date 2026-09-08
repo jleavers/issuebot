@@ -130,10 +130,12 @@ floor, not the shipped version, and moves by hand.
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
   one restarts it. A held worker keeps ticking, so without it `issuebot status`, `/api/v1/state`,
   the dashboard and `/healthz` all read as a healthy worker while the board stops moving.
-  An authentication hold still polls issues (`_poll_issues`, the same fetch dispatch uses
-  without the claiming), so the history the dashboard renders stays current for as long as the
-  hold lasts; a preflight hold polls nothing, since the fetch needs the very executables and
-  token it is reporting missing.
+  An auth hold's `since` is keyed on the probe's verdict, not its wording, so an unreadable
+  `claude` that garbles itself differently every tick still reports how long the hold has
+  lasted. A hold still polls issues (`_poll_issues`, the fetch dispatch uses without the
+  claiming), so the history the dashboard renders stays current for as long as it lasts --
+  unless `fetch_preflight` (the `gh` and `github.token` half of `preflight`) is what is
+  failing, when the request would only fail too.
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib

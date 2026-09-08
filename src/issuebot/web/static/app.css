@@ -152,8 +152,7 @@ section { margin-bottom: 20px; }
 .worker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .worker .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--on-solid); background: var(--muted); }
 .worker.ok .badge { background: var(--ok); }
-.worker.stale .badge { background: var(--warn); }
-.worker.held .badge { background: var(--warn); }
+.worker.stale .badge, .worker.held .badge { background: var(--warn); }
 .worker.none .badge { background: var(--muted); }
 .worker .config-error, .worker .dispatch-hold { color: var(--bad); }
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }

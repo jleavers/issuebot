@@ -18,6 +18,7 @@ from issuebot.orchestrator.orchestrator import (
     OrchestratorStartupError,
     RunObserver,
     RunSessionFn,
+    fetch_preflight,
     preflight,
 )
 from issuebot.orchestrator.state import (
@@ -75,6 +76,7 @@ __all__ = [
     "blocked_escape",
     "claim",
     "claimed_snapshot",
+    "fetch_preflight",
     "finish_terminal",
     "observe_transition",
     "pr_url",
