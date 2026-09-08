@@ -157,6 +157,17 @@ def test_a_card_without_a_pull_request_keeps_the_meta_row_balanced(h: Harness) -
     h.queries.groups["todo"] = [issue_row(number=9, pr_number=None, pr_url=None, pr_state=None)]
     text = html(h.client.get("/partials/dashboard"))
     assert '<span class="pr"></span>' in text
+
+
+def test_a_pull_request_with_no_state_renders_the_chip_alone(h: Harness) -> None:
+    """The store writes the number and the state together, so this is a guard, not a case.
+
+    It is still worth holding: unguarded, Jinja renders a null state as the word `None`
+    beside the chip, and the meta row is the one place on the card with nothing else in it.
+    """
+    h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url=PR_URL, pr_state=None)]
+    text = html(h.client.get("/partials/dashboard"))
+    assert f'<span class="pr"><a class="chip" href="{PR_URL}">PR #4</a></span>' in text
     assert "None" not in text
 
 
@@ -171,9 +182,27 @@ def test_both_card_chips_are_drawn_by_one_rule() -> None:
 
 
 def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
-    """It is the one chip that is a link, and it leaves the dashboard for GitHub."""
-    assert ".card a.chip:hover { color: var(--accent); border-color: var(--accent);" in CSS
+    """It is the one chip that is a link, and it leaves the dashboard for GitHub.
+
+    Hover lights the border and leaves the label at --muted; --accent is a mark on the
+    card, not text (see tests/test_web_theme.py), so it must not become the chip's ink.
+    """
+    assert ".card a.chip:hover { border-color: var(--accent); text-decoration: none; }" in CSS
     assert ".card a.chip:focus-visible { outline: 2px solid var(--accent);" in CSS
+
+
+def test_the_meta_row_wraps_around_a_chip_that_cannot() -> None:
+    """A column is a grid track with a 180px floor; the chip is `nowrap` inside it.
+
+    `PR #26`, the pull request's state and the age do not fit one line of that, so the row
+    has to wrap - otherwise the chip overprints the age at every width under about 1100px.
+    Neither flex item may be given `min-width: 0`, which would let it shrink back under
+    its own chip and hand the overlap straight back.
+    """
+    assert css_declarations(".card .meta {")["flex-wrap"] == "wrap"
+    pr_cell = css_declarations(".card .meta .pr {")
+    assert pr_cell["flex-wrap"] == "wrap"
+    assert "min-width" not in pr_cell and "min-width" not in css_declarations(".card .meta {")
 
 
 def test_the_card_title_is_still_escaped(h: Harness) -> None:
