@@ -227,6 +227,10 @@ def test_accent_is_legible_as_body_text_on_both_surfaces(
     """
     ratio = contrast(theme["--accent"], theme[surface])
     assert ratio >= TEXT_FLOOR, f"--accent on {surface} is {ratio:.4f}:1"
+    # and from the other side: button.poll:hover fills with --accent and writes the
+    # label in --on-solid, so darkening the fill must not strand the label on top of it
+    label = contrast(theme["--on-solid"], theme["--accent"])
+    assert label >= TEXT_FLOOR, f"--on-solid on --accent is {label:.4f}:1"
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])

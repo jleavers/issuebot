@@ -16,15 +16,21 @@
   --ink: #1f2328;
   --muted: #6b7280;
   --line: #d9dee5;
-  /* Primer blue-600, the light-theme sibling of the dark --accent below. It is a step
-   * darker than the --review/--chart-runs blue it used to share a hex with, because it is
-   * the one blue in the set that is read as *type* and so owes 4.5:1 rather than the 3:1
-   * a border or a bar owes: a hovered issue title (.issue-ref:hover), an issue title in
-   * the /issues table (a plain `a`) and the chosen filter chip (.filter.current) are all
-   * --accent on --bg, the darker of the two surfaces. #1d76db was 4.20:1 there - under
-   * the floor - and 4.5002:1 on --panel, which is at it rather than over it (#43). The
-   * state and chart blues keep the old hex: they are marks, and they belong to the
-   * GitHub label palette --todo, --rework and --complete come from, not to this role. */
+  /* GitHub's own light-theme link blue, the sibling of the dark --accent below. It is a
+   * step darker than the --review/--chart-runs blue it used to share a hex with, because
+   * --accent is read as *type* and so owes 4.5:1 rather than the 3:1 a border or a bar
+   * owes: a hovered issue title (.issue-ref:hover), an issue title in the /issues table
+   * (a plain `a`) and the chosen filter chip (.filter.current) are all --accent on --bg,
+   * the darker of the two surfaces. #1d76db was 4.20:1 there - under the floor - and
+   * 4.5002:1 on --panel, which is at it rather than over it (#43).
+   *
+   * --review and --chart-runs keep #1d76db, and not because they are only ever marks:
+   * .column.review h3 below paints a heading with --review. They keep it because the
+   * five state tokens are GitHub's own label hexes (LABEL_STYLES in
+   * src/issuebot/github/state.py sets review to 1D76DB), so the board reads as the
+   * labels GitHub renders. That pins them at the floor rather than over it, which is
+   * its own question and not this one (#51). --accent answers to
+   * nothing outside the stylesheet, so it is free to move. */
   --accent: #0969da;
   --ok: #0e8a16;
   --warn: #b7791f;
@@ -64,6 +70,9 @@
     --ink: #e6edf3;
     --muted: #9198a1;
     --line: #30363d;
+    /* In dark this is the same hex as --review; in light the two are one step apart
+     * (#43). That asymmetry is deliberate: re-unifying them in light would put --accent
+     * back under the text floor on --bg. tests/test_web_theme.py holds the floor. */
     --accent: #58a6ff;
     --ok: #3fb950;
     --warn: #d29922;
