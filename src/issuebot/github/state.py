@@ -99,15 +99,15 @@ def classify_closed(issue: Issue, labels: GitHubLabels) -> ClosedOutcome:
     """How a closed issue was resolved: a merged PR, an investigation, or neither.
 
     A merged linked pull request is ``complete`` however the issue is labelled. Failing that,
-    the no-fault marker means somebody's investigation is the delivered value, so the close is
+    the no-fault marker means a session's investigation is the delivered value, so the close is
     ``no_change`` rather than an abandonment. Everything else is ``cancelled``, as before.
 
-    The marker only counts while no pull request was ever linked, which is what the no-fault
-    route produces. Nothing removes the label, so a later session that did open a pull request
-    leaves it behind stale; without this an unmerged PR on such an issue would be counted as
-    delivered work.
+    The marker is trusted whatever pull requests the issue has linked, because ``claim`` clears
+    it: it is always the verdict of the *last* session, and a session that opened a pull request
+    does not add it. So an unmerged pull request under the marker is an earlier attempt that the
+    investigation superseded, not evidence of an abandonment.
     """
     pr = issue.linked_pr
-    if pr is not None:
-        return "complete" if pr.state == "merged" else "cancelled"
+    if pr is not None and pr.state == "merged":
+        return "complete"
     return "no_change" if carries_no_fault(issue, labels) else "cancelled"

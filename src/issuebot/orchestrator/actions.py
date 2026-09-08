@@ -29,10 +29,16 @@ CANCEL_REASON = "closed without a merged pull request"
 
 
 async def claim(adapter: GitHubAdapter, bus: EventBus, issue: Issue) -> Issue | None:
-    """Set ``in_progress`` and publish the claim; ``None`` (logged) when GitHub refuses."""
+    """Set ``in_progress`` and publish the claim; ``None`` (logged) when GitHub refuses.
+
+    The claim also drops the markers, so each of them says what *this* session concluded. A
+    no-fault marker left over from an earlier session would otherwise outlive the finding it
+    records: a reworked issue that this session fixes with a pull request would still be
+    labelled "no fault", and ``classify_closed`` could not tell a fresh verdict from a stale one.
+    """
     log = get_logger(__name__)
     try:
-        await adapter.set_state(issue.number, StateLabel.IN_PROGRESS)
+        await adapter.set_state(issue.number, StateLabel.IN_PROGRESS, clear_markers=True)
     except GitHubError as exc:
         log.warning(
             "dispatch_claim_failed",

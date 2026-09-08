@@ -196,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     labels = subparsers.add_parser("labels", help="manage the issuebot state labels")
     labels_sub = labels.add_subparsers(dest="labels_command", metavar="<subcommand>", required=True)
     ensure = labels_sub.add_parser(
-        "ensure", help="create or update the five state labels in the repository"
+        "ensure", help="create or update the state labels and markers in the repository"
     )
     _add_workflow_option(ensure)
     ensure.set_defaults(func=cmd_labels_ensure)
@@ -367,11 +367,14 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
 
 def _labels_detail(adapter: GitHubAdapter, model_labels: Sequence[str]) -> str:
     """What `validate` says when every label the workflow names exists."""
+    markers = adapter.labels.markers()
     parts = [f"{len(adapter.labels.as_tuple())} state labels"]
-    if adapter.labels.markers():
-        parts.append(_plural(len(adapter.labels.markers()), "marker label"))
+    if markers:
+        parts.append(_plural(len(markers), "marker label"))
     if model_labels:
         parts.append(_plural(len(model_labels), "model label"))
+    if len(parts) == 1:
+        return f"{parts[0]} present"
     return f"{', '.join(parts[:-1])} and {parts[-1]} present"
 
 

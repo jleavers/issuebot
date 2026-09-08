@@ -51,10 +51,10 @@ def pr_url(issue: Issue) -> str | None:
 
 
 def claimed_snapshot(issue: Issue, labels: GitHubLabels) -> Issue:
-    """The issue as it looks after set_state(IN_PROGRESS): state labels replaced, rest kept."""
-    state_names = {name.lower() for name in labels.as_tuple()}
+    """The issue after ``claim``: state labels replaced, markers dropped, the rest kept."""
+    dropped = {name.lower() for name in (*labels.as_tuple(), *labels.markers())}
     target = labels.in_progress.lower()
-    kept = tuple(name for name in issue.labels if name.lower() not in state_names)
+    kept = tuple(name for name in issue.labels if name.lower() not in dropped)
     return replace(
         issue,
         state=StateLabel.IN_PROGRESS,

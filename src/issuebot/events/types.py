@@ -88,6 +88,8 @@ class IssueCompleted(IssueEvent):
 
     kind: ClassVar[str] = "issue_completed"
     pr_url: str | None
+    # The default is for reading back payloads stored before #34, not for callers: every
+    # construction site says which resolution it means.
     resolution: CompletionResolution = "merged_pr"
 
 

@@ -134,10 +134,16 @@ class GhCliAdapter:
 
     # --- writes ------------------------------------------------------------------
 
-    async def set_state(self, number: int, state: StateLabel) -> None:
+    async def set_state(
+        self, number: int, state: StateLabel, *, clear_markers: bool = False
+    ) -> None:
         target = label_name(self.labels, state)
         others = [label_name(self.labels, role) for role in StateLabel if role is not state]
-        self._log.debug("set_state", issue_number=number, state=state.value)
+        if clear_markers:
+            others += list(self.labels.markers())
+        self._log.debug(
+            "set_state", issue_number=number, state=state.value, clear_markers=clear_markers
+        )
         await self._edit_labels(number, add=target, remove=others)
 
     async def clear_state(self, number: int) -> None:

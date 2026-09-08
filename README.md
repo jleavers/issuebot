@@ -94,7 +94,7 @@ checked-in file points at this repository. Unknown keys are rejected, so a typo 
 |---|---|---|
 | `github.repo` | `owner/name` of the repository to watch. **Required.** | |
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
-| `github.labels.*` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
+| `github.labels.todo|in_progress|review|rework|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
@@ -147,8 +147,9 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 13 checks: 0 failed, 2 warnings
 ```
 
-`labels ensure` creates (or recolours) the five labels in the target repository; run it once
-per repository. The labels warning disappears on the next `validate`.
+`labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
+the target repository; run it once per repository, and again after an upgrade that adds a label.
+The labels warning disappears on the next `validate`.
 
 To use a Claude Code login instead of an API key, log in once inside the container: run
 `docker compose run --rm --entrypoint claude worker`, complete the login, then exit. The
@@ -280,7 +281,9 @@ claims the issue and runs one session with the logs on your terminal.
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
   the worker labels it `issuebot/complete` and counts it as closed, keeping the marker so the
-  resolution stays visible and greppable on GitHub.
+  resolution stays visible and greppable on GitHub. Sending the issue back with
+  `issuebot/rework` instead is also fine: claiming an issue removes the marker, so it always
+  says what the most recent session concluded.
 - **Drop it.** Close an issue that was never investigated without merging (or close the PR and
   the issue); the worker removes the state label and records a cancellation, which the closed
   counts do not include.

@@ -421,6 +421,16 @@ async def test_set_state_adds_target_and_removes_the_other_four() -> None:
     ]
 
 
+async def test_set_state_removes_the_markers_only_when_asked() -> None:
+    """#34: `claim` drops the no-fault marker; every other `set_state` must preserve it."""
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS, clear_markers=True)
+    assert runner.argv(0)[-1] == (
+        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete,issuebot/no-fault"
+    )
+
+
 async def test_clear_state_removes_all_five() -> None:
     runner = StubRunner()
     runner.on(has("issue", "edit"))

@@ -96,6 +96,23 @@ async def test_claim_sets_in_progress_and_publishes(tmp_path: Path) -> None:
     )
 
 
+async def test_claim_clears_the_no_fault_marker(tmp_path: Path) -> None:
+    """#34: the marker records what the *last* session concluded, so a new claim drops it.
+
+    A reworked issue that an earlier session handed over as "no fault" must not stay labelled
+    that way while this session works on it — otherwise a pull request this session merges
+    would close a no-fault-labelled issue, and `classify_closed` could not trust the marker.
+    """
+    h = Harness(tmp_path)
+    issue = h.github.add_issue(
+        "Reported bug", labels=("bug", "issuebot/no-fault", "issuebot/rework"), number=42
+    )
+    claimed = await claim(h.github, h.bus, issue)
+    assert claimed is not None
+    assert claimed.labels == ("bug", "issuebot/in-progress")
+    assert h.github.issue(42).labels == ("bug", "issuebot/in-progress")
+
+
 async def test_claim_failure_returns_none_without_events(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     issue = h.github.add_issue("Task", labels=("issuebot/rework",), number=42)
@@ -318,6 +335,29 @@ async def test_finish_terminal_prefers_a_merged_pr_over_the_no_fault_marker(
     assert isinstance(completed, IssueCompleted)
     assert completed.resolution == "merged_pr"
     assert completed.pr_url == "https://github.com/example/repo/pull/43"
+
+
+async def test_finish_terminal_counts_no_change_over_a_superseded_pull_request(
+    tmp_path: Path,
+) -> None:
+    """#34: a rework whose next session found no fault, closed with the old PR still linked.
+
+    The first session opened a pull request, a human closed it unmerged and asked for rework,
+    and the second session concluded there was nothing to fix. `claim` cleared the marker before
+    that session ran, so the marker on the issue is that session\'s verdict — the unmerged pull
+    request beneath it is the attempt it superseded, and the close is a resolution.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review", "issuebot/no-fault"), number=42)
+    h.github.open_pr(42, pr_number=43)
+    h.github.close_pr(43)
+    h.github.close_issue(42)
+    assert await finish_terminal(h.github, h.bus, h.workspaces, h.github.issue(42)) == "no_change"
+    assert h.github.issue(42).state is StateLabel.COMPLETE
+    assert "issuebot/no-fault" in h.github.issue(42).labels
+    completed = h.recorder.events[1]
+    assert isinstance(completed, IssueCompleted)
+    assert completed.resolution == "no_change"
 
 
 async def test_finish_terminal_leaves_a_completed_issue_alone(tmp_path: Path) -> None:

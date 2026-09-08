@@ -124,15 +124,16 @@ def test_classify_closed(
 
 @pytest.mark.parametrize(
     ("pr", "expected"),
-    [(MERGED, "complete"), (OPEN, "cancelled"), (CLOSED, "cancelled"), (None, "no_change")],
+    [(MERGED, "complete"), (OPEN, "no_change"), (CLOSED, "no_change"), (None, "no_change")],
 )
 def test_classify_closed_reads_the_no_fault_marker(
     make_issue: Callable[..., Issue], pr: LinkedPr | None, expected: str
 ) -> None:
-    """The marker turns an abandonment into a no-change close, but only while there is no PR.
+    """The marker turns an abandonment into a no-change close; only a merged PR outranks it.
 
-    Nothing removes the label, so a session that later opened a pull request leaves it stale;
-    an unmerged PR on such an issue is still the abandonment it looks like.
+    `claim` clears the marker, so it is always the last session\'s verdict and a session that
+    opened a pull request never carries it. An unmerged pull request under the marker is
+    therefore an earlier attempt the investigation superseded, not an abandonment.
     """
     issue = make_issue(
         github_state="closed",

@@ -115,12 +115,17 @@ class FakeGitHub:
 
     # --- protocol: writes ---------------------------------------------------------
 
-    async def set_state(self, number: int, state: StateLabel) -> None:
+    async def set_state(
+        self, number: int, state: StateLabel, *, clear_markers: bool = False
+    ) -> None:
         self._enter("set_state", number, state)
         record = self._require_issue(number)
         self._require_state_labels()
         target = label_name(self.labels, state)
         self._strip_state_labels(record)
+        if clear_markers:
+            markers = {name.lower() for name in self.labels.markers()}
+            record.labels = [name for name in record.labels if name.lower() not in markers]
         record.labels.append(target)
         record.updated_at = self._now()
 
