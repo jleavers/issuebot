@@ -79,10 +79,16 @@ class Blocked(IssueEvent):
     reason: str
 
 
+CompletionResolution = Literal["merged_pr", "no_change"]
+
+
 @dataclass(frozen=True, kw_only=True)
 class IssueCompleted(IssueEvent):
+    """A closed issue issuebot counts as done: a merged PR, or an investigation finding no fault."""
+
     kind: ClassVar[str] = "issue_completed"
     pr_url: str | None
+    resolution: CompletionResolution = "merged_pr"
 
 
 @dataclass(frozen=True, kw_only=True)

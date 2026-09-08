@@ -367,11 +367,17 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
 
 def _labels_detail(adapter: GitHubAdapter, model_labels: Sequence[str]) -> str:
     """What `validate` says when every label the workflow names exists."""
-    state = f"{len(adapter.labels.as_tuple())} state labels"
-    if not model_labels:
-        return f"{state} present"
-    plural = "" if len(model_labels) == 1 else "s"
-    return f"{state} and {len(model_labels)} model label{plural} present"
+    parts = [
+        f"{len(adapter.labels.as_tuple())} state labels",
+        _plural(len(adapter.labels.markers()), "marker label"),
+    ]
+    if model_labels:
+        parts.append(_plural(len(model_labels), "model label"))
+    return f"{', '.join(parts[:-1])} and {parts[-1]} present"
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _token_check(workflow: Workflow) -> Check:

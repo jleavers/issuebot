@@ -11,13 +11,15 @@ repository. You put the `issuebot/todo` label on an issue; the worker clones the
 runs Claude Code on the issue unattended, pushes a branch, opens a pull request and moves the
 issue to `issuebot/review`. You review the PR like any other. Merging it closes the issue and
 the worker marks it `issuebot/complete`; labelling it `issuebot/rework` sends it back to the
-agent with your review comments.
+agent with your review comments. An issue whose reported defect turns out not to happen comes
+back with the evidence and the `issuebot/no-fault` marker instead of a pull request, and closing
+it counts as a completion too — on a backlog of aged issues that triage is most of the value.
 
 ### What is configured where
 
 - **One `WORKFLOW.md` is one worker watching one repository.** Nothing is installed in the
-  target repository: it only needs the five `issuebot/*` labels, which `issuebot labels ensure`
-  creates. To work on several repositories, run one self-contained stack per repository
+  target repository: it only needs the five `issuebot/*` state labels and the `issuebot/no-fault`
+  marker, which `issuebot labels ensure` creates. To work on several repositories, run one self-contained stack per repository
   (see "More than one repository" below); there is no shared dashboard.
 - `WORKFLOW.md` has two parts. The YAML front matter is the configuration; everything after
   it is the prompt the agent receives, a Jinja2 template that works unchanged for any
@@ -92,6 +94,7 @@ checked-in file points at this repository. Unknown keys are rejected, so a typo 
 | `github.repo` | `owner/name` of the repository to watch. **Required.** | |
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.*` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
+| `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each | none; `60000` |
@@ -272,8 +275,14 @@ claims the issue and runs one session with the logs on your terminal.
   `issuebot/review` to `issuebot/rework` (remove one label, add the other: an issue carrying
   two state labels is ignored until that is fixed). The agent resumes on the same branch and
   PR, reads every comment, addresses each one and returns the issue to review.
-- **Drop it.** Close the issue without merging (or close the PR and the issue); the worker
-  removes the state label.
+- **Accept "no fault found".** A session that reproduces the reported defect and does not see
+  it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
+  evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
+  the worker labels it `issuebot/complete` and counts it as closed, keeping the marker so the
+  resolution stays visible and greppable on GitHub.
+- **Drop it.** Close an issue that was never investigated without merging (or close the PR and
+  the issue); the worker removes the state label and records a cancellation, which the closed
+  counts do not include.
 - **Re-queue it.** Moving `issuebot/in-progress` or `issuebot/review` back to `issuebot/todo`
   is also allowed; the issue is picked up again from its existing workspace.
 
@@ -420,6 +429,13 @@ of the worker's last report. It needs `DATABASE_URL` and nothing else, reads `WO
 once at start, and has no authentication: keep it on loopback (`server.bind: 127.0.0.1` outside
 Docker) or behind a reverse proxy. Turn logs are captured into the database when a run ends,
 so they outlive the workspace.
+
+**What "issues closed" counts.** The hero's 1d/7d closed tiles, the closed series on the
+30-day chart and `issuebot stats` all count issues the worker resolved: closed by a merged
+pull request, or closed after a session found no fault. Both end up labelled
+`issuebot/complete`, and the counts are exactly the issues in that column. An issue closed
+without either — abandoned rather than investigated — loses its state label and is counted
+nowhere; the `issue_cancelled` event on its timeline is the record of it.
 
 Slack notifications are optional: export `SLACK_WEBHOOK_URL` (an incoming webhook,
 `https://hooks.slack.com/services/...`) and choose the event kinds in `WORKFLOW.md` under

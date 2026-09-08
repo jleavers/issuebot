@@ -20,7 +20,7 @@ from issuebot.github.models import (
 )
 from issuebot.github.normalise import issue_from_node, label_name
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
-from issuebot.github.state import LABEL_STYLES, LabelStyle
+from issuebot.github.state import LABEL_STYLES, LabelStyle, marker_label_styles
 from issuebot.log import get_logger
 
 PAGE_SIZE = 100
@@ -217,6 +217,7 @@ class GhCliAdapter:
         self._log.debug("ensure_labels")
         existing = await self._repo_labels()
         wanted = [(label_name(self.labels, role), LABEL_STYLES[role]) for role in StateLabel]
+        wanted += list(marker_label_styles(self.labels).items())
         wanted += list((extra or {}).items())
         results: list[LabelEnsured] = []
         for name, style in wanted:
@@ -234,7 +235,7 @@ class GhCliAdapter:
     async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:
         self._log.debug("missing_labels")
         existing = await self._repo_labels()
-        wanted = (*self.labels.as_tuple(), *extra)
+        wanted = (*self.labels.as_tuple(), *self.labels.markers(), *extra)
         return [name for name in wanted if name.lower() not in existing]
 
     async def _repo_labels(self) -> dict[str, tuple[str, str]]:

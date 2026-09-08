@@ -21,7 +21,7 @@ from issuebot.db.queries import (
     TurnSummaryRow,
 )
 from issuebot.db.store import IssueSnapshot, PostgresStore
-from issuebot.events import Blocked, RunEnded, RunStarted
+from issuebot.events import Blocked, IssueCompleted, RunEnded, RunStarted, StateChanged
 from issuebot.github import Issue, StateLabel
 
 NOW = datetime.now(UTC)
@@ -176,6 +176,61 @@ async def with_turns(seeded: Database, db_url: str) -> Database:
     )
     await store.close()
     return seeded
+
+
+async def test_a_no_fault_close_reaches_the_closed_count(
+    db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    """#34: the events `finish_terminal` publishes for a no-change close must be counted.
+
+    The tile counts `state = 'complete'`, so what makes this work is that the sweep labels the
+    issue `complete` rather than clearing it. Drive the real events, not a hand-written row.
+    """
+    await migrate(db_url)
+    store = PostgresStore(db_url, labels=GitHubLabels())
+    await store.connect()
+    handed_over = make_issue(
+        number=20,
+        identifier="repo-20",
+        title="Reported defect that does not happen",
+        state=StateLabel.REVIEW,
+        state_labels=("issuebot/review",),
+        labels=("issuebot/review", "issuebot/no-fault"),
+        github_state="closed",
+        closed_at=NOW - HOUR,
+        updated_at=NOW - HOUR,
+    )
+    await store.upsert_issues([IssueSnapshot(issue=handed_over, seen_at=NOW - HOUR)])
+    await store.apply_event(
+        StateChanged(
+            issue_number=20,
+            issue_identifier="repo-20",
+            from_label="issuebot/review",
+            to_label="issuebot/complete",
+            actor="issuebot",
+            at=NOW,
+        )
+    )
+    await store.apply_event(
+        IssueCompleted(
+            issue_number=20,
+            issue_identifier="repo-20",
+            pr_url=None,
+            resolution="no_change",
+            at=NOW,
+        )
+    )
+    await store.close()
+
+    database = Database(db_url)
+    async with database.queries() as q:
+        assert await q.closed_count(DAY) == 1
+        assert (await q.state_counts())["complete"] == 1
+        # It is on the board, in a terminal column, rather than gone.
+        assert [i.number for i in (await q.issues_by_state())["complete"]] == [20]
+        # And the resolution survives on the timeline for the issue page to read.
+        payloads = [e.payload for e in await q.events_for_issue(20, 10)]
+        assert {"resolution": "no_change"}.items() <= payloads[0].items()
 
 
 async def test_counts_by_window(seeded: Database) -> None:

@@ -19,16 +19,24 @@ SettingSource = Literal["user", "project", "local"]
 
 
 class GitHubLabels(_Model):
+    """The five state label names, plus the markers that qualify them but are not states."""
+
     todo: NonEmptyStr = "issuebot/todo"
     in_progress: NonEmptyStr = "issuebot/in-progress"
     review: NonEmptyStr = "issuebot/review"
     rework: NonEmptyStr = "issuebot/rework"
     complete: NonEmptyStr = "issuebot/complete"
+    no_fault: NonEmptyStr = "issuebot/no-fault"
 
     def as_tuple(self) -> tuple[str, ...]:
+        """The five state labels, and only those: what ``clear_state`` strips."""
         return (self.todo, self.in_progress, self.review, self.rework, self.complete)
 
-    @field_validator("todo", "in_progress", "review", "rework", "complete")
+    def markers(self) -> tuple[str, ...]:
+        """Labels issuebot owns that are not states, so a state change must not remove them."""
+        return (self.no_fault,)
+
+    @field_validator("todo", "in_progress", "review", "rework", "complete", "no_fault")
     @classmethod
     def _label_name_is_usable(cls, value: str) -> str:
         if "," in value:
@@ -39,7 +47,7 @@ class GitHubLabels(_Model):
 
     @model_validator(mode="after")
     def _labels_are_distinct(self) -> Self:
-        values = self.as_tuple()
+        values = (*self.as_tuple(), *self.markers())
         if len({value.lower() for value in values}) != len(values):
             raise ValueError("state labels must be distinct (compared case-insensitively)")
         return self

@@ -23,7 +23,7 @@ from issuebot.orchestrator.state import (
 )
 
 EscapeOutcome = Literal["applied", "skipped", "failed"]
-FinishOutcome = Literal["complete", "cancelled", "unchanged", "failed"]
+FinishOutcome = Literal["complete", "no_change", "cancelled", "unchanged", "failed"]
 
 CANCEL_REASON = "closed without a merged pull request"
 
@@ -138,15 +138,16 @@ async def finish_terminal(
     workspaces: WorkspaceManager,
     issue: Issue,
 ) -> FinishOutcome:
-    """A closed issue: ``complete`` or cancelled, the events, then the workspace removed."""
+    """A closed issue: ``complete``, no-change or cancelled, the events, workspace removed."""
     log = get_logger(__name__)
     outcome: FinishOutcome
     if issue.state is StateLabel.COMPLETE:
         outcome = "unchanged"
     else:
-        outcome = classify_closed(issue)
+        outcome = classify_closed(issue, adapter.labels)
         try:
-            if outcome == "complete":
+            if outcome in ("complete", "no_change"):
+                # Both rest in `complete`: the resolution, not the state, is what differs.
                 await adapter.set_state(issue.number, StateLabel.COMPLETE)
                 bus.publish(
                     StateChanged(
@@ -163,6 +164,7 @@ async def finish_terminal(
                         issue_number=issue.number,
                         issue_identifier=issue.identifier,
                         pr_url=pr_url(issue),
+                        resolution="merged_pr" if outcome == "complete" else "no_change",
                     )
                 )
             else:

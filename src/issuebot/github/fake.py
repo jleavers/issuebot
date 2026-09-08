@@ -21,7 +21,7 @@ from issuebot.github.models import (
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
-from issuebot.github.state import LABEL_STYLES, LabelStyle
+from issuebot.github.state import LABEL_STYLES, LabelStyle, marker_label_styles
 
 _PR_STATE_UPPER: dict[PrState, str] = {"open": "OPEN", "closed": "CLOSED", "merged": "MERGED"}
 
@@ -70,6 +70,7 @@ class FakeGitHub:
         if preseed_labels:
             for role in StateLabel:
                 self.repo_labels[label_name(settings.labels, role)] = LABEL_STYLES[role]
+            self.repo_labels.update(marker_label_styles(settings.labels))
 
     # --- protocol: identity -------------------------------------------------------
 
@@ -178,6 +179,7 @@ class FakeGitHub:
     ) -> list[LabelEnsured]:
         self._enter("ensure_labels")
         wanted = [(label_name(self.labels, role), LABEL_STYLES[role]) for role in StateLabel]
+        wanted += list(marker_label_styles(self.labels).items())
         wanted += list((extra or {}).items())
         results: list[LabelEnsured] = []
         for name, style in wanted:
@@ -194,7 +196,7 @@ class FakeGitHub:
 
     async def missing_labels(self, extra: Sequence[str] = ()) -> list[str]:
         self._enter("missing_labels")
-        wanted = (*self.labels.as_tuple(), *extra)
+        wanted = (*self.labels.as_tuple(), *self.labels.markers(), *extra)
         return [name for name in wanted if name not in self.repo_labels]
 
     async def rate_limit(self) -> RateLimit:

@@ -174,7 +174,7 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] prompt: 44 characters, renders" in out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
-    assert "[ OK ] github.labels: 5 state labels present" in out
+    assert "[ OK ] github.labels: 5 state labels and 1 marker label present" in out
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
@@ -789,7 +789,7 @@ def test_validate_reports_repo_access_failure(
     out = capsys.readouterr().out
     assert "[ OK ] gh auth: logged in as fake-user" in out
     assert "[FAIL] github.repo access: not_found: injected not_found failure" in out
-    assert "[ OK ] github.labels: 5 state labels present" in out
+    assert "[ OK ] github.labels: 5 state labels and 1 marker label present" in out
 
 
 def test_validate_reports_labels_failure(
@@ -855,7 +855,7 @@ def test_validate_counts_the_model_labels_it_finds(
     path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] github.labels: 5 state labels and 1 model label present" in out
+    assert "[ OK ] github.labels: 5 state labels, 1 marker label and 1 model label present" in out
 
 
 # --- labels ensure -----------------------------------------------------------------------
@@ -874,6 +874,7 @@ def test_labels_ensure_reports_each_label(
         "[ OK ] issuebot/review: created",
         "[ OK ] issuebot/rework: created",
         "[ OK ] issuebot/complete: created",
+        "[ OK ] issuebot/no-fault: created",
     ]
     assert main(["labels", "ensure", "--workflow", str(GOOD)]) == 0
     assert all(line.endswith(": unchanged") for line in capsys.readouterr().out.splitlines())

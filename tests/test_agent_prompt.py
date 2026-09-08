@@ -72,7 +72,8 @@ def test_issue_variables_handle_missing_values(make_issue: Callable[..., Issue])
 def test_every_documented_variable_is_reachable(make_issue: Callable[..., Issue]) -> None:
     template = (
         "{{ issue.identifier }}|{{ repo }}|{{ labels.todo }}|{{ labels.in_progress }}|"
-        "{{ labels.review }}|{{ labels.rework }}|{{ labels.complete }}|{{ workpad_marker }}|"
+        "{{ labels.review }}|{{ labels.rework }}|{{ labels.complete }}|{{ labels.no_fault }}|"
+        "{{ workpad_marker }}|"
         "{{ attempt }}|{{ turn_number }}|{{ max_turns }}|{{ rework }}|{{ self_review }}"
     )
     rendered = PromptRenderer(template).render(
@@ -80,7 +81,7 @@ def test_every_documented_variable_is_reachable(make_issue: Callable[..., Issue]
     )
     assert rendered == (
         "repo-42|example/repo|issuebot/todo|issuebot/in-progress|issuebot/review|"
-        f"issuebot/rework|issuebot/complete|{WORKPAD_MARKER}|2|3|5|True|True"
+        f"issuebot/rework|issuebot/complete|issuebot/no-fault|{WORKPAD_MARKER}|2|3|5|True|True"
     )
 
 

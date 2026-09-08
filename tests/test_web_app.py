@@ -434,6 +434,17 @@ def test_worker_status() -> None:
         ),
         ("issue_completed", {"pr_url": None}, "completed"),
         (
+            "issue_completed",
+            {"pr_url": None, "resolution": "no_change"},
+            "completed: no change needed",
+        ),
+        # Events stored before the resolution field existed were all merged-PR completions.
+        (
+            "issue_completed",
+            {"pr_url": "https://github.com/example/repo/pull/8", "resolution": "merged_pr"},
+            "completed (https://github.com/example/repo/pull/8)",
+        ),
+        (
             "issue_cancelled",
             {"reason": "closed without a merged pull request"},
             "cancelled: closed without a merged pull request",

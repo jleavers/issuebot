@@ -25,6 +25,7 @@ def test_minimal_config_applies_every_default() -> None:
         "issuebot/rework",
         "issuebot/complete",
     )
+    assert s.github.labels.markers() == ("issuebot/no-fault",)
     assert s.github.request_timeout_ms == 30_000
     assert s.polling.interval_ms == 30_000
     assert s.workspace.root == Path("/workspaces")
@@ -207,6 +208,18 @@ def test_setting_sources_rejects_bad_values(value: list[str], needle: str) -> No
 def test_state_labels_distinctness_is_case_insensitive() -> None:
     with pytest.raises(ValidationError, match="distinct"):
         GitHubLabels(todo="Issuebot/Todo", review="issuebot/todo")
+
+
+def test_the_marker_label_must_not_collide_with_a_state_label() -> None:
+    """A marker that is also a state name would be stripped by every `clear_state`."""
+    with pytest.raises(ValidationError, match="distinct"):
+        GitHubLabels(no_fault="Issuebot/Review")
+
+
+@pytest.mark.parametrize(("value", "needle"), [("a,b", "','"), ("-marker", "'-'")])
+def test_marker_label_names_that_break_gh_are_rejected(value: str, needle: str) -> None:
+    with pytest.raises(ValidationError, match=needle):
+        GitHubLabels(no_fault=value)
 
 
 @pytest.mark.parametrize(("value", "needle"), [("a,b", "','"), ("-todo", "'-'")])

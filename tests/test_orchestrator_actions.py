@@ -280,6 +280,46 @@ async def test_finish_terminal_cancels_an_unmerged_issue(tmp_path: Path) -> None
     assert not workspace.exists()
 
 
+async def test_finish_terminal_completes_a_no_fault_issue_without_a_pull_request(
+    tmp_path: Path,
+) -> None:
+    """#33's other outcome: closing it is a resolution, not the abandonment #34 reported."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review", "issuebot/no-fault"), number=42)
+    h.github.close_issue(42)
+    workspace = h.workspace_dir("repo-42")
+    assert await finish_terminal(h.github, h.bus, h.workspaces, h.github.issue(42)) == "no_change"
+    # It rests in `complete`, so it stays on the Kanban and the closed counts see it...
+    assert h.github.issue(42).state is StateLabel.COMPLETE
+    # ...and it keeps the marker, so the resolution is still legible on GitHub afterwards.
+    assert "issuebot/no-fault" in h.github.issue(42).labels
+    assert h.calls("clear_state") == []
+    assert h.recorder.kinds == ["state_changed", "issue_completed"]
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == ("issuebot/review", "issuebot/complete")
+    completed = h.recorder.events[1]
+    assert isinstance(completed, IssueCompleted)
+    assert completed.resolution == "no_change"
+    assert completed.pr_url is None
+    assert not workspace.exists()
+
+
+async def test_finish_terminal_prefers_a_merged_pr_over_the_no_fault_marker(
+    tmp_path: Path,
+) -> None:
+    """A marker left over from an earlier session must not relabel a real fix as no-change."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review", "issuebot/no-fault"), number=42)
+    h.github.open_pr(42, pr_number=43)
+    h.github.merge_pr(43)
+    assert await finish_terminal(h.github, h.bus, h.workspaces, h.github.issue(42)) == "complete"
+    completed = h.recorder.events[1]
+    assert isinstance(completed, IssueCompleted)
+    assert completed.resolution == "merged_pr"
+    assert completed.pr_url == "https://github.com/example/repo/pull/43"
+
+
 async def test_finish_terminal_leaves_a_completed_issue_alone(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/complete",), number=42)

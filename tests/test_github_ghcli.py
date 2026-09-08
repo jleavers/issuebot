@@ -560,6 +560,7 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         ("issuebot/review", "updated"),
         ("issuebot/rework", "created"),
         ("issuebot/complete", "created"),
+        ("issuebot/no-fault", "created"),
     ]
     assert runner.argv(0) == [
         "label",
@@ -572,7 +573,7 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         "200",
     ]
     creates = [argv for argv, _ in runner.calls if argv[:2] == ["label", "create"]]
-    assert len(creates) == 4
+    assert len(creates) == 5
     assert creates[0] == [
         "label",
         "create",
@@ -593,7 +594,12 @@ async def test_missing_labels_lists_absent_names_in_role_order() -> None:
     runner = StubRunner()
     runner.on(has("label", "list"), stdout=fixture("labels.json"))
     missing = await make_adapter(runner).missing_labels()
-    assert missing == ["issuebot/in-progress", "issuebot/rework", "issuebot/complete"]
+    assert missing == [
+        "issuebot/in-progress",
+        "issuebot/rework",
+        "issuebot/complete",
+        "issuebot/no-fault",
+    ]
 
 
 async def test_missing_labels_reports_the_extra_names_after_the_state_ones() -> None:
@@ -604,6 +610,7 @@ async def test_missing_labels_reports_the_extra_names_after_the_state_ones() -> 
         "issuebot/in-progress",
         "issuebot/rework",
         "issuebot/complete",
+        "issuebot/no-fault",
         "issuebot/model/sonnet",
     ]
 

@@ -67,11 +67,17 @@ def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None
         case PrOpened():
             return f":link: {issue} opened {pr_link(event.pr_url)}"
         case IssueCompleted():
-            merged = f" · {pr_link(event.pr_url)} merged" if event.pr_url else ""
-            return f":tada: {issue} complete{merged}"
+            return _completed(event, issue)
         case IssueCancelled():
             return f":wastebasket: {issue} cancelled: {_escape(event.reason)}"
     return None
+
+
+def _completed(event: IssueCompleted, issue: str) -> str:
+    if event.resolution == "no_change":
+        return f":mag: {issue} closed with no change needed"
+    merged = f" · {pr_link(event.pr_url)} merged" if event.pr_url else ""
+    return f":tada: {issue} complete{merged}"
 
 
 def _state_changed(event: StateChanged, issue: str, labels: GitHubLabels) -> str:

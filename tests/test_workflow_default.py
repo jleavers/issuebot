@@ -135,6 +135,22 @@ def test_no_fault_found_hands_over_without_a_pull_request(
     assert "Reproduction attempted" in text
 
 
+def test_no_fault_found_hands_over_with_the_marker_label(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """The route has to leave a signal, or the close cannot be told from an abandonment."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert (
+        '--add-label "issuebot/review" --add-label "issuebot/no-fault" '
+        '--remove-label "issuebot/in-progress"' in text
+    )
+    # And the marker must not read as a sixth state the session could set on its own.
+    assert "`issuebot/no-fault` is not a state" in text
+
+
 def test_no_fault_found_is_not_contradicted_on_a_later_attempt(
     make_issue: Callable[..., Issue],
 ) -> None:

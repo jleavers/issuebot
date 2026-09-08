@@ -5,19 +5,25 @@ from datetime import UTC, datetime
 
 import pytest
 
+from issuebot.config import GitHubLabels
 from issuebot.github.models import Issue, LinkedPr, StateLabel
 from issuebot.github.state import (
     ACTIVE_STATES,
     LABEL_STYLES,
+    NO_FAULT_LABEL_STYLE,
     TERMINAL_STATES,
     TRANSITIONS,
     Actor,
+    carries_no_fault,
     classify_closed,
     is_active,
     is_allowed,
     is_terminal,
+    marker_label_styles,
     next_state_for,
 )
+
+LABELS = GitHubLabels()
 
 MERGED = LinkedPr(
     number=51,
@@ -113,7 +119,44 @@ def test_classify_closed(
     make_issue: Callable[..., Issue], pr: LinkedPr | None, expected: str
 ) -> None:
     issue = make_issue(github_state="closed", linked_pr=pr, dispatchable=False)
-    assert classify_closed(issue) == expected
+    assert classify_closed(issue, LABELS) == expected
+
+
+@pytest.mark.parametrize(
+    ("pr", "expected"),
+    [(MERGED, "complete"), (OPEN, "no_change"), (CLOSED, "no_change"), (None, "no_change")],
+)
+def test_classify_closed_reads_the_no_fault_marker(
+    make_issue: Callable[..., Issue], pr: LinkedPr | None, expected: str
+) -> None:
+    """The marker turns an abandonment into a no-change close; a merged PR still wins."""
+    issue = make_issue(
+        github_state="closed",
+        linked_pr=pr,
+        dispatchable=False,
+        labels=("issuebot/review", "issuebot/no-fault"),
+    )
+    assert classify_closed(issue, LABELS) == expected
+
+
+def test_the_no_fault_marker_is_read_under_the_configured_name(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """`Issue.labels` is lowercased by the normaliser, so the comparison must be too."""
+    labels = GitHubLabels(no_fault="Team/No-Fault")
+    issue = make_issue(github_state="closed", dispatchable=False, labels=("team/no-fault",))
+    assert carries_no_fault(issue, labels)
+    assert not carries_no_fault(issue, LABELS)
+    assert classify_closed(issue, labels) == "no_change"
+
+
+def test_marker_labels_are_named_and_styled_but_are_not_states() -> None:
+    """A marker must never reach `as_tuple()`: `clear_state` strips exactly those names."""
+    assert marker_label_styles(LABELS) == {"issuebot/no-fault": NO_FAULT_LABEL_STYLE}
+    assert set(marker_label_styles(LABELS)).isdisjoint(LABELS.as_tuple())
+    assert len(NO_FAULT_LABEL_STYLE.color) == 6
+    int(NO_FAULT_LABEL_STYLE.color, 16)
+    assert NO_FAULT_LABEL_STYLE.description
 
 
 def test_label_styles_cover_every_role() -> None:
