@@ -63,7 +63,7 @@ for the host route use WSL.
 ### Step 1: clone and configure
 
 ```bash
-git clone https://github.com/jleavers/issuebot.git
+git clone git@github.com:jleavers/issuebot.git
 cd issuebot
 cp .env.example .env
 ```
@@ -330,8 +330,8 @@ schema changes.
 With Compose the simplest setup is one checkout per repository:
 
 ```bash
-git clone https://github.com/jleavers/issuebot.git issuebot-frontend
-git clone https://github.com/jleavers/issuebot.git issuebot-backend
+git clone git@github.com:jleavers/issuebot.git issuebot-frontend
+git clone git@github.com:jleavers/issuebot.git issuebot-backend
 ```
 
 Compose names the project after the directory, so each checkout gets its own `db`, `worker`
