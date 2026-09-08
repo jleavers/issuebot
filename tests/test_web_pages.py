@@ -295,6 +295,18 @@ def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harn
     assert "repo-9" not in row
 
 
+def test_a_retrying_title_is_escaped(h: Harness) -> None:
+    """The cell used to hold `identifier`, a sanitised `<repo>-<number>` slug (#42).
+
+    It holds a human-written issue title now, so it is the first arbitrary text to reach
+    this row; autoescape covers it, and this is what says so.
+    """
+    h.queries.snapshot_row = snapshot(retrying=(retry_row(title=HOSTILE),))
+    text = html(h.client.get("/partials/dashboard"))
+    assert HOSTILE not in text
+    assert f'<span class="text">{ESCAPED}</span>' in text
+
+
 def test_a_retrying_row_written_before_the_title_existed(h: Harness) -> None:
     """A snapshot from an older worker has no title, and the cell must not read `None`.
 
