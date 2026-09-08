@@ -18,16 +18,42 @@
   {% endif %}
 </section>
 <section class="hero">
-  <div class="tile"><div class="label">closed, 1 day</div><div class="value">{{ live.hero.closed_1d }}</div></div>
-  <div class="tile"><div class="label">closed, 7 days</div><div class="value">{{ live.hero.closed_7d }}</div></div>
-  <div class="tile"><div class="label">agents run, 1 day</div><div class="value">{{ live.hero.runs_1d }}</div></div>
-  <div class="tile"><div class="label">agents run, 7 days</div><div class="value">{{ live.hero.runs_7d }}</div></div>
-  <div class="tile"><div class="label">running now</div><div class="value">{{ live.hero.running }}</div></div>
-  <div class="tile"><div class="label">retrying</div><div class="value">{{ live.hero.retrying }}</div></div>
-  <div class="tile"><div class="label">cost, 1 day</div><div class="value">{{ live.hero.cost_1d|money }}</div></div>
-  <div class="tile"><div class="label">cost, 7 days</div><div class="value">{{ live.hero.cost_7d|money }}</div></div>
-  <div class="tile"><div class="label">tokens, 1 day</div><div class="value">{{ live.hero.tokens_1d|thousands }}</div></div>
-  <div class="tile"><div class="label">tokens, 7 days</div><div class="value">{{ live.hero.tokens_7d|thousands }}</div></div>
+  <div class="tile">
+    <div class="label">closed</div>
+    <div class="windows">
+      <div class="window"><div class="value">{{ live.hero.closed_1d }}</div><div class="span">1 day</div></div>
+      <div class="window"><div class="value">{{ live.hero.closed_7d }}</div><div class="span">7 days</div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <div class="label">agents run</div>
+    <div class="windows">
+      <div class="window"><div class="value">{{ live.hero.runs_1d }}</div><div class="span">1 day</div></div>
+      <div class="window"><div class="value">{{ live.hero.runs_7d }}</div><div class="span">7 days</div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <div class="label">cost</div>
+    <div class="windows">
+      <div class="window"><div class="value">{{ live.hero.cost_1d|money }}</div><div class="span">1 day</div></div>
+      <div class="window"><div class="value">{{ live.hero.cost_7d|money }}</div><div class="span">7 days</div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <div class="label">tokens</div>
+    <div class="windows">
+      <div class="window" title="{{ live.hero.tokens_1d|thousands }}"><div class="value">{{ live.hero.tokens_1d|compact }}</div><div class="span">1 day</div></div>
+      <div class="window" title="{{ live.hero.tokens_7d|thousands }}"><div class="value">{{ live.hero.tokens_7d|compact }}</div><div class="span">7 days</div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <div class="label">running now</div>
+    <div class="value">{{ live.hero.running }}</div>
+  </div>
+  <div class="tile">
+    <div class="label">retrying</div>
+    <div class="value">{{ live.hero.retrying }}</div>
+  </div>
 </section>
 <section class="panel running">
   <h2>Running</h2>

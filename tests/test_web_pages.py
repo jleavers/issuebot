@@ -1,5 +1,6 @@
 """Tests for the HTML pages, the live partial, the raw text routes and the static files."""
 
+import re
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
@@ -29,6 +30,7 @@ from issuebot.db import (
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
     age_text,
+    compact,
     dashboard_context,
     duration_text,
     money,
@@ -49,6 +51,12 @@ def css_declarations(selector: str) -> dict[str, str]:
         if sep:
             found[name.strip()] = value.strip()
     return found
+
+
+def hero(text: str) -> str:
+    """Just the hero section, so a label or a value elsewhere on the page cannot be mistaken."""
+    start = text.index('<section class="hero">')
+    return text[start : text.index("</section>", start)]
 
 
 RUN_ID_2 = "20260904T210000Z-abcdef"
@@ -106,12 +114,49 @@ def test_the_dashboard_costs_the_windows_not_the_worker_process(h: Harness) -> N
     h.queries.snapshot_row = snapshot()  # ClaudeTotals: $1.25 and 1,050 tokens this process
     h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
     h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
-    text = html(h.client.get("/partials/dashboard"))
-    assert "cost, 1 day" in text and "$4.50" in text
-    assert "cost, 7 days" in text and "$42.66" in text
-    assert "tokens, 1 day" in text and "203,000" in text
-    assert "tokens, 7 days" in text and "1,209,000" in text
-    assert "since start" not in text and "$1.25" not in text and "1,050" not in text
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert "$4.50" in section and "$42.66" in section
+    assert "203,000" in section and "1,209,000" in section
+    assert "since start" not in section and "$1.25" not in section and "1,050" not in section
+
+
+def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
+    """Six tiles, each carrying both windows: ten of them orphaned the last onto its own row."""
+    h.queries.closed = {1: 6, 7: 5}
+    h.queries.runs = {1: 8, 7: 7}
+    h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
+    h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
+    section = hero(html(h.client.get("/partials/dashboard")))
+    assert section.count('<div class="tile">') == 6
+    assert re.findall(r'<div class="label">([^<]+)</div>', section) == [
+        "closed",
+        "agents run",
+        "cost",
+        "tokens",
+        "running now",
+        "retrying",
+    ]
+    assert re.findall(r'<div class="value">([^<]+)</div>', section) == [
+        "6",
+        "5",
+        "8",
+        "7",
+        "$4.50",
+        "$42.66",
+        "203K",
+        "1.2M",
+        "0",
+        "0",
+    ]
+    assert 'title="203,000"' in section and 'title="1,209,000"' in section
+    assert section.count('<div class="span">1 day</div>') == 4
+    assert section.count('<div class="span">7 days</div>') == 4
+
+
+def test_the_hero_columns_always_divide_the_tiles() -> None:
+    """Six across, then three, then two: every breakpoint fills its rows exactly."""
+    columns = [int(count) for count in re.findall(r"\.hero \{[^}]*repeat\((\d+),", CSS)]
+    assert columns and all(6 % count == 0 for count in columns)
 
 
 def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
@@ -520,6 +565,17 @@ def test_stamp_duration_money_and_thousands() -> None:
     assert money(None) == "$0.00"
     assert thousands(513338) == "513,338"
     assert thousands(None) == "0"
+
+
+def test_compact_abbreviates_large_counts() -> None:
+    """The hero's token figures run to ten digits; the tile shows the magnitude."""
+    assert compact(0) == "0"
+    assert compact(950) == "950"
+    assert compact(1_000) == "1.0K"
+    assert compact(203_000) == "203K"
+    assert compact(39_160_357) == "39.2M"
+    assert compact(1_209_000_000) == "1.2B"
+    assert compact(None) == "0"
 
 
 def test_dashboard_context() -> None:
