@@ -116,11 +116,15 @@ floor, not the shipped version, and moves by hand.
   authentication rather than after `max_attempts` opaque failures. The same exit holds
   dispatch: no issue is claimed (`_dispatch_candidates` is skipped, a due retry requeues as
   kind `auth` at one poll interval) until a probe through the same `claude_auth` seam reports
-  a login, which lifts the hold and resumes dispatch with no restart. Only `ok` or `ambiguous`
-  lifts it: startup treats an `unreadable` answer as "start anyway", but here a run has
-  already failed and an answer showing nothing has changed is no reason to claim again. The
-  hold is logged as `dispatch_auth_held` (once per distinct error, then per tick at debug) and
-  `dispatch_auth_recovered`; like a preflight problem it is not carried in the snapshot.
+  a login, which lifts the hold and resumes dispatch with no restart. `logged_out` holds for
+  as long as it lasts, since a run has already failed and that answer shows nothing has
+  changed; an `unreadable` one holds for at most `MAX_UNREADABLE_AUTH_PROBES` (10) ticks and
+  then gives up (`dispatch_auth_hold_abandoned`), because #17's rule that a `claude` which
+  cannot answer must not keep a worker down applies here too — the fallback is the per-run
+  escalation, one issue per hold rather than one per attempt. The hold logs
+  `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
+  an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts; like a
+  preflight problem it is not carried in the snapshot.
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib

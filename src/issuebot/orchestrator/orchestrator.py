@@ -66,6 +66,9 @@ CANDIDATE_STATES: tuple[StateLabel, ...] = (
 # for the history store only; the dispatch loop never runs it (Phase 6 spec §8.1).
 OBSERVED_STATES: tuple[StateLabel, ...] = (*CANDIDATE_STATES, StateLabel.REVIEW)
 SHUTDOWN_MARGIN_S = 10.0
+# How many ticks an authentication hold (#20) waits for a probe that cannot answer before it
+# gives up and lets dispatch resume. Ten polls is five minutes at the default interval.
+MAX_UNREADABLE_AUTH_PROBES = 10
 
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
 # environment, stdout or None. A seam like `which`, so tests never spawn a process.
@@ -178,6 +181,7 @@ class Orchestrator:
         self._reported_preflight: str | None = None
         self._auth_block: str | None = None
         self._reported_auth_block: str | None = None
+        self._unreadable_auth_probes = 0
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
@@ -289,9 +293,13 @@ class Orchestrator:
 
         A run that failed to authenticate (#20) is evidence the worker cannot work any issue,
         so it stops claiming rather than escalating one issue after another with an opaque
-        blocker. Only a probe that reports a login lifts the hold: unlike startup, where an
-        unreadable answer must not keep a worker down, here a failure has already happened and
-        an answer that shows nothing has changed is no reason to start claiming again. The
+        blocker. A probe that reports a login (``ok`` or ``ambiguous``) lifts the hold, and an
+        answer showing nothing has changed does not, because a failure has already happened --
+        except that a probe which cannot answer at all is given only
+        ``MAX_UNREADABLE_AUTH_PROBES`` ticks: a ``claude`` too old for ``auth status``, or a
+        wedged one, would otherwise hold dispatch for good, and #17's rule that such a
+        ``claude`` must not keep a worker down applies here too. Giving up falls back to the
+        per-run escalation, which costs one issue per hold rather than one per attempt. The
         caller has just run preflight, so ``claude.command`` resolves.
         """
         if self._auth_block is None:
@@ -301,19 +309,38 @@ class Orchestrator:
             self._log.info(
                 "dispatch_auth_recovered", claude_auth=auth.detail, error=self._auth_block
             )
-            self._auth_block = None
-            self._reported_auth_block = None
+            self._release_hold()
             return False
+        if auth.verdict == "logged_out":
+            self._unreadable_auth_probes = 0
+        else:
+            self._unreadable_auth_probes += 1
+            if self._unreadable_auth_probes >= MAX_UNREADABLE_AUTH_PROBES:
+                self._log.warning(
+                    "dispatch_auth_hold_abandoned",
+                    claude_auth=auth.detail,
+                    probes=self._unreadable_auth_probes,
+                    error=self._auth_block,
+                )
+                self._release_hold()
+                return False
         if self._auth_block != self._reported_auth_block:
             self._log.error("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
             self._reported_auth_block = self._auth_block
         else:
-            self._log.debug("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
+            # An idle worker says nothing else, so the hold keeps reporting itself.
+            self._log.warning("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
         return True
 
     def _hold_dispatch(self, error: str) -> None:
         """Stop claiming issues until a probe reports the credential works again."""
         self._auth_block = error
+        self._unreadable_auth_probes = 0
+
+    def _release_hold(self) -> None:
+        self._auth_block = None
+        self._reported_auth_block = None
+        self._unreadable_auth_probes = 0
 
     # --- tick -------------------------------------------------------------------------
 

@@ -496,9 +496,14 @@ In this order (Symphony §8.1 with the roadmap's additions):
    `claude auth status --json` through the `claude_auth` seam once per tick;
    a verdict of `ok` or `ambiguous` clears it and logs
    `dispatch_auth_recovered`, anything else keeps it and logs
-   `dispatch_auth_held` (ERROR once per distinct error, DEBUG thereafter).
-   An `unreadable` answer holds, unlike at startup: a run has already failed
-   to authenticate, so no answer is not an answer to resume on.
+   `dispatch_auth_held` (ERROR on the first and on a changed error, WARNING
+   thereafter). An `unreadable` answer holds too, unlike at startup -- a run
+   has already failed to authenticate, so no answer is not an answer to
+   resume on -- but only for `MAX_UNREADABLE_AUTH_PROBES` (10) consecutive
+   ticks, after which the hold is abandoned
+   (`dispatch_auth_hold_abandoned`) so a `claude` that can never answer
+   cannot hold dispatch for good. `logged_out` does not count towards that
+   bound.
 4. `fetch_issues_by_states([IN_PROGRESS, REWORK, TODO])`; a `GitHubError`
    logs `candidates_fetch_failed` at WARNING and skips steps 5 and 6.
    *Amended by Phase 6 (spec §8.1):* with an `on_issues` observer attached the

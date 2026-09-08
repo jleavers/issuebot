@@ -642,6 +642,19 @@ async def test_crash_after_init_is_process_exit_with_stderr(workspace: Path) -> 
 
 
 @posix
+async def test_a_credential_that_stopped_working_is_read_from_the_whole_stderr_tail(
+    workspace: Path,
+) -> None:
+    """The reason is not the last line claude prints, so the tail is what gets scanned (#20)."""
+    turn = await run(runner_for(workspace, scenario="logged_out"), workspace)
+    assert turn.error_category == "auth_failed"
+    assert turn.exit_code == 1
+    assert turn.error is not None
+    # The message still quotes the last line; the category comes from the tail above it.
+    assert "docs.claude.com" in turn.error
+
+
+@posix
 async def test_no_init_is_process_exit_without_a_session(workspace: Path) -> None:
     recorder = Recorder()
     turn = await run(runner_for(workspace, scenario="no_init"), workspace, observer=recorder)

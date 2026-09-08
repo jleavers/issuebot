@@ -183,7 +183,9 @@ at once with a workpad block naming authentication, rather than after `agent.max
 opaque failures, and the worker stops claiming anything else: `docker compose logs worker`
 shows `dispatch_auth_held` and no new dispatches. It re-checks the credential every poll and
 picks up where it left off once `claude auth status` reports a login again, so fixing the
-credential is enough and no restart is needed.
+credential is enough and no restart is needed. A `claude` that cannot answer the probe at all
+holds it up for ten polls at most, and then the worker goes back to failing one issue at a
+time rather than sitting idle for good.
 
 To ask `claude` directly, without going through issuebot:
 

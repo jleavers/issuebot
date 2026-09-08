@@ -41,6 +41,7 @@ FIXED_ENVIRONMENT: dict[str, str] = {
     "DISABLE_AUTOUPDATER": "1",
 }
 _MESSAGE_LIMIT = 500
+STDERR_TAIL_LIMIT = 64 * 1024
 _LOGGED_ARG_LENGTH = 120
 _VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
@@ -321,19 +322,26 @@ AUTH_FAILURE_MARKERS: tuple[str, ...] = (
     "invalid x-api-key",
     "invalid_api_key",
     "invalid bearer token",
-    "oauth token has expired",
-    "oauth token is invalid",
-    "expired oauth token",
-    "invalid oauth token",
     "please run /login",
     "claude auth login",
 )
+# The OAuth family says the same thing too many ways to list ("has expired", "is invalid",
+# "was revoked", ...), so a token word and a verdict word co-occurring is the marker.
+AUTH_TOKEN_WORDS: tuple[str, ...] = ("oauth token", "bearer token", "access token")
+AUTH_VERDICT_WORDS: tuple[str, ...] = ("expire", "invalid", "revoke", "unauthorized")
 
 
 def is_auth_failure(*texts: str | None) -> bool:
     """True when any text carries a marker of a credential claude could not authenticate with."""
     for text in texts:
-        if text and any(marker in text.lower() for marker in AUTH_FAILURE_MARKERS):
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(marker in lowered for marker in AUTH_FAILURE_MARKERS):
+            return True
+        if any(word in lowered for word in AUTH_TOKEN_WORDS) and any(
+            word in lowered for word in AUTH_VERDICT_WORDS
+        ):
             return True
     return False
 
@@ -341,28 +349,34 @@ def is_auth_failure(*texts: str | None) -> bool:
 def classify_result(
     result: dict[str, Any] | None, exit_code: int | None, stderr_tail: str
 ) -> tuple[AgentErrorCategory | None, str | None]:
-    """Map the final result (or its absence) and the exit code to a failure category."""
+    """Map the final result (or its absence) and the exit code to a failure category.
+
+    ``stderr_tail`` is the end of the turn's stderr. Every failure reads it for a credential
+    problem (#20), and reports its last line; a result's own text is read for one only when
+    the subtype says claude failed, because a "success" result carries the agent's final
+    message, which may discuss API keys without one having failed.
+    """
+    stderr_line = _last_line(stderr_tail)
+    auth = is_auth_failure(stderr_tail)
     if result is None:
         message = f"claude exited with status {exit_code} before reporting a result"
-        category: AgentErrorCategory = (
-            "auth_failed" if is_auth_failure(stderr_tail) else "process_exit"
-        )
-        return category, _with_tail(message, stderr_tail)
+        category: AgentErrorCategory = "auth_failed" if auth else "process_exit"
+        return category, _with_tail(message, stderr_line)
     subtype = _string(result.get("subtype")) or ""
     is_error = bool(result.get("is_error"))
     text = _result_text(result)
     if subtype == "error_max_budget_usd":
         return "budget_exceeded", text or "claude stopped at the --max-budget-usd cap"
     if is_error or subtype != "success":
-        # A failing subtype's text is claude reporting why it stopped, so it can be read for a
-        # credential problem; a "success" result carries the agent's own final message, which
-        # may discuss API keys without one having failed, so only stderr is read there.
-        failed = is_auth_failure(text) if subtype != "success" else False
-        category = "auth_failed" if failed or is_auth_failure(stderr_tail) else "turn_failed"
-        return category, _with_tail(subtype or "unknown subtype", text)
+        if subtype != "success" and is_auth_failure(text):
+            auth = True
+        return (
+            "auth_failed" if auth else "turn_failed",
+            _with_tail(subtype or "unknown subtype", text),
+        )
     if exit_code != 0:
         message = f"claude reported success but exited with status {exit_code}"
-        return "process_exit", _with_tail(message, stderr_tail)
+        return "auth_failed" if auth else "process_exit", _with_tail(message, stderr_line)
     return None, None
 
 
@@ -598,7 +612,7 @@ class ClaudeRunner:
 
         emit(_event("process_exit", parser, detail=str(exit_code)))
         if category is None:
-            category, error = classify_result(parser.result, exit_code, _last_line(stderr_path))
+            category, error = classify_result(parser.result, exit_code, _stderr_tail(stderr_path))
         if category is None:
             emit(_event("turn_completed", parser, detail=parser.model))
         elif category == "turn_timeout":
@@ -698,10 +712,24 @@ async def _feed_stdin(process: asyncio.subprocess.Process, prompt: str) -> None:
         stdin.close()
 
 
-def _last_line(path: Path) -> str:
+def _stderr_tail(path: Path) -> str:
+    """The end of a turn's stderr, bounded; the whole of it when the file is small.
+
+    The whole tail is read, not just the last line, because claude prints its reason for
+    stopping and then whatever the runtime says on the way out, so a credential problem is
+    rarely the last thing on the stream (see ``classify_result``).
+    """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(handle.tell() - STDERR_TAIL_LIMIT, 0))
+            raw = handle.read()
     except OSError:
         return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _last_line(text: str) -> str:
+    """The last non-blank line of a tail, capped: the part worth putting in a message."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-1][:_MESSAGE_LIMIT] if lines else ""

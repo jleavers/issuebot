@@ -29,6 +29,7 @@ from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, Issue, StateLa
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
+    MAX_UNREADABLE_AUTH_PROBES,
     Orchestrator,
     OrchestratorStartupError,
     RunObserver,
@@ -1073,6 +1074,66 @@ async def test_only_a_probe_that_reports_a_login_lifts_the_hold(
     h.claude_auth_output = output
     await h.tick()
     assert (len(h.sessions.runs) == 1) is held
+
+
+async def test_a_probe_that_never_answers_gives_up_so_a_wedged_claude_cannot_hold_forever(
+    tmp_path: Path,
+) -> None:
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.add_issue(2, "todo")
+    h.claude_auth_output = None  # an older or wedged claude: no usable answer, ever
+    for _ in range(MAX_UNREADABLE_AUTH_PROBES - 1):
+        await h.tick()
+        assert len(h.sessions.runs) == 1
+    await h.tick()
+    assert len(h.claude_auth_calls) == MAX_UNREADABLE_AUTH_PROBES
+    assert h.github.issue(2).state is StateLabel.IN_PROGRESS
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    [given_up] = [line for line in lines if line["event"] == "dispatch_auth_hold_abandoned"]
+    assert given_up["probes"] == MAX_UNREADABLE_AUTH_PROBES
+    # Giving up is a fallback, not a recovery: nothing claims the credential works.
+    assert [line for line in lines if line["event"] == "dispatch_auth_recovered"] == []
+
+
+async def test_a_definite_logged_out_answer_never_runs_the_hold_out(tmp_path: Path) -> None:
+    """Only probes that cannot answer are counted; "not logged in" holds for as long as it lasts."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.add_issue(2, "todo")
+    for index in range(MAX_UNREADABLE_AUTH_PROBES * 2):
+        h.claude_auth_output = None if index % 2 else LOGGED_OUT
+        await h.tick()
+    assert len(h.sessions.runs) == 1
+    assert h.github.issue(2).state is StateLabel.TODO
+
+
+async def test_a_failed_escape_is_still_retried_while_authentication_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape needs GitHub, not claude, so the hold must not defer the blocker."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    with monkeypatch.context() as patch:
+        h.fail_on("set_state", patch)
+        await h.exit(h.run_for(1), **AUTH_FAILURE)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt, retry.error) == ("escape", 1, "blocked escape failed")
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    h.claude_auth_output = LOGGED_OUT
+    await h.fire(10)
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    body = h.github.comments_for(1)[0].body
+    assert body.count("### Issuebot blocked") == 1
+    assert "Claude could not authenticate in attempt 1" in body
 
 
 async def test_a_due_retry_waits_while_authentication_is_held(tmp_path: Path) -> None:
