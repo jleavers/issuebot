@@ -101,7 +101,7 @@
     <div class="card">
       <a class="title" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
       <div class="meta">
-        <span class="pr">{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a class="chip" href="{{ pr }}">PR #{{ row.pr_number }}</a>{% else %}<span class="chip">PR #{{ row.pr_number }}</span>{% endif %}{% if row.pr_state %}<span>{{ row.pr_state }}</span>{% endif %}{% endif %}</span>
+        <span class="pr">{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a class="chip" href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}<span class="chip">PR#{{ row.pr_number }}</span>{% endif %}{% if row.pr_state %}<span>{{ row.pr_state }}</span>{% endif %}{% endif %}</span>
         <span>{{ row.updated_at|age(now) }}</span>
       </div>
     </div>

@@ -242,8 +242,9 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 /*
  * One rule for both chips. A card carries two references to a GitHub object - the issue
  * number beside the title and the pull request on the meta row - and drawing them once
- * means they cannot drift apart. `nowrap` keeps `PR #26` on one line: it is two words in
- * a 180px column, and a chip broken across two lines would not read as a chip at all.
+ * means they cannot drift apart. `nowrap` keeps `PR#26` on one line: the label has no
+ * space in it to break at, but a chip broken across two lines would not read as a chip at
+ * all, so the rule says so rather than relying on the label's shape.
  */
 .card .chip {
   flex: none;
@@ -278,7 +279,7 @@ button.poll:hover { background: var(--accent); color: var(--on-solid); }
 .card .title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 /* `center` so the age sits on the middle of the chip beside it, not on its top edge.
  * Both rows wrap, because the chip inside them cannot: a column is a grid track with a
- * 180px floor, and `PR #26` + `merged` + an age does not fit one line of that. Without
+ * 180px floor, and `PR#26` + `merged` + an age does not fit one line of that. Without
  * the wrap the nowrap chip would overprint the age instead. `min-width` is left alone on
  * purpose - a `0` would let the flex item shrink under the chip and hand back the
  * overlap the wrap exists to prevent. */

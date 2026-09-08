@@ -104,7 +104,7 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     for label in GitHubLabels().as_tuple():
         assert label in text
     assert 'href="/issues/7"' in text and 'href="/issues/3"' in text
-    assert "javascript:" not in text and "PR #4" in text
+    assert "javascript:" not in text and "PR#4" in text
     assert "<script>" not in text and ' style="' not in text  # the CSP forbids inline code
     assert "example/repo" in text
 
@@ -204,7 +204,7 @@ def test_a_kanban_card_draws_its_pull_request_as_the_same_chip(h: Harness) -> No
     """
     h.queries.groups["review"] = [issue_row(number=24, pr_number=26, pr_url=PR_URL)]
     text = html(h.client.get("/partials/dashboard"))
-    assert f'<a class="chip" href="{PR_URL}">PR #26</a>' in text
+    assert f'<a class="chip" href="{PR_URL}">PR#26</a>' in text
     assert '<span class="chip">#24</span>' in text
 
 
@@ -212,7 +212,7 @@ def test_an_unsafe_pull_request_url_still_draws_the_chip(h: Harness) -> None:
     """`safe_href` refuses the scheme, so the chip loses its link, not its shape."""
     h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url="javascript:alert(1)")]
     text = html(h.client.get("/partials/dashboard"))
-    assert '<span class="chip">PR #4</span>' in text
+    assert '<span class="chip">PR#4</span>' in text
     assert "javascript:" not in text
 
 
@@ -231,7 +231,7 @@ def test_a_pull_request_with_no_state_renders_the_chip_alone(h: Harness) -> None
     """
     h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url=PR_URL, pr_state=None)]
     text = html(h.client.get("/partials/dashboard"))
-    assert f'<span class="pr"><a class="chip" href="{PR_URL}">PR #4</a></span>' in text
+    assert f'<span class="pr"><a class="chip" href="{PR_URL}">PR#4</a></span>' in text
     assert "None" not in text
 
 
@@ -242,7 +242,7 @@ def test_both_card_chips_are_drawn_by_one_rule() -> None:
     assert declarations["font-family"].startswith("ui-monospace")
     assert declarations["font-variant-numeric"] == "tabular-nums"
     assert declarations["border"] == "1px solid var(--line)"
-    assert declarations["white-space"] == "nowrap", "`PR #26` must not break across lines"
+    assert declarations["white-space"] == "nowrap", "`PR#26` must not break across lines"
 
 
 def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
@@ -258,7 +258,7 @@ def test_the_pull_request_chip_answers_the_pointer_and_the_keyboard() -> None:
 def test_the_meta_row_wraps_around_a_chip_that_cannot() -> None:
     """A column is a grid track with a 180px floor; the chip is `nowrap` inside it.
 
-    `PR #26`, the pull request's state and the age do not fit one line of that, so the row
+    `PR#26`, the pull request's state and the age do not fit one line of that, so the row
     has to wrap - otherwise the chip overprints the age at every width under about 1100px.
     Neither flex item may be given `min-width: 0`, which would let it shrink back under
     its own chip and hand the overlap straight back.

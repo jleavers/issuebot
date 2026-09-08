@@ -174,7 +174,7 @@ async def test_the_dashboard_renders_the_seeded_rows(client: TestClient) -> None
         "Issue 7 &lt;b&gt;title&lt;/b&gt;" in response.text and "<b>title</b>" not in response.text
     )
     assert 'href="/issues/7"' in response.text and 'href="/issues/10"' in response.text
-    assert "PR #8" in response.text
+    assert "PR#8" in response.text
     assert 'class="panel worker ok"' in response.text and "tick 12" in response.text
 
 
