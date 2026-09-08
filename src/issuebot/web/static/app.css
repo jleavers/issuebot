@@ -1,6 +1,16 @@
 /* issuebot dashboard. One stylesheet, no inline styles anywhere (the CSP forbids them). */
 
+/*
+ * Two themes, one set of role tokens. Light is the default; the dark values are declared
+ * twice, because they answer two different questions:
+ *   - @media (prefers-color-scheme: dark) is the operator's OS preference, and applies
+ *     only while they have not chosen for themselves (:not([data-theme="light"]));
+ *   - :root[data-theme="dark"] is that explicit choice, stamped on <html> by theme.js.
+ * The explicit choice wins in both directions, which is why the media block is guarded
+ * and written in :where() - zero specificity, so the [data-theme] rules always beat it.
+ */
 :root {
+  color-scheme: light;
   --bg: #f6f7f9;
   --panel: #ffffff;
   --ink: #1f2328;
@@ -15,10 +25,74 @@
   --review: #1d76db;
   --rework: #d93f0b;
   --complete: #5319e7;
+  /* the label a badge or pill wears on top of one of the solid colours above */
+  --on-solid: #ffffff;
+  /* The charts: the bars and the axis furniture Chart.js would otherwise paint near-black.
+   * --chart-ink is held to the text floor, since the tick labels are what a reader must
+   * resolve. --chart-grid is deliberately below the 3:1 mark floor: gridlines carry no
+   * information of their own (WCAG 1.4.11 covers graphics "required to understand the
+   * content"), and a grid at 3:1 would compete with the bars it exists to measure. */
+  --chart-closed: #5319e7;
+  --chart-runs: #1d76db;
+  --chart-ink: #6b7280;
+  --chart-grid: #d9dee5;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.45;
   color: var(--ink);
+}
+
+/*
+ * The dark steps are selected, not an inversion: each hue is lightened until the mark
+ * clears 3:1 against the dark panel (#1b1f24), and the badge label flips to dark ink,
+ * which white could not do on hues this bright.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1b1f24;
+    --ink: #e6edf3;
+    --muted: #9198a1;
+    --line: #30363d;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --todo: #3fb950;
+    --in_progress: #d29922;
+    --review: #58a6ff;
+    --rework: #f0883e;
+    --complete: #a371f7;
+    --on-solid: #0d1117;
+    --chart-closed: #a371f7;
+    --chart-runs: #58a6ff;
+    --chart-ink: #9198a1;
+    --chart-grid: #30363d;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14161a;
+  --panel: #1b1f24;
+  --ink: #e6edf3;
+  --muted: #9198a1;
+  --line: #30363d;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --todo: #3fb950;
+  --in_progress: #d29922;
+  --review: #58a6ff;
+  --rework: #f0883e;
+  --complete: #a371f7;
+  --on-solid: #0d1117;
+  --chart-closed: #a371f7;
+  --chart-runs: #58a6ff;
+  --chart-ink: #9198a1;
+  --chart-grid: #30363d;
 }
 
 * { box-sizing: border-box; }
@@ -44,20 +118,46 @@ header.top .brand { font-weight: 700; font-size: 16px; color: var(--ink); }
 header.top .repo { color: var(--muted); }
 header.top nav { margin-left: auto; display: flex; gap: 14px; }
 
+/*
+ * The theme toggle: a control rather than a link, so it sits beside the header nav and
+ * after it, at the top right. It is hidden until theme.js marks the document (html.js):
+ * without the script the button could not do anything, so it is not offered.
+ * Both icons are in the markup; CSS shows the one for the theme you would switch to.
+ */
+html:not(.js) .theme-toggle { display: none; }
+.theme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; margin: -4px 0;
+  border: 1px solid var(--muted); border-radius: 999px;
+  background: var(--panel); color: var(--muted); cursor: pointer;
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-toggle svg { width: 16px; height: 16px; display: block; fill: currentColor; }
+/* the icon is the destination, not the current state: in light mode it offers the moon */
+.theme-toggle .sun { display: none; }
+.theme-toggle .moon { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .theme-toggle .sun { display: block; }
+  :root:where(:not([data-theme="light"])) .theme-toggle .moon { display: none; }
+}
+:root[data-theme="dark"] .theme-toggle .sun { display: block; }
+:root[data-theme="dark"] .theme-toggle .moon { display: none; }
+
 main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
 section { margin-bottom: 20px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 
 /* the worker line and the poll button */
 .worker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.worker .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: var(--muted); }
+.worker .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--on-solid); background: var(--muted); }
 .worker.ok .badge { background: var(--ok); }
 .worker.stale .badge { background: var(--warn); }
 .worker.none .badge { background: var(--muted); }
 .worker .config-error { color: var(--bad); }
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 button.poll { padding: 5px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--panel); color: var(--accent); cursor: pointer; }
-button.poll:hover { background: var(--accent); color: #fff; }
+button.poll:hover { background: var(--accent); color: var(--on-solid); }
 #refresh-status { color: var(--muted); }
 
 /* hero stats */
@@ -96,7 +196,7 @@ button.poll:hover { background: var(--accent); color: #fff; }
 .issue-head dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
 .issue-head dt { color: var(--muted); }
 .issue-head dd { margin: 0; }
-.state { padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: var(--muted); }
+.state { padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--on-solid); background: var(--muted); }
 .state.todo { background: var(--todo); }
 .state.in_progress { background: var(--in_progress); }
 .state.review { background: var(--review); }
