@@ -158,7 +158,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 `validate` prints one line per check and exits non-zero on any `[FAIL]`:
 
 ```
-[ OK ] workflow: /configs/WORKFLOW.md
+[ OK ] workflow: /configs/WORKFLOW.md + WORKFLOW.local.md (1 override)
 [ OK ] github.repo: your-org/your-repo
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
