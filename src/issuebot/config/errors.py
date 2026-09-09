@@ -6,14 +6,22 @@ from pathlib import Path
 class ConfigError(Exception):
     code: str = "config_error"
 
-    def __init__(self, message: str, *, path: Path | None = None) -> None:
+    def __init__(
+        self, message: str, *, path: Path | None = None, overlay: Path | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.path = path
+        # The local overlay merged over ``path`` when the error is about the merged result
+        # (a resolution or validation failure), so the header names both files a reader
+        # would have to look in. An error about one file alone carries only ``path``.
+        self.overlay = overlay
 
     def __str__(self) -> str:
-        prefix = f"{self.path}: " if self.path is not None else ""
-        return f"{prefix}{self.message}"
+        if self.path is None:
+            return self.message
+        suffix = f" (+ {self.overlay.name})" if self.overlay is not None else ""
+        return f"{self.path}{suffix}: {self.message}"
 
 
 class MissingWorkflowFile(ConfigError):  # noqa: N818
@@ -40,9 +48,15 @@ class MissingEnvironmentVariable(ConfigError):  # noqa: N818
 class SettingsValidationError(ConfigError):
     code = "invalid_settings"
 
-    def __init__(self, errors: list[tuple[str, str]], *, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        errors: list[tuple[str, str]],
+        *,
+        path: Path | None = None,
+        overlay: Path | None = None,
+    ) -> None:
         self.errors = errors
-        super().__init__(f"{len(errors)} invalid setting(s)", path=path)
+        super().__init__(f"{len(errors)} invalid setting(s)", path=path, overlay=overlay)
 
     def __str__(self) -> str:
         lines = [super().__str__()]

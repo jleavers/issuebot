@@ -14,7 +14,9 @@ PR = LinkedPr(
 
 
 def load() -> Workflow:
-    return load_workflow(WORKFLOW, environ={"GH_TOKEN": "t"})
+    # `overlay=False`: `configs/` is where a developer working on issuebot keeps their own
+    # `WORKFLOW.local.md`, and it must not be able to fail the suite for them alone.
+    return load_workflow(WORKFLOW, environ={"GH_TOKEN": "t"}, overlay=False)
 
 
 def context(workflow: Workflow, issue: Issue, **overrides: object) -> PromptContext:
