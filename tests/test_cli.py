@@ -696,10 +696,13 @@ def test_validate_uses_env_workflow_path(
     assert main(["validate"]) == 0
 
 
-def test_validate_defaults_to_cwd_workflow(
+def test_validate_defaults_to_the_configs_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, executables: object
 ) -> None:
-    _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    """The default is `configs/WORKFLOW.md`: a directory is what Compose can mount (#46)."""
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "WORKFLOW.md").write_text("---\ngithub:\n  repo: o/r\n---\nBody", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GH_TOKEN", "t")
     assert main(["validate"]) == 0
@@ -1713,7 +1716,7 @@ def test_migrate_reports_nothing_to_do_and_failures(
 SNAPSHOT_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 SNAPSHOT_DATA: dict[str, Any] = {
     "at": SNAPSHOT_AT.isoformat(),
-    "workflow_path": "/app/WORKFLOW.md",
+    "workflow_path": "/configs/WORKFLOW.md",
     "workflow_mtime_ns": 1,
     "config_valid": True,
     "config_error": None,
@@ -1775,7 +1778,7 @@ def test_render_status_lists_running_and_retrying_entries() -> None:
     text = render_status(row, now=SNAPSHOT_AT + timedelta(seconds=13))
     assert text.splitlines() == [
         "snapshot: 2026-09-04T12:00:00Z (written 2026-09-04T12:00:01Z, 12 s ago)",
-        "workflow: /app/WORKFLOW.md (config valid)",
+        "workflow: /configs/WORKFLOW.md (config valid)",
         "tick 42, last tick 2026-09-04T11:59:58Z, poll 30000 ms, 2 slots",
         "running: 1",
         "  NUMBER  ATTEMPT  TURNS  RUN_ID                   LAST_EVENT          "
@@ -2144,7 +2147,7 @@ def test_worker_without_a_database_seeds_nothing(
 def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=SEED_AT,
-        workflow_path="/app/WORKFLOW.md",
+        workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=1,
         config_valid=True,
         config_error=None,

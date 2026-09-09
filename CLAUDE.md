@@ -16,7 +16,7 @@ docker compose rm -sf test-db        # throw it away (not `compose down`: that i
 docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB_PORT (5434 here)
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
-uv run issuebot validate             # load ./WORKFLOW.md and check the environment
+uv run issuebot validate             # load ./configs/WORKFLOW.md and check the environment
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
 uv run issuebot labels ensure        # create/update the state labels and markers in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
@@ -59,7 +59,10 @@ floor, not the shipped version, and moves by hand.
 ## Package layout
 
 - `issuebot.config`: `load_workflow(path)` → `Workflow(config: Settings, prompt_template,
-  raw_config, path, source_mtime_ns)`. Front matter → `$VAR`/`~`/relative-path
+  raw_config, path, source_mtime_ns, source_dev, source_ino)`, the last three being
+  `source_identity`, the `(dev, ino, mtime_ns)` triple a watcher compares: the mtime alone
+  misses a file replaced by a save that preserved its timestamp (#46).
+  Front matter → `$VAR`/`~`/relative-path
   resolution (`resolve.py`, designated fields only) → pydantic `Settings`
   (`settings.py`, `extra="forbid"`). Errors are `ConfigError` subclasses with a `code`.
 - `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
@@ -130,7 +133,7 @@ floor, not the shipped version, and moves by hand.
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
-  tick; mtime reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
+  tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
   fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
   (the session's final transition is published before any release; `max_turns` while
@@ -147,6 +150,21 @@ floor, not the shipped version, and moves by hand.
   (`state.py`, the total inverse of `to_dict` for one reading) and passes it in, which keeps the
   orchestrator free of `db` the way `on_snapshot` and `on_issues` do. A database that will not
   answer logs `rate_limits_seed_failed` and costs the tile its last figure, never the start.
+  `_reload_workflow` compares `source_identity`, and when it matches asks
+  `_pinned_mount_complaint(path, stat)` why this process might not be able to tell (#46):
+  `stale mount` for `st_nlink == 0` (a name resolving to an inode no directory entry points
+  at is one a mount is holding open, so the host has already replaced it), else
+  `single-file mount` when the file's `st_dev` differs from its own parent's (a directory
+  entry can only name an inode on its own filesystem, so the file *is* a mount point and
+  will go stale on the first save) -- the signal that catches what `st_nlink` cannot, a save
+  that left the old inode a link and Docker Desktop's virtiofs. It goes through
+  `_report_reload_failure`, so the ERROR and the snapshot's `config_error` are the reload's
+  own. Called only on the unchanged branch, so it can never suppress a load: a wrong answer
+  costs a log line, never a setting, which also bounds its one race (a rename committing
+  inside `stat` reads as `nlink == 0`; the next tick reloads and clears it). The deployment
+  fix is the mount itself: compose binds the directory `./configs` at `/configs` for the
+  worker and the web and points `ISSUEBOT_WORKFLOW` at the file inside it (the image
+  defaults to the same), so a lookup goes through the host's directory entry.
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -282,7 +300,8 @@ floor, not the shipped version, and moves by hand.
   omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
   `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One
   connection per request through `Database.queries()`. Constants, not settings; the web reads
-  `WORKFLOW.md` once at start. Light and dark are role tokens in `app.css`, declared once for
+  `WORKFLOW.md` once at start (`ISSUEBOT_WORKFLOW`, `/configs/WORKFLOW.md` under compose).
+  Light and dark are role tokens in `app.css`, declared once for
   light and twice for dark (`@media (prefers-color-scheme: dark)` for the OS preference,
   `:root[data-theme="dark"]` for the operator's own choice, which wins); `static/theme.js` is
   loaded synchronously from `<head>` so the stamp lands before the first paint, persists the

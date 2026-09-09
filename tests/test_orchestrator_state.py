@@ -226,7 +226,7 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
     )
     snapshot = RuntimeSnapshot(
         at=NOW,
-        workflow_path="/app/WORKFLOW.md",
+        workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=5,
         config_valid=True,
         config_error=None,
@@ -266,7 +266,7 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
 def _snapshot_with(limits: RateLimits | None) -> RuntimeSnapshot:
     return RuntimeSnapshot(
         at=NOW,
-        workflow_path="/app/WORKFLOW.md",
+        workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=5,
         config_valid=True,
         config_error=None,

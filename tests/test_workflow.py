@@ -126,6 +126,15 @@ def test_load_workflow_builds_settings_and_prompt(tmp_path: Path) -> None:
     assert wf.source_mtime_ns == wf_path.stat().st_mtime_ns
 
 
+def test_load_workflow_records_the_source_identity(tmp_path: Path) -> None:
+    """Which file the settings came from, so a watcher can tell it apart from another (#46)."""
+    wf_path = tmp_path / "WORKFLOW.md"
+    wf_path.write_text(GOOD, encoding="utf-8")
+    wf = load_workflow(wf_path, environ={"TOKEN": "t"})
+    source = wf_path.stat()
+    assert wf.source_identity == (source.st_dev, source.st_ino, source.st_mtime_ns)
+
+
 def test_load_workflow_accepts_str_path(tmp_path: Path) -> None:
     wf_path = tmp_path / "WORKFLOW.md"
     wf_path.write_text(GOOD, encoding="utf-8")

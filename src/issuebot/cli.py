@@ -78,7 +78,7 @@ from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
 
-DEFAULT_WORKFLOW = "WORKFLOW.md"
+DEFAULT_WORKFLOW = "configs/WORKFLOW.md"
 
 # Module-level references so tests can substitute the executable lookup and the adapter.
 _which = shutil.which
@@ -156,7 +156,7 @@ def _add_workflow_option(parser: argparse.ArgumentParser) -> None:
         "--workflow",
         type=Path,
         default=None,
-        help="path to WORKFLOW.md (default: $ISSUEBOT_WORKFLOW or ./WORKFLOW.md)",
+        help="path to WORKFLOW.md (default: $ISSUEBOT_WORKFLOW or ./configs/WORKFLOW.md)",
     )
 
 

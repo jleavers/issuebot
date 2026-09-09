@@ -9,9 +9,11 @@ import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
@@ -1627,6 +1629,128 @@ async def test_invalid_reload_keeps_the_last_good_workflow(tmp_path: Path) -> No
     assert h.orchestrator.workflow is h.workflow
     assert list(h.orchestrator.running) == ["1"]
     h.write_workflow(max_concurrent=4)
+    await h.tick()
+    assert h.snapshots[-1].config_valid is True
+    assert h.snapshots[-1].max_concurrent_agents == 4
+
+
+async def test_a_stale_single_file_mount_is_reported_at_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path resolving to an unlinked inode is a bind mount serving a replaced file (#46)."""
+    h = Harness(tmp_path)
+    await h.tick()
+    assert h.snapshots[-1].config_valid is True
+
+    # The operator edits the file on the host and their editor saves it by rename, so the
+    # host path gets a new inode. A single-file bind mount stays on the old one, which is
+    # now unlinked: the container sees nlink 0 and an mtime that will never move again.
+    h.write_workflow(max_concurrent=4)
+    watched = h.orchestrator.workflow.path
+    real_stat = Path.stat
+    pinned = real_stat(watched)
+
+    def stale_stat(self: Path, **kwargs: Any) -> Any:
+        if self == watched:
+            return SimpleNamespace(
+                st_nlink=0,
+                st_dev=pinned.st_dev,
+                st_ino=pinned.st_ino,
+                st_mtime_ns=h.workflow.source_mtime_ns,
+            )
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    with capture_logs() as logs:
+        await h.tick()
+
+    complaint = next(entry for entry in logs if entry["event"] == "workflow_reload_failed")
+    assert complaint["log_level"] == "error"
+    assert "stale mount" in complaint["error"]
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is False
+    assert "stale mount" in (snapshot.config_error or "")
+    # It keeps running the settings it started with rather than pretending to be current.
+    assert h.orchestrator.workflow is h.workflow
+    assert snapshot.max_concurrent_agents == h.workflow.config.agent.max_concurrent_agents
+
+
+async def test_a_file_mounted_singly_is_reported_before_it_goes_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file on a different device from its own directory is a mount point (#46)."""
+    h = Harness(tmp_path)
+    await h.tick()
+    assert h.snapshots[-1].config_valid is True
+
+    # The file keeps the identity it was loaded with -- a mounted file already had the
+    # mount's device when it was read -- and its directory is the one on another device.
+    watched = h.orchestrator.workflow.path
+    real_stat = Path.stat
+
+    def mounted_stat(self: Path, **kwargs: Any) -> Any:
+        source = real_stat(self, **kwargs)
+        if self != watched.parent:
+            return source
+        return SimpleNamespace(st_nlink=2, st_dev=source.st_dev + 1, st_ino=source.st_ino)
+
+    monkeypatch.setattr(Path, "stat", mounted_stat)
+    with capture_logs() as logs:
+        await h.tick()
+
+    complaint = next(entry for entry in logs if entry["event"] == "workflow_reload_failed")
+    assert complaint["log_level"] == "error"
+    assert "single-file mount" in complaint["error"]
+    assert "single-file mount" in (h.snapshots[-1].config_error or "")
+
+
+async def test_a_loose_link_count_never_suppresses_a_real_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The complaint is advisory: it is only reached when there is nothing to load (#46)."""
+    h = Harness(tmp_path)
+    await h.tick()
+    h.write_workflow(max_concurrent=4)
+
+    watched = h.orchestrator.workflow.path
+    real_stat = Path.stat
+
+    def zero_nlink_stat(self: Path, **kwargs: Any) -> Any:
+        source = real_stat(self, **kwargs)
+        if self != watched:
+            return source
+        return SimpleNamespace(
+            st_nlink=0,
+            st_dev=source.st_dev,
+            st_ino=source.st_ino,
+            st_mtime_ns=source.st_mtime_ns,
+        )
+
+    monkeypatch.setattr(Path, "stat", zero_nlink_stat)
+    await h.tick()
+
+    # The file really did change, so it is loaded and nothing is complained about.
+    assert h.snapshots[-1].config_valid is True
+    assert h.snapshots[-1].max_concurrent_agents == 4
+
+
+async def test_reload_notices_a_replacement_that_kept_its_mtime(tmp_path: Path) -> None:
+    """Identity is (dev, ino, mtime_ns): the mtime alone misses a timestamp-preserving save."""
+    h = Harness(tmp_path)
+    await h.tick()
+    stamp = h.path.stat().st_mtime_ns
+    ino = h.path.stat().st_ino
+
+    # A restore from an archive, or a checkout that preserves timestamps: the content is
+    # new, the inode is new, and the mtime is the one the old file already had.
+    h.write_workflow(max_concurrent=4)
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text(h.path.read_text(encoding="utf-8"), encoding="utf-8")
+    os.replace(replacement, h.path)
+    os.utime(h.path, ns=(stamp, stamp))
+    assert h.path.stat().st_mtime_ns == stamp
+    assert h.path.stat().st_ino != ino
+
     await h.tick()
     assert h.snapshots[-1].config_valid is True
     assert h.snapshots[-1].max_concurrent_agents == 4

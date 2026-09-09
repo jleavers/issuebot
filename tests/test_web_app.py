@@ -63,7 +63,7 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "last_tick_at": (NOW - timedelta(seconds=6)).isoformat(),
         "poll_interval_ms": 30000,
         "max_concurrent_agents": 2,
-        "workflow_path": "/app/WORKFLOW.md",
+        "workflow_path": "/configs/WORKFLOW.md",
         "config_valid": True,
         "config_error": None,
         "dispatch_hold": None,

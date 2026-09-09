@@ -97,7 +97,7 @@ async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator
     )
     snapshot = RuntimeSnapshot(
         at=NOW,
-        workflow_path="/app/WORKFLOW.md",
+        workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=1,
         config_valid=True,
         config_error=None,

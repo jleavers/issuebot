@@ -31,6 +31,22 @@ class Workflow:
     prompt_template: str
     raw_config: dict[str, Any]
     source_mtime_ns: int
+    # The device and inode the settings were read from. A watcher that keys only on the
+    # mtime misses a file replaced by an atomic save (write a temporary file, rename it
+    # over the original) that carries an mtime it already had -- a restore from an archive
+    # or a checkout that preserves timestamps. Default 0 so a hand-built Workflow in a test
+    # need not invent one; 0 for both is "unknown", and never equal to a real stat.
+    source_dev: int = 0
+    source_ino: int = 0
+
+    @property
+    def source_identity(self) -> tuple[int, int, int]:
+        """``(dev, ino, mtime_ns)`` of the file this was read from.
+
+        The whole triple, not the mtime alone: the file the path names now is the same
+        file only if all three match.
+        """
+        return (self.source_dev, self.source_ino, self.source_mtime_ns)
 
 
 def parse_workflow_text(text: str) -> tuple[dict[str, Any], str]:
@@ -74,7 +90,7 @@ def load_workflow(path: Path | str, *, environ: Mapping[str, str] | None = None)
     try:
         # Stat before read: a racing rewrite then yields content at least as new as
         # the recorded mtime, so the next reload sees the change.
-        mtime_ns = resolved_path.stat().st_mtime_ns
+        source = resolved_path.stat()
         text = resolved_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise MissingWorkflowFile(
@@ -100,7 +116,9 @@ def load_workflow(path: Path | str, *, environ: Mapping[str, str] | None = None)
         config=settings,
         prompt_template=body,
         raw_config=raw,
-        source_mtime_ns=mtime_ns,
+        source_mtime_ns=source.st_mtime_ns,
+        source_dev=source.st_dev,
+        source_ino=source.st_ino,
     )
 
 
