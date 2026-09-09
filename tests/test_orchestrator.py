@@ -18,7 +18,7 @@ from structlog.testing import capture_logs
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.session import run_session
-from issuebot.config import Settings, load_workflow
+from issuebot.config import Settings, load_workflow, overlay_path_for
 from issuebot.events import (
     Blocked,
     Event,
@@ -310,6 +310,15 @@ class Harness:
         previous = getattr(self, "_mtime", 1_700_000_000)
         self._mtime = previous + 1
         os.utime(self.path, ns=(self._mtime * 1_000_000_000, self._mtime * 1_000_000_000))
+
+    def write_overlay(self, text: str) -> Path:
+        """The local overlay beside the workflow file, with a forced distinct mtime."""
+        overlay = overlay_path_for(self.path)
+        overlay.write_text(text, encoding="utf-8")
+        previous = getattr(self, "_overlay_mtime", 1_700_000_000)
+        self._overlay_mtime = previous + 1
+        os.utime(overlay, ns=(self._overlay_mtime * 1_000_000_000,) * 2)
+        return overlay
 
     def claude_extra(self) -> str:
         lines = [f"  model: {self.model}\n"] if self.model else []
@@ -1754,6 +1763,111 @@ async def test_reload_notices_a_replacement_that_kept_its_mtime(tmp_path: Path) 
     await h.tick()
     assert h.snapshots[-1].config_valid is True
     assert h.snapshots[-1].max_concurrent_agents == 4
+
+
+async def test_reload_follows_the_overlay_being_created_edited_and_deleted(
+    tmp_path: Path,
+) -> None:
+    """The overlay reloads on the same terms as the base: presence and identity."""
+    h = Harness(tmp_path)
+    await h.tick()
+    assert h.snapshots[-1].max_concurrent_agents == 2
+    assert h.snapshots[-1].workflow_overlay_path is None
+
+    overlay = h.write_overlay("---\nagent:\n  max_concurrent_agents: 4\n---\n")
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.snapshots[-1].max_concurrent_agents == 4
+    assert h.snapshots[-1].workflow_overlay_path == str(overlay)
+    assert h.snapshots[-1].config_valid is True
+    reloaded = next(entry for entry in logs if entry["event"] == "workflow_reloaded")
+    assert (reloaded["overlay"], reloaded["changed"]) == (str(overlay), ["agent"])
+
+    h.write_overlay("---\nagent:\n  max_concurrent_agents: 5\n---\n")
+    await h.tick()
+    assert h.snapshots[-1].max_concurrent_agents == 5
+
+    overlay.unlink()
+    await h.tick()
+    assert h.snapshots[-1].max_concurrent_agents == 2
+    assert h.snapshots[-1].workflow_overlay_path is None
+    assert h.snapshots[-1].config_valid is True
+
+
+async def test_an_invalid_overlay_keeps_the_last_good_workflow_and_names_it(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    await h.tick()
+    h.write_overlay("---\nagent:\n  bogus: 1\n---\n")
+    await h.tick()
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is False
+    assert snapshot.config_error is not None
+    assert "(+ WORKFLOW.local.md)" in snapshot.config_error and "bogus" in snapshot.config_error
+    assert h.orchestrator.workflow is h.workflow
+    assert snapshot.workflow_overlay_path is None
+
+
+async def test_an_overlay_mounted_singly_is_reported_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An overlay on a different device from its directory is a mount point too (#46)."""
+    h = Harness(tmp_path)
+    await h.tick()
+    overlay = h.write_overlay("---\nagent:\n  max_concurrent_agents: 4\n---\n")
+    real_stat = Path.stat
+
+    def mounted_stat(self: Path, **kwargs: Any) -> Any:
+        source = real_stat(self, **kwargs)
+        if self != overlay:
+            return source
+        return SimpleNamespace(
+            st_nlink=1,
+            st_dev=source.st_dev + 1,
+            st_ino=source.st_ino,
+            st_mtime_ns=source.st_mtime_ns,
+            st_mode=source.st_mode,
+        )
+
+    # Mounted from the start: the overlay is loaded with the mount's device, as a mounted
+    # file would be, and on the next tick nothing has changed and the complaint runs.
+    monkeypatch.setattr(Path, "stat", mounted_stat)
+    await h.tick()
+    assert h.snapshots[-1].max_concurrent_agents == 4
+    assert h.snapshots[-1].config_valid is True
+    with capture_logs() as logs:
+        await h.tick()
+    complaint = next(entry for entry in logs if entry["event"] == "workflow_reload_failed")
+    assert complaint["log_level"] == "error"
+    assert "single-file mount" in complaint["error"]
+    assert str(overlay) in complaint["error"]
+    assert str(h.path) not in complaint["error"]
+    assert "single-file mount" in (h.snapshots[-1].config_error or "")
+    # Advisory: the settings in force are still the overlay's.
+    assert h.snapshots[-1].max_concurrent_agents == 4
+
+
+async def test_an_overlay_that_cannot_be_stated_is_a_reload_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a missing overlay means "no overlay"; any other answer is reported."""
+    h = Harness(tmp_path)
+    await h.tick()
+    overlay = overlay_path_for(h.path)
+    real_stat = Path.stat
+
+    def forbidden_stat(self: Path, **kwargs: Any) -> Any:
+        if self == overlay:
+            raise PermissionError(13, "Permission denied", str(overlay))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", forbidden_stat)
+    await h.tick()
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is False
+    assert "workflow overlay unreadable" in (snapshot.config_error or "")
+    assert h.orchestrator.workflow is h.workflow
 
 
 async def test_missing_workflow_file_is_reported_not_fatal(tmp_path: Path) -> None:

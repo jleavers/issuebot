@@ -27,7 +27,14 @@ from issuebot.agent import (
     settings_for_labels,
 )
 from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits
-from issuebot.config import ConfigError, GitHubSettings, Settings, Workflow, load_workflow
+from issuebot.config import (
+    ConfigError,
+    GitHubSettings,
+    Settings,
+    Workflow,
+    load_workflow,
+    overlay_path_for,
+)
 from issuebot.events import EventBus
 from issuebot.github import (
     ACTIVE_STATES,
@@ -236,6 +243,7 @@ class Orchestrator:
             at=self._now(),
             workflow_path=str(self._workflow.path),
             workflow_mtime_ns=self._workflow.source_mtime_ns,
+            workflow_overlay_path=_overlay_name(self._workflow),
             config_valid=self._config_error is None,
             config_error=self._config_error,
             dispatch_hold=self._dispatch_hold,
@@ -458,16 +466,38 @@ class Orchestrator:
             self._log.exception("issues_consumer_failed", count=len(issues))
 
     def _reload_workflow(self) -> None:
-        path = self._workflow.path
+        workflow = self._workflow
+        path = workflow.path
         try:
             source = path.stat()
         except OSError as exc:
             self._report_reload_failure(f"workflow file unreadable: {exc}")
             return
-        if (source.st_dev, source.st_ino, source.st_mtime_ns) == self._workflow.source_identity:
-            # Nothing to load. The one thing left worth saying is that this deployment may
-            # not be in a position to tell (#46).
+        overlay_path = overlay_path_for(path)
+        try:
+            overlay: os.stat_result | None = overlay_path.stat()
+        except FileNotFoundError:
+            # The normal case: no overlay.
+            overlay = None
+        except OSError as exc:
+            # A file that exists and cannot be stat'ed is not something to guess about.
+            self._report_reload_failure(f"workflow overlay unreadable: {exc}")
+            return
+        loaded = (
+            workflow.source_identity,
+            workflow.overlay_identity if workflow.overlay_path is not None else None,
+        )
+        found = (
+            (source.st_dev, source.st_ino, source.st_mtime_ns),
+            _identity(overlay) if overlay is not None else None,
+        )
+        if loaded == found:
+            # Nothing to load: neither identity has moved and the overlay's presence has not
+            # changed. The one thing left worth saying is that this deployment may not be
+            # in a position to tell (#46), about either file.
             complaint = _pinned_mount_complaint(path, source)
+            if complaint is None and overlay is not None:
+                complaint = _pinned_mount_complaint(overlay_path, overlay)
             if complaint is not None:
                 self._report_reload_failure(complaint)
             return
@@ -482,7 +512,9 @@ class Orchestrator:
         self._reported_reload_error = None
         self._adapter = self._adapter_factory(workflow.config.github)
         self._workspaces = self._workspaces_factory(workflow.config)
-        self._log.info("workflow_reloaded", path=str(path), changed=changed)
+        self._log.info(
+            "workflow_reloaded", path=str(path), overlay=_overlay_name(workflow), changed=changed
+        )
 
     def _report_reload_failure(self, message: str) -> None:
         self._config_error = message
@@ -1125,6 +1157,14 @@ class Orchestrator:
             cost_usd=self._totals.cost_usd,
         )
         self._publish_snapshot()
+
+
+def _identity(source: os.stat_result) -> tuple[int, int, int]:
+    return (source.st_dev, source.st_ino, source.st_mtime_ns)
+
+
+def _overlay_name(workflow: Workflow) -> str | None:
+    return str(workflow.overlay_path) if workflow.overlay_path is not None else None
 
 
 def _changed_sections(old: Workflow, new: Workflow) -> list[str]:
