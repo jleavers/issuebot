@@ -290,13 +290,17 @@ def test_the_column_heading_is_type_and_clears_the_text_floor(theme: dict[str, s
     background = theme["--panel"]
     measured = {}
     for selector, declarations in rules(KANBAN):
-        if "h3" not in selector or "::" in selector:
+        # .column only: the slice runs to the next banner comment and takes in .filters and
+        # the issues table on the way, and those sit on --bg rather than the column's --panel
+        if not selector.startswith(".column") or "h3" not in selector or "::" in selector:
             continue
         token = painted(declarations, "color")
         if token is not None:
             measured[selector] = token
-    # the heading and its count; a heading painted by no rule at all would be a silent pass
-    assert measured, "no rule paints the column heading, so nothing here is measured"
+    # The heading itself, by name: `assert measured` alone would still pass on the strength
+    # of `.column h3 .count`, leaving the heading to inherit - and a later `.column { color:
+    # var(--todo) }` would then put a state token back on it with this test green.
+    assert ".column h3" in measured, f"nothing paints the heading itself: {sorted(measured)}"
     for selector, token in measured.items():
         ratio = contrast(theme[token], background)
         assert ratio >= TEXT_FLOOR, f"{selector} is {token} on --panel: {ratio:.4f}:1"
@@ -334,11 +338,11 @@ def test_the_column_heading_names_its_state_in_words_too() -> None:
     assert '<h3><span class="name">{{ column.label }}</span>' in markup
 
 
-def test_the_light_state_tokens_are_githubs_own_label_hexes() -> None:
+def test_the_light_state_tokens_are_githubs_label_hexes_where_they_can_be() -> None:
     """What "do not drift the board away from the colours GitHub renders" means, asserted.
 
     Four of the five are LABEL_STYLES verbatim. --in_progress is not, and cannot be: GitHub
-    renders that label FBCA04, a yellow that is 1.32:1 on white and so cannot be a mark on
+    renders that label FBCA04, a yellow that is 1.55:1 on white and so cannot be a mark on
     the board at all, let alone type. It is the darkened sibling of that yellow, and it is
     the reason this pairing failed first. Dark is GitHub's dark-theme family rather than
     these hexes, so only light is tied here.

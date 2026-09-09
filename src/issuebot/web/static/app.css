@@ -24,11 +24,12 @@
    * the darker of the two surfaces. #1d76db was 4.20:1 there - under the floor - and
    * 4.5002:1 on --panel, which is at it rather than over it (#43).
    *
-   * --review and --chart-runs keep #1d76db, and since #51 they really are only ever
-   * marks: .column h3 used to be painted with the state tokens, which asked a 13px bold
-   * heading to be type at 4.5:1 on --panel and left --in_progress under it at 3.64:1.
-   * The heading is --ink now and the role is a dot beside it, so the five keep their
-   * hexes and owe the 3:1 a mark owes. They keep them because they are GitHub's own
+   * --review and --chart-runs keep #1d76db, and since #51 no state token is ever ink:
+   * .column h3 used to be painted with them, which asked a 13px bold heading to be type
+   * at 4.5:1 on --panel and left --in_progress under it at 3.64:1. The heading is --ink
+   * now and the role is a dot beside it, so the five keep their hexes and owe the 3:1 a
+   * mark owes. (They still carry --on-solid text on top as a .state pill fill, which is
+   * its own pairing and has its own floor.) They keep them because they are GitHub's own
    * label hexes (LABEL_STYLES in src/issuebot/github/state.py sets review to 1D76DB),
    * so the board reads as the labels GitHub renders. --accent answers to nothing
    * outside the stylesheet, so it is free to move. */
