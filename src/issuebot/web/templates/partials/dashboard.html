@@ -122,7 +122,7 @@
 <section class="kanban">
   {% for column in live.columns %}
   <div class="column {{ column.role }}">
-    <h3><span>{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
+    <h3><span class="name">{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
       <a class="issue-ref" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>

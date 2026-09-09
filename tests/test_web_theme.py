@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from fakes.web import RUN_ID, Harness
+from issuebot.github.state import LABEL_STYLES, StateLabel
 
 CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
 THEME_JS = (files("issuebot.web") / "static" / "theme.js").read_text(encoding="utf-8")
@@ -246,6 +247,115 @@ def test_the_kanban_card_marks_clear_the_mark_floor(theme: dict[str, str]) -> No
     for name in ("--todo", "--in_progress", "--review", "--rework", "--complete", "--accent"):
         ratio = contrast(theme[name], background)
         assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
+
+
+KANBAN = CSS[CSS.index("/* kanban */") : CSS.index("/* banners */")]
+
+
+def rules(section: str) -> list[tuple[str, str]]:
+    """(selector, declarations) for every rule in ``section``, comments stripped first.
+
+    A comment may hold a brace - the kanban block's do not, but nothing stops one - and an
+    unstripped one would also let a *described* colour be read as a declared one.
+    """
+    stripped = re.sub(r"/\*.*?\*/", "", section, flags=re.DOTALL)
+    return [(s.strip(), d) for s, d in re.findall(r"([^{}]+)\{([^{}]*)\}", stripped)]
+
+
+def painted(declarations: str, prop: str) -> str | None:
+    """The token a rule sets ``prop`` to, or None if it does not set it."""
+    match = re.search(rf"(?:^|;)\s*{prop}\s*:\s*([^;]+)", declarations)
+    if match is None:
+        return None
+    token = re.fullmatch(r"var\((--[a-z_-]+)\)", match.group(1).strip())
+    assert token is not None, f"{prop} is not a token: {match.group(1)!r}"
+    return token.group(1)
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_column_heading_is_type_and_clears_the_text_floor(theme: dict[str, str]) -> None:
+    """A column heading is read as type, so it owes the 4.5:1 of 1.4.3 (#51).
+
+    It is a 13px bold h3, under WCAG's large-text threshold (18.66px bold / 24px regular),
+    so the 3:1 that covers the card stripe and the .state pill does not cover it. It used to
+    be painted with the five state tokens - GitHub's label hexes, picked to carry white text
+    on a pill rather than to be ink on white - which put --in_progress at 3.64:1 on --panel
+    in light and three of the other four at 4.500x:1, at the floor rather than over it.
+
+    The assertion is on whatever the stylesheet actually paints a heading with rather than
+    on a token named here, because that is the shape of the regression: the ratio was never
+    measured *as a heading*, so a state token could sit there unnoticed. Re-introducing one
+    fails this, and so would painting the heading with any other mark-grade token.
+    """
+    background = theme["--panel"]
+    measured = {}
+    for selector, declarations in rules(KANBAN):
+        # .column only: the slice runs to the next banner comment and takes in .filters and
+        # the issues table on the way, and those sit on --bg rather than the column's --panel
+        if not selector.startswith(".column") or "h3" not in selector or "::" in selector:
+            continue
+        token = painted(declarations, "color")
+        if token is not None:
+            measured[selector] = token
+    # The heading itself, by name: `assert measured` alone would still pass on the strength
+    # of `.column h3 .count`, leaving the heading to inherit - and a later `.column { color:
+    # var(--todo) }` would then put a state token back on it with this test green.
+    assert ".column h3" in measured, f"nothing paints the heading itself: {sorted(measured)}"
+    for selector, token in measured.items():
+        ratio = contrast(theme[token], background)
+        assert ratio >= TEXT_FLOOR, f"{selector} is {token} on --panel: {ratio:.4f}:1"
+
+
+@pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
+def test_the_column_role_is_a_dot_and_keeps_its_state_token(theme: dict[str, str]) -> None:
+    """The role moved off the heading's ink and onto a mark, which owes 3:1 and clears it.
+
+    Dropping the ask is what let the five keep GitHub's hexes: darkening them per role would
+    have fixed the ratio by drifting the board off the colours GitHub renders. The dot is a
+    mark on --panel (the column's own surface, unlike the card stripe, which sits on --bg).
+    """
+    roles = ("todo", "in_progress", "review", "rework", "complete")
+    dots = {}
+    for selector, declarations in rules(KANBAN):
+        match = re.fullmatch(r"\.column\.(\w+) h3 \.name::before", selector)
+        if match is not None:
+            dots[match.group(1)] = painted(declarations, "background")
+    assert dots == {role: f"--{role}" for role in roles}
+    for role, token in dots.items():
+        ratio = contrast(theme[token], theme["--panel"])
+        assert ratio >= MARK_FLOOR, f"the {role} dot is {ratio:.2f}:1 on --panel"
+
+
+def test_the_column_heading_names_its_state_in_words_too() -> None:
+    """The dot is the CSS hook's whole point, and colour is never the only carrier.
+
+    A dot alone would put the role in colour alone (WCAG 1.4.1); the heading keeps naming
+    its state, and the ::before rules above hang off the span that holds that name.
+    """
+    markup = (files("issuebot.web") / "templates" / "partials" / "dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    assert '<h3><span class="name">{{ column.label }}</span>' in markup
+
+
+def test_the_light_state_tokens_are_githubs_label_hexes_where_they_can_be() -> None:
+    """What "do not drift the board away from the colours GitHub renders" means, asserted.
+
+    Four of the five are LABEL_STYLES verbatim. --in_progress is not, and cannot be: GitHub
+    renders that label FBCA04, a yellow that is 1.55:1 on white and so cannot be a mark on
+    the board at all, let alone type. It is the darkened sibling of that yellow, and it is
+    the reason this pairing failed first. Dark is GitHub's dark-theme family rather than
+    these hexes, so only light is tied here.
+    """
+    for label, role in (
+        (StateLabel.TODO, "--todo"),
+        (StateLabel.REVIEW, "--review"),
+        (StateLabel.REWORK, "--rework"),
+        (StateLabel.COMPLETE, "--complete"),
+    ):
+        assert LIGHT[role] == f"#{LABEL_STYLES[label].color.lower()}", role
+    assert LIGHT["--in_progress"] != f"#{LABEL_STYLES[StateLabel.IN_PROGRESS].color.lower()}"
+    assert contrast(f"#{LABEL_STYLES[StateLabel.IN_PROGRESS].color}", LIGHT["--panel"]) < MARK_FLOOR
 
 
 @pytest.mark.parametrize("theme", [LIGHT, OS_DARK])
