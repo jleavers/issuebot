@@ -1,4 +1,4 @@
-"""The committed WORKFLOW.md loads and renders."""
+"""The committed configs/WORKFLOW.md loads and renders."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -7,7 +7,7 @@ from issuebot.agent.prompt import PromptContext, PromptRenderer
 from issuebot.config import Workflow, load_workflow
 from issuebot.github.models import WORKPAD_MARKER, Issue, LinkedPr, StateLabel
 
-WORKFLOW = Path(__file__).parent.parent / "WORKFLOW.md"
+WORKFLOW = Path(__file__).parent.parent / "configs" / "WORKFLOW.md"
 PR = LinkedPr(
     number=51, url="https://github.com/jleavers/issuebot/pull/51", state="open", merged_at=None
 )

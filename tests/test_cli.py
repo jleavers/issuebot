@@ -696,10 +696,13 @@ def test_validate_uses_env_workflow_path(
     assert main(["validate"]) == 0
 
 
-def test_validate_defaults_to_cwd_workflow(
+def test_validate_defaults_to_the_configs_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, executables: object
 ) -> None:
-    _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    """The default is `configs/WORKFLOW.md`: a directory is what Compose can mount (#46)."""
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "WORKFLOW.md").write_text("---\ngithub:\n  repo: o/r\n---\nBody", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GH_TOKEN", "t")
     assert main(["validate"]) == 0

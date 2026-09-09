@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NoReturn
 
@@ -459,11 +460,14 @@ class Orchestrator:
     def _reload_workflow(self) -> None:
         path = self._workflow.path
         try:
-            mtime_ns = path.stat().st_mtime_ns
+            source = path.stat()
         except OSError as exc:
             self._report_reload_failure(f"workflow file unreadable: {exc}")
             return
-        if mtime_ns == self._workflow.source_mtime_ns:
+        if source.st_nlink == 0:
+            self._report_stale_mount(path)
+            return
+        if (source.st_dev, source.st_ino, source.st_mtime_ns) == self._workflow.source_identity:
             return
         try:
             workflow = load_workflow(path, environ=self._environ)
@@ -477,6 +481,31 @@ class Orchestrator:
         self._adapter = self._adapter_factory(workflow.config.github)
         self._workspaces = self._workspaces_factory(workflow.config)
         self._log.info("workflow_reloaded", path=str(path), changed=changed)
+
+    def _report_stale_mount(self, path: Path) -> None:
+        """Report a path that resolves to an inode no directory entry points at any more.
+
+        A name that still resolves to an unlinked inode is not something a filesystem lookup
+        can normally produce: once the last link goes, the name goes with it. A single-file
+        bind mount is the case that makes it reachable, and it is how issuebot used to be
+        deployed (#46). The mount pins the inode the file had when the container started, so
+        an editor that saves by writing a temporary file and renaming it over the original --
+        most of them, and `sed -i` too -- gives the host path a new inode and leaves the
+        container reading the old one, whose mtime never moves again. Watching the mtime
+        therefore returns early forever, which is the silence the issue was really about: the
+        settings in force are valid, just not the ones on disk.
+
+        Advisory, not authoritative. It costs one field of a stat the reload already does,
+        and the worst a filesystem that reports `st_nlink` loosely can do is add a log line
+        and a `config_error`; nothing here changes what the worker runs.
+        """
+        self._report_reload_failure(
+            f"stale mount: {path} resolves to an unlinked inode, so it is a single-file "
+            "bind mount whose host file has been replaced. Edits on the host cannot be seen "
+            "from here and the running configuration is the one this file held at start. "
+            "Mount the directory instead (compose.yaml mounts ./configs and sets "
+            "ISSUEBOT_WORKFLOW), or recreate the container to pick the new file up."
+        )
 
     def _report_reload_failure(self, message: str) -> None:
         self._config_error = message

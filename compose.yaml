@@ -67,8 +67,17 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+      # The directory below is what is mounted; this names the file inside it. Keep the two
+      # in step if you rename either.
+      ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
     volumes:
-      - ./WORKFLOW.md:/app/WORKFLOW.md:ro
+      # The DIRECTORY, not the file. A single-file bind mount resolves to the inode, so an
+      # editor that saves by writing a temporary file and renaming it over the original --
+      # which is most of them, and `sed -i` too -- leaves the container bound to the old,
+      # now-unlinked inode and serving the old settings until it is recreated (#46). Mounting
+      # the directory means the lookup goes through the host's directory entry every time, so
+      # an atomic save is picked up by the worker's next tick.
+      - ./configs:/configs:ro
       - workspaces:/workspaces
       - claude-home:/home/issuebot/.claude
     depends_on:
@@ -85,12 +94,16 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+      ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
     ports:
       # Loopback only: the dashboard has no authentication. Override the host port with
       # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is server.port.
       - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
     volumes:
-      - ./WORKFLOW.md:/app/WORKFLOW.md:ro
+      # The directory, for the reason given on the worker above (#46). The web reads
+      # WORKFLOW.md once at start, so a stale mount here survives `docker compose restart web`
+      # -- restart reuses the container, and with it the mount -- and needs a recreate.
+      - ./configs:/configs:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
