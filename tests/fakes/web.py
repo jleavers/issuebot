@@ -110,7 +110,7 @@ def snapshot(
 ) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=NOW - timedelta(seconds=age_s + 1),
-        workflow_path="/app/WORKFLOW.md",
+        workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=1,
         config_valid=True,
         config_error=None,

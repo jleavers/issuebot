@@ -156,7 +156,7 @@ def _add_workflow_option(parser: argparse.ArgumentParser) -> None:
         "--workflow",
         type=Path,
         default=None,
-        help="path to WORKFLOW.md (default: $ISSUEBOT_WORKFLOW or ./WORKFLOW.md)",
+        help="path to WORKFLOW.md (default: $ISSUEBOT_WORKFLOW or ./configs/WORKFLOW.md)",
     )
 
 

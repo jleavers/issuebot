@@ -53,6 +53,10 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}" \
  && claude --help | grep -q -- '--permission-prompts'
 
 WORKDIR /app
+# Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind
+# mount pins the inode, so an atomic save on the host leaves the container reading the old
+# one (#46). compose.yaml mounts ./configs and sets this same value.
+ENV ISSUEBOT_WORKFLOW=/configs/WORKFLOW.md
 VOLUME ["/workspaces", "/home/issuebot/.claude"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
