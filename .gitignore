@@ -24,6 +24,15 @@ build/
 .claude/worktrees/
 .claude/settings.local.json
 
+# The deployment's own settings: `github.repo`, the budget, the model, whatever this
+# checkout overrides in the tracked `configs/WORKFLOW.md`. Machine-local by nature,
+# like the worktrees above: one checkout watches one repository, and tracking the file
+# would put that repository's name in issuebot's own history and make every `git pull`
+# a merge on the one file the operator has rewritten. `*.local.md` rather than the one
+# name so a second workflow file on a host (`--workflow frontend.md`) has its
+# `frontend.local.md` ignored too.
+configs/*.local.md
+
 # Local secrets - service principal creds for the FOCUS export storage account.
 .env
 .env.*

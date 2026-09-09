@@ -65,6 +65,23 @@ floor, not the shipped version, and moves by hand.
   Front matter → `$VAR`/`~`/relative-path
   resolution (`resolve.py`, designated fields only) → pydantic `Settings`
   (`settings.py`, `extra="forbid"`). Errors are `ConfigError` subclasses with a `code`.
+  The local overlay: `load_workflow(path, overlay=True)` also reads the sibling
+  `overlay_path_for(path)` names (`WORKFLOW.md` → `WORKFLOW.local.md`, git-ignored, derived
+  and never configured so it lives in the mounted directory and reloads like the base) and
+  merges its front matter over the base's *before* resolution, so a fallback `resolve_config`
+  fills in for an absent field can never clobber the other file's value. `merge_front_matter`
+  has three rules: two mappings merge key by key, recursively; anything else replaces, a list
+  as a whole; an explicit `null` in the overlay deletes the key so the `Settings` default
+  applies. The merged mapping is validated once, so `extra="forbid"` catches a typo in either
+  file, and an error about the merge names both (`/configs/WORKFLOW.md (+ WORKFLOW.local.md):
+  ...`, `ConfigError.overlay`), while a parse error in the overlay carries the overlay's path.
+  The overlay's body replaces the prompt only when it is non-empty. `Workflow` carries
+  `overlay_path` (`None` without one), `overlay_identity` (the same triple, all zero without
+  one) and `overlay_config` (its raw mapping, which `count_overrides` counts for `validate`);
+  `raw_config` is the *merged* mapping. A missing overlay is the normal case; one that exists
+  and is not a regular file is a `MissingWorkflowFile` naming it. `overlay=False` exists for
+  `tests/test_workflow_default.py`, which loads the repository's own `configs/WORKFLOW.md`,
+  exactly where a developer working on issuebot keeps their overlay.
 - `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
@@ -150,8 +167,13 @@ floor, not the shipped version, and moves by hand.
   (`state.py`, the total inverse of `to_dict` for one reading) and passes it in, which keeps the
   orchestrator free of `db` the way `on_snapshot` and `on_issues` do. A database that will not
   answer logs `rate_limits_seed_failed` and costs the tile its last figure, never the start.
-  `_reload_workflow` compares `source_identity`, and when it matches asks
-  `_pinned_mount_complaint(path, stat)` why this process might not be able to tell (#46):
+  `_reload_workflow` compares `source_identity`, and the overlay's `overlay_identity` and
+  presence beside it (a `FileNotFoundError` on the overlay is "no overlay"; any other
+  `OSError` is a reload failure, since a file that exists and cannot be stat'ed is not
+  something to guess about), reloading when either identity moves or the overlay appears or
+  disappears, and when nothing has changed asks
+  `_pinned_mount_complaint(path, stat)` of the base and then of the overlay why this process
+  might not be able to tell (#46):
   `stale mount` for `st_nlink == 0` (a name resolving to an inode no directory entry points
   at is one a mount is holding open, so the host has already replaced it), else
   `single-file mount` when the file's `st_dev` differs from its own parent's (a directory
@@ -164,7 +186,9 @@ floor, not the shipped version, and moves by hand.
   inside `stat` reads as `nlink == 0`; the next tick reloads and clears it). The deployment
   fix is the mount itself: compose binds the directory `./configs` at `/configs` for the
   worker and the web and points `ISSUEBOT_WORKFLOW` at the file inside it (the image
-  defaults to the same), so a lookup goes through the host's directory entry.
+  defaults to the same), so a lookup goes through the host's directory entry. The snapshot
+  carries `workflow_overlay_path` (`None` without one), which is how `issuebot status`,
+  `/api/v1/state` and the dashboard answer "is the worker running my overrides?".
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -265,6 +289,8 @@ floor, not the shipped version, and moves by hand.
   counts `state_counts` rather than the rows it drew, and the difference is an overflow
   link to `/issues?state=<role>` — the list page, which is outside the live region so a
   filter survives the ten-second swap that would collapse an expander or reset a scroll. A snapshot's
+  `workflow_overlay_path` reaches `/api/v1/state` through `_WORKER_KEYS` and the worker line
+  as a fourth `.fact` chip, drawn only when there is one. A snapshot's
   `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,
@@ -309,7 +335,9 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (thirteen checks: three network probes through the
+- `issuebot.cli`: argparse; `validate` (thirteen checks: the `workflow` check naming the
+  overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
+  overrides)`), three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
   the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
   probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the
@@ -326,7 +354,8 @@ floor, not the shipped version, and moves by hand.
   runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
   `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
   and exit 1 when the startup probes fail, `claude auth: not logged in; ...` among them), `migrate`,
-  `status` (the snapshot as text, with a `dispatch: held (<kind>) since ...` line while
+  `status` (the snapshot as text, its `workflow:` line reading `<base> + <overlay>` when one
+  is in force, with a `dispatch: held (<kind>) since ...` line while
   dispatch is held), `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
   `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
   `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is
