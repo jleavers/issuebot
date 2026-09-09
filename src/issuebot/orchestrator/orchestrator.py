@@ -464,10 +464,12 @@ class Orchestrator:
         except OSError as exc:
             self._report_reload_failure(f"workflow file unreadable: {exc}")
             return
-        if source.st_nlink == 0:
-            self._report_stale_mount(path)
-            return
         if (source.st_dev, source.st_ino, source.st_mtime_ns) == self._workflow.source_identity:
+            # Nothing to load. The one thing left worth saying is that this deployment may
+            # not be in a position to tell (#46).
+            complaint = _pinned_mount_complaint(path, source)
+            if complaint is not None:
+                self._report_reload_failure(complaint)
             return
         try:
             workflow = load_workflow(path, environ=self._environ)
@@ -481,31 +483,6 @@ class Orchestrator:
         self._adapter = self._adapter_factory(workflow.config.github)
         self._workspaces = self._workspaces_factory(workflow.config)
         self._log.info("workflow_reloaded", path=str(path), changed=changed)
-
-    def _report_stale_mount(self, path: Path) -> None:
-        """Report a path that resolves to an inode no directory entry points at any more.
-
-        A name that still resolves to an unlinked inode is not something a filesystem lookup
-        can normally produce: once the last link goes, the name goes with it. A single-file
-        bind mount is the case that makes it reachable, and it is how issuebot used to be
-        deployed (#46). The mount pins the inode the file had when the container started, so
-        an editor that saves by writing a temporary file and renaming it over the original --
-        most of them, and `sed -i` too -- gives the host path a new inode and leaves the
-        container reading the old one, whose mtime never moves again. Watching the mtime
-        therefore returns early forever, which is the silence the issue was really about: the
-        settings in force are valid, just not the ones on disk.
-
-        Advisory, not authoritative. It costs one field of a stat the reload already does,
-        and the worst a filesystem that reports `st_nlink` loosely can do is add a log line
-        and a `config_error`; nothing here changes what the worker runs.
-        """
-        self._report_reload_failure(
-            f"stale mount: {path} resolves to an unlinked inode, so it is a single-file "
-            "bind mount whose host file has been replaced. Edits on the host cannot be seen "
-            "from here and the running configuration is the one this file held at start. "
-            "Mount the directory instead (compose.yaml mounts ./configs and sets "
-            "ISSUEBOT_WORKFLOW), or recreate the container to pick the new file up."
-        )
 
     def _report_reload_failure(self, message: str) -> None:
         self._config_error = message
@@ -1159,3 +1136,62 @@ def _changed_sections(old: Workflow, new: Workflow) -> list[str]:
     if old.prompt_template != new.prompt_template:
         changed.append("prompt")
     return changed
+
+
+MOUNT_ADVICE = (
+    "Mount the directory that holds it instead, and name the file with ISSUEBOT_WORKFLOW "
+    "(compose.yaml mounts ./configs at /configs); recreate the container to pick up a file "
+    "it is already stale on."
+)
+
+
+def _pinned_mount_complaint(path: Path, source: os.stat_result) -> str | None:
+    """Why this workflow file may be one the host can no longer reach, or None (#46).
+
+    A single-file bind mount resolves to the inode, not the path, so an editor that saves by
+    writing a temporary file and renaming it over the original -- most of them, and `sed -i`
+    too -- gives the host path a new inode and leaves the container pinned to the old one.
+    Its mtime never moves again, so a watcher sees an unchanging file forever and says
+    nothing, which is the silence #46 was really about: the settings in force are valid, just
+    not the ones on disk.
+
+    Two signals, weakest claim first:
+
+    * ``st_nlink == 0`` -- the file has already been replaced. A name that still resolves to
+      an inode no directory entry points at is not something a filesystem lookup can normally
+      produce; once the last link goes, the name goes with it. A mount holding the inode open
+      is what makes it reachable.
+    * the file's device differs from its own directory's -- the file *is* a mount point, so
+      it will go stale the first time anyone saves it. A directory entry can only name an
+      inode on its own filesystem, so a difference means a mount and nothing else. This is
+      the signal that catches what ``st_nlink`` cannot: a save that left the old inode with a
+      link (a retained backup, a hard link), and Docker Desktop's virtiofs, where the guest's
+      link count need not follow the host's rename at all. The supported arrangement -- the
+      directory mounted, the file inside it -- shares a device with its parent and is silent
+      here.
+
+    Called only when the file's identity has not changed, so it can never suppress a reload:
+    a wrong answer costs a log line and a ``config_error``, never a setting. That also bounds
+    the one race it has. ``stat`` resolves the name and then reads the inode, so a host-side
+    rename committing in between can be seen as ``nlink == 0`` on a perfectly healthy
+    directory mount; the next tick reloads and clears it.
+    """
+    if source.st_nlink == 0:
+        return (
+            f"stale mount: {path} resolves to an unlinked inode, so it is mounted as a file "
+            "and the host has replaced it. Edits made there cannot be seen from here, and "
+            f"the running configuration is the one this file held at start. {MOUNT_ADVICE}"
+        )
+    try:
+        parent = path.parent.stat()
+    except OSError:
+        return None
+    if source.st_dev != parent.st_dev:
+        return (
+            f"single-file mount: {path} is a mount point rather than an entry in "
+            f"{path.parent}, so it is pinned to one inode. Saving it on the host the way "
+            "most editors do, by writing a temporary file and renaming it over the original, "
+            f"will leave this process reading the old file with nothing to show for it. "
+            f"{MOUNT_ADVICE}"
+        )
+    return None

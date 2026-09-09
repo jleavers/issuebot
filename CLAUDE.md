@@ -150,17 +150,21 @@ floor, not the shipped version, and moves by hand.
   (`state.py`, the total inverse of `to_dict` for one reading) and passes it in, which keeps the
   orchestrator free of `db` the way `on_snapshot` and `on_issues` do. A database that will not
   answer logs `rate_limits_seed_failed` and costs the tile its last figure, never the start.
-  `_reload_workflow` compares `source_identity` and, before that, refuses a path whose
-  `st_nlink` is 0: a name resolving to an unlinked inode is a single-file bind mount whose
-  host file has been replaced by an atomic save, which is how a container came to serve a
-  `WORKFLOW.md` the host could no longer see, silently and forever, since that inode's mtime
-  never moves again (#46). It reports `stale mount: ...` through `_report_reload_failure`, so
-  the ERROR and the `config_error` in the snapshot are the ones the reload already had. The
-  deployment fix is the mount: compose binds the directory `./configs` at `/configs` for both
-  the worker and the web and points `ISSUEBOT_WORKFLOW` at the file inside it, so a lookup
-  goes through the host's directory entry; the check is belt and braces for a file still
-  mounted by hand, and is advisory (a filesystem reporting `st_nlink` loosely costs a log
-  line, never a behaviour change).
+  `_reload_workflow` compares `source_identity`, and when it matches asks
+  `_pinned_mount_complaint(path, stat)` why this process might not be able to tell (#46):
+  `stale mount` for `st_nlink == 0` (a name resolving to an inode no directory entry points
+  at is one a mount is holding open, so the host has already replaced it), else
+  `single-file mount` when the file's `st_dev` differs from its own parent's (a directory
+  entry can only name an inode on its own filesystem, so the file *is* a mount point and
+  will go stale on the first save) -- the signal that catches what `st_nlink` cannot, a save
+  that left the old inode a link and Docker Desktop's virtiofs. It goes through
+  `_report_reload_failure`, so the ERROR and the snapshot's `config_error` are the reload's
+  own. Called only on the unchanged branch, so it can never suppress a load: a wrong answer
+  costs a log line, never a setting, which also bounds its one race (a rename committing
+  inside `stat` reads as `nlink == 0`; the next tick reloads and clears it). The deployment
+  fix is the mount itself: compose binds the directory `./configs` at `/configs` for the
+  worker and the web and points `ISSUEBOT_WORKFLOW` at the file inside it (the image
+  defaults to the same), so a lookup goes through the host's directory entry.
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the

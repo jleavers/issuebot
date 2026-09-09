@@ -403,17 +403,26 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   leaves the container reading the old one, silently, until it is recreated. Mounting the
   directory means the lookup goes through the host's directory entry every time, so an
   ordinary save is picked up normally. Keep your own configuration inside `configs/`: a file
-  mounted individually from anywhere else has the same problem. If one ever is, the worker
-  now says so at ERROR (`workflow_reload_failed`, `stale mount: ...`) and carries it as a
-  config error into `issuebot status`, the dashboard's worker line and `/api/v1/state`,
-  rather than serving the old settings quietly.
+  mounted individually from anywhere else has the same problem, in Compose or anywhere else
+  that mounts one file (a Kubernetes `subPath`, say).
+
+  If one ever is, the worker says so instead of serving the old settings quietly. It logs
+  `workflow_reload_failed` at ERROR and carries the reason as a config error into
+  `issuebot status`, the dashboard's worker line and `/api/v1/state` — `single-file mount`
+  when the file is a mount point, which it can tell because a file and its own directory can
+  only be on different devices if the file is mounted, and `stale mount` once the host has
+  actually replaced it and the file the worker holds has no directory entry left. It is a
+  warning, not a guarantee: it never changes what the worker runs, and a platform that
+  reports neither signal faithfully will stay quiet.
 - **Upgrades.** `configs/` is mounted into the container, but the code is baked into the
   image: after pulling a new version of issuebot, run `docker compose build` (or
   `docker compose up --build -d`) before anything else. Upgrading across the move of
   `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker web`
   once, so the containers pick up the new mount; check that your edits followed the rename
-  (`git status`) before starting. A setting that a newer `WORKFLOW.md`
-  introduces fails against a stale image at `validate`, as
+  (`git status`) before starting, and note that `workspace.root` now resolves against
+  `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
+  make it absolute, because `/configs` is mounted read-only. A setting that a newer
+  `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The agent runs with no permission prompts and may run anything inside its
   workspace. Keep it in the container, give it a repository-scoped token, and keep the

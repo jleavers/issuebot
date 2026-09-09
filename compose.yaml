@@ -100,9 +100,10 @@ services:
       # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is server.port.
       - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
     volumes:
-      # The directory, for the reason given on the worker above (#46). The web reads
-      # WORKFLOW.md once at start, so a stale mount here survives `docker compose restart web`
-      # -- restart reuses the container, and with it the mount -- and needs a recreate.
+      # The directory, for the reason given on the worker above (#46). The file mount was
+      # worse here than on the worker: the web reads WORKFLOW.md once at start, so a stale
+      # one survived even `docker compose restart web`, which reuses the container and with
+      # it the mount, and took a recreate to clear.
       - ./configs:/configs:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
