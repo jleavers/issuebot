@@ -24,13 +24,14 @@
    * the darker of the two surfaces. #1d76db was 4.20:1 there - under the floor - and
    * 4.5002:1 on --panel, which is at it rather than over it (#43).
    *
-   * --review and --chart-runs keep #1d76db, and not because they are only ever marks:
-   * .column.review h3 below paints a heading with --review. They keep it because the
-   * five state tokens are GitHub's own label hexes (LABEL_STYLES in
-   * src/issuebot/github/state.py sets review to 1D76DB), so the board reads as the
-   * labels GitHub renders. That pins them at the floor rather than over it, which is
-   * its own question and not this one (#51). --accent answers to nothing outside the
-   * stylesheet, so it is free to move. */
+   * --review and --chart-runs keep #1d76db, and since #51 they really are only ever
+   * marks: .column h3 used to be painted with the state tokens, which asked a 13px bold
+   * heading to be type at 4.5:1 on --panel and left --in_progress under it at 3.64:1.
+   * The heading is --ink now and the role is a dot beside it, so the five keep their
+   * hexes and owe the 3:1 a mark owes. They keep them because they are GitHub's own
+   * label hexes (LABEL_STYLES in src/issuebot/github/state.py sets review to 1D76DB),
+   * so the board reads as the labels GitHub renders. --accent answers to nothing
+   * outside the stylesheet, so it is free to move. */
   --accent: #0969da;
   --ok: #0e8a16;
   --warn: #b7791f;
@@ -307,8 +308,11 @@ a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* kanban */
 .kanban { display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 10px; }
 .column { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 120px; }
-.column h3 { margin: 0 0 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
-.column h3 .count { color: var(--muted); font-weight: 500; }
+.column h3 {
+  margin: 0 0 8px; font-size: 13px; color: var(--ink);
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.column h3 .count { flex: none; color: var(--muted); font-weight: 500; }
 /*
  * The overflow link. A column draws BOARD_LIMIT cards and this is the way to the rest, so
  * it sits where the next card would: a block with the card's own left inset. It is --muted
@@ -319,11 +323,35 @@ a.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .column .more { display: block; margin-top: 2px; padding: 4px 9px 4px 12px; font-size: 12px; color: var(--muted); }
 .column .more:hover { color: var(--accent); text-decoration: underline; }
 .column .more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.column.todo h3 { color: var(--todo); }
-.column.in_progress h3 { color: var(--in_progress); }
-.column.review h3 { color: var(--review); }
-.column.rework h3 { color: var(--rework); }
-.column.complete h3 { color: var(--complete); }
+/*
+ * The role, drawn beside the heading rather than painted onto it (#51). A column heading
+ * is a 13px bold h3 - under WCAG's large-text threshold (18.66px bold), so it is body
+ * text and owes the 4.5:1 of 1.4.3, not the 3:1 a stripe or a pill owes. The five state
+ * tokens are GitHub's label hexes, picked to carry white text on a label pill rather
+ * than to be ink on white, and on --panel in light they land at 3.64:1 (--in_progress)
+ * and at 4.500x:1 (three of the other four) - one under the text floor and three at it
+ * rather than over it. Darkening them per role would have fixed the ratio by drifting
+ * the board off the colours GitHub renders, so the ask is dropped instead: the name is
+ * --ink and the colour is a dot, which is a mark and clears the 3:1 marks owe on both
+ * surfaces in both themes. The same "a dot and prose" shape the worker line's verdict
+ * uses, and the heading still names its state in words, so the colour is never the only
+ * thing carrying the role.
+ *
+ * flex-start with the verdict dot's margin rather than center, because a heading carries
+ * the label's own name (issuebot/in-progress, not "In progress") and that wraps inside a
+ * 180px column; the dot belongs on the first line when it does. --muted is the fallback
+ * for a role no rule below matches, as .state does for the same reason.
+ */
+.column h3 .name { display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.column h3 .name::before {
+  content: ""; flex: none; margin-top: 0.4em;
+  width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+}
+.column.todo h3 .name::before { background: var(--todo); }
+.column.in_progress h3 .name::before { background: var(--in_progress); }
+.column.review h3 .name::before { background: var(--review); }
+.column.rework h3 .name::before { background: var(--rework); }
+.column.complete h3 .name::before { background: var(--complete); }
 /*
  * The card. Its title is an .issue-ref like the tables' (the number as a chip pinned left
  * and out of the way, the title taking the weight, both inside the one link) plus the two
