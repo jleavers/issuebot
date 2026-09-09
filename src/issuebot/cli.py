@@ -44,6 +44,7 @@ from issuebot.config import (
     GitHubSettings,
     Settings,
     Workflow,
+    count_overrides,
     load_workflow,
 )
 from issuebot.config.resolve import ENV_REF
@@ -320,7 +321,7 @@ def run_checks(
 ) -> list[Check]:
     cfg = workflow.config
     checks = [
-        Check("workflow", "ok", str(workflow.path)),
+        Check("workflow", "ok", _workflow_detail(workflow)),
         Check("github.repo", "ok", cfg.github.repo),
         _token_check(workflow),
         _workspace_check(cfg.workspace.root),
@@ -333,6 +334,19 @@ def run_checks(
     checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
     return checks
+
+
+def _workflow_detail(workflow: Workflow) -> str:
+    """The path, and with an overlay its name and how many settings it overrides.
+
+    The overlay creates one new question, "is the worker running my overrides?", and this
+    is the first of the two places that answer it (the other is the runtime snapshot).
+    """
+    if workflow.overlay_path is None:
+        return str(workflow.path)
+    count = count_overrides(workflow.overlay_config)
+    noun = "override" if count == 1 else "overrides"
+    return f"{workflow.path} + {workflow.overlay_path.name} ({count} {noun})"
 
 
 def _github_checks(adapter: GitHubAdapter | None, model_labels: Sequence[str] = ()) -> list[Check]:
@@ -1152,9 +1166,11 @@ def render_status(row: SnapshotRow, *, now: datetime) -> str:
     retrying = list(data.get("retrying") or [])
     totals = dict(data.get("totals") or {})
     counters = dict(data.get("counters") or {})
+    overlay = data.get("workflow_overlay_path")
+    workflow = f"{data.get('workflow_path')} + {overlay}" if overlay else data.get("workflow_path")
     lines = [
         f"snapshot: {_stamp(row.at)} (written {_stamp(row.written_at)}, {age:.0f} s ago)",
-        f"workflow: {data.get('workflow_path')} ({config})",
+        f"workflow: {workflow} ({config})",
         f"tick {data.get('tick_count')}, last tick {_stamp(data.get('last_tick_at'))}, "
         f"poll {data.get('poll_interval_ms')} ms, {data.get('max_concurrent_agents')} slots",
     ]

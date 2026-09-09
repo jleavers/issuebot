@@ -186,6 +186,50 @@ def test_validate_good_workflow_exits_zero(
     assert "secret-token-value" not in out
 
 
+def test_validate_names_the_overlay_and_counts_its_overrides(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The one check that answers "is it running my overrides?" before the worker starts."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    path = _write(tmp_path, GOOD.read_text(encoding="utf-8"))
+    overlay = tmp_path / "WORKFLOW.local.md"
+    overlay.write_text(
+        "---\ngithub:\n  repo: acme/frontend\nclaude:\n  max_budget_usd: 3.0\n---\n",
+        encoding="utf-8",
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
+    assert "[ OK ] github.repo: acme/frontend" in out
+    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
+
+    overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (1 override)" in out
+    assert "[ OK ] github.repo: example/repo" in out
+
+
+def test_validate_reports_an_invalid_overlay_naming_both_files(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    path = _write(tmp_path, GOOD.read_text(encoding="utf-8"))
+    (tmp_path / "WORKFLOW.local.md").write_text(
+        "---\nclaude:\n  max_budget: 3.0\n---\n", encoding="utf-8"
+    )
+    assert main(["validate", "--workflow", str(path)]) == 2
+    out = capsys.readouterr().out
+    assert out.startswith(f"[FAIL] workflow: {path.resolve()} (+ WORKFLOW.local.md): ")
+    assert "claude.max_budget: Extra inputs are not permitted" in out
+
+
 def test_validate_token_from_fallback_variable(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1791,6 +1835,19 @@ def test_render_status_lists_running_and_retrying_entries() -> None:
         "totals: 3 runs started, 2 ended, 1 completed, 0 cancelled, 1 blocked; 1234 tokens, "
         "$1.23, 321 s running",
     ]
+
+
+def test_render_status_names_the_overlay_in_force() -> None:
+    """The second place that answers "is the worker running my overrides?"."""
+    data = dict(SNAPSHOT_DATA)
+    data["workflow_overlay_path"] = "/configs/WORKFLOW.local.md"
+    row = SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data=data)
+    lines = render_status(row, now=SNAPSHOT_AT).splitlines()
+    assert lines[1] == "workflow: /configs/WORKFLOW.md + /configs/WORKFLOW.local.md (config valid)"
+    # None, or a snapshot from a worker that predates the field, reads as before.
+    data["workflow_overlay_path"] = None
+    lines = render_status(row, now=SNAPSHOT_AT).splitlines()
+    assert lines[1] == "workflow: /configs/WORKFLOW.md (config valid)"
 
 
 def test_render_status_names_a_held_dispatch() -> None:

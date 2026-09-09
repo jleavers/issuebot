@@ -28,6 +28,28 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
   it is the prompt the agent receives, a Jinja2 template that works unchanged for any
   repository. Secrets never go in the file: a field is either omitted (and the well-known
   variable is used) or set to `$VAR`.
+- **Local overrides.** `configs/WORKFLOW.local.md`, beside the tracked file and git-ignored,
+  holds this deployment's own settings. Its front matter is merged over the tracked file's,
+  so a deployment's whole configuration can be four lines:
+
+  ```yaml
+  ---
+  github:
+    repo: acme/frontend
+  claude:
+    max_budget_usd: 3.0
+  ---
+  ```
+
+  Everything else, the prompt included, keeps coming from the tracked file, so `git pull`
+  brings prompt improvements and new defaults with no merge and `git status` stays clean.
+  The merge has three rules: a mapping merges key by key, anything else replaces (a list as
+  a whole, so a deployment can subscribe to *fewer* Slack event kinds), and an explicit
+  `null` deletes the key so the setting falls back to its default (`hooks.after_create:
+  null` drops the shipped hook; `claude.model: null` takes Claude Code's default). Anything
+  after the overlay's front matter replaces the prompt; leave it out to inherit. `validate`
+  names the overlay and counts its overrides, and a running worker reports the one in force
+  in `issuebot status`, on the dashboard's worker line and in `/api/v1/state`.
 - `.env` (copied from `.env.example`, git-ignored) holds the secrets and the identity the
   agent commits with. Docker Compose loads it for the worker; on the host you export the
   variables yourself.
@@ -88,9 +110,12 @@ you. For linked commits under a separate identity, use a
 — GitHub's terms allow one free machine account alongside a free personal account — and its
 noreply address.
 
-Then edit the front matter of `configs/WORKFLOW.md`. The one required change is
-`github.repo`; the checked-in file points at this repository. Unknown keys are rejected, so
-a typo fails at `validate` rather than being silently ignored.
+Then create `configs/WORKFLOW.local.md` and set `github.repo` in it, the one required
+change; the checked-in `configs/WORKFLOW.md` points at this repository and stays as it is.
+Every key below can be set in the overlay, which is where a deployment's settings belong
+(see "Local overrides" above); the tracked file holds the defaults and the prompt. Unknown
+keys are rejected in either file, so a typo fails at `validate` rather than being silently
+ignored.
 
 | Key | What it does | Default |
 |---|---|---|
@@ -133,7 +158,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 `validate` prints one line per check and exits non-zero on any `[FAIL]`:
 
 ```
-[ OK ] workflow: /configs/WORKFLOW.md
+[ OK ] workflow: /configs/WORKFLOW.md + WORKFLOW.local.md (1 override)
 [ OK ] github.repo: your-org/your-repo
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
@@ -355,9 +380,9 @@ git clone git@github.com:jleavers/issuebot.git issuebot-backend
 
 Compose names the project after the directory, so each checkout gets its own `db`, `worker`
 and `web` containers and its own `pgdata`, `workspaces` and `claude-home` volumes. In each
-directory set `github.repo` in `configs/WORKFLOW.md`, and give its `.env` distinct
-`ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` values (say 5432 and 8080 for one, 5433 and 8081
-for the other).
+directory set `github.repo` in `configs/WORKFLOW.local.md`, never in the tracked file, and
+give its `.env` distinct `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` values (say 5432 and
+8080 for one, 5433 and 8081 for the other).
 Everything else can be identical, including `GH_TOKEN` when one token covers both
 repositories. The dashboards are then at http://127.0.0.1:8080 and http://127.0.0.1:8081.
 Because `claude-home` is per project, a Claude Code login has to be repeated for each stack;
@@ -366,7 +391,8 @@ drive several stacks with `docker compose -p <name>` and an override file that s
 `configs` mount and the `env_file`, but one directory each is easier to reason about.
 
 On the host, run one `issuebot worker` and one `issuebot web` per repository, each with its
-own `--workflow` file (or `ISSUEBOT_WORKFLOW`), its own `workspace.root`, its own database
+own `--workflow` file (or `ISSUEBOT_WORKFLOW`) and that file's own overlay beside it
+(`frontend.md` reads `frontend.local.md`), its own `workspace.root`, its own database
 and its own `server.port` (or `web --port`). A second database on the same PostgreSQL server
 is fine: `docker compose exec db createdb -U issuebot issuebot_backend`, then point that
 worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on first start.
@@ -391,8 +417,9 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   `notifications.slack.events`) show each run's cost.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
-- **Configuration changes.** A running worker re-reads `configs/WORKFLOW.md` when it
-  changes, within one `polling.interval_ms`, and logs `workflow_reloaded` naming the sections
+- **Configuration changes.** A running worker re-reads `configs/WORKFLOW.md` and
+  `configs/WORKFLOW.local.md` when either changes, or the overlay appears or disappears,
+  within one `polling.interval_ms`, and logs `workflow_reloaded` naming the sections
   that moved. `database.url`, the Slack webhook and its event list are read once at start, so
   those need `docker compose restart worker`.
 
@@ -404,7 +431,10 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   directory means the lookup goes through the host's directory entry every time, so an
   ordinary save is picked up normally. Keep your own configuration inside `configs/`: a file
   mounted individually from anywhere else has the same problem, in Compose or anywhere else
-  that mounts one file (a Kubernetes `subPath`, say).
+  that mounts one file (a Kubernetes `subPath`, say). The overlay is looked for beside
+  `WORKFLOW.md` and nowhere else for exactly this reason: a sibling inside the mounted
+  directory reloads on the same terms as the base, and a `WORKFLOW.local.md` mounted on its
+  own would be pinned the same way, holding the settings you change most often.
 
   If one ever is, the worker says so instead of serving the old settings quietly. It logs
   `workflow_reload_failed` at ERROR and carries the reason as a config error into
@@ -414,7 +444,11 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   actually replaced it and the file the worker holds has no directory entry left. It is a
   warning, not a guarantee: it never changes what the worker runs, and a platform that
   reports neither signal faithfully will stay quiet.
-- **Upgrades.** `configs/` is mounted into the container, but the code is baked into the
+- **Upgrades.** With your settings in `configs/WORKFLOW.local.md` and the tracked
+  `configs/WORKFLOW.md` untouched, a clean `git pull` is the expected experience: the prompt
+  and the defaults update, your overrides stay. If you edited the tracked file before the
+  overlay existed, move those edits into the overlay and `git checkout configs/WORKFLOW.md`
+  first. `configs/` is mounted into the container, but the code is baked into the
   image: after pulling a new version of issuebot, run `docker compose build` (or
   `docker compose up --build -d`) before anything else. Upgrading across the move of
   `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker web`

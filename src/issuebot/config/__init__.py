@@ -24,7 +24,14 @@ from issuebot.config.settings import (
     SlackSettings,
     WorkspaceSettings,
 )
-from issuebot.config.workflow import Workflow, load_workflow, parse_workflow_text
+from issuebot.config.workflow import (
+    Workflow,
+    count_overrides,
+    load_workflow,
+    merge_front_matter,
+    overlay_path_for,
+    parse_workflow_text,
+)
 
 __all__ = [
     "AgentSettings",
@@ -48,6 +55,9 @@ __all__ = [
     "Workflow",
     "WorkflowParseError",
     "WorkspaceSettings",
+    "count_overrides",
     "load_workflow",
+    "merge_front_matter",
+    "overlay_path_for",
     "parse_workflow_text",
 ]

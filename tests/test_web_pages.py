@@ -367,6 +367,20 @@ def test_the_worker_facts_are_bounded_rather_than_run_together(h: Harness) -> No
     assert '.worker .verdict::before { content: "";' in CSS
 
 
+def test_the_worker_line_names_the_overlay_in_force(h: Harness) -> None:
+    """A fourth fact, drawn only when there is one: the dashboard's answer to "is the worker
+    running my overrides?"."""
+    h.queries.snapshot_row = snapshot(workflow_overlay_path="/configs/WORKFLOW.local.md")
+    text = html(h.client.get("/partials/dashboard"))
+    line = text[text.index('<section class="panel worker') :]
+    line = line[: line.index("</section>")]
+    assert '<span class="fact overlay">overlay /configs/WORKFLOW.local.md</span>' in line
+
+    h.queries.snapshot_row = snapshot()
+    text = html(h.client.get("/partials/dashboard"))
+    assert "overlay" not in text[text.index('<section class="panel worker') :]
+
+
 def test_an_alerting_verdict_is_prose_in_the_bad_token(h: Harness) -> None:
     """A config error and a held dispatch are verdicts, not facts, and they are sentences.
 

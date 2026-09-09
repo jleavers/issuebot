@@ -287,6 +287,9 @@ class RuntimeSnapshot:
     at: datetime
     workflow_path: str
     workflow_mtime_ns: int
+    # The local overlay in force, so "is the worker running my overrides?" has an answer
+    # in `issuebot status`, `/api/v1/state` and the dashboard's worker line; None without one.
+    workflow_overlay_path: str | None = None
     config_valid: bool
     config_error: str | None
     dispatch_hold: DispatchHold | None

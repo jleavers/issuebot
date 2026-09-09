@@ -242,6 +242,9 @@ def test_snapshot_rows_and_to_dict(make_issue: Callable[..., Issue]) -> None:
     )
     data = snapshot.to_dict()
     assert json.dumps(data)
+    # The overlay rides the snapshot like the other worker facts; None without one, and a
+    # snapshot built without naming it (every earlier caller) says so.
+    assert data["workflow_overlay_path"] is None
     row = data["running"][0]
     assert row["state"] == "in_progress"
     assert (row["attempt"], row["rework"], row["session_id"], row["turns"]) == (2, True, "sess", 1)

@@ -36,6 +36,7 @@ _WORKER_KEYS = (
     "poll_interval_ms",
     "max_concurrent_agents",
     "workflow_path",
+    "workflow_overlay_path",
     "config_valid",
     "config_error",
 )
@@ -305,6 +306,7 @@ def dashboard_context(
             tick_count=data.get("tick_count"),
             poll_interval_ms=data.get("poll_interval_ms"),
             max_concurrent_agents=data.get("max_concurrent_agents"),
+            workflow_overlay_path=data.get("workflow_overlay_path"),
             config_valid=data.get("config_valid"),
             config_error=data.get("config_error"),
             dispatch_hold=dispatch_hold(row),
