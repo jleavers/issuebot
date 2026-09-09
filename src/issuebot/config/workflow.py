@@ -87,14 +87,16 @@ def merge_front_matter(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> d
     scalar, a list as a whole (an event allow-list is a choice, not an accumulation), and
     a mapping on one side where the other holds a scalar or a list. An explicit ``null`` in
     the overlay deletes the key, so the setting falls back to its ``Settings`` default; a
-    ``null`` naming a key the base does not set is a no-op.
+    ``null`` naming a key the base does not set is a no-op, at any depth, so a mapping that
+    replaces a scalar or fills a section the base lacks still sheds its ``null`` leaves.
     """
     merged: dict[str, Any] = copy.deepcopy(dict(base))
     for key, value in overlay.items():
         if value is None:
             merged.pop(key, None)
-        elif isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
-            merged[key] = merge_front_matter(merged[key], value)
+        elif isinstance(value, Mapping):
+            current = merged.get(key)
+            merged[key] = merge_front_matter(current if isinstance(current, Mapping) else {}, value)
         else:
             merged[key] = copy.deepcopy(value)
     return merged

@@ -1809,6 +1809,30 @@ async def test_an_invalid_overlay_keeps_the_last_good_workflow_and_names_it(
     assert snapshot.workflow_overlay_path is None
 
 
+async def test_removing_a_bad_overlay_clears_the_error_it_caused(tmp_path: Path) -> None:
+    """An error the overlay caused must not outlive the overlay (final review)."""
+    h = Harness(tmp_path)
+    await h.tick()
+    overlay = h.write_overlay("---\nagent:\n  bogus: 1\n---\n")
+    await h.tick()
+    assert h.snapshots[-1].config_valid is False
+
+    overlay.unlink()
+    await h.tick()
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is True
+    assert snapshot.config_error is None
+    assert snapshot.workflow_overlay_path is None
+    assert h.orchestrator.workflow is h.workflow
+
+    # The same error must be reported again if the same bad overlay comes back.
+    h.write_overlay("---\nagent:\n  bogus: 1\n---\n")
+    with capture_logs() as logs:
+        await h.tick()
+    assert any(entry["event"] == "workflow_reload_failed" for entry in logs)
+    assert h.snapshots[-1].config_valid is False
+
+
 async def test_an_overlay_mounted_singly_is_reported_naming_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

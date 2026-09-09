@@ -81,6 +81,20 @@ def test_null_deletes_the_key_and_a_null_for_an_unset_key_is_a_no_op() -> None:
     assert merged == {"claude": {"max_budget_usd": 3.0}}
 
 
+def test_a_null_inside_a_section_the_base_lacks_is_still_a_no_op() -> None:
+    """Rule 3 holds at depth: a new subtree sheds its nulls rather than carrying None."""
+    assert merge_front_matter({}, {"server": {"port": None}}) == {"server": {}}
+    assert merge_front_matter({"x": 1}, {"x": {"y": None, "z": 2}}) == {"x": {"z": 2}}
+
+
+def test_null_in_a_new_section_takes_the_settings_default(tmp_path: Path) -> None:
+    base = "---\ngithub:\n  repo: o/r\n---\nBody"
+    wf = load_workflow(
+        write(tmp_path, base=base, overlay="---\nagent:\n  max_turns: null\n---\n"), environ={}
+    )
+    assert wf.config.agent.max_turns == 5
+
+
 def test_merge_leaves_both_inputs_alone() -> None:
     base = {"claude": {"model_labels": {"a": "b"}}}
     overlay = {"claude": {"model_labels": {"c": "d"}}}

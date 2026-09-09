@@ -488,18 +488,23 @@ class Orchestrator:
             workflow.overlay_identity if workflow.overlay_path is not None else None,
         )
         found = (
-            (source.st_dev, source.st_ino, source.st_mtime_ns),
+            _identity(source),
             _identity(overlay) if overlay is not None else None,
         )
         if loaded == found:
             # Nothing to load: neither identity has moved and the overlay's presence has not
             # changed. The one thing left worth saying is that this deployment may not be
-            # in a position to tell (#46), about either file.
+            # in a position to tell (#46), about either file. On this branch the files on
+            # disk are exactly what was loaded, so the error state is exactly the complaint:
+            # an error an overlay caused must clear once the overlay is gone.
             complaint = _pinned_mount_complaint(path, source)
             if complaint is None and overlay is not None:
                 complaint = _pinned_mount_complaint(overlay_path, overlay)
             if complaint is not None:
                 self._report_reload_failure(complaint)
+            else:
+                self._config_error = None
+                self._reported_reload_error = None
             return
         try:
             workflow = load_workflow(path, environ=self._environ)
