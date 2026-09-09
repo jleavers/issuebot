@@ -107,11 +107,13 @@ def snapshot(
     dispatch_hold: DispatchHold | None = None,
     credential: str = "subscription",
     rate_limits: RateLimits | None = None,
+    workflow_overlay_path: str | None = None,
 ) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=NOW - timedelta(seconds=age_s + 1),
         workflow_path="/configs/WORKFLOW.md",
         workflow_mtime_ns=1,
+        workflow_overlay_path=workflow_overlay_path,
         config_valid=True,
         config_error=None,
         dispatch_hold=dispatch_hold,

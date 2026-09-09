@@ -64,6 +64,7 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "poll_interval_ms": 30000,
         "max_concurrent_agents": 2,
         "workflow_path": "/configs/WORKFLOW.md",
+        "workflow_overlay_path": None,
         "config_valid": True,
         "config_error": None,
         "dispatch_hold": None,
@@ -116,6 +117,13 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "issues_cancelled": 0,
         "blocked": 0,
     }
+
+
+def test_state_names_the_overlay_in_force(h: Harness) -> None:
+    """The API's answer to "is the worker running my overrides?"."""
+    h.queries.snapshot_row = snapshot(workflow_overlay_path="/configs/WORKFLOW.local.md")
+    worker = h.client.get("/api/v1/state").json()["worker"]
+    assert worker["workflow_overlay_path"] == "/configs/WORKFLOW.local.md"
 
 
 def test_state_without_a_snapshot_is_empty_not_missing(h: Harness) -> None:

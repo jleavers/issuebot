@@ -13,6 +13,9 @@
     <span class="fact">tick {{ worker.tick_count }}</span>
     <span class="fact">poll {{ worker.poll_interval_ms }} ms</span>
     <span class="fact">{{ worker.max_concurrent_agents }} slots</span>
+    {% if worker.workflow_overlay_path %}
+    <span class="fact overlay">overlay {{ worker.workflow_overlay_path }}</span>
+    {% endif %}
   </span>
   {% if worker.config_valid %}
   <span class="verdict ok">config valid</span>
