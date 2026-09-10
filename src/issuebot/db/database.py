@@ -82,13 +82,16 @@ class Database:
     def store(self, labels: GitHubLabels, repo: str) -> PostgresStore:
         return PostgresStore(self._url, repo=repo, labels=labels, connect=self._connect)
 
-    def listener(self, on_notify: Callable[[], None]) -> RefreshListener:
-        return RefreshListener(self._url, on_notify, connect=self._connect)
+    def listener(
+        self, on_notify: Callable[[], None], *, repo: str | None = None
+    ) -> RefreshListener:
+        return RefreshListener(self._url, on_notify, repo=repo, connect=self._connect)
 
-    async def notify_refresh(self) -> None:
-        """NOTIFY the refresh channel, which makes a listening worker tick at once."""
+    async def notify_refresh(self, repo: str | None = None) -> None:
+        """NOTIFY the refresh channel: with a repository, that worker ticks at once; without
+        one, every listening worker does."""
         async with self._open() as conn:
-            await conn.execute(f"NOTIFY {REFRESH_CHANNEL}")
+            await conn.execute("SELECT pg_notify(%s, %s)", (REFRESH_CHANNEL, repo or ""))
 
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[AsyncConnection]:

@@ -28,9 +28,10 @@ def test_store_and_listener_are_built_with_the_url() -> None:
     assert isinstance(store, PostgresStore)
     assert store._url == URL
     assert store.repo == "example/repo"
-    listener = database.listener(lambda: None)
+    listener = database.listener(lambda: None, repo="example/repo")
     assert isinstance(listener, RefreshListener)
     assert listener._url == URL
+    assert listener._repo == "example/repo"
 
 
 async def test_probe_reports_an_unreachable_server_without_the_url() -> None:

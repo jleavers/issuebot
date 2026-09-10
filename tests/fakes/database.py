@@ -183,8 +183,9 @@ class FakeRepoQueries:
 
 
 class FakeListener:
-    def __init__(self, on_notify: Callable[[], None]) -> None:
+    def __init__(self, on_notify: Callable[[], None], repo: str | None = None) -> None:
         self.on_notify = on_notify
+        self.repo = repo
         self.started = False
         self.closed = False
         self.close_error: Exception | None = None
@@ -217,6 +218,7 @@ class FakeDatabase:
         self.listeners: list[FakeListener] = []
         self.listener_close_error: Exception | None = None
         self.notified = 0
+        self.notified_repos: list[str | None] = []
         self.notify_error: DatabaseError | None = None
         self.opened = 0
 
@@ -256,13 +258,14 @@ class FakeDatabase:
         self.repo = repo
         return self.store_obj
 
-    def listener(self, on_notify: Callable[[], None]) -> FakeListener:
-        listener = FakeListener(on_notify)
+    def listener(self, on_notify: Callable[[], None], *, repo: str | None = None) -> FakeListener:
+        listener = FakeListener(on_notify, repo)
         listener.close_error = self.listener_close_error
         self.listeners.append(listener)
         return listener
 
-    async def notify_refresh(self) -> None:
+    async def notify_refresh(self, repo: str | None = None) -> None:
         if self.notify_error is not None:
             raise self.notify_error
         self.notified += 1
+        self.notified_repos.append(repo)
