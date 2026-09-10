@@ -3,6 +3,7 @@
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -71,9 +72,8 @@ def with_search_path(url: str, schema: str) -> str:
     return urlunsplit(parts._replace(query=query))
 
 
-@pytest.fixture
-def db_url() -> Iterator[str]:
-    """A DATABASE_URL scoped to a fresh schema; skipped when no database is configured."""
+@contextmanager
+def _fresh_schema() -> Iterator[str]:
     if not _DATABASE_URL:
         pytest.skip("DATABASE_URL is not set; database tests need a PostgreSQL server")
     schema = f"issuebot_test_{uuid.uuid4().hex[:8]}"
@@ -83,3 +83,17 @@ def db_url() -> Iterator[str]:
             yield with_search_path(_DATABASE_URL, schema)
         finally:
             conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+@pytest.fixture
+def db_url() -> Iterator[str]:
+    """A DATABASE_URL scoped to a fresh schema; skipped when no database is configured."""
+    with _fresh_schema() as url:
+        yield url
+
+
+@pytest.fixture
+def source_db_url() -> Iterator[str]:
+    """A second fresh schema on the same server: the old, single-repository database."""
+    with _fresh_schema() as url:
+        yield url

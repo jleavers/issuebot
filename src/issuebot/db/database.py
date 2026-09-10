@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, classify, connect, describe, error_text, redact
 from issuebot.db.errors import StoreUnavailableError
+from issuebot.db.importer import ImportResult, import_repo
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import MigrationResult, discover_migrations, migrate, schema_version
 from issuebot.db.queries import Queries
@@ -78,6 +79,19 @@ class Database:
                     "workflow_path": workflow_path,
                 },
             )
+
+    async def import_from(
+        self, source_url: str, *, repo: str, labels: GitHubLabels, workflow_path: str | None
+    ) -> ImportResult:
+        """Copy an old single-repository database in, stamped with ``repo`` (spec §4)."""
+        return await import_repo(
+            source_url,
+            self._url,
+            repo=repo,
+            labels=labels,
+            workflow_path=workflow_path,
+            connect=self._connect,
+        )
 
     def store(self, labels: GitHubLabels, repo: str) -> PostgresStore:
         return PostgresStore(self._url, repo=repo, labels=labels, connect=self._connect)
