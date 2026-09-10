@@ -7,10 +7,11 @@ from fastapi.testclient import TestClient
 
 from fakes.database import FakeDatabase
 from issuebot.agent.runner import RateLimits, RateLimitWindow
-from issuebot.config import GitHubSettings, Settings
+from issuebot.config import GitHubLabels, GitHubSettings, Settings
 from issuebot.db.queries import (
     EventRow,
     IssueRow,
+    RepoRow,
     RunRow,
     SnapshotRow,
     TurnRow,
@@ -46,7 +47,22 @@ def limits(
 
 
 RUN_ID = "20260904T202535Z-0964cd"
-SETTINGS = Settings(github=GitHubSettings(repo="example/repo"))
+REPO = "example/repo"
+BASE = "/r/example/repo"
+API = "/api/v1/repos/example/repo"
+SETTINGS = Settings(github=GitHubSettings(repo=REPO))
+
+
+def repo_row(**overrides: Any) -> RepoRow:
+    fields: dict[str, Any] = {
+        "repo": REPO,
+        "labels": GitHubLabels().model_dump(),
+        "workflow_path": "/configs/WORKFLOW.md",
+        "registered_at": NOW - timedelta(days=2),
+        "seen_at": NOW - timedelta(hours=1),
+    }
+    fields.update(overrides)
+    return RepoRow(**fields)
 
 
 class Clock:

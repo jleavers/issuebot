@@ -13,23 +13,30 @@ from fakes.web import (
     event_row,
     issue_row,
     limits,
+    repo_row,
     retry_row,
     running_row,
     snapshot,
 )
+from issuebot.config import GitHubLabels
 from issuebot.db import MAX_WINDOW_DAYS, StoreUnavailableError
 from issuebot.db.queries import DailyPoint
 from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import REFRESH_MIN_INTERVAL_S, SECURITY_HEADERS, STALE_FACTOR
 from issuebot.web.views import (
+    api_base,
     cost_label,
     describe_event,
     dispatch_hold,
     limits_unavailable,
     rate_limit_windows,
+    repo_base,
+    repo_labels,
     safe_href,
+    switch_target,
     window_days,
     worker_status,
+    worst_status,
 )
 
 HELD_SINCE = NOW - timedelta(minutes=4)
@@ -624,3 +631,37 @@ def test_healthz_reports_a_held_worker_and_why(h: Harness) -> None:
 )
 def test_describe_event(kind: str, payload: dict[str, Any], text: str) -> None:
     assert describe_event(event_row(kind=kind, payload=payload)) == text
+
+
+def test_repo_paths() -> None:
+    assert repo_base("acme/frontend") == "/r/acme/frontend"
+    assert api_base("acme/frontend") == "/api/v1/repos/acme/frontend"
+
+
+@pytest.mark.parametrize(
+    ("kind", "query", "target"),
+    [
+        ("dashboard", "", "/r/acme/frontend/"),
+        ("issues", "", "/r/acme/frontend/issues"),
+        ("issues", "state=review", "/r/acme/frontend/issues?state=review"),
+        ("issue", "", "/r/acme/frontend/"),  # an issue number means nothing elsewhere
+        ("turn", "", "/r/acme/frontend/"),
+    ],
+)
+def test_switch_target(kind: str, query: str, target: str) -> None:
+    assert switch_target(kind, "acme/frontend", query) == target
+
+
+def test_worst_status_orders_none_over_stale_over_held_over_ok() -> None:
+    assert worst_status([]) == "none"
+    assert worst_status(["ok", "ok"]) == "ok"
+    assert worst_status(["ok", "held"]) == "held"
+    assert worst_status(["held", "stale"]) == "stale"
+    assert worst_status(["stale", "none", "ok"]) == "none"
+
+
+def test_repo_labels_validates_the_stored_mapping() -> None:
+    row = repo_row(labels={**GitHubLabels().model_dump(), "review": "issuebot/check"})
+    assert repo_labels(row).review == "issuebot/check"
+    with pytest.raises(ValueError):
+        repo_labels(repo_row(labels={"todo": ""}))

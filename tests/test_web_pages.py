@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from fakes.web import (
+    BASE,
     NOW,
     RUN_ID,
     Harness,
@@ -743,7 +744,9 @@ def test_every_page_links_to_the_issues_list(h: Harness) -> None:
 
 
 def test_issue_filters_mark_the_current_column() -> None:
-    filters = issue_filters("review", {"todo": 2, "review": 1, "complete": 44}, GitHubLabels())
+    filters = issue_filters(
+        "review", {"todo": 2, "review": 1, "complete": 44}, GitHubLabels(), BASE
+    )
     assert [entry["label"] for entry in filters] == [
         "all",
         "issuebot/todo",
@@ -754,9 +757,9 @@ def test_issue_filters_mark_the_current_column() -> None:
     ]
     assert [entry["current"] for entry in filters] == [False, False, False, True, False, False]
     assert [entry["total"] for entry in filters] == [47, 2, 0, 1, 0, 44]
-    assert filters[0]["href"] == "/issues"
-    assert filters[3]["href"] == "/issues?state=review"
-    assert issue_filters(None, {}, GitHubLabels())[0]["current"] is True
+    assert filters[0]["href"] == f"{BASE}/issues"
+    assert filters[3]["href"] == f"{BASE}/issues?state=review"
+    assert issue_filters(None, {}, GitHubLabels(), BASE)[0]["current"] is True
 
 
 def test_an_unknown_issue_is_a_404_page(h: Harness) -> None:

@@ -1,9 +1,12 @@
 """Pure builders for what the pages and the API show: no I/O, no HTML, JSON-safe values only."""
 
 import re
-from dataclasses import fields
+from collections.abc import Iterable
+from dataclasses import dataclass, fields
 from datetime import UTC, date, datetime
 from typing import Any, Literal
+
+from pydantic import ValidationError
 
 from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
@@ -11,6 +14,7 @@ from issuebot.db.queries import (
     DailyPoint,
     EventRow,
     IssueRow,
+    RepoRow,
     RunRow,
     RunTotals,
     SnapshotRow,
@@ -26,6 +30,7 @@ RECENT_EVENTS_LIMIT = 50
 RUN_ID_PATTERN = r"^\d{8}T\d{6}Z-[0-9a-f]{6}$"
 DEFAULT_WINDOW_DAYS = 7
 DEFAULT_POLL_INTERVAL_MS = 30_000
+REPO_COOKIE = "issuebot-repo"
 
 WorkerStatus = Literal["ok", "held", "stale", "none"]
 
@@ -42,6 +47,77 @@ _WORKER_KEYS = (
 )
 _TOTAL_KEYS = ("input_tokens", "output_tokens", "total_tokens")
 _COUNTER_KEYS = ("runs_started", "runs_ended", "issues_completed", "issues_cancelled", "blocked")
+_STATUS_RANK: dict[WorkerStatus, int] = {"ok": 0, "held": 1, "stale": 2, "none": 3}
+
+
+# --- the repository a page is scoped to -------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RepoContext:
+    """What a page knows about the repository it is scoped to: its name and its two prefixes."""
+
+    name: str
+    base: str  # /r/{owner}/{name}: the pages
+    api: str  # /api/v1/repos/{owner}/{name}: the JSON routes the page calls
+
+
+def repo_base(name: str) -> str:
+    return f"/r/{name}"
+
+
+def api_base(name: str) -> str:
+    return f"/api/v1/repos/{name}"
+
+
+def repo_context(name: str) -> RepoContext:
+    return RepoContext(name=name, base=repo_base(name), api=api_base(name))
+
+
+def switch_target(kind: str, name: str, query: str = "") -> str:
+    """Where the dropdown sends the browser when it picks ``name`` from a page of ``kind``.
+
+    A dashboard stays a dashboard and an issue list stays an issue list (filter kept); an
+    issue or a turn page goes to the other repository's dashboard, because the number
+    means nothing there.
+    """
+    base = repo_base(name)
+    if kind == "issues":
+        return f"{base}/issues?{query}" if query else f"{base}/issues"
+    return f"{base}/"
+
+
+def repo_options(
+    repos: list[RepoRow], current: str, kind: str, query: str = ""
+) -> list[dict[str, Any]]:
+    """The dropdown's options: every registered repository, each with where it would go."""
+    return [
+        {
+            "name": row.repo,
+            "url": switch_target(kind, row.repo, query),
+            "current": row.repo == current,
+        }
+        for row in repos
+    ]
+
+
+def worst_status(statuses: Iterable[WorkerStatus]) -> WorkerStatus:
+    """The one status a single-field probe should see: none > stale > held > ok."""
+    worst: WorkerStatus = "ok"
+    seen = False
+    for status in statuses:
+        seen = True
+        if _STATUS_RANK[status] > _STATUS_RANK[worst]:
+            worst = status
+    return worst if seen else "none"
+
+
+def repo_labels(row: RepoRow) -> GitHubLabels:
+    """The registry row's labels, validated; a hand-edited row raises ValueError."""
+    try:
+        return GitHubLabels.model_validate(row.labels)
+    except ValidationError as exc:
+        raise ValueError(f"labels of {row.repo} do not validate: {exc}") from exc
 
 
 def iso(value: datetime | date | None) -> str | None:
@@ -201,8 +277,8 @@ def safe_href(url: object) -> str | None:
     return url if isinstance(url, str) and url.startswith("https://") else None
 
 
-def turn_url(number: int, run_id: str, turn_number: int) -> str:
-    return f"/issues/{number}/runs/{run_id}/turns/{turn_number}"
+def turn_url(base: str, number: int, run_id: str, turn_number: int) -> str:
+    return f"{base}/issues/{number}/runs/{run_id}/turns/{turn_number}"
 
 
 def turn_label(run_id: str, turn_number: int) -> str:
@@ -363,7 +439,7 @@ def is_board_state(state: str) -> bool:
 
 
 def issue_filters(
-    state: str | None, counts: dict[str, int], labels: GitHubLabels
+    state: str | None, counts: dict[str, int], labels: GitHubLabels, base: str
 ) -> list[dict[str, Any]]:
     """The list page's filter row: "all" first, then one per column, each with its count.
 
@@ -376,7 +452,7 @@ def issue_filters(
         {
             "role": None,
             "label": "all",
-            "href": "/issues",
+            "href": f"{base}/issues",
             "current": state is None,
             "total": sum(counts.get(role.value, 0) for role in StateLabel),
         }
@@ -386,7 +462,7 @@ def issue_filters(
             {
                 "role": role.value,
                 "label": names[role.value],
-                "href": f"/issues?state={role.value}",
+                "href": f"{base}/issues?state={role.value}",
                 "current": state == role.value,
                 "total": counts.get(role.value, 0),
             }
@@ -497,6 +573,7 @@ def issue_document(
     turns: list[TurnSummaryRow],
     events: list[EventRow],
     snapshot: SnapshotRow | None,
+    base: str,
 ) -> dict[str, Any]:
     """GET /api/v1/issues/<n>: the row, the snapshot's entries, runs with captured turns, events.
 
@@ -526,7 +603,7 @@ def issue_document(
         for turn in turns:
             if turn.run_id != run.run_id:
                 continue
-            url = turn_url(issue.number, run.run_id, turn.turn_number)
+            url = turn_url(base, issue.number, run.run_id, turn.turn_number)
             run_turns.append({**row_dict(turn), "url": url})
             logs.append(
                 {
