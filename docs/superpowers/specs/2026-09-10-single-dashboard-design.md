@@ -1,7 +1,7 @@
 # One dashboard for every repository
 
 Date: 2026-09-10
-Status: approved, not implemented
+Status: approved; implemented 2026-09-10 on branch `issuebot/single-dashboard`
 
 ## Problem
 
@@ -343,3 +343,26 @@ does now, and serves on its flags' bind and port.
 Named so nobody expects them in this phase: any cross-repository page or an "all" entry
 in the dropdown; authentication; hosting the dashboard off the VM; workers sharing one
 Claude login; a `since` filter or any other change to what a worker fetches.
+
+## Implementation notes
+
+Three places where the built thing differs from the plan above, and one clarification.
+
+- **§3's guard text** ends "copy these in with the import command" rather than naming
+  `issuebot import` in backticks. `redact()` replaces the database password anywhere in a
+  message it passes, and the compose default password is the word `issuebot`, so a message
+  that spells the command out reaches the operator with the command name replaced.
+- **§3's upgrade route** became a rename rather than a second database: `ALTER DATABASE
+  issuebot RENAME TO issuebot_old`, `createdb issuebot`, then the import before the new
+  worker starts. `DATABASE_URL` is hard-coded in every checkout's compose file, so pointing
+  it at a differently named database would be an edit in every checkout; renaming the old
+  data out from under the same name is one command and no configuration change.
+- **§7's `repo_path(repo, suffix)` helper** became `RepoContext(name, base, api)`: the
+  templates build links from `repo.base` and `repo.api` directly, which keeps the page
+  prefix and the API prefix in one object rather than in a filter every template has to
+  call correctly.
+
+§1's "every service" means the `hub` and `worker` services. `test-db` deliberately stays
+off the `issuebot` network: it is a throwaway for the test suite, reached on a published
+loopback port, and joining a shared network would let it collide with the hub's `db` by
+name.

@@ -50,8 +50,10 @@ live and serving the worker and the web. 5434 is neither arbitrary nor a collisi
 host runs a database per project, and `docker ps` shows 5432, 5433 and 5435 held by three of
 the others. Leave it there.
 
-CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and
-a Docker build on every PR. Dependabot covers uv, Docker and Actions weekly.
+CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and, in the
+`docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
+under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
+before the Docker build, on every PR. Dependabot covers uv, Docker and Actions weekly.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
 Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
 new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
@@ -249,7 +251,8 @@ floor, not the shipped version, and moves by hand.
   under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
   files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
   workflow path and first/last-seen times) and a `repo` column, `NOT NULL` with no default, on
-  every other table, so it refuses to apply against a database that already holds `issues`,
+  `issues`, `runs`, `events` and `runtime_snapshot` (`run_turns` has none, and is reached
+  through `runs`), so it refuses to apply against a database that already holds `issues`,
   `runs` or `events` rows -- a migration cannot know which repository they belong to -- naming
   the import command as the remedy; it also drops and recreates `runtime_snapshot` keyed by
   `repo` instead of as a single row.

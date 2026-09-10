@@ -2,7 +2,8 @@
 
 The source is read with the version-2 SQL below, written here and nowhere else, because
 ``Queries`` speaks version 3. Rows are streamed in batches through a server-side cursor so a
-large ``run_turns`` never has to fit in memory. Everything lands in one target transaction.
+large ``run_turns`` never has to fit in memory. Every table is read from one repeatable-read
+snapshot of the source and lands in one target transaction.
 """
 
 from collections.abc import Callable
@@ -180,6 +181,9 @@ async def _import(
         )
     counts: dict[str, int] = {}
     async with target.transaction(), source.transaction():
+        # One snapshot for every read below: the source may still be serving a running worker,
+        # and under READ COMMITTED the five reads would each be their own point in time.
+        await source.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         await target.execute(
             REGISTER_REPO,
             {"repo": repo, "labels": Jsonb(labels.model_dump()), "workflow_path": workflow_path},

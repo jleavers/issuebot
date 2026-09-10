@@ -579,20 +579,64 @@ async def test_queries_on_an_empty_schema_report_a_database_error(db_url: str) -
 async def test_scoped_reads_see_only_their_own_repository(
     seeded: Database, db_url: str, make_issue: Callable[..., Issue]
 ) -> None:
+    """Spec §9: every ``RepoQueries`` method answers for its own repository and no other.
+
+    The other repository is seeded richly enough -- an open issue, a closed ``complete`` one,
+    a finished run with tokens and a captured turn, three events and a snapshot -- that a
+    missing ``repo`` predicate in any one query would change a number below rather than pass.
+    """
     other = PostgresStore(db_url, repo="example/other", labels=GitHubLabels())
     await other.connect()
     try:
         await other.upsert_issues(
-            [IssueSnapshot(issue=make_issue(number=1, title="Elsewhere"), seen_at=NOW)]
+            [
+                IssueSnapshot(issue=make_issue(number=1, title="Elsewhere"), seen_at=NOW),
+                IssueSnapshot(
+                    issue=make_issue(
+                        number=2,
+                        identifier="other-2",
+                        title="Theirs closed",
+                        state=StateLabel.COMPLETE,
+                        state_labels=("issuebot/complete",),
+                        labels=("issuebot/complete",),
+                        github_state="closed",
+                        closed_at=NOW - HOUR,
+                        updated_at=NOW - HOUR,
+                    ),
+                    seen_at=NOW,
+                ),
+            ]
         )
         await other.apply_event(
             RunStarted(
                 issue_number=1,
-                issue_identifier="repo-1",
+                issue_identifier="other-1",
                 run_id="other-run",
                 attempt=1,
                 session_id="s",
                 workspace_path="/w",
+                at=NOW - HOUR,
+            )
+        )
+        await other.apply_event(
+            run_ended(
+                "other-run",
+                1,
+                NOW - HOUR + timedelta(seconds=30),
+                issue_identifier="other-1",
+                input_tokens=700,
+                output_tokens=70,
+                cost_usd=7.0,
+            ),
+            turns=[capture(1, model="claude-elsewhere")],
+        )
+        await other.apply_event(
+            StateChanged(
+                issue_number=1,
+                issue_identifier="other-1",
+                from_label="issuebot/review",
+                to_label="issuebot/todo",  # keeps issue 1 on the column make_issue put it on
+                actor="human",
                 at=NOW,
             )
         )
@@ -600,13 +644,74 @@ async def test_scoped_reads_see_only_their_own_repository(
     finally:
         await other.close()
     async with scoped(seeded, "example/other") as theirs, scoped(seeded) as ours:
-        assert [row.title for row in await theirs.issues_for_state(None)] == ["Elsewhere"]
+        # issues_for_state
+        assert sorted(row.title for row in await theirs.issues_for_state(None)) == [
+            "Elsewhere",
+            "Theirs closed",
+        ]
         assert "Elsewhere" not in [row.title for row in await ours.issues_for_state(None)]
+        # issues_by_state: only their two cards, on their own columns
+        board = await theirs.issues_by_state()
+        assert [(role, [row.title for row in rows]) for role, rows in board.items() if rows] == [
+            ("todo", ["Elsewhere"]),
+            ("complete", ["Theirs closed"]),
+        ]
+        assert {"Elsewhere", "Theirs closed"}.isdisjoint(
+            row.title for rows in (await ours.issues_by_state()).values() for row in rows
+        )
+        # state_counts: the board's headers, uncapped, per repository
+        assert await theirs.state_counts() == {
+            "todo": 1,
+            "in_progress": 0,
+            "review": 0,
+            "rework": 0,
+            "complete": 1,
+        }
+        assert await ours.state_counts() == {
+            "todo": 2,
+            "in_progress": 1,
+            "review": 1,
+            "rework": 0,
+            "complete": 3,
+        }
+        # closed_count: theirs closed an hour ago too, and must not reach ours
+        assert await theirs.closed_count(DAY) == 1
+        assert await ours.closed_count(DAY) == 1
+        # runs_for_issue and runs_count
         assert [run.run_id for run in await theirs.runs_for_issue(1)] == ["other-run"]
-        assert await theirs.runs_count(timedelta(days=1)) == 1
+        assert await theirs.runs_count(DAY) == 1
         assert "other-run" not in [run.run_id for run in await ours.runs_for_issue(1)]
-        assert (await theirs.snapshot()).data == {"tick_count": 99}  # type: ignore[union-attr]
+        assert await ours.runs_count(DAY) == 1
+        # run_totals: their 7.0 must not land in our window's cost
+        theirs_totals = await theirs.run_totals(DAY)
+        assert (theirs_totals.total_tokens, theirs_totals.cost_usd) == (770, pytest.approx(7.0))
+        assert (await ours.run_totals(7 * DAY)).cost_usd == pytest.approx(0.1)
+        # daily_series: two days of buckets, one close and one run each side
+        theirs_days = await theirs.daily_series(2)
+        assert (sum(p.closed for p in theirs_days), sum(p.runs for p in theirs_days)) == (1, 1)
+        ours_days = await ours.daily_series(2)
+        assert (sum(p.closed for p in ours_days), sum(p.runs for p in ours_days)) == (1, 1)
+        # issue: the same number in both repositories is two different issues
+        assert (await theirs.issue(1)).title == "Elsewhere"  # type: ignore[union-attr]
+        assert (await ours.issue(1)).title == "Issue 1"  # type: ignore[union-attr]
+        # recent_events and events_for_issue
+        assert [event.kind for event in await theirs.recent_events(50)] == [
+            "state_changed",
+            "run_ended",
+            "run_started",
+        ]
+        assert "other-run" not in [event.run_id for event in await ours.recent_events(50)]
+        assert len(await theirs.events_for_issue(1, 50)) == 3
+        assert await ours.events_for_issue(1, 50) == []
+        # turn_summaries_for_issue and turn: run_turns is scoped through its run
+        assert [turn.model for turn in await theirs.turn_summaries_for_issue(1)] == [
+            "claude-elsewhere"
+        ]
+        assert await ours.turn_summaries_for_issue(1) == []
+        assert (await theirs.turn("other-run", 1)).model == "claude-elsewhere"  # type: ignore[union-attr]
         assert await ours.turn("other-run", 1) is None
+        # snapshot
+        assert (await theirs.snapshot()).data == {"tick_count": 99}  # type: ignore[union-attr]
 
 
 async def test_repos_lists_registrations_by_name_and_snapshots_by_repo(
