@@ -87,6 +87,7 @@ async def test_import_copies_every_table_stamped_with_the_repository(
         scoped = queries.scoped(REPO)
         turn = await scoped.turn(RUN_ID, 1)
         assert turn is not None and turn.model == "opus"
+        assert turn.captured_at == NOW  # the source's capture time, not the import's
         (event,) = await scoped.recent_events(10)
         assert event.payload["run_id"] == RUN_ID
         assert (await scoped.snapshot()).data == {"tick_count": 3}  # type: ignore[union-attr]

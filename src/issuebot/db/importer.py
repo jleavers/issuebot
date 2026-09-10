@@ -18,7 +18,7 @@ from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, connect, error_text, redact
 from issuebot.db.errors import ImportRefused
 from issuebot.db.migrate import apply_migrations, schema_version
-from issuebot.db.store import INSERT_TURN, REGISTER_REPO
+from issuebot.db.store import REGISTER_REPO
 
 SOURCE_VERSION = 2
 BATCH = 500
@@ -52,14 +52,28 @@ VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(attempt)
 """
 
 READ_TURNS = """
-SELECT run_id, turn_number, model, subtype, is_error, num_turns, input_tokens,
+SELECT run_id, turn_number, captured_at, model, subtype, is_error, num_turns, input_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, output_tokens, cost_usd, duration_ms,
        result_text, prompt, prompt_bytes, stream, stream_bytes, stream_lines, omitted_lines,
        stderr, stderr_bytes, truncated
 FROM run_turns ORDER BY run_id, turn_number
 """
-# INSERT_TURN (store.py) sets captured_at = now(); the original capture time is not carried,
-# which the transcript page does not show for an imported run anyway.
+# The sink's INSERT_TURN stamps captured_at = now(), which an import must not do: a turn
+# crosses as it was captured, and the transcript page shows that time. Hence this plain INSERT
+# instead -- and no ON CONFLICT, because a colliding turn implies a colliding run, which
+# WRITE_RUN has already rejected.
+IMPORT_TURN = """
+INSERT INTO run_turns (run_id, turn_number, captured_at, model, subtype, is_error, num_turns,
+                       input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+                       output_tokens, cost_usd, duration_ms, result_text, prompt, prompt_bytes,
+                       stream, stream_bytes, stream_lines, omitted_lines, stderr, stderr_bytes,
+                       truncated)
+VALUES (%(run_id)s, %(turn_number)s, %(captured_at)s, %(model)s, %(subtype)s, %(is_error)s,
+        %(num_turns)s, %(input_tokens)s, %(cache_creation_input_tokens)s,
+        %(cache_read_input_tokens)s, %(output_tokens)s, %(cost_usd)s, %(duration_ms)s,
+        %(result_text)s, %(prompt)s, %(prompt_bytes)s, %(stream)s, %(stream_bytes)s,
+        %(stream_lines)s, %(omitted_lines)s, %(stderr)s, %(stderr_bytes)s, %(truncated)s)
+"""
 
 READ_EVENTS = "SELECT at, kind, issue_number, run_id, payload FROM events ORDER BY id"
 WRITE_EVENT = """
@@ -97,7 +111,7 @@ def _json_data(row: dict[str, Any]) -> dict[str, Any]:
 TABLES: tuple[tuple[str, str, str, Callable[[dict[str, Any]], dict[str, Any]]], ...] = (
     ("issues", READ_ISSUES, WRITE_ISSUE, _as_is),
     ("runs", READ_RUNS, WRITE_RUN, _as_is),
-    ("run_turns", READ_TURNS, INSERT_TURN, _as_is),
+    ("run_turns", READ_TURNS, IMPORT_TURN, _as_is),
     ("events", READ_EVENTS, WRITE_EVENT, _json_payload),
     ("runtime_snapshot", READ_SNAPSHOT, WRITE_SNAPSHOT, _json_data),
 )
