@@ -186,10 +186,11 @@ floor, not the shipped version, and moves by hand.
   costs a log line, never a setting, which also bounds its one race (a rename committing
   inside `stat` reads as `nlink == 0`; the next tick reloads and clears it). The deployment
   fix is the mount itself: compose binds the directory `./configs` at `/configs` for the
-  worker and the web and points `ISSUEBOT_WORKFLOW` at the file inside it (the image
-  defaults to the same), so a lookup goes through the host's directory entry. The snapshot
-  carries `workflow_overlay_path` (`None` without one), which is how `issuebot status`,
-  `/api/v1/state` and the dashboard answer "is the worker running my overrides?".
+  worker (the web reads no workflow, so it has no such mount) and points `ISSUEBOT_WORKFLOW`
+  at the file inside it (the image defaults to the same), so a lookup goes through the host's
+  directory entry. The snapshot carries `workflow_overlay_path` (`None` without one), which is
+  how `issuebot status`, `/api/v1/repos/<owner>/<name>/state` and the dashboard answer "is the
+  worker running my overrides?".
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
   and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
@@ -222,7 +223,8 @@ floor, not the shipped version, and moves by hand.
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
   builds) or `auth` (`claude authentication unavailable: <the probe's detail>`), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
-  one restarts it. A held worker keeps ticking, so without it `issuebot status`, `/api/v1/state`,
+  one restarts it. A held worker keeps ticking, so without it `issuebot status`,
+  `/api/v1/repos/<owner>/<name>/state`,
   the dashboard and `/healthz` all read as a healthy worker while the board stops moving.
   An auth hold's `since` is keyed on the probe's verdict, not its wording, so an unreadable
   `claude` that garbles itself differently every tick still reports how long the hold has

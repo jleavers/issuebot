@@ -105,7 +105,7 @@ services:
       DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
     ports:
       # Loopback only: the dashboard has no authentication. Override the host port with
-      # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is server.port.
+      # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is the --port above.
       - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]

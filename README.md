@@ -218,10 +218,11 @@ revoked API key — is caught by the run that hits it. That issue is moved to `i
 at once with a workpad block naming authentication, rather than after `agent.max_attempts`
 opaque failures, and the worker stops claiming anything else. A worker holding dispatch says
 so wherever you look: `issuebot status` prints a `dispatch: held (auth) since ...` line, the
-dashboard's worker line reads `worker held` with the reason, `/healthz` reports
-`"worker": "held"` with the same reason under `dispatch_hold`, and `docker compose logs
-worker` shows `dispatch_auth_held`. The board keeps updating while the hold lasts, since the
-hold stops `claude`, not `gh`. It re-checks the credential every poll and
+dashboard's worker line reads `worker held` with the reason, `/healthz` reports that
+repository's entry in `workers` with `"status": "held"` and the same reason under its
+`dispatch_hold`, and `docker compose logs worker` shows `dispatch_auth_held`. The board keeps
+updating while the hold lasts, since the hold stops `claude`, not `gh`. It re-checks the
+credential every poll and
 picks up where it left off once `claude auth status` reports a login again, so fixing the
 credential is enough and no restart is needed. A `claude` that cannot answer the probe at all
 holds it up for ten polls at most, and then the worker goes back to failing one issue at a
@@ -386,30 +387,54 @@ them from that repository's checkout.
 #### Upgrading from one stack per repository
 
 Schema version 3 adds a repository column to every table, and the migration refuses a
-database that already holds rows because it cannot tell which repository they belong to.
-So the hub starts with a **fresh** database and each old one is imported:
+database that already holds rows because it cannot tell which repository they belong to. The
+route below renames each checkout's old database out of the way and imports into a fresh
+database of the same name, so no `DATABASE_URL` changes anywhere:
 
-1. In the hub checkout, before starting it with the `hub` profile, give it an empty database:
-   either a new `pgdata` volume, or `docker compose exec db createdb -U issuebot issuebot_hub`
-   and `DATABASE_URL` pointing at it in the worker's and the web's environment.
-2. Start the hub. From each repository's checkout, with the old database still running on
-   its published port, run on the host:
+1. In the hub checkout, pull the new version and add `COMPOSE_PROFILES=hub,worker` to `.env`;
+   once per host, `docker network create issuebot`.
+2. Stop the old worker and web but keep the database up: `docker compose stop worker web`
+   (the profiles in `.env` do not matter for `stop`; if compose cannot see the old containers,
+   `docker stop` them by name instead).
+3. Move the old data aside and give the hub a fresh database of the same name:
 
    ```bash
-   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5432/issuebot_hub \
+   docker compose exec db psql -U issuebot -d postgres -c 'ALTER DATABASE issuebot RENAME TO issuebot_old'
+   docker compose exec db createdb -U issuebot issuebot
+   ```
+
+4. Import this checkout's own history before any new worker starts — a started worker
+   registers its repository first, and the import then refuses it:
+
+   ```bash
+   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5432/issuebot \
+     uv run issuebot import --from postgresql://issuebot:issuebot@127.0.0.1:5432/issuebot_old
+   ```
+
+   The command migrates the fresh database to schema version 3 itself; no separate
+   `issuebot migrate` is needed. The repository and its labels come from that checkout's
+   workflow file; the command refuses to run twice for the same repository.
+5. `docker compose up -d --build` starts `db`, `web` and this repository's worker.
+6. For every other repository's checkout: pull the new version and set
+   `COMPOSE_PROFILES=worker` in `.env`. With its old stack still running on its own published
+   port, import its history into the hub from the host — the target is always the hub's
+   database, as in step 4, and the source is that checkout's own port:
+
+   ```bash
+   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:5432/issuebot \
      uv run issuebot import --from postgresql://issuebot:issuebot@127.0.0.1:5433/issuebot
    ```
 
-   The repository and its labels come from that checkout's workflow file; the command
-   refuses to run twice for the same repository.
-3. Switch that checkout to `COMPOSE_PROFILES=worker`, remove its `db` and `web` containers
-   (`docker compose rm -sf db web`) and `docker compose up -d`.
+   Then remove that checkout's own `db` and `web` containers (`docker compose rm -sf db web`)
+   and `docker compose up -d --build`. Once every import is verified in the dashboard,
+   `issuebot_old` and the other checkouts' `pgdata` volumes can be dropped.
 
 Two smaller changes: the dashboard's URLs moved under `/r/<owner>/<name>/` (the API under
 `/api/v1/repos/<owner>/<name>/`), and the `server` block in `WORKFLOW.md` is no longer
-accepted, since the web takes `--bind` and `--port` instead; delete it. A hub's dashboard
-also shows no worker snapshot until each worker's next tick after it starts: migrating to
-schema version 3 drops and recreates `runtime_snapshot`.
+accepted, since the web takes `--bind` and `--port` instead; delete it. A repository you
+import brings its last runtime snapshot with it, so it reads `stale` in the dashboard until
+its worker's next tick; a repository that only registers, with no import, shows none until
+its first tick.
 
 ### When things go wrong
 
