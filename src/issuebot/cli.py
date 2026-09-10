@@ -712,12 +712,22 @@ async def _open_database(settings: Settings) -> Database | None:
     return database
 
 
-async def _build_sinks(settings: Settings) -> _Sinks:
-    """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError."""
+async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
+    """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError.
+
+    With a database the worker registers its repository first (spec §5): the row the
+    dashboard lists and lays the board out by, refreshed on every start so a label rename
+    reaches it.
+    """
     slack = _slack_sink(settings)
     database = await _open_database(settings)
+    if database is not None:
+        await database.register_repo(settings.github.repo, settings.github.labels, workflow_path)
     postgres = (
-        PostgresSink(database.store(settings.github.labels), description=database.description)
+        PostgresSink(
+            database.store(settings.github.labels, settings.github.repo),
+            description=database.description,
+        )
         if database
         else None
     )
@@ -794,7 +804,7 @@ async def _run_once(
             return 1
         return 0
     try:
-        sinks = await _build_sinks(settings)
+        sinks = await _build_sinks(settings, workflow_path=str(workflow.path))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -931,7 +941,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return asyncio.run(_run_worker(workflow))
 
 
-async def _last_rate_limits(database: Database | None) -> RateLimits | None:
+async def _last_rate_limits(database: Database | None, repo: str) -> RateLimits | None:
     """The reading the previous worker last saw, so a restart does not blank the limits tile.
 
     A reading reaches a worker only while a turn is running, and it lives in memory; restarting
@@ -942,7 +952,7 @@ async def _last_rate_limits(database: Database | None) -> RateLimits | None:
         return None
     try:
         async with database.queries() as queries:
-            row = await queries.snapshot()
+            row = await queries.scoped(repo).snapshot()
     except DatabaseError as exc:
         get_logger(__name__).warning("rate_limits_seed_failed", error=exc.message)
         return None
@@ -952,7 +962,7 @@ async def _last_rate_limits(database: Database | None) -> RateLimits | None:
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     try:
-        sinks = await _build_sinks(workflow.config)
+        sinks = await _build_sinks(workflow.config, workflow_path=str(workflow.path))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -964,14 +974,16 @@ async def _run_worker(workflow: Workflow) -> int:
         run_session=_run_session,
         which=_which,
         claude_auth=_claude_auth,
-        initial_rate_limits=await _last_rate_limits(sinks.database),
+        initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,
     )
     listener: RefreshListener | None = None
     if sinks.database is not None:
-        listener = sinks.database.listener(orchestrator.request_refresh)
+        listener = sinks.database.listener(
+            orchestrator.request_refresh, repo=workflow.config.github.repo
+        )
     sinks.start()
     if listener is not None:
         listener.start()
@@ -1029,13 +1041,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
-    return asyncio.run(_status(database))
+    return asyncio.run(_status(database, workflow.config.github.repo))
 
 
-async def _status(database: Database) -> int:
+async def _status(database: Database, repo: str) -> int:
     try:
-        async with database.queries() as queries:
-            row = await queries.snapshot()
+        async with database.queries() as base:
+            row = await base.scoped(repo).snapshot()
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -1066,12 +1078,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
-    return asyncio.run(_stats(database, args.days))
+    return asyncio.run(_stats(database, workflow.config.github.repo, args.days))
 
 
-async def _stats(database: Database, days: int) -> int:
+async def _stats(database: Database, repo: str, days: int) -> int:
     try:
-        async with database.queries() as queries:
+        async with database.queries() as base:
+            queries = base.scoped(repo)
             view = StatsView(
                 closed_1d=await queries.closed_count(timedelta(days=1)),
                 closed_7d=await queries.closed_count(timedelta(days=7)),
@@ -1094,12 +1107,13 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
+    repo = workflow.config.github.repo
     try:
-        asyncio.run(database.notify_refresh())
+        asyncio.run(database.notify_refresh(repo))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    print("[ OK ] refresh: notified issuebot_refresh")
+    print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
     return 0
 
 

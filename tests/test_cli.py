@@ -2092,7 +2092,7 @@ def test_refresh_notifies_and_reports_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh\n"
+    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
     assert fake_database.notified == 1
     fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
     assert main(["refresh", "--workflow", str(path)]) == 1
@@ -2324,3 +2324,72 @@ def test_worker_fails_before_the_orchestrator_when_migration_fails(
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
     assert stub_orchestrator.instances == []
     assert fake_database.listeners == []
+
+
+def test_worker_registers_its_repository_before_the_sinks_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    path = _workflow_with_root(tmp_path)
+    assert main(["worker", "--workflow", str(path)]) == 0
+    ((repo, labels, workflow_path),) = fake_database.registrations
+    assert (repo, workflow_path) == ("example/repo", str(path))
+    assert labels == GitHubLabels()
+    assert fake_database.repo == "example/repo"  # the store was built for this repository
+    (listener,) = fake_database.listeners
+    assert listener.repo == "example/repo"
+
+
+def test_worker_fails_fast_when_registration_fails(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.register_error = StoreUnavailableError("cannot connect: refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+    assert stub_orchestrator.instances == []
+
+
+def test_run_once_registers_its_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubSession,
+    fake_github: FakeGitHub,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    ((repo, labels, workflow_path),) = fake_database.registrations
+    assert (repo, labels, workflow_path) == ("example/repo", GitHubLabels(), str(path))
+    assert fake_database.repo == "example/repo"
+
+
+def test_refresh_names_its_repository(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["refresh", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert fake_database.notified_repos == ["example/repo"]
+
+
+def test_status_and_stats_read_their_own_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_database: FakeDatabase
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["status", "--workflow", str(path)]) == 0
+    assert main(["stats", "--workflow", str(path)]) == 0
+    assert fake_database.queries_obj.scoped_repos == ["example/repo", "example/repo"]
