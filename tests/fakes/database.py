@@ -12,6 +12,7 @@ from issuebot.db.queries import (
     DailyPoint,
     EventRow,
     IssueRow,
+    RepoRow,
     RunRow,
     RunTotals,
     SnapshotRow,
@@ -75,14 +76,38 @@ class FakeQueries:
         self.error: DatabaseError | None = None
         self.days_asked: int | None = None
         self.calls: list[str] = []
+        self.repo_rows: dict[str, RepoRow] = {}
+        self.snapshot_rows: dict[str, SnapshotRow] = {}  # per repo; snapshot_row is the default
+        self.scoped_repos: list[str] = []
+        self._repo: str | None = None
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
         if self.error is not None:
             raise self.error
 
+    async def repos(self) -> list[RepoRow]:
+        self._check("repos")
+        return [self.repo_rows[name] for name in sorted(self.repo_rows)]
+
+    async def repo(self, name: str) -> RepoRow | None:
+        self._check("repo")
+        return self.repo_rows.get(name)
+
+    async def snapshots(self) -> dict[str, SnapshotRow]:
+        self._check("snapshots")
+        rows = {name: self.snapshot_rows.get(name, self.snapshot_row) for name in self.repo_rows}
+        return {name: row for name, row in rows.items() if row is not None}
+
+    def scoped(self, repo: str) -> FakeQueries:
+        self.scoped_repos.append(repo)
+        self._repo = repo
+        return self
+
     async def snapshot(self) -> SnapshotRow | None:
         self._check("snapshot")
+        if self._repo is not None and self._repo in self.snapshot_rows:
+            return self.snapshot_rows[self._repo]
         return self.snapshot_row
 
     async def closed_count(self, window: timedelta) -> int:
@@ -170,6 +195,9 @@ class FakeDatabase:
         self.queries_obj = FakeQueries()
         self.store_obj = FakeStore()
         self.labels: GitHubLabels | None = None
+        self.repo: str | None = None
+        self.registrations: list[tuple[str, GitHubLabels, str | None]] = []
+        self.register_error: DatabaseError | None = None
         self.listeners: list[FakeListener] = []
         self.listener_close_error: Exception | None = None
         self.notified = 0
@@ -200,8 +228,16 @@ class FakeDatabase:
         self.opened += 1
         yield self.queries_obj
 
-    def store(self, labels: GitHubLabels) -> FakeStore:
+    async def register_repo(
+        self, repo: str, labels: GitHubLabels, workflow_path: str | None
+    ) -> None:
+        if self.register_error is not None:
+            raise self.register_error
+        self.registrations.append((repo, labels, workflow_path))
+
+    def store(self, labels: GitHubLabels, repo: str) -> FakeStore:
         self.labels = labels
+        self.repo = repo
         return self.store_obj
 
     def listener(self, on_notify: Callable[[], None]) -> FakeListener:

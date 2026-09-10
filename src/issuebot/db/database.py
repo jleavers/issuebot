@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, classify, connect, describe, error_text, redact
@@ -13,7 +14,7 @@ from issuebot.db.errors import StoreUnavailableError
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import MigrationResult, discover_migrations, migrate, schema_version
 from issuebot.db.queries import Queries
-from issuebot.db.store import PostgresStore
+from issuebot.db.store import REGISTER_REPO, PostgresStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +61,26 @@ class Database:
         async with self._open() as conn:
             yield Queries(conn)
 
-    def store(self, labels: GitHubLabels) -> PostgresStore:
-        return PostgresStore(self._url, labels=labels, connect=self._connect)
+    async def register_repo(
+        self, repo: str, labels: GitHubLabels, workflow_path: str | None
+    ) -> None:
+        """Upsert the worker's row in ``repos``: what the dashboard lists and lays out by.
+
+        A one-shot write before the sinks start, so a failure is a startup failure, not a
+        queued item that could be dropped (spec §5).
+        """
+        async with self._open() as conn:
+            await conn.execute(
+                REGISTER_REPO,
+                {
+                    "repo": repo,
+                    "labels": Jsonb(labels.model_dump()),
+                    "workflow_path": workflow_path,
+                },
+            )
+
+    def store(self, labels: GitHubLabels, repo: str) -> PostgresStore:
+        return PostgresStore(self._url, repo=repo, labels=labels, connect=self._connect)
 
     def listener(self, on_notify: Callable[[], None]) -> RefreshListener:
         return RefreshListener(self._url, on_notify, connect=self._connect)

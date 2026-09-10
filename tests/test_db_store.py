@@ -26,6 +26,7 @@ from issuebot.events import (
 from issuebot.github import Issue, LinkedPr, StateLabel
 
 T0 = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+REPO = "example/repo"
 
 
 def at(seconds: float) -> datetime:
@@ -35,7 +36,7 @@ def at(seconds: float) -> datetime:
 @pytest.fixture
 async def store(db_url: str) -> AsyncIterator[PostgresStore]:
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     try:
         yield store
@@ -366,14 +367,26 @@ async def test_completed_and_cancelled_close_the_row(
 # --- snapshot ---------------------------------------------------------------------------------
 
 
-async def test_write_snapshot_keeps_exactly_one_row(store: PostgresStore, db_url: str) -> None:
+async def test_write_snapshot_keeps_one_row_per_repository(
+    store: PostgresStore, db_url: str
+) -> None:
     await store.write_snapshot(at(0), {"tick_count": 1, "running": []})
     await store.write_snapshot(at(30), {"tick_count": 2, "running": [{"issue_number": 1}]})
-    (row,) = await rows(db_url, "SELECT at, written_at, data FROM runtime_snapshot")
-    assert row["at"] == at(30)
-    assert row["data"] == {"tick_count": 2, "running": [{"issue_number": 1}]}
-    assert row["written_at"].tzinfo is not None
-    assert row["written_at"] > at(30)
+    other = PostgresStore(db_url, repo="example/other", labels=GitHubLabels())
+    await other.connect()
+    try:
+        await other.write_snapshot(at(1), {"tick_count": 9})
+    finally:
+        await other.close()
+    found = await rows(
+        db_url, "SELECT repo, at, written_at, data FROM runtime_snapshot ORDER BY repo"
+    )
+    assert [(r["repo"], r["at"], r["data"]) for r in found] == [
+        ("example/other", at(1), {"tick_count": 9}),
+        (REPO, at(30), {"tick_count": 2, "running": [{"issue_number": 1}]}),
+    ]
+    assert found[1]["written_at"].tzinfo is not None
+    assert found[1]["written_at"] > at(30)
 
 
 # --- errors -----------------------------------------------------------------------------------
@@ -381,7 +394,7 @@ async def test_write_snapshot_keeps_exactly_one_row(store: PostgresStore, db_url
 
 async def test_writes_need_a_connection(db_url: str) -> None:
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     with pytest.raises(StoreUnavailableError, match="not connected"):
         await store.apply_event(moved())
     await store.connect()
@@ -400,7 +413,7 @@ async def test_a_bad_value_is_a_store_error_not_an_outage(store: PostgresStore) 
 
 
 async def test_a_missing_table_is_a_store_error(db_url: str) -> None:
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     try:
         with pytest.raises(StoreError, match="UndefinedTable"):
@@ -410,8 +423,51 @@ async def test_a_missing_table_is_a_store_error(db_url: str) -> None:
 
 
 async def test_connect_failure_is_unavailable_and_redacted() -> None:
-    store = PostgresStore("postgresql://u:s3cret@127.0.0.1:1/db", labels=GitHubLabels())
+    store = PostgresStore("postgresql://u:s3cret@127.0.0.1:1/db", repo=REPO, labels=GitHubLabels())
     with pytest.raises(StoreUnavailableError) as exc:
         await store.connect()
     assert "s3cret" not in exc.value.message
     assert not store.connected
+
+
+# --- the repository stamp ---------------------------------------------------------------------
+
+
+async def test_every_write_carries_the_repository(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    assert store.repo == REPO
+    await store.apply_event(started())
+    await store.apply_event(ended())
+    await store.upsert_issues([snapshot(make_issue(), 0)])
+    assert {r["repo"] for r in await rows(db_url, "SELECT repo FROM events")} == {REPO}
+    assert {r["repo"] for r in await rows(db_url, "SELECT repo FROM runs")} == {REPO}
+    assert {r["repo"] for r in await rows(db_url, "SELECT repo FROM issues")} == {REPO}
+
+
+async def test_two_repositories_share_an_issue_number_without_colliding(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    other = PostgresStore(db_url, repo="example/other", labels=GitHubLabels())
+    await other.connect()
+    try:
+        await store.upsert_issues([IssueSnapshot(issue=make_issue(title="Ours"), seen_at=at(0))])
+        await other.upsert_issues([IssueSnapshot(issue=make_issue(title="Theirs"), seen_at=at(0))])
+        await other.apply_event(
+            StateChanged(
+                issue_number=42,
+                issue_identifier="repo-42",
+                from_label="issuebot/todo",
+                to_label="issuebot/review",
+                actor="agent",
+                pr_url=None,
+                at=at(1),
+            )
+        )
+    finally:
+        await other.close()
+    found = await rows(db_url, "SELECT repo, title, state FROM issues ORDER BY repo")
+    assert [(r["repo"], r["title"], r["state"]) for r in found] == [
+        ("example/other", "Theirs", "review"),
+        (REPO, "Ours", "todo"),
+    ]

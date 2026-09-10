@@ -29,7 +29,7 @@ SETTINGS = Settings(github=GitHubSettings(repo="example/repo"))
 async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator[Database]:
     """Three issues, one finished run on #7 with the sample turn captured twice, a snapshot."""
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo="example/repo", labels=GitHubLabels())
     await store.connect()
 
     def issue(number: int, state: StateLabel, **overrides: Any) -> Issue:

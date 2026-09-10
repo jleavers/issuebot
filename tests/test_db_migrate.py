@@ -15,19 +15,28 @@ from issuebot.db import (
     schema_version,
 )
 
-TABLES = {"issues", "runs", "events", "runtime_snapshot", "run_turns", "schema_migrations"}
+TABLES = {
+    "issues",
+    "runs",
+    "events",
+    "runtime_snapshot",
+    "run_turns",
+    "repos",
+    "schema_migrations",
+}
 
 
 # --- discovery (no database) -------------------------------------------------------------
 
 
-def test_the_package_ships_the_two_migrations() -> None:
+def test_the_package_ships_the_three_migrations() -> None:
     migrations = discover_migrations()
-    assert [m.label for m in migrations] == ["0001_initial", "0002_run_turns"]
-    assert [m.version for m in migrations] == [1, 2]
+    assert [m.label for m in migrations] == ["0001_initial", "0002_run_turns", "0003_repos"]
+    assert [m.version for m in migrations] == [1, 2, 3]
     assert "CREATE TABLE issues" in migrations[0].sql
     assert "CREATE TABLE runtime_snapshot" in migrations[0].sql
     assert "CREATE TABLE run_turns" in migrations[1].sql
+    assert "CREATE TABLE repos" in migrations[2].sql
 
 
 def test_discovery_sorts_by_version_and_reads_the_sql(tmp_path: Path) -> None:
@@ -77,13 +86,16 @@ async def _tables(conn: psycopg.AsyncConnection) -> set[str]:
 
 async def test_migrate_applies_every_migration_once(db_url: str) -> None:
     first = await migrate(db_url)
-    assert (first.applied, first.version) == (("0001_initial", "0002_run_turns"), 2)
+    assert (first.applied, first.version) == (
+        ("0001_initial", "0002_run_turns", "0003_repos"),
+        3,
+    )
     second = await migrate(db_url)
-    assert (second.applied, second.version) == ((), 2)
+    assert (second.applied, second.version) == ((), 3)
     conn = await connect(db_url)
     try:
         assert await _tables(conn) == TABLES
-        assert await schema_version(conn) == 2
+        assert await schema_version(conn) == 3
     finally:
         await conn.close()
 
@@ -102,7 +114,7 @@ async def test_a_newer_recorded_version_is_refused(db_url: str) -> None:
     try:
         await apply_migrations(conn)
         await conn.execute("INSERT INTO schema_migrations (version, name) VALUES (7, 'future')")
-        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(2\)"):
+        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(3\)"):
             await apply_migrations(conn)
     finally:
         await conn.close()
@@ -137,3 +149,63 @@ async def test_migrate_reports_an_unreachable_server_without_the_url() -> None:
     with pytest.raises(MigrationError, match="cannot connect") as exc:
         await migrate(url)
     assert "s3cret" not in exc.value.message
+
+
+async def _at_version_two(db_url: str) -> psycopg.AsyncConnection:
+    """A connection to a schema migrated to version 2 only (the pre-hub shape)."""
+    conn = await connect(db_url)
+    await apply_migrations(conn, discover_migrations()[:2])
+    return conn
+
+
+ISSUE_V2 = """
+INSERT INTO issues (number, identifier, title, github_state, url, created_at, updated_at, seen_at)
+VALUES (7, 'repo-7', 'Old', 'open', 'https://github.com/x/y/issues/7', now(), now(), now())
+"""
+
+
+async def test_0003_refuses_a_database_that_holds_rows(db_url: str) -> None:
+    conn = await _at_version_two(db_url)
+    try:
+        await conn.execute(ISSUE_V2)
+    finally:
+        await conn.close()
+    # The pointer at the import command is asserted on the SQL, not on the raised message:
+    # `redact` strips the URL's password wherever it appears, and this test database's is
+    # the word "issuebot", so the message reaching the operator here says "`<database url>
+    # import`". The prose up to the command name is stable either way.
+    assert "copy these in with `issuebot import`" in discover_migrations()[2].sql
+    with pytest.raises(MigrationError, match="give the hub a fresh database and copy these in"):
+        await migrate(db_url)
+    conn = await connect(db_url)
+    try:
+        assert await schema_version(conn) == 2  # the transaction rolled back
+    finally:
+        await conn.close()
+
+
+async def test_0003_ignores_a_stored_snapshot(db_url: str) -> None:
+    conn = await _at_version_two(db_url)
+    try:
+        await conn.execute(
+            "INSERT INTO runtime_snapshot (id, at, written_at, data) "
+            "VALUES (true, now(), now(), '{}')"
+        )
+    finally:
+        await conn.close()
+    result = await migrate(db_url)
+    assert result.version == 3 and result.applied == ("0003_repos",)
+    conn = await connect(db_url)
+    try:
+        columns = await (
+            await conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'runtime_snapshot' ORDER BY ordinal_position"
+            )
+        ).fetchall()
+        assert [c[0] for c in columns] == ["repo", "at", "written_at", "data"]
+        assert (await (await conn.execute("SELECT count(*) FROM runtime_snapshot")).fetchone())[
+            0
+        ] == 0
+    finally:
+        await conn.close()
