@@ -26,10 +26,11 @@ uv run issuebot migrate              # apply pending .sql migrations (worker and
 uv run issuebot status               # the worker's last runtime snapshot, read from the database
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
 uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
-uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL)
+uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
+uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
-docker compose up                    # db (postgres:18) + worker (issuebot worker) + web (issuebot web,
-                                     #   http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
+docker compose up                    # db + web (profile hub) + worker (profile worker), COMPOSE_PROFILES in .env
+                                     #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
 
 **Run the DB tests against `test-db`, not against the long-lived `db`.** It sits behind a
@@ -242,22 +243,35 @@ floor, not the shipped version, and moves by hand.
   webhook or allow-list change needs a worker restart.
 - `issuebot.db`: the observability store, imported by `cli` and `web`; imports `config`,
   `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-  `0002_run_turns`; schema version 2) applied by `migrate.py` in one transaction under an advisory lock
-  (`schema_migrations` bookkeeping; a recorded version newer than the files is an error).
+  `0002_run_turns`, `0003_repos`; schema version 3) applied by `migrate.py` in one transaction
+  under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
+  files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
+  workflow path and first/last-seen times) and a `repo` column, `NOT NULL` with no default, on
+  every other table, so it refuses to apply against a database that already holds `issues`,
+  `runs` or `events` rows -- a migration cannot know which repository they belong to -- naming
+  the import command as the remedy; it also drops and recreates `runtime_snapshot` keyed by
+  `repo` instead of as a single row.
   `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session), `describe`/`redact`
   (the URL's password never reaches a log or a line), `reconnect_delay` (1, 2, 4, 8, 16, then
-  30 s). `store.py`: `PostgresStore` (`apply_event(event, turns=())` appends to `events`, upserts
-  `runs` on `run_started`/`run_ended` and inserts the captured turns into `run_turns` in the
-  `run_ended` transaction (idempotent per `(run_id, turn_number)`), or updates `issues` on
-  `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`; `write_snapshot`);
-  every `issues` write is guarded by `seen_at`, so write order never matters. `sink.py`:
+  30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
+  appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
+  turns into `run_turns` in the `run_ended` transaction (idempotent per `(run_id, turn_number)`),
+  or updates `issues` on `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`;
+  `write_snapshot`), every write stamped with its `repo`; every `issues` write is also guarded
+  by `seen_at`, so write order never matters. `sink.py`:
   `PostgresSink` (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots
   into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
   with backoff and retries the item in flight; a `run_ended` item's turn files are captured
   once, in a thread, before its first write attempt (`db_turns_captured`,
   `db_turns_capture_failed`); statement failures are dropped and counted; `close()` drains for
   up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
-  callback per NOTIFY, reconnects). `queries.py`: `Queries` over one connection (`closed_count`,
+  callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload -- every worker
+  wakes -- or one matching its own repository, logs another repository's at debug
+  (`db_refresh_other_repo`) and drops anything else with a `refresh_payload_ignored` warning).
+  `queries.py`: `Queries` over one connection, repository-free (`repos` -- every registration,
+  what the dropdown lists -- `repo`, `snapshots` -- every worker's latest snapshot, keyed by
+  repository, for `/healthz` -- and `scoped(repo)`, which returns a `RepoQueries` with that
+  repository bound into every predicate). `RepoQueries` (`closed_count`,
   `runs_count`, `run_totals` (tokens and cost summed over the runs `runs_count` counts),
   `daily_series`, `issues_by_state` (unknown roles skipped, every column capped at
   `BOARD_LIMIT = 5`), `state_counts` (uncapped, which is what the board's headers count),
@@ -265,33 +279,57 @@ floor, not the shipped version, and moves by hand.
   when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
-  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
-  facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `store`, `listener`,
-  `notify_refresh`); one connection per call, no pool. Constants, not settings; a `database.url`
+  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `importer.py`: `import_repo`
+  copies a version-2, single-repository database into the hub (refusing a source not at that
+  exact schema version, and a repository already registered in the target), streaming `issues`,
+  `runs`, `run_turns`, `events` and `runtime_snapshot` through a server-side cursor in batches
+  of 500 so a large `run_turns` never has to fit in memory, everything landing in one target
+  transaction; its own `IMPORT_TURN` carries `run_turns.captured_at` across as it is, rather
+  than the sink's `INSERT_TURN`, which stamps `now()`. `database.py`: the `Database`
+  facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `register_repo`,
+  `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`, `import_from`);
+  one connection per call, no pool. Constants, not settings; a `database.url`
   change needs a restart. Tests: `db_url` (conftest) creates a schema per test and skips without
   `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
-  `FakeDatabase` the CLI and web tests share.
+  `FakeDatabase` the CLI and web tests share, with a separate `FakeRepoQueries`.
 - `issuebot.web`: the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
-  `log`. `app.py`: `create_app(database, settings, *, clock=, now=)` (FastAPI; pages `/`,
-  `/issues[?state=<role>]`, `/issues/<n>`, `/issues/<n>/runs/<run_id>/turns/<t>` plus
-  `/prompt|stream|stderr` as `text/plain`; `/partials/dashboard` (the htmx live region, every 10 s); `/api/v1/state`,
-  `/api/v1/issues/<n>`, `/api/v1/stats?window=<N>d`, `POST /api/v1/refresh` (NOTIFY, throttled to
-  one per 5 s, Symphony's `coalesced`), `/healthz` (503 only when the database does not answer;
-  `worker` is `ok`, `held` while the worker ticks without claiming, `stale` past three poll
-  intervals, or `none`, and `dispatch_hold` names the reason for a held one); `/static` (vendored htmx
-  2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept byte-for-byte); JSON error envelopes
-  under `/api/` and `/healthz`, `error.html` elsewhere; `DatabaseError` is 503; the four
-  security headers on every response, a CSP without `unsafe-inline`). `views.py`: pure builders
-  and template filters (`state_document`, `stats_document`, `issue_document` with
+  `log`. `app.py`: `create_app(database, *, clock=, now=)` (FastAPI; every page and JSON route
+  lives under a repository prefix, since one database now holds every worker's rows —
+  `/r/<owner>/<name>/` for the pages, `/api/v1/repos/<owner>/<name>/` for the JSON. Pages:
+  `/r/<owner>/<name>/` (dashboard), `/issues[?state=<role>]`, `/issues/<n>`,
+  `/issues/<n>/runs/<run_id>/turns/<t>` plus `/prompt|stream|stderr` as `text/plain`,
+  `/partials/dashboard` (the htmx live region, every 10 s). JSON, under the API prefix:
+  `/state`, `/issues/<n>`, `/stats?window=<N>d`, `POST /refresh` (NOTIFY, throttled to one per
+  5 s, Symphony's `coalesced`); the unprefixed `/api/v1/repos` lists every registration and its
+  worker's status, what the header's dropdown is built from. A module-level
+  `load_scope(queries, owner, name)` looks the prefix up in `repos` (one query, which also
+  feeds the dropdown) before any scoped read: 404 for an unregistered prefix, 503 with the
+  validation message when its stored labels do not validate (`repo_labels`). `/`
+  percent-decodes the `issuebot-repo` cookie and redirects only to a registered repository,
+  else the first by name, else the `no-repos.html` page (200, with no repository to redirect
+  to). `/healthz` (503 only when the database does not answer; a `workers` map keyed by
+  repository, each holding `status` (`ok`, `held` while its worker ticks without claiming,
+  `stale` past three poll intervals, or `none`), `snapshot_at`, `snapshot_age_s` and
+  `dispatch_hold`; the top-level `worker` is the worst of them, `none` > `stale` > `held` >
+  `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
+  byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
+  `DatabaseError` is 503; the four security headers on every response, a CSP without
+  `unsafe-inline`). `views.py`: pure builders
+  and template filters (`RepoContext(name, base, api)` — a page's two prefixes, from which
+  `base.html`'s links are built — `repo_context`, `repo_base`, `switch_target` (where the
+  dropdown sends the browser: a dashboard stays a dashboard and an issue list keeps its filter,
+  but an issue or a turn page goes to the other repository's dashboard since the number means
+  nothing there), `repo_options`, `repo_labels` (a registry row's stored labels, validated),
+  `state_document`, `stats_document`, `issue_document` with
   `runs[].captured_turns`, `dashboard_context`, `describe_event`, `safe_href`, `window_days`,
   `worker_status`, `dispatch_hold`, `age_text`, `stamp_text`, `is_board_state`,
   `issue_filters`, `rate_limit_windows`, `cost_label`, ...). A board column draws at most `BOARD_LIMIT` cards, so its header
   counts `state_counts` rather than the rows it drew, and the difference is an overflow
-  link to `/issues?state=<role>` — the list page, which is outside the live region so a
+  link to `<repo.base>/issues?state=<role>` — the list page, which is outside the live region so a
   filter survives the ten-second swap that would collapse an expander or reset a scroll. A snapshot's
-  `workflow_overlay_path` reaches `/api/v1/state` through `_WORKER_KEYS` and the worker line
+  `workflow_overlay_path` reaches `<repo.api>/state` through `_WORKER_KEYS` and the worker line
   as a fourth `.fact` chip, drawn only when there is one. A snapshot's
-  `dispatch_hold` reaches `/api/v1/state` and the dashboard's worker line through
+  `dispatch_hold` reaches `<repo.api>/state` and the dashboard's worker line through
   `dispatch_hold`, which reads it defensively (the column is JSON) and yields nothing for a
   hold that names no reason; `worker_status` reports `held` for a fresh snapshot carrying one,
   `stale` still winning, since a snapshot too old to trust is too old to trust about its hold.
@@ -303,7 +341,7 @@ floor, not the shipped version, and moves by hand.
   which is what the line used to do. The hero's cost and token tiles are 1d/7d
   sums over `runs` (`run_totals`), so they match the closed and agents-run tiles beside them and
   survive a worker restart; the worker's in-process `ClaudeTotals` restart with it and stay on
-  `/api/v1/state` as `claude_totals` and in `issuebot status`, which both say "since start"
+  `<repo.api>/state` as `claude_totals` and in `issuebot status`, which both say "since start"
   and mean it. The hero is six tiles, each with two windows inside it — closed, agents run,
   cost, tokens, limits, activity — and `.hero` pins its
   column count (6, 3, 2) instead of auto-fitting, because every count has to divide the six
@@ -319,14 +357,18 @@ floor, not the shipped version, and moves by hand.
   `N/A` for an API key, which has no windows and never will, and an em dash for a worker that
   has not seen a reading yet, which fills in on its own; the tooltip says so either way.
   `cost_label` names the cost tile `cost (effort)`, `cost (actual)` or plain `cost` from the
-  same credential. `/api/v1/state` carries both as `credential` and `rate_limits`. The token figures there go
+  same credential. `<repo.api>/state` carries both as `credential` and `rate_limits`. The token figures there go
   through `compact` (`39.2M`), the exact number staying as the window's `title`.
   `transcript.py`: `parse_transcript(stream)`
   turns the stored stream-json into `Block`s (init, text, thinking, tool_use, tool_result, result,
   omitted, unparseable; other status lines counted as `hidden`). Templates render with autoescape and
-  `StrictUndefined`; nothing is inlined into HTML (`app.js` fetches the charts' data). One
+  `StrictUndefined`; nothing is inlined into HTML — `app.js`, loaded from `base.html` after the
+  page's own `scripts` block so it can see a library that block loaded, fetches the charts'
+  data from data attributes on `#chart-config` (`data-stats-url`, `data-chart-window`,
+  `data-chart-poll-s`). One
   connection per request through `Database.queries()`. Constants, not settings; the web reads
-  `WORKFLOW.md` once at start (`ISSUEBOT_WORKFLOW`, `/configs/WORKFLOW.md` under compose).
+  no `WORKFLOW.md` — everything it shows comes from the database, so `create_app` takes only
+  `database` (and the `clock`/`now` test seams).
   Light and dark are role tokens in `app.css`, declared once for
   light and twice for dark (`@media (prefers-color-scheme: dark)` for the OS preference,
   `:root[data-theme="dark"]` for the operator's own choice, which wins); `static/theme.js` is
@@ -354,17 +396,29 @@ floor, not the shipped version, and moves by hand.
   runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
   `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
   and exit 1 when the startup probes fail, `claude auth: not logged in; ...` among them), `migrate`,
-  `status` (the snapshot as text, its `workflow:` line reading `<base> + <overlay>` when one
-  is in force, with a `dispatch: held (<kind>) since ...` line while
-  dispatch is held), `stats [--days N]` (`by_state` from `state_counts`; `--days` 1 to 365), `refresh` and
-  `web [--port N] [--bind HOST]` (each `[FAIL] database:` and exit 1 without `DATABASE_URL`);
-  `run-once`, `worker` and `web` migrate first when `database.url` is set (a failure is
-  `[FAIL] database:` and exit 1); `run-once` and `worker` start the Slack and PostgreSQL sinks
-  before and close them after (Slack never for a non-`https` webhook); `worker` also passes
-  `on_snapshot`/`on_issues` to the orchestrator and runs the refresh listener; `web` builds
-  `create_app` and serves it with uvicorn (`--port`/`--bind` override `server.*`; uvicorn's
-  lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is uvicorn's error and exit
-  1); exit codes 0/1/2 (ok / failed / workflow unloadable).
+  `status` (through `queries.scoped(repo)`: the snapshot as text, its `workflow:` line reading
+  `<base> + <overlay>` when one is in force, with a `dispatch: held (<kind>) since ...` line
+  while dispatch is held), `stats [--days N]` (also `scoped(repo)`; `by_state` from
+  `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
+  the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
+  issuebot_refresh for <repo>`), `import --from URL` (copies a version-2, single-repository
+  database into this one, stamped with `github.repo` and its labels; `[FAIL] import:` and exit
+  1 on refusal — wrong source schema version, or the repository already registered — or a
+  connection failure) and
+  `web [--bind HOST] [--port N]` (reads `DATABASE_URL` alone — no `--workflow`, no other
+  setting, and no workflow file to fail loading — `[FAIL] database: not configured; export
+  DATABASE_URL` without it, distinct from every other command's `... or set database.url:
+  $VAR`);
+  `run-once` and `worker` migrate first when `database.url` is set and then register the
+  workflow's repository (`Database.register_repo`: labels and workflow path, refreshed every
+  start so a label rename reaches the dashboard) before starting the Slack and PostgreSQL
+  sinks, closing the sinks after (Slack never for a non-`https` webhook; a migration or
+  registration failure is `[FAIL] database:` and exit 1); `worker` also passes
+  `on_snapshot`/`on_issues` to the orchestrator and runs the refresh listener; `web` always
+  migrates (its `DATABASE_URL` is mandatory) and then builds `create_app` and serves it with
+  uvicorn (uvicorn's lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is
+  uvicorn's error and exit 1); exit codes 0/1/2 (ok / failed / workflow unloadable) for every
+  command but `web`, which loads no workflow and so only ever returns 0 or 1.
   Tests substitute `_which`, `_claude_version`, `_claude_auth`, `_adapter_factory`, `_run_session`,
   `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
   `_serve`.

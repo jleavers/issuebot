@@ -637,7 +637,8 @@ Markdown rendering of agent output, a reload of `WORKFLOW.md` in the web process
 ### Later (not scheduled)
 
 Recorded so the phase specs do not accidentally absorb them: GitHub App
-authentication; multiple target repositories per worker; GitHub webhooks instead of
+authentication; multiple target repositories per worker (one dashboard and one database for
+many workers is done: `2026-09-10-single-dashboard-design.md`); GitHub webhooks instead of
 polling; cost budgets per issue and per day;
 SSH or remote workers (Symphony Appendix A); Windows host support for the worker
 itself (the repo's cross-OS rule applies to scripts the agent writes, the service is
@@ -665,7 +666,8 @@ Each was made to keep moving; any can be changed before Phase 1 without cost.
    persistence is Phase 6, after the loop works.
 4. **Rework reuses the branch and PR** rather than Symphony's close-and-restart.
 5. **Blocked runs park in `review` with a comment**, no sixth label.
-6. **One target repository per worker instance.** Multi-repo is listed under Later.
+6. **One target repository per worker instance.** Multi-repo is listed under Later. One
+   dashboard across workers landed 2026-09-10.
 7. **Server-rendered dashboard (FastAPI + Jinja2 + HTMX + Chart.js)**, no SPA, no
    Node toolchain.
 8. **Raw SQL with psycopg 3 and numbered migrations**, no ORM, no Alembic.
