@@ -7,7 +7,10 @@ from typing import Any
 import pytest
 
 from fakes.web import (
+    API,
+    BASE,
     NOW,
+    REPO,
     RUN_ID,
     Harness,
     event_row,
@@ -59,7 +62,7 @@ def h() -> Iterator[Harness]:
 
 def test_state_reshapes_the_snapshot(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(running=(running_row(),), retrying=(retry_row(),))
-    response = h.client.get("/api/v1/state")
+    response = h.client.get(f"{API}/state")
     assert response.status_code == 200
     body = response.json()
     assert body["generated_at"] == (NOW - timedelta(seconds=6)).isoformat()
@@ -129,12 +132,12 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
 def test_state_names_the_overlay_in_force(h: Harness) -> None:
     """The API's answer to "is the worker running my overrides?"."""
     h.queries.snapshot_row = snapshot(workflow_overlay_path="/configs/WORKFLOW.local.md")
-    worker = h.client.get("/api/v1/state").json()["worker"]
+    worker = h.client.get(f"{API}/state").json()["worker"]
     assert worker["workflow_overlay_path"] == "/configs/WORKFLOW.local.md"
 
 
 def test_state_without_a_snapshot_is_empty_not_missing(h: Harness) -> None:
-    body = h.client.get("/api/v1/state").json()
+    body = h.client.get(f"{API}/state").json()
     assert (body["generated_at"], body["written_at"], body["snapshot_age_s"]) == (None, None, None)
     assert body["worker"] is None
     assert (body["counts"], body["running"], body["retrying"]) == (
@@ -147,7 +150,7 @@ def test_state_without_a_snapshot_is_empty_not_missing(h: Harness) -> None:
 
 def test_state_marks_a_stale_worker(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(age_s=STALE_FACTOR * 30 + 1)
-    assert h.client.get("/api/v1/state").json()["worker"]["stale"] is True
+    assert h.client.get(f"{API}/state").json()["worker"]["stale"] is True
 
 
 # --- /api/v1/issues/{number} -----------------------------------------------------------------
@@ -156,7 +159,7 @@ def test_state_marks_a_stale_worker(h: Harness) -> None:
 def test_issue_document(h: Harness) -> None:
     h.seed_issue()
     h.queries.snapshot_row = snapshot(running=(running_row(),))
-    response = h.client.get("/api/v1/issues/7")
+    response = h.client.get(f"{API}/issues/7")
     assert response.status_code == 200
     body = response.json()
     assert body["issue"]["number"] == 7 and body["issue"]["state"] == "review"
@@ -168,14 +171,14 @@ def test_issue_document(h: Harness) -> None:
     assert run["turns"] == 1  # the run's turn count, a runs column
     (turn,) = run["captured_turns"]
     assert (turn["turn_number"], turn["model"], turn["num_turns"]) == (1, "claude-opus-5", 19)
-    assert turn["url"] == f"/issues/7/runs/{RUN_ID}/turns/1"
+    assert turn["url"] == f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"
     assert "stream" not in turn and "prompt" not in turn
     assert body["logs"] == [
         {
             "run_id": RUN_ID,
             "turn_number": 1,
             "label": f"run {RUN_ID} turn 1",
-            "url": f"/issues/7/runs/{RUN_ID}/turns/1",
+            "url": f"{BASE}/issues/7/runs/{RUN_ID}/turns/1",
         }
     ]
     assert [event["kind"] for event in body["recent_events"]] == ["run_ended", "state_changed"]
@@ -186,13 +189,13 @@ def test_issue_document(h: Harness) -> None:
 def test_issue_with_a_retry_entry(h: Harness) -> None:
     h.queries.issue_rows[9] = issue_row(number=9, identifier="repo-9", state="todo")
     h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
-    body = h.client.get("/api/v1/issues/9").json()
+    body = h.client.get(f"{API}/issues/9").json()
     assert body["running"] is None and body["retry"]["kind"] == "failure"
     assert body["runs"] == [] and body["logs"] == []
 
 
 def test_unknown_issue_is_a_404_envelope(h: Harness) -> None:
-    response = h.client.get("/api/v1/issues/99")
+    response = h.client.get(f"{API}/issues/99")
     assert response.status_code == 404
     assert response.json() == {
         "error": {"code": "unknown_issue", "message": "issue #99 is not known"}
@@ -200,7 +203,7 @@ def test_unknown_issue_is_a_404_envelope(h: Harness) -> None:
 
 
 def test_a_non_numeric_issue_is_a_404_envelope(h: Harness) -> None:
-    response = h.client.get("/api/v1/issues/abc")
+    response = h.client.get(f"{API}/issues/abc")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
 
@@ -213,7 +216,7 @@ def test_stats_default_window(h: Harness) -> None:
     h.queries.runs = {7: 3, 1: 1}
     h.queries.counts = {"todo": 1, "in_progress": 0, "review": 1, "rework": 0, "complete": 3}
     h.queries.series = [DailyPoint(day=date(2026, 9, 4), closed=1, runs=1)]
-    body = h.client.get("/api/v1/stats").json()
+    body = h.client.get(f"{API}/stats").json()
     assert body == {
         "window": "7d",
         "days": 7,
@@ -228,14 +231,14 @@ def test_stats_default_window(h: Harness) -> None:
 def test_stats_thirty_day_window(h: Harness) -> None:
     h.queries.closed[30] = 5
     h.queries.runs[30] = 9
-    body = h.client.get("/api/v1/stats?window=30d").json()
+    body = h.client.get(f"{API}/stats?window=30d").json()
     assert (body["window"], body["days"], body["closed"], body["runs"]) == ("30d", 30, 5, 9)
     assert h.queries.days_asked == 30
 
 
 @pytest.mark.parametrize("window", ["0d", f"{MAX_WINDOW_DAYS + 1}d", "7", "x", "7D", "-3d"])
 def test_stats_rejects_a_bad_window(h: Harness, window: str) -> None:
-    response = h.client.get("/api/v1/stats", params={"window": window})
+    response = h.client.get(f"{API}/stats", params={"window": window})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_window"
     assert f"1 <= N <= {MAX_WINDOW_DAYS}" in response.json()["error"]["message"]
@@ -245,7 +248,7 @@ def test_stats_rejects_a_bad_window(h: Harness, window: str) -> None:
 
 
 def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None:
-    first = h.client.post("/api/v1/refresh")
+    first = h.client.post(f"{API}/refresh")
     assert first.status_code == 202
     assert first.json() == {
         "queued": True,
@@ -254,12 +257,12 @@ def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None
         "operations": ["poll", "reconcile"],
     }
     h.clock.mono += REFRESH_MIN_INTERVAL_S - 0.5
-    second = h.client.post("/api/v1/refresh")
+    second = h.client.post(f"{API}/refresh")
     assert second.status_code == 202
     assert (second.json()["queued"], second.json()["coalesced"]) == (False, True)
     assert h.database.notified == 1
     h.clock.mono += 0.5
-    third = h.client.post("/api/v1/refresh")
+    third = h.client.post(f"{API}/refresh")
     assert (third.json()["queued"], third.json()["coalesced"]) == (True, False)
     assert h.database.notified == 2
 
@@ -267,7 +270,7 @@ def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None
 def test_refresh_reports_a_database_failure(h: Harness) -> None:
     message = "cannot connect to postgresql://issuebot:***@db.example:5432/issuebot: refused"
     h.database.notify_error = StoreUnavailableError(message)
-    response = h.client.post("/api/v1/refresh")
+    response = h.client.post(f"{API}/refresh")
     assert response.status_code == 503
     assert response.json() == {"error": {"code": "database_unavailable", "message": message}}
     assert "s3cret" not in response.text
@@ -275,7 +278,7 @@ def test_refresh_reports_a_database_failure(h: Harness) -> None:
 
 
 def test_refresh_only_accepts_post(h: Harness) -> None:
-    response = h.client.get("/api/v1/refresh")
+    response = h.client.get(f"{API}/refresh")
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "method_not_allowed"
 
@@ -284,20 +287,21 @@ def test_refresh_only_accepts_post(h: Harness) -> None:
 
 
 def test_healthz_ok_stale_and_none(h: Harness) -> None:
-    assert h.client.get("/healthz").json() == {
-        "status": "ok",
-        "database": "ok",
+    """The three states, per registered repository: they live in the ``workers`` map now."""
+    body = h.client.get("/healthz").json()
+    assert (body["status"], body["worker"]) == ("ok", "none")
+    assert body["workers"][REPO] == {
+        "status": "none",
         "snapshot_at": None,
         "snapshot_age_s": None,
-        "worker": "none",
         "dispatch_hold": None,
     }
     h.queries.snapshot_row = snapshot(age_s=5.0)
-    body = h.client.get("/healthz").json()
-    assert (body["worker"], body["snapshot_age_s"]) == ("ok", 5.0)
-    assert body["snapshot_at"] == (NOW - timedelta(seconds=6)).isoformat()
+    worker = h.client.get("/healthz").json()["workers"][REPO]
+    assert (worker["status"], worker["snapshot_age_s"]) == ("ok", 5.0)
+    assert worker["snapshot_at"] == (NOW - timedelta(seconds=6)).isoformat()
     h.queries.snapshot_row = snapshot(age_s=91.0)
-    assert h.client.get("/healthz").json()["worker"] == "stale"
+    assert h.client.get("/healthz").json()["workers"][REPO]["status"] == "stale"
 
 
 def test_healthz_reports_an_unreachable_database(h: Harness) -> None:
@@ -311,12 +315,112 @@ def test_healthz_reports_an_unreachable_database(h: Harness) -> None:
     }
 
 
+# --- repositories ------------------------------------------------------------------------------
+
+
+def test_root_redirects_to_the_cookie_then_the_first_repository(h: Harness) -> None:
+    h.register("acme/frontend")
+    response = h.client.get("/", follow_redirects=False)
+    assert (response.status_code, response.headers["location"]) == (302, "/r/acme/frontend/")
+    h.client.cookies.set("issuebot-repo", "example/repo")
+    response = h.client.get("/", follow_redirects=False)
+    assert response.headers["location"] == "/r/example/repo/"
+    h.client.cookies.set("issuebot-repo", "nobody/here")
+    response = h.client.get("/", follow_redirects=False)
+    assert response.headers["location"] == "/r/acme/frontend/"
+    # what app.js actually stores: encodeURIComponent turns the name's "/" into %2F, and
+    # nothing between the browser and here decodes a cookie value.
+    h.client.cookies.set("issuebot-repo", "example%2Frepo")
+    response = h.client.get("/", follow_redirects=False)
+    assert response.headers["location"] == "/r/example/repo/"
+
+
+def test_root_without_a_registry_is_a_plain_page(h: Harness) -> None:
+    h.queries.repo_rows.clear()
+    response = h.client.get("/", follow_redirects=False)
+    assert response.status_code == 200
+    assert "no worker has registered yet" in response.text
+    assert "<select" not in response.text
+
+
+def test_an_unregistered_prefix_is_a_404_before_any_scoped_read(h: Harness) -> None:
+    response = h.client.get("/api/v1/repos/nobody/here/state")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    assert h.queries.scoped_repos == []
+    page = h.client.get("/r/nobody/here/")
+    assert page.status_code == 404 and "<h1>404</h1>" in page.text
+
+
+def test_the_repos_api_lists_every_registration_with_its_worker(h: Harness) -> None:
+    h.register("acme/frontend")
+    h.queries.snapshot_rows["acme/frontend"] = snapshot(age_s=5.0)
+    body = h.client.get("/api/v1/repos").json()
+    assert body == {
+        "repos": [
+            {
+                "repo": "acme/frontend",
+                "url": "/r/acme/frontend/",
+                "worker": "ok",
+                "snapshot_at": (NOW - timedelta(seconds=6)).isoformat(),
+            },
+            {
+                "repo": "example/repo",
+                "url": "/r/example/repo/",
+                "worker": "none",
+                "snapshot_at": None,
+            },
+        ]
+    }
+
+
+def test_healthz_maps_every_worker_and_reports_the_worst(h: Harness) -> None:
+    h.register("acme/frontend")
+    h.queries.snapshot_rows["example/repo"] = snapshot(age_s=5.0)
+    h.queries.snapshot_rows["acme/frontend"] = snapshot(age_s=5.0, dispatch_hold=HOLD)
+    body = h.client.get("/healthz").json()
+    assert body["status"] == "ok" and body["database"] == "ok"
+    assert body["worker"] == "held"
+    assert body["workers"]["example/repo"] == {
+        "status": "ok",
+        "snapshot_at": (NOW - timedelta(seconds=6)).isoformat(),
+        "snapshot_age_s": 5.0,
+        "dispatch_hold": None,
+    }
+    assert body["workers"]["acme/frontend"]["status"] == "held"
+    assert body["workers"]["acme/frontend"]["dispatch_hold"]["kind"] == "auth"
+    h.queries.snapshot_rows["acme/frontend"] = snapshot(age_s=91.0)
+    assert h.client.get("/healthz").json()["worker"] == "stale"
+    h.queries.repo_rows.clear()
+    assert h.client.get("/healthz").json() == {
+        "status": "ok",
+        "database": "ok",
+        "worker": "none",
+        "workers": {},
+    }
+
+
+def test_refresh_is_throttled_per_repository(h: Harness) -> None:
+    h.register("acme/frontend")
+    assert h.client.post(f"{API}/refresh").json()["queued"] is True
+    assert h.client.post(f"{API}/refresh").json()["coalesced"] is True
+    assert h.client.post("/api/v1/repos/acme/frontend/refresh").json()["queued"] is True
+    assert h.database.notified_repos == ["example/repo", "acme/frontend"]
+
+
+def test_invalid_stored_labels_are_a_503_under_that_prefix_only(h: Harness) -> None:
+    h.register("acme/frontend", labels={"todo": ""})
+    response = h.client.get("/r/acme/frontend/")
+    assert response.status_code == 503 and "do not validate" in response.text
+    assert h.client.get(f"{BASE}/").status_code == 200
+
+
 # --- errors and headers -------------------------------------------------------------------------
 
 
 def test_a_database_error_in_the_api_is_a_503_envelope(h: Harness) -> None:
     h.queries.error = StoreUnavailableError("cannot connect: refused")
-    response = h.client.get("/api/v1/state")
+    response = h.client.get(f"{API}/state")
     assert response.status_code == 503
     assert response.json()["error"] == {
         "code": "database_unavailable",
@@ -328,7 +432,7 @@ def test_unknown_api_paths_and_methods_get_envelopes(h: Harness) -> None:
     missing = h.client.get("/api/v1/nothing")
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "not_found"
-    wrong = h.client.delete("/api/v1/state")
+    wrong = h.client.delete(f"{API}/state")
     assert wrong.status_code == 405
     assert wrong.json()["error"]["code"] == "method_not_allowed"
 
@@ -336,10 +440,10 @@ def test_unknown_api_paths_and_methods_get_envelopes(h: Harness) -> None:
 def test_every_response_carries_the_security_headers(h: Harness) -> None:
     h.queries.snapshot_row = snapshot()
     for response in (
-        h.client.get("/api/v1/state"),
+        h.client.get(f"{API}/state"),
         h.client.get("/healthz"),
         h.client.get("/api/v1/nothing"),
-        h.client.post("/api/v1/refresh"),
+        h.client.post(f"{API}/refresh"),
     ):
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value, (response.url, name)
@@ -349,9 +453,9 @@ def test_every_response_carries_the_security_headers(h: Harness) -> None:
 
 def test_each_request_uses_one_connection(h: Harness) -> None:
     h.seed_issue()
-    h.client.get("/api/v1/issues/7")
+    h.client.get(f"{API}/issues/7")
     assert h.database.opened == 1
-    h.client.get("/api/v1/stats")
+    h.client.get(f"{API}/stats")
     assert h.database.opened == 2
 
 
@@ -406,7 +510,7 @@ def test_a_worker_that_is_ticking_but_not_claiming_is_held_not_ok() -> None:
 
 def test_state_reports_the_credential_and_the_windows(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(rate_limits=limits(0.42, 0.32))
-    body = h.client.get("/api/v1/state").json()
+    body = h.client.get(f"{API}/state").json()
     assert body["credential"] == "subscription"
     assert [(w["key"], w["percent"]) for w in body["rate_limits"]] == [
         ("five_hour", 42),
@@ -416,7 +520,7 @@ def test_state_reports_the_credential_and_the_windows(h: Harness) -> None:
 
 def test_state_without_a_snapshot_says_the_credential_is_unknown(h: Harness) -> None:
     h.queries.snapshot_row = None
-    body = h.client.get("/api/v1/state").json()
+    body = h.client.get(f"{API}/state").json()
     assert body["credential"] == "unknown"
     assert body["rate_limits"] == []
 
@@ -514,7 +618,7 @@ def test_dispatch_hold_ignores_a_snapshot_that_names_no_reason() -> None:
 
 def test_state_names_the_reason_dispatch_is_held(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(dispatch_hold=HOLD)
-    worker = h.client.get("/api/v1/state").json()["worker"]
+    worker = h.client.get(f"{API}/state").json()["worker"]
     assert worker["status"] == "held"
     assert worker["stale"] is False
     assert worker["dispatch_hold"] == {
@@ -529,7 +633,8 @@ def test_healthz_reports_a_held_worker_and_why(h: Harness) -> None:
     body = h.client.get("/healthz").json()
     assert body["status"] == "ok"  # the service is fine; the worker is not claiming
     assert body["worker"] == "held"
-    assert body["dispatch_hold"]["reason"].startswith("claude authentication unavailable")
+    hold = body["workers"][REPO]["dispatch_hold"]
+    assert hold["reason"].startswith("claude authentication unavailable")
 
 
 @pytest.mark.parametrize(

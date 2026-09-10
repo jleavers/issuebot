@@ -1,12 +1,33 @@
-/* issuebot dashboard: the two charts and the "Poll now" status line. No inline scripts (CSP). */
+/* issuebot dashboard: the repository switch, the two charts and the "Poll now" status line.
+   No inline scripts (CSP), so every per-page value is read off a data attribute. */
 (function () {
   "use strict";
 
-  // --- the Poll now button: report what POST /api/v1/refresh answered --------------------
+  // --- the repository dropdown: navigate, and remember the choice for "/" ------------------
+  var switcher = document.querySelector("select.repo-switch");
+  if (switcher) {
+    switcher.addEventListener("change", function () {
+      var option = switcher.options[switcher.selectedIndex];
+      if (!option) {
+        return;
+      }
+      var name = option.dataset.repo || "";
+      document.cookie =
+        "issuebot-repo=" + encodeURIComponent(name) + "; Path=/; Max-Age=31536000; SameSite=Lax";
+      window.location.assign(option.value);
+    });
+  }
+
+  // --- the Poll now button: report what POST <api prefix>/refresh answered ---------------
   document.body.addEventListener("htmx:afterRequest", function (event) {
     var status = document.getElementById("refresh-status");
     var info = event.detail && event.detail.pathInfo;
-    if (!status || !info || info.requestPath !== "/api/v1/refresh") {
+    var path = info && info.requestPath;
+    var refreshed =
+      typeof path === "string" &&
+      path.indexOf("/api/v1/repos/") === 0 &&
+      path.slice(-"/refresh".length) === "/refresh";
+    if (!status || !refreshed) {
       return;
     }
     var xhr = event.detail.xhr;
@@ -23,15 +44,16 @@
     }
   });
 
-  // --- the charts: /api/v1/stats?window=<N>d on load and every chart_poll_s seconds ------
-  var script = document.currentScript;
+  // --- the charts: <api prefix>/stats?window=<N>d on load and every chart_poll_s seconds ---
+  var config = document.getElementById("chart-config");
   var closedCanvas = document.getElementById("closed-chart");
   var runsCanvas = document.getElementById("runs-chart");
-  if (!script || !closedCanvas || !runsCanvas || typeof Chart === "undefined") {
+  if (!config || !closedCanvas || !runsCanvas || typeof Chart === "undefined") {
     return;
   }
-  var windowText = script.dataset.chartWindow || "30d";
-  var pollSeconds = Number(script.dataset.chartPollS) || 60;
+  var statsUrl = config.dataset.statsUrl;
+  var windowText = config.dataset.chartWindow || "30d";
+  var pollSeconds = Number(config.dataset.chartPollS) || 60;
   var charts = {};
   var series = null;
 
@@ -107,7 +129,7 @@
   }
 
   function refresh() {
-    fetch("/api/v1/stats?window=" + encodeURIComponent(windowText), { headers: { Accept: "application/json" } })
+    fetch(statsUrl + "?window=" + encodeURIComponent(windowText), { headers: { Accept: "application/json" } })
       .then(function (response) { return response.ok ? response.json() : Promise.reject(response.status); })
       .then(function (body) {
         series = body.series;

@@ -1,4 +1,4 @@
-<div id="live" hx-get="/partials/dashboard" hx-trigger="every {{ live_poll_s }}s" hx-swap="outerHTML">
+<div id="live" hx-get="{{ repo.base }}/partials/dashboard" hx-trigger="every {{ live_poll_s }}s" hx-swap="outerHTML">
 {% if live.unavailable %}
 <div class="banner error">database unavailable: {{ live.unavailable }}</div>
 {% else %}
@@ -88,7 +88,7 @@
     <tr><th>issue</th><th>attempt</th><th class="num">turns</th><th>last event</th><th>last activity</th><th>started</th><th>stop</th></tr>
     {% for entry in live.running %}
     <tr>
-      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
+      <td><a class="issue-ref" href="{{ repo.base }}/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
       <td>{{ entry.attempt }}</td>
       <td class="num">{{ entry.turn_count }}</td>
       <td>{{ entry.last_event or "-" }}</td>
@@ -112,7 +112,7 @@
        gone. A running row's title has been there since Phase 4, so it needs no fallback. #}
     {% for entry in live.retrying %}
     <tr>
-      <td><a class="issue-ref" href="/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title or "-" }}</span></a></td>
+      <td><a class="issue-ref" href="{{ repo.base }}/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title or "-" }}</span></a></td>
       <td>{{ entry.kind }}</td>
       <td>{{ entry.attempt }}</td>
       <td>{{ entry.due_at|stamp }}</td>
@@ -128,14 +128,14 @@
     <h3><span class="name">{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
-      <a class="issue-ref" href="/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
+      <a class="issue-ref" href="{{ repo.base }}/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>
       <div class="meta">
         <span class="pr">{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a class="chip" href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}<span class="chip">PR#{{ row.pr_number }}</span>{% endif %}{% if row.pr_state %}<span>{{ row.pr_state }}</span>{% endif %}{% endif %}</span>
         <span>{{ row.updated_at|age(now) }}</span>
       </div>
     </div>
     {% endfor %}
-    {% if column.overflow %}<a class="more" href="/issues?state={{ column.role }}">{{ column.overflow }} more &rarr;</a>{% endif %}
+    {% if column.overflow %}<a class="more" href="{{ repo.base }}/issues?state={{ column.role }}">{{ column.overflow }} more &rarr;</a>{% endif %}
   </div>
   {% endfor %}
 </section>

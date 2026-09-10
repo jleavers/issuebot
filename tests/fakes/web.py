@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from fakes.database import FakeDatabase
 from issuebot.agent.runner import RateLimits, RateLimitWindow
-from issuebot.config import GitHubLabels, GitHubSettings, Settings
+from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
     EventRow,
     IssueRow,
@@ -50,7 +50,6 @@ RUN_ID = "20260904T202535Z-0964cd"
 REPO = "example/repo"
 BASE = "/r/example/repo"
 API = "/api/v1/repos/example/repo"
-SETTINGS = Settings(github=GitHubSettings(repo=REPO))
 
 
 def repo_row(**overrides: Any) -> RepoRow:
@@ -271,14 +270,20 @@ def event_row(**overrides: Any) -> EventRow:
 
 
 class Harness:
+    """One registered repository (``REPO``) and a client on the app; ``register`` adds more."""
+
     def __init__(self) -> None:
         self.database = FakeDatabase()
         self.queries = self.database.queries_obj
+        self.queries.repo_rows[REPO] = repo_row()
         self.clock = Clock()
         self.client = TestClient(
-            create_app(self.database, SETTINGS, clock=self.clock, now=self.clock.utcnow),
+            create_app(self.database, clock=self.clock, now=self.clock.utcnow),
             raise_server_exceptions=False,
         )
+
+    def register(self, name: str, **overrides: Any) -> None:
+        self.queries.repo_rows[name] = repo_row(repo=name, **overrides)
 
     def seed_issue(self) -> None:
         self.queries.issue_rows[7] = issue_row()

@@ -55,7 +55,7 @@
       <td class="num">{{ ((turn.input_tokens or 0) + (turn.cache_creation_input_tokens or 0) + (turn.cache_read_input_tokens or 0))|thousands }}</td>
       <td class="num">{{ (turn.output_tokens or 0)|thousands }}</td>
       <td class="num">{{ (turn.cost_usd or 0)|money }}</td>
-      <td><a href="/issues/{{ issue.number }}/runs/{{ run.run_id }}/turns/{{ turn.turn_number }}">transcript</a>{% if turn.truncated or turn.omitted_lines %} <span class="muted">(capped)</span>{% endif %}</td>
+      <td><a href="{{ repo.base }}/issues/{{ issue.number }}/runs/{{ run.run_id }}/turns/{{ turn.turn_number }}">transcript</a>{% if turn.truncated or turn.omitted_lines %} <span class="muted">(capped)</span>{% endif %}</td>
       <td></td>
     </tr>
     {% endfor %}

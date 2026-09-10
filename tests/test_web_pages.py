@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from fakes.web import (
+    API,
     BASE,
     NOW,
     RUN_ID,
@@ -96,13 +97,13 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     h.queries.groups["todo"] = [
         issue_row(number=3, title="Safe", pr_number=4, pr_url="javascript:alert(1)")
     ]
-    response = h.client.get("/")
+    response = h.client.get(f"{BASE}/")
     assert response.status_code == 200
     text = html(response)
     assert HOSTILE not in text and text.count(ESCAPED) == 2
-    assert 'hx-get="/partials/dashboard"' in text
+    assert f'hx-get="{BASE}/partials/dashboard"' in text
     assert f'hx-trigger="every {LIVE_POLL_S}s"' in text
-    assert 'hx-post="/api/v1/refresh"' in text and 'id="refresh-status"' in text
+    assert f'hx-post="{API}/refresh"' in text and 'id="refresh-status"' in text
     assert (
         'src="/static/vendor/htmx.min.js"' in text and 'src="/static/vendor/chart.umd.js"' in text
     )
@@ -113,7 +114,7 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     assert '"code": "503", "swap": true' in text
     for label in GitHubLabels().as_tuple():
         assert label in text
-    assert 'href="/issues/7"' in text and 'href="/issues/3"' in text
+    assert f'href="{BASE}/issues/7"' in text and f'href="{BASE}/issues/3"' in text
     assert "javascript:" not in text and "PR#4" in text
     assert "<script>" not in text and ' style="' not in text  # the CSP forbids inline code
     assert "example/repo" in text
@@ -124,7 +125,7 @@ def test_the_dashboard_costs_the_windows_not_the_worker_process(h: Harness) -> N
     h.queries.snapshot_row = snapshot()  # ClaudeTotals: $1.25 and 1,050 tokens this process
     h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
     h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert "$4.50" in section and "$42.66" in section
     assert "203,000" in section and "1,209,000" in section
     assert "since start" not in section and "$1.25" not in section and "1,050" not in section
@@ -137,7 +138,7 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
     h.queries.totals[1] = RunTotals(input_tokens=200_000, output_tokens=3_000, cost_usd=4.5)
     h.queries.totals[7] = RunTotals(input_tokens=1_200_000, output_tokens=9_000, cost_usd=42.66)
     h.queries.snapshot_row = snapshot(rate_limits=limits(0.42, 0.32))
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert section.count('<div class="tile">') == 6
     assert re.findall(r'<div class="label">([^<]+)</div>', section) == [
         "closed",
@@ -174,14 +175,14 @@ def test_the_hero_is_one_tile_per_metric(h: Harness) -> None:
 def test_every_hero_tile_carries_two_windows(h: Harness) -> None:
     """The merge of running and retrying is what makes the layout uniform."""
     h.queries.snapshot_row = snapshot(rate_limits=limits())
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert section.count('<div class="windows">') == 6
     assert section.count('<div class="window"') == 12
 
 
 def test_the_limits_tile_is_not_available_on_an_api_key(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(credential="api_key", rate_limits=limits())
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert "cost (actual)" in section and "cost (effort)" not in section
     assert section.count(">N/A<") == 2
     assert "has no usage windows" in section
@@ -192,7 +193,7 @@ def test_the_limits_tile_is_not_available_on_an_api_key(h: Harness) -> None:
 def test_the_limits_tile_says_not_yet_before_any_reading(h: Harness) -> None:
     """A dash, not N/A: nothing has run, rather than nothing can ever apply."""
     h.queries.snapshot_row = snapshot()
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert section.count(">\u2014<") == 2 and "N/A" not in section
     assert "no reading yet; one arrives while a turn is running" in section
     assert 'class="meter"' not in section
@@ -202,7 +203,7 @@ def test_a_window_past_its_reset_draws_an_empty_meter(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(
         rate_limits=limits(0.42, 0.32, five_resets_in=-timedelta(minutes=1))
     )
-    section = hero(html(h.client.get("/partials/dashboard")))
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
     assert '<div class="value">0%</div>' in section
     # A <progress>, not a styled div: the CSP has no unsafe-inline, so a width cannot be
     # an inline style, and the element announces itself to a screen reader for free.
@@ -217,7 +218,7 @@ def test_the_hero_columns_always_divide_the_tiles() -> None:
 
 def test_the_dashboard_shows_a_running_agent_and_a_retry(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(running=(running_row(),), retrying=(retry_row(),))
-    text = html(h.client.get("/"))
+    text = html(h.client.get(f"{BASE}/"))
     assert 'class="panel worker ok"' in text and "tick 41" in text
     assert "turn_activity" in text and "20 s ago" in text
     assert "Retrying" in text and "turn_failed: boom" in text
@@ -230,14 +231,14 @@ def test_the_running_row_draws_its_issue_the_way_a_card_does(h: Harness) -> None
     as the chip, the title with the weight, both inside the one link to the issue page.
     """
     h.queries.snapshot_row = snapshot(running=(running_row(),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert (
-        '<a class="issue-ref" href="/issues/7">'
+        f'<a class="issue-ref" href="{BASE}/issues/7">'
         '<span class="chip">#7</span>'
         '<span class="text">Add a power function</span></a>'
     ) in text
     # the old shape: the number linked on its own, with the title loose beside it
-    assert '<a href="/issues/7">#7</a>' not in text
+    assert f'<a href="{BASE}/issues/7">#7</a>' not in text
 
 
 def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
@@ -246,13 +247,13 @@ def test_the_retrying_row_draws_its_issue_the_same_way(h: Harness) -> None:
     The `.text` slot holds the issue's title, which is what #42 gave the row to put there.
     """
     h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert (
-        '<a class="issue-ref" href="/issues/9">'
+        f'<a class="issue-ref" href="{BASE}/issues/9">'
         '<span class="chip">#9</span>'
         '<span class="text">Retry the flaky import</span></a>'
     ) in text
-    assert '<a href="/issues/9">#9</a>' not in text
+    assert f'<a href="{BASE}/issues/9">#9</a>' not in text
 
 
 def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
@@ -264,7 +265,7 @@ def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
     `flex`, being the one surface where the link is the full width and nothing follows it.
     """
     h.queries.snapshot_row = snapshot(running=(running_row(rework=True, resumed=True),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert '</a> <span class="muted">(rework)</span> <span class="muted">(resumed)</span>' in text
     assert css_declarations(".issue-ref {")["display"] == "inline-flex"
     assert css_declarations(".card .issue-ref {")["display"] == "flex"
@@ -273,7 +274,7 @@ def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
 def test_the_running_title_is_still_escaped(h: Harness) -> None:
     """The title moved into a new element; it must not have picked up markup on the way."""
     h.queries.snapshot_row = snapshot(running=(running_row(title=HOSTILE),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert HOSTILE not in text
     assert f'<span class="text">{ESCAPED}</span>' in text
 
@@ -294,7 +295,7 @@ def test_a_retrying_row_names_the_issue_rather_than_repeating_its_number(h: Harn
     the row carries a title to put in it now; the identifier is not drawn anywhere.
     """
     h.queries.snapshot_row = snapshot(retrying=(retry_row(),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     row = text.split("Retrying", 1)[1].split("</table>", 1)[0]
     assert '<span class="text">Retry the flaky import</span>' in row
     assert "repo-9" not in row
@@ -307,7 +308,7 @@ def test_a_retrying_title_is_escaped(h: Harness) -> None:
     this row; autoescape covers it, and this is what says so.
     """
     h.queries.snapshot_row = snapshot(retrying=(retry_row(title=HOSTILE),))
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert HOSTILE not in text
     assert f'<span class="text">{ESCAPED}</span>' in text
 
@@ -321,13 +322,13 @@ def test_a_retrying_row_written_before_the_title_existed(h: Harness) -> None:
     row = snapshot(retrying=(retry_row(),))
     del row.data["retrying"][0]["title"]
     h.queries.snapshot_row = row
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     retrying = text.split("Retrying", 1)[1].split("</table>", 1)[0]
     assert '<span class="text">-</span>' in retrying and "None" not in retrying
 
 
 def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert text.startswith('<div id="live"')
     assert 'class="panel worker none"' in text and "no report yet" in text
     assert "no agent is running" in text
@@ -336,7 +337,7 @@ def test_the_live_partial_without_a_snapshot(h: Harness) -> None:
 
 def test_the_live_partial_marks_a_stale_worker(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(age_s=200.0)
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert 'class="panel worker stale"' in text and "3 min ago" in text
 
 
@@ -349,7 +350,7 @@ def test_the_worker_facts_are_bounded_rather_than_run_together(h: Harness) -> No
     entirely, so no two neighbours on the line share a treatment.
     """
     h.queries.snapshot_row = snapshot()
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     line = text[text.index('<section class="panel worker') :]
     line = line[: line.index("</section>")]
     assert '<span class="fact">tick 41</span>' in line
@@ -372,13 +373,13 @@ def test_the_worker_line_names_the_overlay_in_force(h: Harness) -> None:
     """A fourth fact, drawn only when there is one: the dashboard's answer to "is the worker
     running my overrides?"."""
     h.queries.snapshot_row = snapshot(workflow_overlay_path="/configs/WORKFLOW.local.md")
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     line = text[text.index('<section class="panel worker') :]
     line = line[: line.index("</section>")]
     assert '<span class="fact overlay">overlay /configs/WORKFLOW.local.md</span>' in line
 
     h.queries.snapshot_row = snapshot()
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert "overlay" not in text[text.index('<section class="panel worker') :]
 
 
@@ -392,7 +393,7 @@ def test_an_alerting_verdict_is_prose_in_the_bad_token(h: Harness) -> None:
     row.data["config_valid"] = False
     row.data["config_error"] = "polling.interval_ms must be >= 1000"
     h.queries.snapshot_row = row
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     line = text[text.index('<section class="panel worker') :]
     line = line[: line.index("</section>")]
     assert '<span class="verdict alert config-error">' in line
@@ -410,9 +411,9 @@ def test_a_kanban_card_separates_the_number_from_the_title(h: Harness) -> None:
     the chip and the title out as a row without giving up a single click target.
     """
     h.queries.groups["todo"] = [issue_row(number=23, title="Add a status badge to the README")]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert (
-        '<a class="issue-ref" href="/issues/23">'
+        f'<a class="issue-ref" href="{BASE}/issues/23">'
         '<span class="chip">#23</span>'
         '<span class="text">Add a status badge to the README</span></a>'
     ) in text
@@ -426,7 +427,7 @@ def test_a_kanban_card_draws_its_pull_request_as_the_same_chip(h: Harness) -> No
     space, so the two halves of the reference read as the one token they are.
     """
     h.queries.groups["review"] = [issue_row(number=24, pr_number=26, pr_url=PR_URL)]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert f'<a class="chip" href="{PR_URL}">PR#26</a>' in text
     assert '<span class="chip">#24</span>' in text
     assert "PR #" not in text
@@ -435,7 +436,7 @@ def test_a_kanban_card_draws_its_pull_request_as_the_same_chip(h: Harness) -> No
 def test_an_unsafe_pull_request_url_still_draws_the_chip(h: Harness) -> None:
     """`safe_href` refuses the scheme, so the chip loses its link, not its shape."""
     h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url="javascript:alert(1)")]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert '<span class="chip">PR#4</span>' in text
     assert "javascript:" not in text
 
@@ -443,7 +444,7 @@ def test_an_unsafe_pull_request_url_still_draws_the_chip(h: Harness) -> None:
 def test_a_card_without_a_pull_request_keeps_the_meta_row_balanced(h: Harness) -> None:
     """The empty cell is what holds the age at the right end of a `space-between` row."""
     h.queries.groups["todo"] = [issue_row(number=9, pr_number=None, pr_url=None, pr_state=None)]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert '<span class="pr"></span>' in text
 
 
@@ -454,7 +455,7 @@ def test_a_pull_request_with_no_state_renders_the_chip_alone(h: Harness) -> None
     beside the chip, and the meta row is the one place on the card with nothing else in it.
     """
     h.queries.groups["todo"] = [issue_row(number=3, pr_number=4, pr_url=PR_URL, pr_state=None)]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert f'<span class="pr"><a class="chip" href="{PR_URL}">PR#4</a></span>' in text
     assert "None" not in text
 
@@ -502,7 +503,7 @@ def test_the_meta_row_wraps_around_a_chip_that_cannot() -> None:
 def test_the_card_title_is_still_escaped(h: Harness) -> None:
     """The title moved into a new element; it must not have picked up any markup on the way."""
     h.queries.groups["todo"] = [issue_row(title=HOSTILE)]
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert HOSTILE not in text
     assert f'<span class="text">{ESCAPED}</span>' in text
 
@@ -510,7 +511,7 @@ def test_the_card_title_is_still_escaped(h: Harness) -> None:
 def test_the_card_is_laid_out_by_the_stylesheet_alone(h: Harness) -> None:
     """The chips and the title are their own elements; the CSP forbids styling them inline."""
     assert ".chip {" in CSS and ".issue-ref .text {" in CSS and ".card .issue-ref .text {" in CSS
-    assert ' style="' not in html(h.client.get("/partials/dashboard"))
+    assert ' style="' not in html(h.client.get(f"{BASE}/partials/dashboard"))
 
 
 def test_a_long_card_title_cannot_stretch_its_column() -> None:
@@ -556,20 +557,20 @@ def test_the_live_partial_shows_a_config_error(h: Harness) -> None:
     row.data["config_valid"] = False
     row.data["config_error"] = "polling.interval_ms must be >= 1000"
     h.queries.snapshot_row = row
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert "config error: polling.interval_ms must be &gt;= 1000" in text
 
 
 def test_the_live_partial_names_a_held_dispatch(h: Harness) -> None:
     h.queries.snapshot_row = snapshot(dispatch_hold=HOLD)
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert 'class="panel worker held"' in text
     assert "worker held" in text
     assert "not claiming (auth, held since 2026-09-04T11:56:00Z)" in text
     assert "claude authentication unavailable: not logged in" in text
     # Nothing is held by default, so the line appears only when it should.
     h.queries.snapshot_row = snapshot()
-    assert "not claiming" not in html(h.client.get("/partials/dashboard"))
+    assert "not claiming" not in html(h.client.get(f"{BASE}/partials/dashboard"))
 
 
 def test_a_held_worker_badge_is_marked_up_like_the_other_states() -> None:
@@ -584,9 +585,9 @@ def test_a_capped_column_counts_them_all_and_links_to_the_rest(h: Harness) -> No
         for n in range(1, BOARD_LIMIT + 1)
     ]
     h.queries.counts["complete"] = 44
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert '<span class="count">44</span>' in text
-    assert 'href="/issues?state=complete"' in text
+    assert f'href="{BASE}/issues?state=complete"' in text
     assert "39 more" in text
 
 
@@ -595,23 +596,23 @@ def test_a_column_inside_the_cap_has_no_overflow_link(h: Harness) -> None:
         issue_row(number=n, state="complete", github_state="closed") for n in range(1, 4)
     ]
     h.queries.counts["complete"] = 3
-    text = html(h.client.get("/partials/dashboard"))
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
     assert '<span class="count">3</span>' in text
     assert "more</a>" not in text
 
 
 def test_the_live_partial_survives_a_database_error(h: Harness) -> None:
     h.queries.error = StoreUnavailableError("cannot connect: refused")
-    response = h.client.get("/partials/dashboard")
+    response = h.client.get(f"{BASE}/partials/dashboard")
     assert response.status_code == 503
     text = html(response)
-    assert text.startswith('<div id="live"') and 'hx-get="/partials/dashboard"' in text
+    assert text.startswith('<div id="live"') and f'hx-get="{BASE}/partials/dashboard"' in text
     assert "database unavailable: cannot connect: refused" in text
 
 
 def test_a_database_error_on_a_page_is_an_html_503(h: Harness) -> None:
     h.queries.error = StoreUnavailableError("cannot connect: refused")
-    response = h.client.get("/")
+    response = h.client.get(f"{BASE}/")
     assert response.status_code == 503
     text = html(response)
     assert "<h1>503</h1>" in text and "database_unavailable" in text
@@ -627,7 +628,7 @@ def test_the_issue_page(h: Harness) -> None:
         run_row(run_id=RUN_ID_2, attempt=2, outcome="failed", error="turn_failed: boom")
     )
     h.queries.snapshot_row = snapshot(running=(running_row(),))
-    response = h.client.get("/issues/7")
+    response = h.client.get(f"{BASE}/issues/7")
     assert response.status_code == 200
     text = html(response)
     assert "Add a power function" in text and "issuebot/review" in text
@@ -636,7 +637,7 @@ def test_the_issue_page(h: Harness) -> None:
     assert "Running now" in text and "turn_activity" in text
     assert RUN_ID in text and RUN_ID_2 in text
     assert "claude-opus-5" in text and "19 agent iterations" in text and "3m21s" in text
-    assert f'href="/issues/7/runs/{RUN_ID}/turns/1"' in text
+    assert f'href="{BASE}/issues/7/runs/{RUN_ID}/turns/1"' in text
     assert text.count("turn logs were not captured") == 1  # the failed run has none
     assert "agent changed issuebot/in-progress to issuebot/review" in text
     assert "run 20260904T202535Z-0964cd succeeded after 1 turn, $0.90" in text
@@ -650,14 +651,14 @@ def test_the_issue_page(h: Harness) -> None:
 def test_the_issue_page_shows_a_running_run_without_the_not_captured_hint(h: Harness) -> None:
     h.seed_issue()
     h.queries.runs_by_issue[7] = [run_row(run_id=RUN_ID_2, ended_at=None, outcome=None)]
-    text = html(h.client.get("/issues/7"))
+    text = html(h.client.get(f"{BASE}/issues/7"))
     assert '<td class="outcome running">running</td>' in text
     assert "turn logs were not captured" not in text
 
 
 def test_the_issue_page_escapes_the_title(h: Harness) -> None:
     h.queries.issue_rows[7] = issue_row(title=HOSTILE)
-    text = html(h.client.get("/issues/7"))
+    text = html(h.client.get(f"{BASE}/issues/7"))
     assert HOSTILE not in text and ESCAPED in text
     assert "no runs recorded" in text and "no events recorded" in text
 
@@ -680,10 +681,10 @@ def test_the_issues_page_lists_a_row_per_issue(h: Harness) -> None:
             title="Cache the workflow",
         ),
     ]
-    response = h.client.get("/issues")
+    response = h.client.get(f"{BASE}/issues")
     assert response.status_code == 200
     text = html(response)
-    assert 'href="/issues/7"' in text and 'href="/issues/12"' in text
+    assert f'href="{BASE}/issues/7"' in text and f'href="{BASE}/issues/12"' in text
     assert "Add a power function" in text and "Cache the workflow" in text
     assert 'class="state review"' in text and 'class="state complete"' in text
     assert h.queries.state_asked is None  # no filter: every column
@@ -692,21 +693,21 @@ def test_the_issues_page_lists_a_row_per_issue(h: Harness) -> None:
 def test_the_issues_page_filters_to_one_state(h: Harness) -> None:
     h.queries.counts["complete"] = 44
     h.queries.issue_list = [issue_row(number=12, state="complete", github_state="closed")]
-    text = html(h.client.get("/issues?state=complete"))
+    text = html(h.client.get(f"{BASE}/issues?state=complete"))
     assert h.queries.state_asked == "complete"
-    assert 'class="filter current" href="/issues?state=complete"' in text
+    assert f'class="filter current" href="{BASE}/issues?state=complete"' in text
     assert "44" in text
 
 
 def test_the_issues_page_offers_a_filter_per_column_and_an_all(h: Harness) -> None:
-    text = html(h.client.get("/issues"))
+    text = html(h.client.get(f"{BASE}/issues"))
     for role in ("todo", "in_progress", "review", "rework", "complete"):
-        assert f'href="/issues?state={role}"' in text
-    assert 'class="filter current" href="/issues"' in text
+        assert f'href="{BASE}/issues?state={role}"' in text
+    assert f'class="filter current" href="{BASE}/issues"' in text
 
 
 def test_an_unknown_state_filter_is_a_404_page(h: Harness) -> None:
-    response = h.client.get("/issues?state=mystery")
+    response = h.client.get(f"{BASE}/issues?state=mystery")
     assert response.status_code == 404
     text = html(response)
     assert "<h1>404</h1>" in text and "mystery" in text
@@ -715,32 +716,32 @@ def test_an_unknown_state_filter_is_a_404_page(h: Harness) -> None:
 
 def test_the_issues_page_notes_a_truncated_list(h: Harness) -> None:
     h.queries.issue_list = [issue_row(number=n) for n in range(ISSUE_LIST_LIMIT)]
-    text = html(h.client.get("/issues"))
+    text = html(h.client.get(f"{BASE}/issues"))
     assert f"the {ISSUE_LIST_LIMIT} most recent" in text
     h.queries.issue_list.pop()
-    assert "most recent" not in html(h.client.get("/issues"))
+    assert "most recent" not in html(h.client.get(f"{BASE}/issues"))
 
 
 def test_the_issues_page_says_when_a_column_is_empty(h: Harness) -> None:
-    text = html(h.client.get("/issues?state=rework"))
+    text = html(h.client.get(f"{BASE}/issues?state=rework"))
     assert "no issues" in text
 
 
 def test_the_issues_page_escapes_the_title(h: Harness) -> None:
     h.queries.issue_list = [issue_row(title=HOSTILE)]
-    text = html(h.client.get("/issues"))
+    text = html(h.client.get(f"{BASE}/issues"))
     assert HOSTILE not in text and ESCAPED in text
 
 
 def test_the_issues_page_survives_a_database_error(h: Harness) -> None:
     h.queries.error = StoreUnavailableError("cannot connect: refused")
-    response = h.client.get("/issues")
+    response = h.client.get(f"{BASE}/issues")
     assert response.status_code == 503
 
 
 def test_every_page_links_to_the_issues_list(h: Harness) -> None:
-    for path in ("/", "/issues"):
-        assert '<a href="/issues">issues</a>' in html(h.client.get(path))
+    for path in (f"{BASE}/", f"{BASE}/issues"):
+        assert f'<a href="{BASE}/issues">issues</a>' in html(h.client.get(path))
 
 
 def test_issue_filters_mark_the_current_column() -> None:
@@ -763,14 +764,14 @@ def test_issue_filters_mark_the_current_column() -> None:
 
 
 def test_an_unknown_issue_is_a_404_page(h: Harness) -> None:
-    response = h.client.get("/issues/99")
+    response = h.client.get(f"{BASE}/issues/99")
     assert response.status_code == 404
     text = html(response)
     assert "<h1>404</h1>" in text and "issue #99 is not known" in text
 
 
 def test_a_non_numeric_issue_is_a_404_page(h: Harness) -> None:
-    response = h.client.get("/issues/abc")
+    response = h.client.get(f"{BASE}/issues/abc")
     assert response.status_code == 404
     assert "<h1>404</h1>" in html(response)
 
@@ -780,7 +781,7 @@ def test_a_non_numeric_issue_is_a_404_page(h: Harness) -> None:
 
 def test_the_turn_page_renders_the_transcript(h: Harness) -> None:
     h.seed_issue()
-    response = h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1")
+    response = h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1")
     assert response.status_code == 200
     text = html(response)
     assert "turn 1 of 1" in text and "claude-opus-5" in text
@@ -791,7 +792,7 @@ def test_the_turn_page_renders_the_transcript(h: Harness) -> None:
     assert "&lt;b&gt;bold&lt;/b&gt;" in text and "<b>bold</b>" not in text
     assert "warning: something" in text
     for part in ("prompt", "stream", "stderr"):
-        assert f'href="/issues/7/runs/{RUN_ID}/turns/1/{part}"' in text
+        assert f'href="{BASE}/issues/7/runs/{RUN_ID}/turns/1/{part}"' in text
     assert "95 lines" in text and "115,429 bytes" in text
 
 
@@ -799,7 +800,7 @@ def test_the_turn_page_notes_caps(h: Harness) -> None:
     h.seed_issue()
     row = h.queries.turn_rows[(RUN_ID, 1)]
     h.queries.turn_rows[(RUN_ID, 1)] = replace(row, truncated=True, omitted_lines=2, stream="")
-    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    text = html(h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"))
     assert "<strong>truncated</strong>" in text and "2 oversized lines replaced" in text
     assert "the stored stream is empty" in text
 
@@ -812,31 +813,31 @@ def test_the_turn_page_notes_cuts_by_bytes_not_characters(h: Harness) -> None:
     h.queries.turn_rows[(RUN_ID, 1)] = replace(
         row, prompt=prompt, prompt_bytes=len(prompt.encode())
     )
-    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    text = html(h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"))
     assert "showing the first" not in text
 
     h.queries.turn_rows[(RUN_ID, 1)] = replace(row, prompt_bytes=PROMPT_LIMIT + 1)
-    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    text = html(h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"))
     assert "showing the first" in text
 
     h.queries.turn_rows[(RUN_ID, 1)] = replace(row, stderr_bytes=STDERR_LIMIT)
-    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    text = html(h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"))
     assert "showing the tail" not in text
 
     h.queries.turn_rows[(RUN_ID, 1)] = replace(row, stderr_bytes=STDERR_LIMIT + 1)
-    text = html(h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"))
+    text = html(h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"))
     assert "showing the tail" in text
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        f"/issues/9/runs/{RUN_ID}/turns/1",  # another issue's run
-        f"/issues/7/runs/{RUN_ID}/turns/2",  # no such turn
-        f"/issues/7/runs/{RUN_ID_2}/turns/1",  # no such run
-        "/issues/7/runs/bad/turns/1",  # malformed run id
-        f"/issues/7/runs/{RUN_ID}/turns/x",  # malformed turn number
-        f"/issues/99/runs/{RUN_ID}/turns/1",  # unknown issue
+        f"{BASE}/issues/9/runs/{RUN_ID}/turns/1",  # another issue's run
+        f"{BASE}/issues/7/runs/{RUN_ID}/turns/2",  # no such turn
+        f"{BASE}/issues/7/runs/{RUN_ID_2}/turns/1",  # no such run
+        f"{BASE}/issues/7/runs/bad/turns/1",  # malformed run id
+        f"{BASE}/issues/7/runs/{RUN_ID}/turns/x",  # malformed turn number
+        f"{BASE}/issues/99/runs/{RUN_ID}/turns/1",  # unknown issue
     ],
 )
 def test_turn_pages_that_do_not_exist_are_404_pages(h: Harness, path: str) -> None:
@@ -853,7 +854,7 @@ def test_turn_pages_that_do_not_exist_are_404_pages(h: Harness, path: str) -> No
 )
 def test_raw_files_are_plain_text(h: Harness, part: str, attribute: str, extension: str) -> None:
     h.seed_issue()
-    response = h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1/{part}")
+    response = h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1/{part}")
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
     assert response.headers["x-content-type-options"] == "nosniff"
@@ -864,8 +865,8 @@ def test_raw_files_are_plain_text(h: Harness, part: str, attribute: str, extensi
 
 def test_an_unknown_raw_part_is_a_404(h: Harness) -> None:
     h.seed_issue()
-    assert h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1/other").status_code == 404
-    assert h.client.get(f"/issues/7/runs/{RUN_ID}/turns/2/prompt").status_code == 404
+    assert h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1/other").status_code == 404
+    assert h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/2/prompt").status_code == 404
 
 
 # --- static files, unknown pages, headers -----------------------------------------------------
@@ -892,15 +893,62 @@ def test_an_unknown_page_is_a_404_page(h: Harness) -> None:
 def test_pages_and_static_files_carry_the_security_headers(h: Harness) -> None:
     h.seed_issue()
     for response in (
-        h.client.get("/"),
-        h.client.get("/partials/dashboard"),
-        h.client.get("/issues/7"),
-        h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"),
+        h.client.get(f"{BASE}/"),
+        h.client.get(f"{BASE}/partials/dashboard"),
+        h.client.get(f"{BASE}/issues/7"),
+        h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"),
         h.client.get("/static/app.css"),
         h.client.get("/nothing"),
     ):
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value, (response.url, name)
+
+
+# --- the repository header --------------------------------------------------------------------
+
+
+def test_the_header_offers_a_dropdown_of_repositories(h: Harness) -> None:
+    h.register("acme/frontend")
+    text = html(h.client.get(f"{BASE}/"))
+    assert '<select class="repo-switch"' in text
+    assert (
+        '<option value="/r/acme/frontend/" data-repo="acme/frontend">acme/frontend</option>' in text
+    )
+    assert (
+        '<option value="/r/example/repo/" data-repo="example/repo" selected>example/repo</option>'
+        in text
+    )
+    text = html(h.client.get(f"{BASE}/issues?state=review"))
+    assert '<option value="/r/acme/frontend/issues?state=review"' in text
+    h.seed_issue()
+    text = html(h.client.get(f"{BASE}/issues/7"))
+    assert '<option value="/r/acme/frontend/"' in text  # an issue number means nothing there
+
+
+def test_the_page_carries_its_api_prefix_for_the_scripts(h: Harness) -> None:
+    text = html(h.client.get(f"{BASE}/"))
+    assert f'hx-post="{API}/refresh"' in text
+    assert f'data-stats-url="{API}/stats"' in text
+    assert f'hx-get="{BASE}/partials/dashboard"' in text
+
+
+def test_the_scripts_load_in_an_order_app_js_can_work_in(h: Harness) -> None:
+    """app.js is on every page for the switch, and it draws the charts: Chart.js first.
+
+    A classic script sees only what has already run, so app.js loaded above the block that
+    ships chart.umd.js would take its `typeof Chart === "undefined"` exit and draw nothing --
+    and no test here executes JavaScript, so nothing else would notice.
+    """
+    text = html(h.client.get(f"{BASE}/"))
+    assert text.index('src="/static/vendor/chart.umd.js"') < text.index('src="/static/app.js"')
+    issues = html(h.client.get(f"{BASE}/issues"))
+    assert 'src="/static/app.js"' in issues  # every page, chart or no chart
+
+
+def test_the_board_uses_the_repositorys_own_labels(h: Harness) -> None:
+    h.register("acme/frontend", labels={**GitHubLabels().model_dump(), "review": "team/check"})
+    text = html(h.client.get("/r/acme/frontend/"))
+    assert "team/check" in text and "issuebot/review" not in text
 
 
 # --- the pure helpers -------------------------------------------------------------------------

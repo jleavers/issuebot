@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from fakes.web import RUN_ID, Harness
+from fakes.web import BASE, RUN_ID, Harness
 from issuebot.github.state import LABEL_STYLES, StateLabel
 
 CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
@@ -85,9 +85,9 @@ def test_theme_js_is_served(h: Harness) -> None:
 def test_every_page_carries_the_toggle_and_the_script(h: Harness) -> None:
     h.seed_issue()
     pages = (
-        h.client.get("/"),
-        h.client.get("/issues/7"),
-        h.client.get(f"/issues/7/runs/{RUN_ID}/turns/1"),
+        h.client.get(f"{BASE}/"),
+        h.client.get(f"{BASE}/issues/7"),
+        h.client.get(f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"),
         h.client.get("/nothing"),  # the error page inherits the header too
     )
     for response in pages:
@@ -105,14 +105,14 @@ def test_every_page_carries_the_toggle_and_the_script(h: Harness) -> None:
 
 def test_the_script_runs_before_the_first_paint(h: Harness) -> None:
     """In <head>, and synchronous: a deferred script would flash the light theme first."""
-    text = html(h.client.get("/"))
+    text = html(h.client.get(f"{BASE}/"))
     tag = '<script src="/static/theme.js"></script>'
     assert text.index(tag) < text.index("</head>") < text.index("<body>")
     assert "defer" not in tag and "async" not in tag
 
 
 def test_the_toggle_is_reachable_and_labelled(h: Harness) -> None:
-    text = html(h.client.get("/"))
+    text = html(h.client.get(f"{BASE}/"))
     # a real <button>, so it carries the role, the keyboard behaviour and the focus ring
     assert '<button class="theme-toggle" type="button"' in text
     # the name describes the action, so it must not also claim a pressed state
@@ -494,7 +494,8 @@ def test_the_two_scripts_agree_on_the_repaint_event() -> None:
 
 def test_the_theme_introduces_no_inline_code(h: Harness) -> None:
     h.seed_issue()
-    for response in (h.client.get("/"), h.client.get("/issues/7"), h.client.get("/nothing")):
+    pages = (h.client.get(f"{BASE}/"), h.client.get(f"{BASE}/issues/7"), h.client.get("/nothing"))
+    for response in pages:
         text = html(response)
         assert ' style="' not in text, response.url
         assert "<style" not in text, response.url
