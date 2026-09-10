@@ -1,6 +1,12 @@
+# Two roles in one file, chosen by COMPOSE_PROFILES in this checkout's .env:
+#   hub     -> db + web        (one checkout on the host)
+#   worker  -> worker          (every checkout, this one included)
+# So the hub checkout says COMPOSE_PROFILES=hub,worker and every other says worker.
 services:
   db:
     image: postgres:18
+    profiles: ["hub"]
+    networks: [issuebot]
     environment:
       POSTGRES_USER: issuebot
       POSTGRES_PASSWORD: issuebot
@@ -53,6 +59,8 @@ services:
 
   worker:
     build: .
+    profiles: ["worker"]
+    networks: [issuebot]
     # The worker applies pending database migrations when it starts (issuebot migrate is the
     # manual equivalent) and fails fast if DATABASE_URL is set but the server is unusable.
     command: ["worker"]
@@ -80,31 +88,25 @@ services:
       - ./configs:/configs:ro
       - workspaces:/workspaces
       - claude-home:/home/issuebot/.claude
-    depends_on:
-      db:
-        condition: service_healthy
+    # No depends_on: the database may be in another checkout's project (the hub). A worker
+    # that starts first fails its migration, prints [FAIL] database: and exits 1, and
+    # restart: unless-stopped brings it back until the hub answers.
 
   web:
     build: .
-    # The dashboard and the JSON API. Reads WORKFLOW.md for database.url, server.* and the
-    # repository name; needs no GitHub, Claude or Slack credential, so no env_file and no
-    # workspace volume. Migrates at start like the worker (the advisory lock makes that safe).
-    command: ["web"]
+    profiles: ["hub"]
+    networks: [issuebot]
+    # The dashboard and the JSON API for every repository on this database. Reads nothing but
+    # DATABASE_URL; no workflow, no GitHub, Claude or Slack credential.
+    command: ["web", "--bind", "0.0.0.0", "--port", "8080"]
     init: true
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
-      ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
     ports:
       # Loopback only: the dashboard has no authentication. Override the host port with
       # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is server.port.
       - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
-    volumes:
-      # The directory, for the reason given on the worker above (#46). The file mount was
-      # worse here than on the worker: the web reads WORKFLOW.md once at start, so a stale
-      # one survived even `docker compose restart web`, which reuses the container and with
-      # it the mount, and took a recreate to clear.
-      - ./configs:/configs:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -118,3 +120,11 @@ volumes:
   pgdata:
   workspaces:
   claude-home:
+
+# Every project on the host joins one network, created once with `docker network create
+# issuebot`, so a worker in another checkout resolves the hub's database as `db`. External
+# in every project rather than owned by the hub: a single compose file cannot declare it
+# both ways, and a project that finds a network it did not create refuses to start.
+networks:
+  issuebot:
+    external: true
