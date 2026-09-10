@@ -51,8 +51,6 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.database.url is None
     assert s.notifications.slack.webhook_url is None
     assert s.notifications.slack.events == ["state_changed", "blocked"]
-    assert s.server.port == 8080
-    assert s.server.bind == "0.0.0.0"
 
 
 def test_github_repo_is_required() -> None:
@@ -95,6 +93,11 @@ def test_unknown_nested_key_is_rejected() -> None:
     assert "github.tokne" in _locs(exc.value)
 
 
+def test_a_server_block_is_no_longer_accepted() -> None:
+    with pytest.raises(ValidationError, match="server"):
+        Settings.model_validate({"github": {"repo": "a/b"}, "server": {"port": 1}})
+
+
 def test_state_labels_must_be_distinct() -> None:
     with pytest.raises(ValidationError, match="distinct"):
         GitHubLabels(todo="same", review="same")
@@ -120,9 +123,6 @@ def test_label_must_not_be_empty() -> None:
         ("claude", "turn_timeout_ms", 0),
         ("claude", "permission_mode", "plan"),
         ("claude", "permission_mode", "manual"),
-        ("server", "port", 65536),
-        ("server", "port", -1),
-        ("server", "bind", ""),
     ],
 )
 def test_constraints_reject_out_of_range_values(section: str, field: str, value: object) -> None:

@@ -269,11 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
     importer.set_defaults(func=cmd_import)
 
     web = subparsers.add_parser(
-        "web", help="serve the dashboard and the JSON API until SIGTERM or SIGINT"
+        "web",
+        help="serve the dashboard and the JSON API until SIGTERM or SIGINT (needs DATABASE_URL)",
     )
-    _add_workflow_option(web)
-    web.add_argument("--port", type=int, default=None, help="listen port (default: server.port)")
-    web.add_argument("--bind", default=None, help="listen address (default: server.bind)")
+    web.add_argument("--port", type=int, default=8080, help="listen port (default: 8080)")
+    web.add_argument("--bind", default="0.0.0.0", help="listen address (default: 0.0.0.0)")
     web.set_defaults(func=cmd_web)
     return parser
 
@@ -697,11 +697,9 @@ class _Sinks:
             self.postgres.record_issues(issues)
 
 
-async def _open_database(settings: Settings) -> Database | None:
-    """Migrate at start when database.url is set; None when it is not; raises DatabaseError."""
-    if settings.database.url is None:
-        return None
-    database = _database_factory(settings.database.url.get_secret_value())
+async def _migrate_database(url: str) -> Database:
+    """Migrate at start; raises DatabaseError."""
+    database = _database_factory(url)
     result = await database.migrate()
     get_logger(__name__).info(
         "db_migrated",
@@ -710,6 +708,13 @@ async def _open_database(settings: Settings) -> Database | None:
         version=result.version,
     )
     return database
+
+
+async def _open_database(settings: Settings) -> Database | None:
+    """Migrate at start when database.url is set; None when it is not; raises DatabaseError."""
+    if settings.database.url is None:
+        return None
+    return await _migrate_database(settings.database.url.get_secret_value())
 
 
 async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
@@ -1146,35 +1151,31 @@ def cmd_import(args: argparse.Namespace) -> int:
 # --- web -------------------------------------------------------------------------------------
 
 
+_WEB_NOT_CONFIGURED = "[FAIL] database: not configured; export DATABASE_URL"
+
+
 def cmd_web(args: argparse.Namespace) -> int:
-    workflow = _load_or_report(args)
-    if workflow is None:
-        return 2
-    return asyncio.run(_run_web(workflow, port=args.port, bind=args.bind))
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print(_WEB_NOT_CONFIGURED)
+        return 1
+    return asyncio.run(_run_web(url, port=args.port, bind=args.bind))
 
 
-async def _run_web(workflow: Workflow, *, port: int | None, bind: str | None) -> int:
-    """Migrate, build the app and serve it until a stop signal; the database is required;
-    a failed bind is uvicorn's error line and exit 1."""
-    settings = workflow.config
+async def _run_web(url: str, *, port: int, bind: str) -> int:
+    """Migrate, build the app and serve it until a stop signal; a failed bind is uvicorn's
+    error line and exit 1. The web reads no workflow: everything it shows is in the database."""
+    if not 0 <= port <= 65535:
+        print("[FAIL] web: --port must be between 0 and 65535")
+        return 1
     try:
-        database = await _open_database(settings)
+        database = await _migrate_database(url)
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    if database is None:
-        print(_NOT_CONFIGURED)
-        return 1
-    host = bind or settings.server.bind
-    listen_port = settings.server.port if port is None else port
-    if not 0 <= listen_port <= 65535:
-        print("[FAIL] web: --port must be between 0 and 65535")
-        return 1
-    get_logger(__name__).info(
-        "web_started", bind=host, port=listen_port, database=database.description
-    )
+    get_logger(__name__).info("web_started", bind=bind, port=port, database=database.description)
     try:
-        await _serve(create_app(database, settings), host=host, port=listen_port)
+        await _serve(create_app(database), host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
     return 0

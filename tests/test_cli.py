@@ -1711,7 +1711,6 @@ def _db_workflow(
         ["status"],
         ["stats"],
         ["refresh"],
-        ["web"],
         ["import", "--from", "postgresql://x@y/z"],
     ],
 )
@@ -1737,7 +1736,6 @@ def test_database_commands_need_a_configured_url(
         ["status"],
         ["stats"],
         ["refresh"],
-        ["web"],
         ["import", "--from", "postgresql://x@y/z"],
     ],
 )
@@ -2010,49 +2008,59 @@ def fake_serve(monkeypatch: pytest.MonkeyPatch) -> FakeServe:
     return fake
 
 
-def test_web_migrates_then_serves_on_the_configured_bind(
+def test_web_migrates_then_serves_on_the_defaults(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
-    path = _write(
-        tmp_path,
-        "---\ngithub:\n  repo: example/repo\nserver:\n  bind: 127.0.0.1\n  port: 9000\n---\nBody",
-    )
-    assert main(["web", "--workflow", str(path)]) == 0
+    assert main(["web"]) == 0
     assert fake_database.migrations == 1 and fake_database.urls == [DB_URL]
     ((app, host, port),) = fake_serve.calls
-    assert (host, port) == ("127.0.0.1", 9000)
+    assert (host, port) == ("0.0.0.0", 8080)
     assert getattr(app, "title", None) == "issuebot"
     err = capsys.readouterr().err
     assert "web_started" in err and "s3cret" not in err
 
 
-def test_web_overrides_the_bind_and_port_from_the_command_line(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_database: FakeDatabase,
-    fake_serve: FakeServe,
+def test_web_takes_the_bind_and_port_from_the_command_line(
+    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
 ) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path), "--bind", "0.0.0.0", "--port", "0"]) == 0
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web", "--bind", "127.0.0.1", "--port", "0"]) == 0
     ((_app, host, port),) = fake_serve.calls
-    assert (host, port) == ("0.0.0.0", 0)
+    assert (host, port) == ("127.0.0.1", 0)
+
+
+def test_web_reads_no_workflow(
+    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ISSUEBOT_WORKFLOW", "/nowhere/WORKFLOW.md")
+    assert main(["web"]) == 0
+    with pytest.raises(SystemExit) as exc:
+        main(["web", "--workflow", "x"])
+    assert exc.value.code == 2
+
+
+def test_web_needs_database_url(
+    capsys: pytest.CaptureFixture[str], fake_database: FakeDatabase, fake_serve: FakeServe
+) -> None:
+    assert main(["web"]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: not configured; export DATABASE_URL\n"
+    assert fake_database.urls == [] and fake_serve.calls == []
 
 
 def test_web_fails_fast_when_the_migration_fails(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path)]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
     assert fake_serve.calls == []
 
@@ -2060,27 +2068,25 @@ def test_web_fails_fast_when_the_migration_fails(
 def test_web_rejects_a_port_out_of_range(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path), "--port", "70000"]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web", "--port", "70000"]) == 1
     assert capsys.readouterr().out == "[FAIL] web: --port must be between 0 and 65535\n"
     assert fake_serve.calls == []
 
 
 def test_web_exits_one_when_uvicorn_cannot_bind(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
 ) -> None:
     async def refuse(app: object, *, host: str, port: int) -> None:
         raise SystemExit(3)  # what uvicorn's startup() does on a bind failure
 
     monkeypatch.setattr("issuebot.cli._serve", refuse)
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path)]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 1
     assert fake_database.migrations == 1
 
 
