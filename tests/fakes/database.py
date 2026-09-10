@@ -55,7 +55,13 @@ class FakeStore:
 
 
 class FakeQueries:
-    """Canned answers for every Queries method; ``error`` makes them all raise it."""
+    """Canned answers for the global reads, and the canned data a scoped view reads through.
+
+    ``error`` makes every read on either object raise it. The data and the recording
+    attributes live here, on the object a test configures; the per-repository reads live on
+    ``FakeRepoQueries``, exactly as the real split does, so a caller that forgets to scope
+    fails here the way it would against a real database.
+    """
 
     def __init__(self) -> None:
         self.snapshot_row: SnapshotRow | None = None
@@ -79,7 +85,6 @@ class FakeQueries:
         self.repo_rows: dict[str, RepoRow] = {}
         self.snapshot_rows: dict[str, SnapshotRow] = {}  # per repo; snapshot_row is the default
         self.scoped_repos: list[str] = []
-        self._repo: str | None = None
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -99,71 +104,82 @@ class FakeQueries:
         rows = {name: self.snapshot_rows.get(name, self.snapshot_row) for name in self.repo_rows}
         return {name: row for name, row in rows.items() if row is not None}
 
-    def scoped(self, repo: str) -> FakeQueries:
+    def scoped(self, repo: str) -> FakeRepoQueries:
         self.scoped_repos.append(repo)
-        self._repo = repo
-        return self
+        return FakeRepoQueries(self, repo)
+
+
+class FakeRepoQueries:
+    """Stands in for RepoQueries: the fourteen per-repository reads over the parent's data."""
+
+    def __init__(self, parent: FakeQueries, repo: str) -> None:
+        self._parent = parent
+        self.repo = repo
+
+    def _check(self, name: str) -> None:
+        self._parent._check(name)
 
     async def snapshot(self) -> SnapshotRow | None:
         self._check("snapshot")
-        if self._repo is not None and self._repo in self.snapshot_rows:
-            return self.snapshot_rows[self._repo]
-        return self.snapshot_row
+        parent = self._parent
+        if self.repo in parent.snapshot_rows:
+            return parent.snapshot_rows[self.repo]
+        return parent.snapshot_row
 
     async def closed_count(self, window: timedelta) -> int:
         self._check("closed_count")
-        return self.closed[window.days]
+        return self._parent.closed[window.days]
 
     async def runs_count(self, window: timedelta) -> int:
         self._check("runs_count")
-        return self.runs[window.days]
+        return self._parent.runs[window.days]
 
     async def run_totals(self, window: timedelta) -> RunTotals:
         self._check("run_totals")
-        return self.totals[window.days]
+        return self._parent.totals[window.days]
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
         self._check("issues_by_state")
-        return self.groups
+        return self._parent.groups
 
     async def state_counts(self) -> dict[str, int]:
         self._check("state_counts")
-        return self.counts
+        return self._parent.counts
 
     async def issues_for_state(self, state: str | None) -> list[IssueRow]:
         self._check("issues_for_state")
-        self.state_asked = state
-        return self.issue_list
+        self._parent.state_asked = state
+        return self._parent.issue_list
 
     async def daily_series(self, days: int) -> list[DailyPoint]:
         self._check("daily_series")
-        self.days_asked = days
-        return self.series
+        self._parent.days_asked = days
+        return self._parent.series
 
     async def issue(self, number: int) -> IssueRow | None:
         self._check("issue")
-        return self.issue_rows.get(number)
+        return self._parent.issue_rows.get(number)
 
     async def runs_for_issue(self, number: int) -> list[RunRow]:
         self._check("runs_for_issue")
-        return self.runs_by_issue.get(number, [])
+        return self._parent.runs_by_issue.get(number, [])
 
     async def events_for_issue(self, number: int, limit: int) -> list[EventRow]:
         self._check("events_for_issue")
-        return self.events_by_issue.get(number, [])[:limit]
+        return self._parent.events_by_issue.get(number, [])[:limit]
 
     async def recent_events(self, limit: int) -> list[EventRow]:
         self._check("recent_events")
-        events = [event for rows in self.events_by_issue.values() for event in rows]
+        events = [event for rows in self._parent.events_by_issue.values() for event in rows]
         return sorted(events, key=lambda event: event.id, reverse=True)[:limit]
 
     async def turn_summaries_for_issue(self, number: int) -> list[TurnSummaryRow]:
         self._check("turn_summaries_for_issue")
-        return self.turns_by_issue.get(number, [])
+        return self._parent.turns_by_issue.get(number, [])
 
     async def turn(self, run_id: str, turn_number: int) -> TurnRow | None:
         self._check("turn")
-        return self.turn_rows.get((run_id, turn_number))
+        return self._parent.turn_rows.get((run_id, turn_number))
 
 
 class FakeListener:

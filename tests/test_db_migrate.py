@@ -170,12 +170,7 @@ async def test_0003_refuses_a_database_that_holds_rows(db_url: str) -> None:
         await conn.execute(ISSUE_V2)
     finally:
         await conn.close()
-    # The pointer at the import command is asserted on the SQL, not on the raised message:
-    # `redact` strips the URL's password wherever it appears, and this test database's is
-    # the word "issuebot", so the message reaching the operator here says "`<database url>
-    # import`". The prose up to the command name is stable either way.
-    assert "copy these in with `issuebot import`" in discover_migrations()[2].sql
-    with pytest.raises(MigrationError, match="give the hub a fresh database and copy these in"):
+    with pytest.raises(MigrationError, match="copy these in with the import command"):
         await migrate(db_url)
     conn = await connect(db_url)
     try:

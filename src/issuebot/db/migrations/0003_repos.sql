@@ -9,7 +9,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM issues)
        OR EXISTS (SELECT 1 FROM runs)
        OR EXISTS (SELECT 1 FROM events) THEN
-        RAISE EXCEPTION 'issues, runs or events already hold rows and 0003 cannot tell which repository they belong to; give the hub a fresh database and copy these in with `issuebot import`';
+        RAISE EXCEPTION 'issues, runs or events already hold rows and 0003 cannot tell which repository they belong to; give the hub a fresh database and copy these in with the import command';
     END IF;
 END $$;
 
