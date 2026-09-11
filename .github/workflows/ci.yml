@@ -101,8 +101,11 @@ jobs:
           test "$(docker run --rm --entrypoint id issuebot:ci-pg -un)" = issuebot
       # initdb --version prints a string constant, so on its own it proves almost nothing. The
       # hooks the README tells an operator to paste are pulled straight out of README.md and
-      # run in the image, under `bash -lc` as WorkspaceManager runs them -- which is also the
-      # only check that the login shell keeps the PATH /etc/profile would otherwise reset.
+      # run in the image inside a login shell, as WorkspaceManager's `bash -lc` runs them --
+      # which is also the only check that a login shell keeps the PATH /etc/profile resets.
+      # after_run and before_remove both end in `|| true`, so running them proves only that
+      # they parse; the postmaster has to be gone between the two for the step to mean
+      # anything. An `if`, not `! pg_ctl ...`: a pipeline led by `!` is exempt from errexit.
       - name: the README's cluster recipe runs in the image
         run: |
           mkdir -p /tmp/hooks
@@ -123,6 +126,7 @@ jobs:
               pathlib.Path(f"/tmp/hooks/{key}.sh").write_text("\n".join(body) + "\n")
           assert set(hooks) == {"before_run", "after_run", "before_remove"}, sorted(hooks)
           PY
+          chmod a+rX /tmp/hooks /tmp/hooks/*.sh
           docker run --rm -v /tmp/hooks:/hooks:ro --entrypoint bash issuebot:ci-pg -lc '
             set -eu
             cd "$(mktemp -d)"
@@ -131,5 +135,9 @@ jobs:
             . .issuebot/pg/env
             test "$(psql "$ARROWBOT_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "select 1")" = 1
             bash /hooks/after_run.sh
+            if pg_ctl -D .issuebot/pg/data status >/dev/null 2>&1; then
+              echo "after_run left the postmaster running" >&2
+              exit 1
+            fi
             bash /hooks/before_remove.sh
           '
