@@ -58,7 +58,16 @@ services:
       retries: 15
 
   worker:
-    build: .
+    build:
+      context: .
+      args:
+        # Empty -- the default -- bakes no PostgreSQL server into the worker image. Set
+        # ISSUEBOT_POSTGRES_VERSION in this checkout's .env when the target repository's tests
+        # need a real server, and `docker compose build worker` to pick it up (README, "A
+        # PostgreSQL server for the target repository's tests"). The web service builds from
+        # the same context without it: the dashboard needs no server, and a hub that sets the
+        # variable would otherwise carry the packages twice.
+        POSTGRES_VERSION: "${ISSUEBOT_POSTGRES_VERSION:-}"
     profiles: ["worker"]
     networks: [issuebot]
     # The worker applies pending database migrations when it starts (issuebot migrate is the

@@ -37,14 +37,54 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
+# Optional PostgreSQL server binaries, for a target repository whose tests need a real server
+# (#62). Empty -- the default -- installs nothing, so the image keeps exactly the contents it
+# has without the argument. Debian trixie ships PostgreSQL 17 only, so the version comes from
+# PGDG, with the same keyring-and-list shape as the gh stanza above. postgresql-common lands
+# first so that create_main_cluster can be turned off before the server package's postinst
+# runs: its "main" cluster would be root-owned, and the sessions make their own anyway.
+# /opt/postgresql is a stable name for the versioned directory, so the ENV below can put it on
+# PATH without expanding POSTGRES_VERSION inside the ${VAR:+...} that keeps it off the default
+# image's PATH. The profile.d line is not a duplicate of that ENV: hooks run under `bash -lc`
+# and Debian's /etc/profile *overwrites* PATH for a login shell, so without it the hooks that
+# drive the cluster could not find initdb however the image's own PATH is set.
+# Both put the directory ahead of /usr/bin, where postgresql-client-common's pg_wrapper links
+# live: called with no registered cluster -- and create_main_cluster is off, so there is none
+# -- every one of them prints "No existing cluster is suitable as a default target" before
+# exec'ing the real binary, which is a warning an agent would waste a turn chasing.
+# initdb --version is asserted here for the same reason claude --version is below: a renamed
+# package or a moved repository has to fail the build, not the first session that tries to
+# start a cluster.
+ARG POSTGRES_VERSION=""
+RUN if [ -n "${POSTGRES_VERSION}" ]; then \
+      curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        -o /etc/apt/keyrings/pgdg.asc \
+   && chmod go+r /etc/apt/keyrings/pgdg.asc \
+   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "${VERSION_CODENAME}")-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+   && apt-get update \
+   && apt-get install -y --no-install-recommends postgresql-common \
+   && echo "create_main_cluster = false" > /etc/postgresql-common/createcluster.conf \
+   && apt-get install -y --no-install-recommends "postgresql-${POSTGRES_VERSION}" \
+   && rm -rf /var/lib/apt/lists/* \
+   && ln -s "/usr/lib/postgresql/${POSTGRES_VERSION}" /opt/postgresql \
+   && printf 'PATH="/opt/postgresql/bin:$PATH"\n' > /etc/profile.d/issuebot-postgresql.sh \
+   && chmod 0644 /etc/profile.d/issuebot-postgresql.sh \
+   && /opt/postgresql/bin/initdb --version; \
+    fi
+
 RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
  && install -d -o issuebot -g issuebot /workspaces /home/issuebot/.claude /app
 
 COPY --from=builder --chown=issuebot:issuebot /app /app
 
 USER issuebot
+# initdb, pg_ctl and postgres live in the versioned directory alone -- /usr/bin holds only
+# wrappers such as pg_ctlcluster, which need root -- so the hooks that run a per-workspace
+# cluster need it on PATH. Added only when the argument was set, so the default image's PATH is
+# the one it has always been.
 ENV HOME=/home/issuebot \
-    PATH="/home/issuebot/.local/bin:/app/.venv/bin:${PATH}"
+    PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${PATH}"
 
 # The flag assertion is the point of pinning: a release that drops --permission-prompts
 # breaks an unattended worker at runtime, so fail the build instead.

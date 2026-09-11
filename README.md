@@ -83,7 +83,11 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
    newer on `PATH`.
 4. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
-   build an image `FROM` it and add the tools, or install them in `hooks.after_create`.
+   install the tools in `hooks.after_create`, or build an image `FROM` it and add them. One
+   thing a hook cannot install is a database server, because the container runs as uid 1000
+   with no `sudo` and no Docker — so if the target repository's tests need one, set
+   `ISSUEBOT_POSTGRES_VERSION` in `.env` before building (see "A PostgreSQL server for the
+   target repository's tests" below).
 
 The commands below are Bash. On Windows the Compose route works as-is under Docker Desktop;
 for the host route use WSL.
@@ -364,6 +368,97 @@ which is worth checking after the first run with a new label.
 
 For one session without touching labels, `issuebot run-once <number> --model <name>` overrides
 both the label and the default.
+
+### A PostgreSQL server for the target repository's tests
+
+Some repositories cannot run their suite without a real PostgreSQL: the fixtures fail rather
+than skip, and most of the tests never get to run. The worker container has no Docker, no
+`sudo` and no root, so no hook can install a server and no compose sidecar helps — a service
+on the compose network is reachable by name, not on loopback, and one server shared by every
+concurrent session is one session's `DROP DATABASE` away from wrecking another's run.
+
+So the server binaries go into the image, off by default, and each session runs its own
+throwaway cluster inside its own workspace.
+
+**1. Build the worker image with a server.** Set the major version in this checkout's `.env`
+and rebuild:
+
+```bash
+echo 'ISSUEBOT_POSTGRES_VERSION=18' >> .env
+docker compose build worker
+docker compose up -d worker
+```
+
+Empty — the default — installs nothing, so every checkout that does not need a server keeps
+the image it has. The version comes from the PostgreSQL project's own apt repository, so it is
+not limited to the one Debian ships; `docker compose run --rm --entrypoint initdb worker
+--version` says which one you got. Only the `worker` service takes the argument: the dashboard
+needs no server. Changing the variable needs `docker compose build worker`, not just a restart.
+
+**2. Give the target repository's workflow the hooks.** `initdb`, `pg_ctl`, `postgres` and
+`psql` are all on the `PATH` of the image built above — in the hooks' login shell too, which
+`/etc/profile` would otherwise reset. Put this in the `hooks` block of that checkout's
+`configs/WORKFLOW.local.md`; the git-ignored overlay is the right place, since it is a property
+of the deployment rather than of issuebot:
+
+```yaml
+hooks:
+  before_run: |
+    set -e
+    PG="$PWD/.issuebot/pg"
+    mkdir -p "$PG/sock"
+    [ -d "$PG/data" ] || initdb -D "$PG/data" -U issuebot --auth=trust \
+      --encoding=UTF8 --locale=C.UTF-8 >/dev/null
+    pg_ctl -D "$PG/data" status >/dev/null 2>&1 \
+      || pg_ctl -D "$PG/data" -w -l "$PG/log" \
+           -o "-c listen_addresses='' -k $PG/sock -c fsync=off" start
+    printf 'export ARROWBOT_DATABASE_URL=postgresql://issuebot@/arrowbot_test?host=%s\n' \
+      "$PG/sock" > "$PG/env"
+  after_run: |
+    pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
+  before_remove: |
+    pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
+```
+
+Rename `ARROWBOT_DATABASE_URL` to whatever the target repository reads, and the database name
+with it.
+
+**3. Tell the agent the file exists.** Add one line to the prompt below the front matter:
+
+> A throwaway PostgreSQL for this workspace is running; `. .issuebot/pg/env` before running
+> the tests.
+
+That step is not decoration. The agent and the hooks run under a filtered environment —
+`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in `src/issuebot/agent/runner.py` — so a DSN set
+on the compose service or exported by `before_run` never reaches `pytest`. Writing it to a file
+inside the workspace and sourcing it is what carries it across.
+
+Why it is shaped this way:
+
+- **One cluster per workspace**, under `.issuebot/`, which is the scratch directory issuebot
+  already adds to the clone's `.git/info/exclude`. Concurrent sessions never share a server, so
+  one session's teardown cannot touch another's data, and `finish_terminal` takes the cluster
+  with the workspace when the issue leaves.
+- **A Unix socket, `listen_addresses=''`.** No port to allocate, so no collisions between
+  concurrent sessions, and nothing outside the container can reach it. It also keeps the DSN on
+  loopback for target repositories that refuse a non-loopback host: `urlsplit` on
+  `postgresql://issuebot@/db?host=/path/sock` reports no hostname at all. Keep the socket
+  directory inside the workspace root — the kernel caps a socket path at about 107 bytes, which
+  `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
+- **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
+  nobody else is in.
+- **`initdb` refuses to run as root**, and the container runs as uid 1000, so that is one
+  problem the image does not have.
+- **Three hooks, not two.** `before_run` starts it idempotently (`pg_ctl status || pg_ctl
+  start`), so a second turn or a retry reuses the cluster instead of rebuilding it; `after_run`
+  stops it; and `before_remove` stops it again, because `finish_terminal` deletes the workspace
+  and a postmaster whose data directory has vanished would otherwise sit there until the
+  container restarts.
+- **`hooks.timeout_ms` (60 s by default) is ample**: `initdb` takes a couple of seconds and the
+  start after it is immediate.
+
+If the suite still reports no server, run the hook by hand to see why:
+`docker compose exec worker bash -lc 'cd /workspaces/<repo>-<number> && cat .issuebot/pg/log'`.
 
 ### More than one repository
 
