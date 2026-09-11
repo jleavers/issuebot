@@ -516,36 +516,30 @@ wherever the harness keeps its `package.json`, or drop it if that is the reposit
 
 **3. Make a missing runtime fail rather than skip.** Installing a runtime so the tests can run
 is pointless if they would still quietly skip, so give the agent the target repository's own
-"the harness must work" switch. It goes in the env file `before_run` writes. That file is
-truncated every session — the recipe in the section above ends with a `printf … > "$PG/env"` —
-so the line has to come from the same hook rather than be appended to the file by hand. One
-more line after that `printf`:
+"the harness must work" switch. It goes in
+[`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and
+issuebot merges into the environment of every turn. The recipe in the section above writes
+that file with `>`, truncating it every session, so the line has to come from the same
+`before_run` rather than be appended to the file by hand. One more line after that `printf`:
 
 ```bash
-printf 'export ARROWBOT_JS_HARNESS=1\n' >> "$PG/env"
+printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
 ```
 
 If the target repository needs no PostgreSQL, there is no recipe above to append to and
-`before_run` exists only for this, writing the same file from nothing:
+`before_run` exists only for this, writing the file from nothing — the directory is already
+there, since `.issuebot/` is what marks a workspace whose creation finished:
 
 ```yaml
 hooks:
   before_run: |
-    mkdir -p .issuebot
-    printf 'export ARROWBOT_JS_HARNESS=1\n' > .issuebot/env
+    printf 'ARROWBOT_JS_HARNESS=1\n' > .issuebot/env
 ```
-
-— and then the prompt line that step 3 of the section above describes names *that* path:
-"`. .issuebot/env` before running the tests". Without it the agent has no reason to source the
-file, and the export reaches nothing.
 
 `ARROWBOT_JS_HARNESS` is arrowbot's variable — its CI sets it so the harness *fails* rather
 than skips when `node` or jsdom is unavailable; use whatever the target repository calls its
-equivalent. It goes in the env file for the same reason the DSN does: the agent and the hooks
-run under a filtered environment (`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in
-`src/issuebot/agent/runner.py`), so a variable exported by `before_run` or set on the compose
-service never reaches `pytest`. Writing it into a file inside the workspace and sourcing it is
-what carries it across.
+equivalent. It goes in that file for the same reason the DSN does, and the section below says
+what else the file will and will not carry.
 
 `npm`'s cache and logs live under `$HOME/.npm`, inside the container's `issuebot` home, so they
 survive between sessions and are gone when the container is recreated. If a session reports
