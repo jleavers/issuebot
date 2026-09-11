@@ -29,7 +29,8 @@ uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
 uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
-                                     #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set)
+                                     #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
+                                     #    + node and npm when ISSUEBOT_NODE_VERSION is set)
 docker compose up                    # db + web (profile hub) + worker (profile worker), COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
@@ -54,10 +55,15 @@ the others. Leave it there.
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and, in the
 `docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
 under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
-before the Docker build, on every PR. That job builds the image twice (#62): the default one,
-which must carry no `initdb`, and a second with `POSTGRES_VERSION=18` in its own `type=gha`
-cache scope, which must have `initdb` on `PATH`, still run as `issuebot`, and survive the
-README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
+before the Docker build, on every PR. That job builds the image twice (#62, #64): the default
+one, which must carry no `initdb`, `node` or `npm`, and a second, `issuebot:ci-toolchain`, with
+both `POSTGRES_VERSION=18` and `NODE_VERSION=24` in its own `type=gha` cache scope (one build,
+not two: the checks are about what is on `PATH` and under which uid, not about the arguments
+interacting), which must answer `initdb --version`, `node --version` and `npm --version` on its
+own `PATH` and in a login shell, still run as `issuebot`, run one `npm ci` over a
+dependency-free fixture as `issuebot` with the registry pointed at a dead port (so the writable
+`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), and survive
+the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Dependabot covers uv, Docker and Actions weekly.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
