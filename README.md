@@ -136,7 +136,7 @@ ignored.
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
-| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each | none; `60000` |
+| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
@@ -417,7 +417,7 @@ hooks:
       "select 1 from pg_database where datname='arrowbot_test'" | grep -q 1 \
       || createdb -h "$PG/sock" arrowbot_test
     printf 'export ARROWBOT_DATABASE_URL=postgresql://issuebot@/arrowbot_test?host=%s\n' \
-      "$PG/sock" > "$PG/env"
+      "$PG/sock" > .issuebot/env
   after_run: |
     pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
   before_remove: |
@@ -430,15 +430,8 @@ whatever database it expects — in both the `createdb` line and the DSN. `initd
 `FATAL: database "arrowbot_test" does not exist`, and `.issuebot/pg/log` shows a perfectly
 healthy server. Drop the line only if the suite creates its own database.
 
-**3. Tell the agent the file exists.** Add one line to the prompt below the front matter:
-
-> A throwaway PostgreSQL for this workspace is running; `. .issuebot/pg/env` before running
-> the tests.
-
-That step is not decoration. The agent and the hooks run under a filtered environment —
-`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in `src/issuebot/agent/runner.py` — so a DSN set
-on the compose service or exported by `before_run` never reaches `pytest`. Writing it to a file
-inside the workspace and sourcing it is what carries it across.
+That is the whole recipe: there is no prompt to change and nothing for the agent to remember
+to source, because `.issuebot/env` is the seam described below.
 
 Why it is shaped this way:
 
@@ -558,6 +551,36 @@ what carries it across.
 survive between sessions and are gone when the container is recreated. If a session reports
 `node: command not found`, check it in a login shell, which is what the hooks get:
 `docker compose exec worker bash -lc 'command -v node'`.
+
+### `.issuebot/env`: what a hook hands the agent
+
+The agent and the hooks run under a filtered environment — `PASSTHROUGH_NAMES` and
+`PASSTHROUGH_PREFIXES` in `src/issuebot/agent/runner.py` — so a variable set on the compose
+service, or exported by `before_run`, does not reach `claude` or `pytest`: it dies with the
+shell that exported it. A hook that wants to hand something over writes it to `.issuebot/env`
+inside the workspace instead, and issuebot merges that file into the environment of every turn
+and of every hook after the one that wrote it:
+
+```bash
+printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
+```
+
+- **One `KEY=VALUE` per line.** A leading `export ` is accepted and stripped, blank lines and
+  `#` comments are skipped, and the value is everything after the first `=`, verbatim: no quote
+  stripping and no `$VAR` expansion, because a hook that wants either has a shell. Keys match
+  `[A-Za-z_][A-Za-z0-9_]*`.
+- **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
+  resumed after a retry still gets the file, and a hook may rewrite it between turns.
+- **Some names are protected**: the fixed entries (`GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`,
+  `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`), `GH_TOKEN`, `PATH` and `HOME`. A line naming
+  one of those is dropped with a warning naming the key, so a typo cannot take `gh` or `claude`
+  down in the middle of a run.
+- **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, or a line
+  that does not parse, is a warning and the turn runs. A warning about a line names its number
+  and nothing else, and the log records which keys were applied, never their values — the
+  usual contents are a DSN with a password in it.
+- `after_create` runs before a workspace can have the file, so it is the one hook that cannot
+  read it; it can of course write it.
 
 ### More than one repository
 
