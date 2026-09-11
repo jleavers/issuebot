@@ -40,6 +40,22 @@ FIXED_ENVIRONMENT: dict[str, str] = {
     "GH_PAGER": "cat",
     "DISABLE_AUTOUPDATER": "1",
 }
+# Hooks hand the agent variables by writing them here, inside the workspace: `agent_environment`
+# is an allow-list, so a DSN a `before_run` shell exports dies with that shell.
+WORKSPACE_ENV_PATH = (".issuebot", "env")
+# Enough for any plausible set of variables, and a bound on a hook that redirects a log here
+# by accident: the file is re-read for every turn and every hook.
+WORKSPACE_ENV_LIMIT = 64 * 1024
+# What the file may not take out from under a running turn. A hook writes it, but it lives in
+# the agent's own workspace, so the session can write it too -- which is why the line is drawn
+# at the tooling issuebot launches rather than at "a hook would not do that". `PATH`, `HOME`,
+# `GH_TOKEN` and the fixed entries keep `gh` and `claude` running; the prefixes are the ones
+# `agent_environment` passes through to configure `claude` itself, and the file's job is to add
+# what the target repository's tests need, not to re-point or re-credential the agent for its
+# next turn. Everything else the agent could already do from inside the workspace anyway.
+PROTECTED_ENV_NAMES: frozenset[str] = frozenset({"GH_TOKEN", "PATH", "HOME", *FIXED_ENVIRONMENT})
+PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_")
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MESSAGE_LIMIT = 500
 STDERR_TAIL_LIMIT = 64 * 1024
 _LOGGED_ARG_LENGTH = 120
@@ -67,6 +83,92 @@ def agent_environment(environ: Mapping[str, str], *, token: SecretStr | None) ->
     if token is not None:
         env["GH_TOKEN"] = token.get_secret_value()
     return env
+
+
+def parse_workspace_env(text: str) -> tuple[dict[str, str], list[str]]:
+    """Parse ``KEY=VALUE`` lines into a mapping and a list of complaints about the rest.
+
+    One assignment per line, an optional ``export `` prefix stripped, blank lines and ``#``
+    comments skipped. The line's own leading and trailing whitespace goes -- so a here-doc may
+    indent and a CRLF file parses -- and whatever is left after the first ``=`` is the value:
+    no quote stripping and no ``$VAR`` expansion, because a hook that wants either has a shell.
+    A complaint names the line number and nothing else -- the text before a missing ``=`` can be
+    most of a DSN, password included.
+    """
+    env: dict[str, str] = {}
+    warnings: list[str] = []
+    for number, raw in enumerate(text.split("\n"), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            warnings.append(f"line {number}: not KEY=VALUE")
+        elif not _ENV_KEY.fullmatch(key):
+            warnings.append(f"line {number}: not a variable name")
+        elif "\x00" in value:
+            # An environment cannot hold one, and `create_subprocess_exec` raises `ValueError`
+            # rather than `OSError` for it, which would escape the turn loop entirely.
+            warnings.append(f"line {number}: the value has a null byte in it")
+        else:
+            env[key] = value
+    return env, warnings
+
+
+def merge_workspace_env(
+    base: Mapping[str, str], extra: Mapping[str, str]
+) -> tuple[dict[str, str], list[str]]:
+    """Layer `extra` over `base`, refusing the names a turn needs to stay alive."""
+    merged = dict(base)
+    refused: list[str] = []
+    for key, value in extra.items():
+        if key in PROTECTED_ENV_NAMES or key.startswith(PROTECTED_ENV_PREFIXES):
+            refused.append(key)
+        else:
+            merged[key] = value
+    return merged, refused
+
+
+def read_workspace_env(workspace: Path) -> tuple[dict[str, str], list[str]]:
+    """Read ``<workspace>/.issuebot/env``. No file is the normal case and costs nothing."""
+    path = workspace.joinpath(*WORKSPACE_ENV_PATH)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return {}, []
+    except OSError as exc:
+        # A hook's problem, and the hook's own failure is what `before_run` already reports.
+        return {}, [f"cannot read {path}: {exc}"]
+    if len(text) <= WORKSPACE_ENV_LIMIT:
+        return parse_workspace_env(text)
+    # Cut at a line boundary, so the last variable kept is one a hook finished writing.
+    head, _, _ = text[:WORKSPACE_ENV_LIMIT].rpartition("\n")
+    env, warnings = parse_workspace_env(head)
+    return env, [f"longer than {WORKSPACE_ENV_LIMIT} characters: the rest was ignored", *warnings]
+
+
+def workspace_environment(
+    base: Mapping[str, str], workspace: Path
+) -> tuple[dict[str, str], list[str]]:
+    """`base` with the workspace's env file layered over it, plus the keys that took effect.
+
+    Everything it could not use is a warning, never a failure: the file is read fresh for every
+    turn and every hook, so a bad line must not be the thing that ends a run.
+    """
+    extra, warnings = read_workspace_env(workspace)
+    merged, refused = merge_workspace_env(base, extra)
+    log = get_logger(__name__)
+    for reason in warnings:
+        log.warning("workspace_env_ignored", workspace=str(workspace), reason=reason)
+    for key in refused:
+        log.warning("workspace_env_ignored", workspace=str(workspace), reason=f"{key} is protected")
+    applied = [key for key in extra if key not in refused]
+    if applied:
+        # The keys, never the values: one of them is usually a DSN with a password in it.
+        log.debug("workspace_env_applied", workspace=str(workspace), keys=applied)
+    return merged, applied
 
 
 def parse_claude_version(text: str | None) -> tuple[int, int, int] | None:
@@ -632,11 +734,15 @@ class ClaudeRunner:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
         argv = self.build_argv(session_id=session_id, resume=resume)
+        # Read every turn: a `before_run` that ran once still feeds a session resumed after a
+        # retry, and a hook is free to rewrite the file between turns.
+        env, workspace_env = workspace_environment(self.child_environment(), resolved)
         self._log.info(
             "claude_turn_started",
             turn_number=turn_number,
             argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
             workspace=str(resolved),
+            workspace_env_count=len(workspace_env),
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
         )
@@ -647,7 +753,7 @@ class ClaudeRunner:
                 process = await asyncio.create_subprocess_exec(
                     *argv,
                     cwd=resolved,
-                    env=self.child_environment(),
+                    env=env,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr_file,

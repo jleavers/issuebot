@@ -136,7 +136,7 @@ ignored.
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
-| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each | none; `60000` |
+| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
@@ -417,7 +417,7 @@ hooks:
       "select 1 from pg_database where datname='arrowbot_test'" | grep -q 1 \
       || createdb -h "$PG/sock" arrowbot_test
     printf 'export ARROWBOT_DATABASE_URL=postgresql://issuebot@/arrowbot_test?host=%s\n' \
-      "$PG/sock" > "$PG/env"
+      "$PG/sock" > .issuebot/env
   after_run: |
     pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
   before_remove: |
@@ -430,15 +430,8 @@ whatever database it expects — in both the `createdb` line and the DSN. `initd
 `FATAL: database "arrowbot_test" does not exist`, and `.issuebot/pg/log` shows a perfectly
 healthy server. Drop the line only if the suite creates its own database.
 
-**3. Tell the agent the file exists.** Add one line to the prompt below the front matter:
-
-> A throwaway PostgreSQL for this workspace is running; `. .issuebot/pg/env` before running
-> the tests.
-
-That step is not decoration. The agent and the hooks run under a filtered environment —
-`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in `src/issuebot/agent/runner.py` — so a DSN set
-on the compose service or exported by `before_run` never reaches `pytest`. Writing it to a file
-inside the workspace and sourcing it is what carries it across.
+That is the whole recipe: there is no prompt to change and nothing for the agent to remember
+to source, because `.issuebot/env` is the seam described below.
 
 Why it is shaped this way:
 
@@ -530,41 +523,80 @@ wherever the harness keeps its `package.json`, or drop it if that is the reposit
 
 **3. Make a missing runtime fail rather than skip.** Installing a runtime so the tests can run
 is pointless if they would still quietly skip, so give the agent the target repository's own
-"the harness must work" switch. It goes in the env file `before_run` writes. That file is
-truncated every session — the recipe in the section above ends with a `printf … > "$PG/env"` —
-so the line has to come from the same hook rather than be appended to the file by hand. One
-more line after that `printf`:
+"the harness must work" switch. It goes in
+[`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and
+issuebot merges into the environment of every turn. The recipe in the section above writes
+that file with `>`, truncating it every session, so the line has to come from the same
+`before_run` rather than be appended to the file by hand. One more line after that `printf`:
 
 ```bash
-printf 'export ARROWBOT_JS_HARNESS=1\n' >> "$PG/env"
+printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
 ```
 
 If the target repository needs no PostgreSQL, there is no recipe above to append to and
-`before_run` exists only for this, writing the same file from nothing:
+`before_run` exists only for this, writing the file from nothing — the directory is already
+there, since `.issuebot/` is what marks a workspace whose creation finished:
 
 ```yaml
 hooks:
   before_run: |
-    mkdir -p .issuebot
-    printf 'export ARROWBOT_JS_HARNESS=1\n' > .issuebot/env
+    printf 'ARROWBOT_JS_HARNESS=1\n' > .issuebot/env
 ```
-
-— and then the prompt line that step 3 of the section above describes names *that* path:
-"`. .issuebot/env` before running the tests". Without it the agent has no reason to source the
-file, and the export reaches nothing.
 
 `ARROWBOT_JS_HARNESS` is arrowbot's variable — its CI sets it so the harness *fails* rather
 than skips when `node` or jsdom is unavailable; use whatever the target repository calls its
-equivalent. It goes in the env file for the same reason the DSN does: the agent and the hooks
-run under a filtered environment (`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in
-`src/issuebot/agent/runner.py`), so a variable exported by `before_run` or set on the compose
-service never reaches `pytest`. Writing it into a file inside the workspace and sourcing it is
-what carries it across.
+equivalent. It goes in that file for the same reason the DSN does, and the section below says
+what else the file will and will not carry.
 
 `npm`'s cache and logs live under `$HOME/.npm`, inside the container's `issuebot` home, so they
 survive between sessions and are gone when the container is recreated. If a session reports
 `node: command not found`, check it in a login shell, which is what the hooks get:
 `docker compose exec worker bash -lc 'command -v node'`.
+
+### `.issuebot/env`: what a hook hands the agent
+
+The agent and the hooks run under a filtered environment — `PASSTHROUGH_NAMES` and
+`PASSTHROUGH_PREFIXES` in `src/issuebot/agent/runner.py` — so a variable set on the compose
+service, or exported by `before_run`, does not reach `claude` or `pytest`: it dies with the
+shell that exported it. A hook that wants to hand something over writes it to `.issuebot/env`
+inside the workspace instead, and issuebot merges that file into the environment of every turn
+and of every hook after the one that wrote it:
+
+```bash
+printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
+```
+
+One hook owns the file: the PostgreSQL recipe above writes it with `>`, which is what makes
+`before_run` idempotent on a workspace a retry reuses, so a second variable belongs in that
+same `before_run` — appended with `>>` after the recipe's line, as above — rather than in a
+hook that would truncate it again or append a duplicate per session.
+
+- **One `KEY=VALUE` per line.** A leading `export ` is accepted and stripped, blank lines and
+  `#` comments are skipped, and the value is everything after the first `=`: no quote stripping
+  and no `$VAR` expansion, because a hook that wants either has a shell. Only the surrounding
+  whitespace of the line goes, so an indented here-doc and a CRLF file both parse. Keys match
+  `[A-Za-z_][A-Za-z0-9_]*`.
+- **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
+  resumed after a retry still gets the file, and a hook may rewrite it between turns.
+- **Some names are protected**, and a line naming one is dropped with a warning naming the key.
+  `PATH`, `HOME`, `GH_TOKEN` and the fixed entries (`GH_PROMPT_DISABLED`,
+  `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`) keep `gh` and `claude`
+  running, so a typo cannot take either down in the middle of a run. So is anything starting
+  `ANTHROPIC_` or `CLAUDE_`: the file lives in the agent's own workspace, so the *session* can
+  write it as easily as a hook can, and it must not be able to re-point or re-credential the
+  `claude` issuebot launches for the next turn. The file's job is to add what the target
+  repository's tests need.
+- **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
+  does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
+  the turn runs. A warning about a line names its number and nothing else, and the log records
+  which keys were applied, never their values — the usual contents are a DSN with a password
+  in it.
+- **It is a workspace file, so it outlives the session.** A retry or a rework session on the
+  same workspace finds what the last one left, which is why the recipe's `before_run` writes it
+  with `>` rather than appending to it.
+- `after_create` is the one hook that cannot use it, in either direction: it runs before
+  `.issuebot/` exists, because that directory's presence is what marks a workspace whose
+  creation finished. Write the file from `before_run`.
 
 ### More than one repository
 

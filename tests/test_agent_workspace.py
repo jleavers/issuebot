@@ -289,6 +289,29 @@ async def test_hook_runs_in_workspace_with_agent_environment(
 
 
 @posix
+async def test_hook_sees_the_workspace_env_file(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    # `before_run` writes the DSN; `after_run` and `before_remove` want it back.
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={
+            "before_run": "printf 'export DSN=postgresql://issuebot@/db\\nPATH=/hijacked\\n'"
+            " > .issuebot/env",
+            "after_run": "echo ${DSN:-unset}; echo $PATH",
+        },
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    before = await manager.run_hook("before_run", ws.path)
+    assert before is not None and before.ok
+    after = await manager.run_hook("after_run", ws.path)
+    assert after is not None and after.ok
+    seen_dsn, seen_path = after.stdout_tail.splitlines()
+    assert seen_dsn == "postgresql://issuebot@/db"
+    assert seen_path != "/hijacked"
+
+
+@posix
 async def test_unconfigured_hook_returns_none(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
