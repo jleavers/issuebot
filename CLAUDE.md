@@ -65,7 +65,11 @@ dependency-free fixture as `issuebot` with the registry pointed at a dead port (
 `$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), and survive
 the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
-session. Dependabot covers uv, Docker and Actions weekly.
+session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `bash -lc` with
+`LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base
+image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
+catches that rather than the variable that happens to produce it.
+Dependabot covers uv, Docker and Actions weekly.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
 Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
 new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
