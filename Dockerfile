@@ -80,6 +80,50 @@ RUN if [ -n "${POSTGRES_VERSION}" ]; then \
    && /opt/postgresql/bin/initdb --version; \
     fi
 
+# Optional Node runtime, for a target repository whose tests execute its own client-side
+# JavaScript (#64). Empty -- the default -- installs nothing, so the image keeps exactly the
+# contents it has without the argument. The official build from nodejs.org rather than an apt
+# repository: this needs one major, not a distribution's idea of one, and the tarball carries
+# npm with it. NODE_VERSION is a major, so the build resolves it to whatever patch nodejs.org
+# holds -- the same shape of knob as POSTGRES_VERSION, and the same reason: an operator pins
+# the line their target repository's CI runs on, not a patch they would then have to chase.
+# .tar.gz rather than .tar.xz, so nothing here depends on whether the slim image carries
+# xz-utils. The checksum comes from the same SHASUMS256.txt the filename is read out of, and
+# --ignore-missing checks the one file that was downloaded against it.
+# /opt/node is a stable name for the versioned directory, exactly as /opt/postgresql is, so the
+# ENV below can put it on PATH without expanding NODE_VERSION inside the ${VAR:+...} that keeps
+# it off the default image's PATH; and the profile.d line is there for the same reason as the
+# PostgreSQL one, since hooks run under `bash -lc` and Debian's /etc/profile overwrites PATH
+# for a login shell.
+# node --version and npm --version are asserted here for the reason initdb --version and
+# claude --version are: a moved download or a renamed archive has to fail the build, not the
+# first session that runs `npm ci`.
+# The pin moves by hand. A tarball fetched by URL is invisible to Dependabot, the same way
+# MIN_CLAUDE_VERSION is; nodejs.org's own release schedule is the thing to watch.
+ARG NODE_VERSION=""
+RUN if [ -n "${NODE_VERSION}" ]; then \
+      arch="$(dpkg --print-architecture)" \
+   && case "${arch}" in \
+        amd64) node_arch=x64 ;; \
+        arm64) node_arch=arm64 ;; \
+        *) echo "no nodejs.org build for ${arch}" >&2; exit 1 ;; \
+      esac \
+   && dist="https://nodejs.org/dist/latest-v${NODE_VERSION}.x" \
+   && cd /tmp \
+   && curl -fsSL "${dist}/SHASUMS256.txt" -o SHASUMS256.txt \
+   && tarball="$(grep -E "node-v[0-9.]+-linux-${node_arch}\.tar\.gz$" SHASUMS256.txt | awk '{print $2}')" \
+   && test -n "${tarball}" \
+   && curl -fsSLO "${dist}/${tarball}" \
+   && sha256sum -c --ignore-missing SHASUMS256.txt \
+   && tar -xzf "${tarball}" -C /opt \
+   && rm -f "${tarball}" SHASUMS256.txt \
+   && ln -s "/opt/$(basename "${tarball}" .tar.gz)" /opt/node \
+   && printf 'PATH="/opt/node/bin:$PATH"\n' > /etc/profile.d/issuebot-node.sh \
+   && chmod 0644 /etc/profile.d/issuebot-node.sh \
+   && /opt/node/bin/node --version \
+   && PATH="/opt/node/bin:${PATH}" /opt/node/bin/npm --version; \
+    fi
+
 RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
  && install -d -o issuebot -g issuebot /workspaces /home/issuebot/.claude /app
 
@@ -88,10 +132,11 @@ COPY --from=builder --chown=issuebot:issuebot /app /app
 USER issuebot
 # initdb, pg_ctl and postgres live in the versioned directory alone -- /usr/bin holds only
 # wrappers such as pg_ctlcluster, which need root -- so the hooks that run a per-workspace
-# cluster need it on PATH. Added only when the argument was set, so the default image's PATH is
+# cluster need it on PATH; node and npm live in the unpacked tarball and are on no PATH at all
+# without this. Each is added only when its own argument was set, so the default image's PATH is
 # the one it has always been.
 ENV HOME=/home/issuebot \
-    PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${PATH}"
+    PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
 # The flag assertion is the point of pinning: a release that drops --permission-prompts
 # breaks an unattended worker at runtime, so fail the build instead.

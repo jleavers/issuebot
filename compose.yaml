@@ -68,6 +68,10 @@ services:
         # the same context without it: the dashboard needs no server, and a hub that sets the
         # variable would otherwise carry the packages twice.
         POSTGRES_VERSION: "${ISSUEBOT_POSTGRES_VERSION:-}"
+        # Likewise for a JavaScript runtime, when the target repository's tests execute its
+        # own client-side code (README, "Node for the target repository's tests"). Empty bakes
+        # nothing; `docker compose build worker` to pick a change up.
+        NODE_VERSION: "${ISSUEBOT_NODE_VERSION:-}"
     profiles: ["worker"]
     networks: [issuebot]
     # The worker applies pending database migrations when it starts (issuebot migrate is the

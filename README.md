@@ -83,11 +83,13 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
    newer on `PATH`.
 4. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
-   install the tools in `hooks.after_create`, or build an image `FROM` it and add them. One
-   thing a hook cannot install is a database server, because the container runs as uid 1000
-   with no `sudo` and no Docker — so if the target repository's tests need one, set
-   `ISSUEBOT_POSTGRES_VERSION` in `.env` before building (see "A PostgreSQL server for the
-   target repository's tests" below).
+   install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
+   things a hook cannot install are a database server and a language runtime, because the
+   container runs as uid 1000 with no `sudo` and no Docker — so if the target repository's
+   tests need a PostgreSQL server, set `ISSUEBOT_POSTGRES_VERSION` in `.env` before building
+   (see "A PostgreSQL server for the target repository's tests" below), and if they execute
+   the repository's own client-side JavaScript, set `ISSUEBOT_NODE_VERSION` too (see "Node for
+   the target repository's tests").
 
 The commands below are Bash. On Windows the Compose route works as-is under Docker Desktop;
 for the host route use WSL.
@@ -468,6 +470,72 @@ If a session still reports no server, the postmaster's own log says why:
 `docker compose exec worker bash -lc 'cat /workspaces/<repo>-<number>/.issuebot/pg/log'`. Drop
 the `-lc` and the hooks' `PATH` goes with it, which is a quick way to reproduce a
 `command not found`.
+
+### Node for the target repository's tests
+
+The same problem in a different shape: a repository whose tests *execute* its client-side
+JavaScript — in jsdom, over the markup the server actually rendered — has nothing to execute it
+with. Those tests usually skip rather than fail when `node` is missing, which is the worse
+outcome: every pull request reaches review with the JavaScript unverified, and the skip count
+is the only trace. A hook cannot install a runtime for the same reasons it cannot install a
+server, so `node` and `npm` go into the image the same way, off by default.
+
+**1. Build the worker image with a runtime.** Set `ISSUEBOT_NODE_VERSION` in this checkout's
+`.env` — `.env.example` carries the key, empty — and rebuild:
+
+```bash
+docker compose build worker
+docker compose up -d worker
+```
+
+Pick the LTS line the target repository's own CI runs on, rather than treating any number here
+as permanent: a repository whose workflow just uses the GitHub runner's default node is on
+whatever that runner ships, and that moves. Node 24 is the active LTS at the time of writing.
+The major resolves at build time to the newest patch on that line — the build reads
+`https://nodejs.org/dist/latest-v<major>.x/SHASUMS256.txt`, picks the Linux tarball for the
+image's architecture and verifies its checksum against that same list — so `docker compose run
+--rm --entrypoint node worker --version` says which one you got. As with the server, only the
+`worker` service takes the argument, empty installs nothing, and changing it needs
+`docker compose build worker` rather than a restart. The pin moves by hand: a tarball fetched
+by URL is invisible to Dependabot.
+
+**2. Install the target repository's JavaScript dependencies in `after_create`.** That is the
+hook where a target repository's dependencies get installed, and it runs once per workspace.
+In that checkout's `configs/WORKFLOW.local.md`:
+
+```yaml
+hooks:
+  after_create: |
+    if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
+    npm ci --prefix tests/web/js
+```
+
+The first line is not decoration either: an overlay hook *replaces* the base one rather than
+appending to it, and the shipped `after_create` is that `git fetch --unshallow`, which the
+self-review's `git diff origin/HEAD...HEAD` needs. Point `--prefix` at wherever the harness
+keeps its `package.json`, or drop it if that is the repository root.
+
+**3. Make a missing runtime fail rather than skip.** Installing a runtime so the tests can run
+is pointless if they would still quietly skip, so add the target repository's own "the harness
+must work" switch to the env file the `before_run` recipe above writes:
+
+```
+export ARROWBOT_JS_HARNESS=1
+```
+
+`ARROWBOT_JS_HARNESS` is arrowbot's variable — its CI sets it so the harness *fails* rather
+than skips when `node` or jsdom is unavailable; use whatever the target repository calls its
+equivalent. It goes in the env file for the same reason the DSN does: the agent and the hooks
+run under a filtered environment (`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in
+`src/issuebot/agent/runner.py`), so a variable exported by `before_run` or set on the compose
+service never reaches `pytest`. Writing it into a file inside the workspace and sourcing it is
+what carries it across — and a repository that needs no PostgreSQL can write an env file
+holding nothing but this one line, sourced the same way.
+
+`npm`'s cache and logs live under `$HOME/.npm`, inside the container's `issuebot` home, so they
+survive between sessions and are gone when the container is recreated. If a session reports
+`node: command not found`, check it in a login shell, which is what the hooks get:
+`docker compose exec worker bash -lc 'command -v node'`.
 
 ### More than one repository
 

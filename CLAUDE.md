@@ -29,7 +29,8 @@ uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
 uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
-                                     #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set)
+                                     #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
+                                     #    + node and npm when ISSUEBOT_NODE_VERSION is set)
 docker compose up                    # db + web (profile hub) + worker (profile worker), COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
