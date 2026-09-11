@@ -1,6 +1,7 @@
 """Tests for the claude -p runner."""
 
 import asyncio
+import io
 import json
 import os
 import signal
@@ -12,6 +13,7 @@ import pytest
 from pydantic import SecretStr
 
 from issuebot.agent.runner import (
+    FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
     ClaudeAuth,
     ClaudeRunner,
@@ -24,10 +26,14 @@ from issuebot.agent.runner import (
     claude_auth_status,
     describe_claude_auth,
     is_auth_failure,
+    merge_workspace_env,
     parse_claude_version,
+    parse_workspace_env,
     settings_for_labels,
+    workspace_environment,
 )
 from issuebot.config import Settings
+from issuebot.log import configure_logging
 
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "claude"
 FIXTURES = Path(__file__).parent / "fixtures" / "claude"
@@ -183,6 +189,96 @@ def test_child_environment_uses_the_settings_token(tmp_path: Path) -> None:
     )
     runner = ClaudeRunner(cfg, environ={"PATH": "/usr/bin", "GH_TOKEN": "from-parent"})
     assert runner.child_environment()["GH_TOKEN"] == "from-settings"
+
+
+def test_parse_workspace_env_accepts_the_shapes_a_hook_writes() -> None:
+    text = (
+        "# a comment\n"
+        "\n"
+        "export ARROWBOT_DATABASE_URL=postgresql://issuebot@/db?host=/tmp/s\r\n"
+        "  ARROWBOT_JS_HARNESS=1\n"
+        "EQUALS=a=b=c\n"
+        "EMPTY=\n"
+        "  export SPACED=  padded\n"
+    )
+    env, warnings = parse_workspace_env(text)
+    assert env == {
+        "ARROWBOT_DATABASE_URL": "postgresql://issuebot@/db?host=/tmp/s",
+        "ARROWBOT_JS_HARNESS": "1",
+        "EQUALS": "a=b=c",
+        "EMPTY": "",
+        "SPACED": "  padded",
+    }
+    assert warnings == []
+
+
+def test_parse_workspace_env_warns_by_line_number_only() -> None:
+    # The text before a missing `=` can be most of a DSN, so a complaint never repeats it.
+    env, warnings = parse_workspace_env(
+        "postgresql://user:hunter2@host\nOK=1\nlower case=2\n9LIVES=3\n"
+    )
+    assert env == {"OK": "1"}
+    assert warnings == [
+        "line 1: not KEY=VALUE",
+        "line 3: not a variable name",
+        "line 4: not a variable name",
+    ]
+    assert "hunter2" not in " ".join(warnings)
+
+
+def test_parse_workspace_env_of_nothing_is_nothing() -> None:
+    assert parse_workspace_env("") == ({}, [])
+
+
+@pytest.mark.parametrize("key", ["PATH", "HOME", "GH_TOKEN", "NO_COLOR", "GH_PAGER"])
+def test_merge_workspace_env_refuses_the_protected_names(key: str) -> None:
+    base = {"PATH": "/usr/bin", "HOME": "/home/x", "GH_TOKEN": "sekret", **FIXED_ENVIRONMENT}
+    merged, refused = merge_workspace_env(base, {key: "hijacked", "FOO": "bar"})
+    assert refused == [key]
+    assert merged[key] == base[key]
+    assert merged["FOO"] == "bar"
+
+
+def test_merge_workspace_env_overrides_an_unprotected_name() -> None:
+    merged, refused = merge_workspace_env({"LANG": "C", "TZ": "UTC"}, {"LANG": "en_GB.UTF-8"})
+    assert (merged["LANG"], merged["TZ"], refused) == ("en_GB.UTF-8", "UTC", [])
+
+
+def test_workspace_environment_without_a_file_changes_nothing(tmp_path: Path) -> None:
+    base = agent_environment({"PATH": "/usr/bin"}, token=None)
+    assert workspace_environment(base, tmp_path) == (base, [])
+
+
+def test_workspace_environment_reads_the_file(tmp_path: Path) -> None:
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text("export FOO=bar\nPATH=/hijacked\n")
+    merged, applied = workspace_environment({"PATH": "/usr/bin"}, tmp_path)
+    assert merged == {"PATH": "/usr/bin", "FOO": "bar"}
+    assert applied == ["FOO"]
+
+
+def test_workspace_environment_survives_an_unreadable_file(tmp_path: Path) -> None:
+    # A directory where the file should be: a hook's problem, not a failed turn.
+    (tmp_path / ".issuebot" / "env").mkdir(parents=True)
+    assert workspace_environment({"PATH": "/usr/bin"}, tmp_path) == ({"PATH": "/usr/bin"}, [])
+
+
+def test_workspace_environment_logs_what_it_used_and_what_it_ignored(tmp_path: Path) -> None:
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text("FOO=bar\nGH_TOKEN=stolen\nnonsense\n")
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        workspace_environment({"GH_TOKEN": "sekret"}, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == ["line 3: not KEY=VALUE", "GH_TOKEN is protected"]
+    applied = [r for r in records if r["event"] == "workspace_env_applied"]
+    assert [r["keys"] for r in applied] == [["FOO"]]
+    # The keys, never the values.
+    assert "bar" not in stream.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -632,6 +728,83 @@ async def assert_gone(pid: int) -> None:
             return
         await asyncio.sleep(0.1)
     raise AssertionError(f"process {pid} is still alive")
+
+
+@posix
+async def test_run_turn_hands_the_agent_the_workspace_env_file(
+    workspace: Path, tmp_path: Path
+) -> None:
+    (workspace / ".issuebot").mkdir()
+    (workspace / ".issuebot" / "env").write_text(
+        "export ARROWBOT_DATABASE_URL=postgresql://issuebot@/db\n"
+        "ARROWBOT_JS_HARNESS=1\n"
+        # The two a typo must not take out from under a running turn.
+        "PATH=/hijacked\n"
+        "GH_TOKEN=stolen\n"
+    )
+    record = tmp_path / "record.json"
+    runner = runner_for(
+        workspace,
+        extra_env={
+            "CLAUDE_FAKE_RECORD": str(record),
+            "CLAUDE_FAKE_RECORD_ENV": "ARROWBOT_DATABASE_URL,ARROWBOT_JS_HARNESS,PATH",
+        },
+        token="sekret",
+    )
+    turn = await run(runner, workspace)
+    assert turn.ok
+    recorded = json.loads(record.read_text())["env"]
+    assert recorded["ARROWBOT_DATABASE_URL"] == "postgresql://issuebot@/db"
+    assert recorded["ARROWBOT_JS_HARNESS"] == "1"
+    assert recorded["PATH"] == os.environ["PATH"]
+    assert recorded["GH_TOKEN"] == "sekret"
+
+
+@posix
+async def test_run_turn_without_a_workspace_env_file_is_unchanged(
+    workspace: Path, tmp_path: Path
+) -> None:
+    record = tmp_path / "record.json"
+    runner = runner_for(
+        workspace,
+        extra_env={"CLAUDE_FAKE_RECORD": str(record), "CLAUDE_FAKE_RECORD_ENV": "FOO"},
+    )
+    turn = await run(runner, workspace)
+    assert turn.ok
+    assert json.loads(record.read_text())["env"]["FOO"] is None
+
+
+@posix
+async def test_run_turn_runs_with_an_unreadable_workspace_env_file(
+    workspace: Path, tmp_path: Path
+) -> None:
+    (workspace / ".issuebot" / "env").mkdir(parents=True)
+    record = tmp_path / "record.json"
+    runner = runner_for(workspace, extra_env={"CLAUDE_FAKE_RECORD": str(record)})
+    turn = await run(runner, workspace)
+    assert turn.ok
+    assert turn.error_category is None
+
+
+@posix
+async def test_run_turn_rereads_the_workspace_env_file_every_turn(
+    workspace: Path, tmp_path: Path
+) -> None:
+    # A hook may rewrite it between turns, and a session resumed after a retry never reruns
+    # `before_run`, so the file is read again rather than cached from the first turn.
+    env_file = workspace / ".issuebot" / "env"
+    env_file.parent.mkdir()
+    env_file.write_text("FOO=first\n")
+    record = tmp_path / "record.json"
+    runner = runner_for(
+        workspace,
+        extra_env={"CLAUDE_FAKE_RECORD": str(record), "CLAUDE_FAKE_RECORD_ENV": "FOO"},
+    )
+    await run(runner, workspace, turn_number=1)
+    assert json.loads(record.read_text())["env"]["FOO"] == "first"
+    env_file.write_text("FOO=second\n")
+    await run(runner, workspace, turn_number=2, resume=True)
+    assert json.loads(record.read_text())["env"]["FOO"] == "second"
 
 
 @posix

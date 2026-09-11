@@ -22,9 +22,13 @@ from issuebot.agent.runner import (
     classify_result,
     claude_auth_status,
     describe_claude_auth,
+    merge_workspace_env,
     parse_claude_version,
+    parse_workspace_env,
+    read_workspace_env,
     settings_for_labels,
     settings_with_model,
+    workspace_environment,
 )
 from issuebot.agent.session import RunResult, StopReason, new_run_id, run_session
 from issuebot.agent.workspace import (
@@ -64,13 +68,17 @@ __all__ = [
     "claude_auth_status",
     "describe_claude_auth",
     "issue_variables",
+    "merge_workspace_env",
     "new_run_id",
     "outcome_for",
     "parse_claude_version",
+    "parse_workspace_env",
+    "read_workspace_env",
     "run_log_dir",
     "run_session",
     "session_path",
     "settings_for_labels",
     "settings_with_model",
+    "workspace_environment",
     "workspace_key",
 ]

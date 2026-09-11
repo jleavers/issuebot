@@ -3,7 +3,9 @@
 
 CLAUDE_FAKE_SCENARIO selects the behaviour (success, error_result, budget, long_line,
 crash_after_init, logged_out, no_init, silent, slow, stubborn). CLAUDE_FAKE_RECORD names a file that
-receives argv, stdin, cwd and selected environment as JSON. CLAUDE_FAKE_DELAY_MS sleeps
+receives argv, stdin, cwd and selected environment as JSON; CLAUDE_FAKE_RECORD_ENV adds
+comma-separated names to the recorded selection, which is how a test asks what the workspace's
+.issuebot/env handed over. CLAUDE_FAKE_DELAY_MS sleeps
 between replayed lines. CLAUDE_FAKE_PIDFILE receives the pid. The names carry the CLAUDE_
 prefix because only that prefix passes through the runner's environment filter.
 """
@@ -48,13 +50,15 @@ if pidfile:
     Path(pidfile).write_text(str(os.getpid()))
 record = os.environ.get("CLAUDE_FAKE_RECORD")
 if record:
+    extra = os.environ.get("CLAUDE_FAKE_RECORD_ENV", "")
+    names = (*RECORDED_ENV, *(name for name in extra.split(",") if name))
     Path(record).write_text(
         json.dumps(
             {
                 "argv": argv,
                 "stdin": prompt,
                 "cwd": os.getcwd(),
-                "env": {key: os.environ.get(key) for key in RECORDED_ENV},
+                "env": {key: os.environ.get(key) for key in names},
             }
         )
     )

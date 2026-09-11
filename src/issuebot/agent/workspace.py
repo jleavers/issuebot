@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from issuebot.agent.errors import AgentError
-from issuebot.agent.runner import agent_environment
+from issuebot.agent.runner import agent_environment, workspace_environment
 from issuebot.config import Settings
 from issuebot.events.types import RunOutcome
 from issuebot.github import GhRunner, GhRunnerLike, GitHubError, Issue
@@ -198,13 +198,17 @@ class WorkspaceManager:
     async def _run_script(self, name: str, script: str, workspace: Path) -> HookResult:
         timeout_s = self._settings.hooks.timeout_ms / 1000
         started = time.monotonic()
+        # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
+        # want the same DSN. `after_create` runs before any file can exist, which is fine.
+        base = agent_environment(self._environ, token=self._settings.github.token)
+        env, _ = workspace_environment(base, workspace)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
             process = await asyncio.create_subprocess_exec(
                 *self.hook_shell,
                 script,
                 cwd=workspace,
-                env=agent_environment(self._environ, token=self._settings.github.token),
+                env=env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
