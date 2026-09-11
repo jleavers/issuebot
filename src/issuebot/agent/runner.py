@@ -80,10 +80,11 @@ def parse_workspace_env(text: str) -> tuple[dict[str, str], list[str]]:
     """Parse ``KEY=VALUE`` lines into a mapping and a list of complaints about the rest.
 
     One assignment per line, an optional ``export `` prefix stripped, blank lines and ``#``
-    comments skipped. The value is everything after the first ``=``, verbatim: no quote
-    stripping and no ``$VAR`` expansion, because a hook that wants either has a shell. A
-    complaint names the line number and nothing else -- the text before a missing ``=`` can
-    be most of a DSN, password included.
+    comments skipped. The value is everything after the first ``=``: no quote stripping and no
+    ``$VAR`` expansion, because a hook that wants either has a shell. Only the surrounding
+    whitespace of the line goes, so a here-doc may indent and a CRLF file parses. A complaint
+    names the line number and nothing else -- the text before a missing ``=`` can be most of a
+    DSN, password included.
     """
     env: dict[str, str] = {}
     warnings: list[str] = []

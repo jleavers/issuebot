@@ -122,7 +122,7 @@ floor, not the shipped version, and moves by hand.
   --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
   `.issuebot/runs/<run_id>/`); `workspace_environment` layers the workspace's
-  `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export ` stripped) over
+  `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export ` stripped, the value everything after the first `=`) over
   `agent_environment`'s allow-list for every turn and every hook after the one that wrote it,
   which is how a `before_run` DSN reaches `pytest` at all, refusing `FIXED_ENVIRONMENT`,
   `GH_TOKEN`, `PATH` and `HOME` so a typo cannot take `gh` down mid-run and warning rather

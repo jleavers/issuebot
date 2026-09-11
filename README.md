@@ -565,9 +565,14 @@ and of every hook after the one that wrote it:
 printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
 ```
 
+One hook owns the file: the PostgreSQL recipe above writes it with `>`, which is what makes
+`before_run` idempotent on a workspace a retry reuses, so a second variable belongs in that
+same hook — `>>` after it, as above — rather than in a hook that would truncate it again.
+
 - **One `KEY=VALUE` per line.** A leading `export ` is accepted and stripped, blank lines and
-  `#` comments are skipped, and the value is everything after the first `=`, verbatim: no quote
-  stripping and no `$VAR` expansion, because a hook that wants either has a shell. Keys match
+  `#` comments are skipped, and the value is everything after the first `=`: no quote stripping
+  and no `$VAR` expansion, because a hook that wants either has a shell. Only the surrounding
+  whitespace of the line goes, so an indented here-doc and a CRLF file both parse. Keys match
   `[A-Za-z_][A-Za-z0-9_]*`.
 - **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
   resumed after a retry still gets the file, and a hook may rewrite it between turns.
