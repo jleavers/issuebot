@@ -457,6 +457,13 @@ Why it is shaped this way:
   nobody else is in.
 - **`initdb` refuses to run as root**, and the container runs as uid 1000, so that is one
   problem the image does not have.
+- **`--encoding=UTF8 --locale=C.UTF-8`, even though the image already sets `LANG=C.UTF-8`.**
+  Told neither, `initdb` takes the cluster's encoding from the locale, and on a `C` locale that
+  is `SQL_ASCII` -- which psycopg then reads back as bytes rather than `str`, so a suite fails
+  in teardown rather than anywhere near the cause (#66). The image sets the locale so that a
+  cluster a session starts on its own lands right too; the flags are here as well because a
+  cluster's encoding is fixed at `initdb` and cannot be corrected afterwards, so the recipe
+  should not depend on the environment being what it ought to be.
 - **Three hooks, not two.** `before_run` runs once per session and starts the cluster
   idempotently (`pg_ctl status || pg_ctl start`), so a retry or a rework session on the same
   workspace reuses it rather than paying for `initdb` again; `after_run` stops it at the end of
