@@ -73,3 +73,71 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker run --rm issuebot:ci --version
+      - name: the default build bakes in no PostgreSQL server
+        run: |
+          if docker run --rm --entrypoint sh issuebot:ci -c 'command -v initdb'; then
+            echo "POSTGRES_VERSION defaults to empty; the default image must not carry a server" >&2
+            exit 1
+          fi
+      # The opt-in server (#62) is only ever built with the build argument set, so nothing else
+      # in CI would notice the PGDG stanza rotting. Its own cache scope: writing mode=max to the
+      # default one would replace the cache the build above depends on.
+      - name: build with POSTGRES_VERSION=18
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: issuebot:ci-pg
+          build-args: |
+            POSTGRES_VERSION=18
+          cache-from: |
+            type=gha
+            type=gha,scope=pg
+          cache-to: type=gha,mode=max,scope=pg
+      - name: the opt-in build has initdb on PATH and still runs as issuebot
+        run: |
+          docker run --rm --entrypoint initdb issuebot:ci-pg --version
+          test "$(docker run --rm --entrypoint id issuebot:ci-pg -un)" = issuebot
+      # initdb --version prints a string constant, so on its own it proves almost nothing. The
+      # hooks the README tells an operator to paste are pulled straight out of README.md and
+      # run in the image inside a login shell, as WorkspaceManager's `bash -lc` runs them --
+      # which is also the only check that a login shell keeps the PATH /etc/profile resets.
+      # after_run and before_remove both end in `|| true`, so running them proves only that
+      # they parse; the postmaster has to be gone between the two for the step to mean
+      # anything. An `if`, not `! pg_ctl ...`: a pipeline led by `!` is exempt from errexit.
+      - name: the README's cluster recipe runs in the image
+        run: |
+          mkdir -p /tmp/hooks
+          python3 - <<'PY'
+          import pathlib, re
+          block = re.search(r"```yaml\nhooks:\n(.*?)```",
+                            pathlib.Path("README.md").read_text(), re.S).group(1)
+          hooks, name = {}, None
+          for line in block.splitlines():
+              header = re.fullmatch(r"  (\w+): \|", line)
+              if header:
+                  name = header.group(1); hooks[name] = []
+              elif name and line.startswith("    "):
+                  hooks[name].append(line[4:])
+              elif line.strip():
+                  name = None
+          for key, body in hooks.items():
+              pathlib.Path(f"/tmp/hooks/{key}.sh").write_text("\n".join(body) + "\n")
+          assert set(hooks) == {"before_run", "after_run", "before_remove"}, sorted(hooks)
+          PY
+          chmod a+rX /tmp/hooks /tmp/hooks/*.sh
+          docker run --rm -v /tmp/hooks:/hooks:ro --entrypoint bash issuebot:ci-pg -lc '
+            set -eu
+            cd "$(mktemp -d)"
+            bash /hooks/before_run.sh
+            bash /hooks/before_run.sh
+            . .issuebot/pg/env
+            test "$(psql "$ARROWBOT_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "select 1")" = 1
+            bash /hooks/after_run.sh
+            if pg_ctl -D .issuebot/pg/data status >/dev/null 2>&1; then
+              echo "after_run left the postmaster running" >&2
+              exit 1
+            fi
+            bash /hooks/before_remove.sh
+          '

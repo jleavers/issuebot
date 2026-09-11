@@ -29,6 +29,7 @@ uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
 uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
+                                     #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set)
 docker compose up                    # db + web (profile hub) + worker (profile worker), COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
 ```
@@ -53,7 +54,12 @@ the others. Leave it there.
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and, in the
 `docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
 under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
-before the Docker build, on every PR. Dependabot covers uv, Docker and Actions weekly.
+before the Docker build, on every PR. That job builds the image twice (#62): the default one,
+which must carry no `initdb`, and a second with `POSTGRES_VERSION=18` in its own `type=gha`
+cache scope, which must have `initdb` on `PATH`, still run as `issuebot`, and survive the
+README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
+inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
+session. Dependabot covers uv, Docker and Actions weekly.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
 Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
 new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
