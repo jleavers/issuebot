@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
+    WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
     RateLimitWindow,
@@ -29,6 +30,7 @@ from issuebot.agent.runner import (
     merge_workspace_env,
     parse_claude_version,
     parse_workspace_env,
+    read_workspace_env,
     settings_for_labels,
     workspace_environment,
 )
@@ -230,6 +232,14 @@ def test_parse_workspace_env_of_nothing_is_nothing() -> None:
     assert parse_workspace_env("") == ({}, [])
 
 
+def test_parse_workspace_env_refuses_a_null_byte() -> None:
+    # An environment cannot hold one, and `create_subprocess_exec` raises `ValueError` for it,
+    # which is not an `OSError` and would escape the turn loop.
+    env, warnings = parse_workspace_env("FOO=a\x00b\nOK=1\n")
+    assert env == {"OK": "1"}
+    assert warnings == ["line 1: the value has a null byte in it"]
+
+
 @pytest.mark.parametrize("key", ["PATH", "HOME", "GH_TOKEN", "NO_COLOR", "GH_PAGER"])
 def test_merge_workspace_env_refuses_the_protected_names(key: str) -> None:
     base = {"PATH": "/usr/bin", "HOME": "/home/x", "GH_TOKEN": "sekret", **FIXED_ENVIRONMENT}
@@ -237,6 +247,17 @@ def test_merge_workspace_env_refuses_the_protected_names(key: str) -> None:
     assert refused == [key]
     assert merged[key] == base[key]
     assert merged["FOO"] == "bar"
+
+
+@pytest.mark.parametrize(
+    "key", ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"]
+)
+def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> None:
+    # The file lives in the agent's workspace, so the session can write it; it must not be able
+    # to re-point or re-credential the `claude` issuebot launches for the next turn.
+    merged, refused = merge_workspace_env({"ANTHROPIC_API_KEY": "sk-real"}, {key: "sk-theirs"})
+    assert refused == [key]
+    assert merged == {"ANTHROPIC_API_KEY": "sk-real"}
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:
@@ -261,6 +282,17 @@ def test_workspace_environment_survives_an_unreadable_file(tmp_path: Path) -> No
     # A directory where the file should be: a hook's problem, not a failed turn.
     (tmp_path / ".issuebot" / "env").mkdir(parents=True)
     assert workspace_environment({"PATH": "/usr/bin"}, tmp_path) == ({"PATH": "/usr/bin"}, [])
+
+
+def test_read_workspace_env_caps_the_file_at_a_line_boundary(tmp_path: Path) -> None:
+    (tmp_path / ".issuebot").mkdir()
+    filler = "".join(f"K{n}=x\n" for n in range(WORKSPACE_ENV_LIMIT // 6))
+    (tmp_path / ".issuebot" / "env").write_text(filler + "LAST=kept\n")
+    env, warnings = read_workspace_env(tmp_path)
+    assert warnings[0] == f"longer than {WORKSPACE_ENV_LIMIT} characters: the rest was ignored"
+    assert "LAST" not in env
+    # Cut at a line boundary, so no half-written value survives.
+    assert all(value == "x" for value in env.values())
 
 
 def test_workspace_environment_logs_what_it_used_and_what_it_ignored(tmp_path: Path) -> None:
@@ -784,6 +816,32 @@ async def test_run_turn_runs_with_an_unreadable_workspace_env_file(
     turn = await run(runner, workspace)
     assert turn.ok
     assert turn.error_category is None
+
+
+@posix
+async def test_run_turn_survives_a_null_byte_in_the_workspace_env_file(workspace: Path) -> None:
+    # `create_subprocess_exec` raises `ValueError` for one, and that is not an `OSError`: before
+    # the parser refused it, it escaped `run_turn` and killed the worker task.
+    (workspace / ".issuebot").mkdir()
+    (workspace / ".issuebot" / "env").write_bytes(b"FOO=a\x00b\n")
+    turn = await run(runner_for(workspace), workspace)
+    assert turn.ok
+    assert turn.error_category is None
+
+
+@posix
+async def test_run_turn_counts_the_applied_keys_on_its_start_line(workspace: Path) -> None:
+    (workspace / ".issuebot").mkdir()
+    (workspace / ".issuebot" / "env").write_text("FOO=bar\nBAZ=qux\nPATH=/hijacked\n")
+    stream = io.StringIO()
+    configure_logging(level="INFO", fmt="json", stream=stream)
+    try:
+        await run(runner_for(workspace), workspace)
+    finally:
+        configure_logging(stream=io.StringIO())
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    (started,) = [r for r in records if r["event"] == "claude_turn_started"]
+    assert started["workspace_env_count"] == 2
 
 
 @posix

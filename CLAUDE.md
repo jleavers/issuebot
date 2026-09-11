@@ -121,13 +121,19 @@ floor, not the shipped version, and moves by hand.
   `turn_number`, `max_turns`, `rework`, `self_review`); `ClaudeRunner` (`claude -p
   --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the workspace's
-  `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export ` stripped, the value everything after the first `=`) over
-  `agent_environment`'s allow-list for every turn and every hook after the one that wrote it,
-  which is how a `before_run` DSN reaches `pytest` at all, refusing `FIXED_ENVIRONMENT`,
-  `GH_TOKEN`, `PATH` and `HOME` so a typo cannot take `gh` down mid-run and warning rather
-  than failing on everything else (`parse_workspace_env`/`merge_workspace_env` are the pure
-  seam; a complaint names a line number, never the line, which can be most of a DSN); `settings_for_labels` (a `claude.model_labels` entry carried
+  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
+  stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
+  for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
+  reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
+  `HOME`) keeps `gh` and `claude` running through a typo, and `PROTECTED_ENV_PREFIXES`
+  (`ANTHROPIC_`, `CLAUDE_`) is the trust boundary: the file sits in the agent's own
+  workspace, so the session can write it, and it must not re-point the `claude` issuebot
+  launches next. Everything else warns rather than fails, a null byte included, since
+  `create_subprocess_exec` raises `ValueError` for one and that is no kind of `OSError`
+  (`parse_workspace_env`/`merge_workspace_env` are the pure seam; a complaint names a line
+  number, never the line, which can be most of a DSN); `settings_for_labels` (a
+  `claude.model_labels` entry carried
   by the issue replaces `claude.model`; no match, or two labels naming different models,
   keeps the default) and `settings_with_model`; `claude_auth_status(command, environ)` (the
   `claude auth status --json` probe under `agent_environment`, 10 s, stdout or `None`) and

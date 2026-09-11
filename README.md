@@ -567,7 +567,8 @@ printf 'ARROWBOT_JS_HARNESS=1\n' >> .issuebot/env
 
 One hook owns the file: the PostgreSQL recipe above writes it with `>`, which is what makes
 `before_run` idempotent on a workspace a retry reuses, so a second variable belongs in that
-same hook — `>>` after it, as above — rather than in a hook that would truncate it again.
+same `before_run` — appended with `>>` after the recipe's line, as above — rather than in a
+hook that would truncate it again or append a duplicate per session.
 
 - **One `KEY=VALUE` per line.** A leading `export ` is accepted and stripped, blank lines and
   `#` comments are skipped, and the value is everything after the first `=`: no quote stripping
@@ -576,16 +577,25 @@ same hook — `>>` after it, as above — rather than in a hook that would trunc
   `[A-Za-z_][A-Za-z0-9_]*`.
 - **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
   resumed after a retry still gets the file, and a hook may rewrite it between turns.
-- **Some names are protected**: the fixed entries (`GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`,
-  `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`), `GH_TOKEN`, `PATH` and `HOME`. A line naming
-  one of those is dropped with a warning naming the key, so a typo cannot take `gh` or `claude`
-  down in the middle of a run.
-- **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, or a line
-  that does not parse, is a warning and the turn runs. A warning about a line names its number
-  and nothing else, and the log records which keys were applied, never their values — the
-  usual contents are a DSN with a password in it.
-- `after_create` runs before a workspace can have the file, so it is the one hook that cannot
-  read it; it can of course write it.
+- **Some names are protected**, and a line naming one is dropped with a warning naming the key.
+  `PATH`, `HOME`, `GH_TOKEN` and the fixed entries (`GH_PROMPT_DISABLED`,
+  `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`) keep `gh` and `claude`
+  running, so a typo cannot take either down in the middle of a run. So is anything starting
+  `ANTHROPIC_` or `CLAUDE_`: the file lives in the agent's own workspace, so the *session* can
+  write it as easily as a hook can, and it must not be able to re-point or re-credential the
+  `claude` issuebot launches for the next turn. The file's job is to add what the target
+  repository's tests need.
+- **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
+  does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
+  the turn runs. A warning about a line names its number and nothing else, and the log records
+  which keys were applied, never their values — the usual contents are a DSN with a password
+  in it.
+- **It is a workspace file, so it outlives the session.** A retry or a rework session on the
+  same workspace finds what the last one left, which is why the recipe's `before_run` writes it
+  with `>` rather than appending to it.
+- `after_create` is the one hook that cannot use it, in either direction: it runs before
+  `.issuebot/` exists, because that directory's presence is what marks a workspace whose
+  creation finished. Write the file from `before_run`.
 
 ### More than one repository
 
