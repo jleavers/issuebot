@@ -81,8 +81,10 @@ services:
     init: true
     restart: unless-stopped
     # Longer than the orchestrator's shutdown wait (hooks.timeout_ms + 20 s), so Docker never
-    # SIGKILLs a worker that is still running after_run.
-    stop_grace_period: 120s
+    # SIGKILLs a worker that is still running after_run. 620s pairs with the
+    # hooks.timeout_ms: 600000 a WORKFLOW.local.md needs for an `npm ci` in after_create;
+    # the 60 s default only needs the 120s this was.
+    stop_grace_period: 620s
     env_file:
       - path: .env
         required: false
