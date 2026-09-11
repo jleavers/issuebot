@@ -145,7 +145,17 @@ USER issuebot
 # cluster need it on PATH; node and npm live in the unpacked tarball and are on no PATH at all
 # without this. Each is added only when its own argument was set, so the default image's PATH is
 # the one it has always been.
+# LANG is not part of that: the base image sets no locale at all -- the official python images
+# used to set one and no longer do -- which leaves every process in the container on C. A bare
+# `initdb` takes the cluster's encoding from the locale, so on C it builds a SQL_ASCII database,
+# which hands psycopg bytes where a suite expects str and errors out every postgres-marked test
+# in teardown (#66). Set for every build rather than inside the ${POSTGRES_VERSION:+...} above,
+# because the locale is not the server's business: git, psql, sort and the agent's own shell all
+# read it. C.utf8 is built into glibc on trixie, so there is nothing to install for it. LANG and
+# not LC_ALL: LC_ALL overrides every category, which would stop a target repository's own LC_*
+# settings from taking effect.
 ENV HOME=/home/issuebot \
+    LANG=C.UTF-8 \
     PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
 # The flag assertion is the point of pinning: a release that drops --permission-prompts

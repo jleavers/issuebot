@@ -81,6 +81,14 @@ jobs:
               exit 1
             fi
           done
+      # The locale (#66) is the image's, not the PostgreSQL stanza's, so it is asserted on both
+      # builds: the base image sets none, and every tool in the container reads one. `bash -lc`
+      # as well as `sh -c` for the same reason the PATH is checked in a login shell below --
+      # /etc/profile is free to overwrite what the image set, and the hooks run that way.
+      - name: the default build's locale is UTF-8
+        run: |
+          test "$(docker run --rm --entrypoint sh issuebot:ci -c 'echo $LANG')" = C.UTF-8
+          test "$(docker run --rm --entrypoint bash issuebot:ci -lc 'echo $LANG')" = C.UTF-8
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
       # build carries both, since the checks below are about what is on PATH and under which
@@ -110,6 +118,17 @@ jobs:
           docker run --rm --entrypoint npm issuebot:ci-toolchain --version
           docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
+      # The outcome rather than the variable that produces it (#66): a bare `initdb`, with no
+      # --encoding and no --locale, is what a session that starts its own cluster runs, and on a
+      # C locale it lands on SQL_ASCII silently. A cluster's encoding is fixed at initdb, so the
+      # session only finds out in teardown. Asserting the encoding here means a base image that
+      # drops the locale, or a C.utf8 that stops existing, fails the build instead.
+      - name: a bare initdb in the opt-in build makes a UTF8 cluster
+        run: |
+          test "$(docker run --rm --entrypoint sh issuebot:ci-toolchain -c 'echo $LANG')" = C.UTF-8
+          test "$(docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo $LANG')" = C.UTF-8
+          docker run --rm --entrypoint sh issuebot:ci-toolchain -c \
+            'initdb -D /tmp/c | grep -q "set to \"UTF8\""'
       # node --version answers from a tarball that need not be usable. This runs the thing a
       # target repository's after_create hook actually runs, as the uid a session runs as: the
       # npm wrapper on PATH, resolving its own `#!/usr/bin/env node`, writing its cache and its
