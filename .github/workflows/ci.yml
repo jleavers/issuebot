@@ -57,6 +57,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: compose config under each profile
+        run: |
+          docker network create issuebot
+          for profiles in hub worker hub,worker; do
+            COMPOSE_PROFILES=$profiles docker compose config --quiet
+          done
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:

@@ -135,7 +135,11 @@ header.top {
   padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
 header.top .brand { font-weight: 700; font-size: 16px; color: var(--ink); }
-header.top .repo { color: var(--muted); }
+/* the repository switch: the header's old `.repo` text, now that it picks one */
+header.top .repo-switch {
+  color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 6px; font: inherit; max-width: 40vw;
+}
 header.top nav { margin-left: auto; display: flex; gap: 14px; }
 
 /*

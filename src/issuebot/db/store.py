@@ -50,14 +50,14 @@ class Store(Protocol):
 
 
 INSERT_EVENT = """
-INSERT INTO events (at, kind, issue_number, run_id, payload)
-VALUES (%(at)s, %(kind)s, %(issue_number)s, %(run_id)s, %(payload)s)
+INSERT INTO events (repo, at, kind, issue_number, run_id, payload)
+VALUES (%(repo)s, %(at)s, %(kind)s, %(issue_number)s, %(run_id)s, %(payload)s)
 """
 
 RUN_STARTED = """
-INSERT INTO runs (run_id, issue_number, issue_identifier, attempt, session_id, started_at,
+INSERT INTO runs (repo, run_id, issue_number, issue_identifier, attempt, session_id, started_at,
                   workspace_path)
-VALUES (%(run_id)s, %(issue_number)s, %(issue_identifier)s, %(attempt)s, %(session_id)s,
+VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(attempt)s, %(session_id)s,
         %(started_at)s, %(workspace_path)s)
 ON CONFLICT (run_id) DO UPDATE SET
     issue_number = EXCLUDED.issue_number,
@@ -69,9 +69,9 @@ ON CONFLICT (run_id) DO UPDATE SET
 """
 
 RUN_ENDED = """
-INSERT INTO runs (run_id, issue_number, issue_identifier, started_at, ended_at, outcome, error,
-                  turns, input_tokens, output_tokens, cost_usd, duration_s, log_dir)
-VALUES (%(run_id)s, %(issue_number)s, %(issue_identifier)s, %(started_at)s, %(ended_at)s,
+INSERT INTO runs (repo, run_id, issue_number, issue_identifier, started_at, ended_at, outcome,
+                  error, turns, input_tokens, output_tokens, cost_usd, duration_s, log_dir)
+VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(started_at)s, %(ended_at)s,
         %(outcome)s, %(error)s, %(turns)s, %(input_tokens)s, %(output_tokens)s, %(cost_usd)s,
         %(duration_s)s, %(log_dir)s)
 ON CONFLICT (run_id) DO UPDATE SET
@@ -123,23 +123,23 @@ ON CONFLICT (run_id, turn_number) DO UPDATE SET
 
 STATE_CHANGED = """
 UPDATE issues SET state = %(state)s, state_label = %(state_label)s, seen_at = %(at)s
-WHERE number = %(number)s AND seen_at <= %(at)s
+WHERE repo = %(repo)s AND number = %(number)s AND seen_at <= %(at)s
 """
 
 ISSUE_CLOSED = """
 UPDATE issues
 SET github_state = 'closed', closed_at = coalesce(closed_at, %(at)s), seen_at = %(at)s
-WHERE number = %(number)s AND seen_at <= %(at)s
+WHERE repo = %(repo)s AND number = %(number)s AND seen_at <= %(at)s
 """
 
 UPSERT_ISSUE = """
-INSERT INTO issues (number, identifier, title, state, state_label, github_state, url, labels,
-                    pr_number, pr_url, pr_state, pr_merged_at, created_at, updated_at, closed_at,
-                    seen_at)
-VALUES (%(number)s, %(identifier)s, %(title)s, %(state)s, %(state_label)s, %(github_state)s,
-        %(url)s, %(labels)s, %(pr_number)s, %(pr_url)s, %(pr_state)s, %(pr_merged_at)s,
-        %(created_at)s, %(updated_at)s, %(closed_at)s, %(seen_at)s)
-ON CONFLICT (number) DO UPDATE SET
+INSERT INTO issues (repo, number, identifier, title, state, state_label, github_state, url,
+                    labels, pr_number, pr_url, pr_state, pr_merged_at, created_at, updated_at,
+                    closed_at, seen_at)
+VALUES (%(repo)s, %(number)s, %(identifier)s, %(title)s, %(state)s, %(state_label)s,
+        %(github_state)s, %(url)s, %(labels)s, %(pr_number)s, %(pr_url)s, %(pr_state)s,
+        %(pr_merged_at)s, %(created_at)s, %(updated_at)s, %(closed_at)s, %(seen_at)s)
+ON CONFLICT (repo, number) DO UPDATE SET
     identifier = EXCLUDED.identifier,
     title = EXCLUDED.title,
     state = EXCLUDED.state,
@@ -159,8 +159,18 @@ WHERE issues.seen_at <= EXCLUDED.seen_at
 """
 
 WRITE_SNAPSHOT = """
-INSERT INTO runtime_snapshot (id, at, written_at, data) VALUES (true, %(at)s, now(), %(data)s)
-ON CONFLICT (id) DO UPDATE SET at = EXCLUDED.at, written_at = now(), data = EXCLUDED.data
+INSERT INTO runtime_snapshot (repo, at, written_at, data)
+VALUES (%(repo)s, %(at)s, now(), %(data)s)
+ON CONFLICT (repo) DO UPDATE SET at = EXCLUDED.at, written_at = now(), data = EXCLUDED.data
+"""
+
+REGISTER_REPO = """
+INSERT INTO repos (repo, labels, workflow_path, registered_at, seen_at)
+VALUES (%(repo)s, %(labels)s, %(workflow_path)s, now(), now())
+ON CONFLICT (repo) DO UPDATE SET
+    labels = EXCLUDED.labels,
+    workflow_path = EXCLUDED.workflow_path,
+    seen_at = now()
 """
 
 
@@ -189,13 +199,21 @@ def issue_row(snapshot: IssueSnapshot) -> dict[str, Any]:
 
 
 class PostgresStore:
-    """Writes events, runs, issues and the runtime snapshot over one autocommit connection."""
+    """Writes events, runs, issues and the runtime snapshot over one autocommit connection,
+    every row stamped with the worker's repository."""
 
-    def __init__(self, url: str, *, labels: GitHubLabels, connect: Connector = connect) -> None:
+    def __init__(
+        self, url: str, *, repo: str, labels: GitHubLabels, connect: Connector = connect
+    ) -> None:
         self._url = url
+        self._repo = repo
         self._labels = labels
         self._connect = connect
         self._conn: AsyncConnection | None = None
+
+    @property
+    def repo(self) -> str:
+        return self._repo
 
     @property
     def connected(self) -> bool:
@@ -217,32 +235,40 @@ class PostgresStore:
         """Append the event; then upsert the run (and its captured turns) or update the issue."""
         conn = self._require()
         async with self._guard(), conn.transaction():
-            await conn.execute(INSERT_EVENT, event_row(event))
+            await conn.execute(INSERT_EVENT, self._stamp(event_row(event)))
             if isinstance(event, RunStarted):
-                await conn.execute(RUN_STARTED, run_started_row(event))
+                await conn.execute(RUN_STARTED, self._stamp(run_started_row(event)))
             elif isinstance(event, RunEnded):
-                await conn.execute(RUN_ENDED, run_ended_row(event))
+                await conn.execute(RUN_ENDED, self._stamp(run_ended_row(event)))
                 if turns:
                     async with conn.cursor() as cursor:
                         await cursor.executemany(
                             INSERT_TURN, [turn_row(event.run_id, turn) for turn in turns]
                         )
             elif isinstance(event, StateChanged):
-                await conn.execute(STATE_CHANGED, self._state_changed_row(event))
+                await conn.execute(STATE_CHANGED, self._stamp(self._state_changed_row(event)))
             elif isinstance(event, IssueCompleted | IssueCancelled):
-                await conn.execute(ISSUE_CLOSED, {"number": event.issue_number, "at": event.at})
+                await conn.execute(
+                    ISSUE_CLOSED, self._stamp({"number": event.issue_number, "at": event.at})
+                )
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
         if not issues:
             return
         conn = self._require()
         async with self._guard(), conn.transaction(), conn.cursor() as cursor:
-            await cursor.executemany(UPSERT_ISSUE, [issue_row(snapshot) for snapshot in issues])
+            await cursor.executemany(
+                UPSERT_ISSUE, [self._stamp(issue_row(snapshot)) for snapshot in issues]
+            )
 
     async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
         conn = self._require()
         async with self._guard():
-            await conn.execute(WRITE_SNAPSHOT, {"at": at, "data": Jsonb(dict(data))})
+            await conn.execute(WRITE_SNAPSHOT, self._stamp({"at": at, "data": Jsonb(dict(data))}))
+
+    def _stamp(self, row: dict[str, Any]) -> dict[str, Any]:
+        """The bound parameters of one write, with this store's repository merged in."""
+        return {"repo": self._repo, **row}
 
     def _require(self) -> AsyncConnection:
         if self._conn is None or self._conn.closed:

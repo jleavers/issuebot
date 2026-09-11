@@ -152,11 +152,6 @@ class NotificationsSettings(_Model):
     slack: SlackSettings = Field(default_factory=SlackSettings)
 
 
-class ServerSettings(_Model):
-    port: int = Field(default=8080, ge=0, le=65535)
-    bind: NonEmptyStr = "0.0.0.0"
-
-
 class Settings(_Model):
     github: GitHubSettings
     polling: PollingSettings = Field(default_factory=PollingSettings)
@@ -166,4 +161,3 @@ class Settings(_Model):
     claude: ClaudeSettings = Field(default_factory=ClaudeSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
-    server: ServerSettings = Field(default_factory=ServerSettings)

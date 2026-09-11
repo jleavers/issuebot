@@ -30,6 +30,7 @@ from issuebot.config import GitHubLabels, GitHubSettings, Settings
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
+    ImportRefused,
     MigrationResult,
     Probe,
     StoreError,
@@ -1703,7 +1704,16 @@ def _db_workflow(
     return _write(tmp_path, "---\ngithub:\n  repo: example/repo\n---\nBody")
 
 
-@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"], ["web"]])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["migrate"],
+        ["status"],
+        ["stats"],
+        ["refresh"],
+        ["import", "--from", "postgresql://x@y/z"],
+    ],
+)
 def test_database_commands_need_a_configured_url(
     command: list[str],
     capsys: pytest.CaptureFixture[str],
@@ -1719,7 +1729,16 @@ def test_database_commands_need_a_configured_url(
     assert fake_database.urls == []
 
 
-@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"], ["web"]])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["migrate"],
+        ["status"],
+        ["stats"],
+        ["refresh"],
+        ["import", "--from", "postgresql://x@y/z"],
+    ],
+)
 def test_database_commands_exit_two_on_an_unloadable_workflow(
     command: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1989,49 +2008,59 @@ def fake_serve(monkeypatch: pytest.MonkeyPatch) -> FakeServe:
     return fake
 
 
-def test_web_migrates_then_serves_on_the_configured_bind(
+def test_web_migrates_then_serves_on_the_defaults(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
-    path = _write(
-        tmp_path,
-        "---\ngithub:\n  repo: example/repo\nserver:\n  bind: 127.0.0.1\n  port: 9000\n---\nBody",
-    )
-    assert main(["web", "--workflow", str(path)]) == 0
+    assert main(["web"]) == 0
     assert fake_database.migrations == 1 and fake_database.urls == [DB_URL]
     ((app, host, port),) = fake_serve.calls
-    assert (host, port) == ("127.0.0.1", 9000)
+    assert (host, port) == ("0.0.0.0", 8080)
     assert getattr(app, "title", None) == "issuebot"
     err = capsys.readouterr().err
     assert "web_started" in err and "s3cret" not in err
 
 
-def test_web_overrides_the_bind_and_port_from_the_command_line(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_database: FakeDatabase,
-    fake_serve: FakeServe,
+def test_web_takes_the_bind_and_port_from_the_command_line(
+    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
 ) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path), "--bind", "0.0.0.0", "--port", "0"]) == 0
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web", "--bind", "127.0.0.1", "--port", "0"]) == 0
     ((_app, host, port),) = fake_serve.calls
-    assert (host, port) == ("0.0.0.0", 0)
+    assert (host, port) == ("127.0.0.1", 0)
+
+
+def test_web_reads_no_workflow(
+    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ISSUEBOT_WORKFLOW", "/nowhere/WORKFLOW.md")
+    assert main(["web"]) == 0
+    with pytest.raises(SystemExit) as exc:
+        main(["web", "--workflow", "x"])
+    assert exc.value.code == 2
+
+
+def test_web_needs_database_url(
+    capsys: pytest.CaptureFixture[str], fake_database: FakeDatabase, fake_serve: FakeServe
+) -> None:
+    assert main(["web"]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: not configured; export DATABASE_URL\n"
+    assert fake_database.urls == [] and fake_serve.calls == []
 
 
 def test_web_fails_fast_when_the_migration_fails(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path)]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
     assert fake_serve.calls == []
 
@@ -2039,27 +2068,25 @@ def test_web_fails_fast_when_the_migration_fails(
 def test_web_rejects_a_port_out_of_range(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path), "--port", "70000"]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web", "--port", "70000"]) == 1
     assert capsys.readouterr().out == "[FAIL] web: --port must be between 0 and 65535\n"
     assert fake_serve.calls == []
 
 
 def test_web_exits_one_when_uvicorn_cannot_bind(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     fake_database: FakeDatabase,
 ) -> None:
     async def refuse(app: object, *, host: str, port: int) -> None:
         raise SystemExit(3)  # what uvicorn's startup() does on a bind failure
 
     monkeypatch.setattr("issuebot.cli._serve", refuse)
-    path = _db_workflow(tmp_path, monkeypatch)
-    assert main(["web", "--workflow", str(path)]) == 1
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 1
     assert fake_database.migrations == 1
 
 
@@ -2071,11 +2098,51 @@ def test_refresh_notifies_and_reports_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh\n"
+    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
     assert fake_database.notified == 1
     fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
     assert main(["refresh", "--workflow", str(path)]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+
+
+def test_import_copies_a_source_and_reports_the_counts(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    source = "postgresql://issuebot:old@127.0.0.1:5433/issuebot"
+    assert main(["import", "--from", source, "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == (
+        "[ OK ] import: issues 3\n"
+        "[ OK ] import: runs 2\n"
+        "[ OK ] import: run_turns 5\n"
+        "[ OK ] import: events 9\n"
+        "[ OK ] import: runtime_snapshot 1\n"
+        "[ OK ] import: example/repo imported from postgresql://issuebot@127.0.0.1:5433/issuebot\n"
+    )
+    ((src, repo, labels, workflow_path),) = fake_database.imports
+    assert (src, repo, workflow_path) == (source, "example/repo", str(path))
+    assert labels == GitHubLabels()
+
+
+def test_import_reports_a_refusal(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    fake_database.import_error = ImportRefused("source is at schema version 3, expected 2")
+    assert main(["import", "--from", "postgresql://x@y/z", "--workflow", str(path)]) == 1
+    assert capsys.readouterr().out == "[FAIL] import: source is at schema version 3, expected 2\n"
+
+
+def test_import_needs_a_source(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["import", "--workflow", str(GOOD)])
+    assert exc.value.code == 2
 
 
 # --- the database in run-once and worker ------------------------------------------------------
@@ -2263,3 +2330,72 @@ def test_worker_fails_before_the_orchestrator_when_migration_fails(
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
     assert stub_orchestrator.instances == []
     assert fake_database.listeners == []
+
+
+def test_worker_registers_its_repository_before_the_sinks_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    path = _workflow_with_root(tmp_path)
+    assert main(["worker", "--workflow", str(path)]) == 0
+    ((repo, labels, workflow_path),) = fake_database.registrations
+    assert (repo, workflow_path) == ("example/repo", str(path))
+    assert labels == GitHubLabels()
+    assert fake_database.repo == "example/repo"  # the store was built for this repository
+    (listener,) = fake_database.listeners
+    assert listener.repo == "example/repo"
+
+
+def test_worker_fails_fast_when_registration_fails(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.register_error = StoreUnavailableError("cannot connect: refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
+    assert stub_orchestrator.instances == []
+
+
+def test_run_once_registers_its_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubSession,
+    fake_github: FakeGitHub,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path)]) == 0
+    ((repo, labels, workflow_path),) = fake_database.registrations
+    assert (repo, labels, workflow_path) == ("example/repo", GitHubLabels(), str(path))
+    assert fake_database.repo == "example/repo"
+
+
+def test_refresh_names_its_repository(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["refresh", "--workflow", str(path)]) == 0
+    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert fake_database.notified_repos == ["example/repo"]
+
+
+def test_status_and_stats_read_their_own_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_database: FakeDatabase
+) -> None:
+    path = _db_workflow(tmp_path, monkeypatch)
+    assert main(["status", "--workflow", str(path)]) == 0
+    assert main(["stats", "--workflow", str(path)]) == 0
+    assert fake_database.queries_obj.scoped_repos == ["example/repo", "example/repo"]

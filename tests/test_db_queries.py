@@ -1,6 +1,7 @@
 """Tests for the query module against a seeded database (skipped without DATABASE_URL)."""
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,6 +17,7 @@ from issuebot.db.queries import (
     DailyPoint,
     EventRow,
     IssueRow,
+    RepoQueries,
     RunRow,
     RunTotals,
     TurnRow,
@@ -28,13 +30,21 @@ from issuebot.github import Issue, StateLabel
 NOW = datetime.now(UTC)
 HOUR = timedelta(hours=1)
 DAY = timedelta(days=1)
+REPO = "example/repo"
+
+
+@asynccontextmanager
+async def scoped(database: Database, repo: str = REPO) -> AsyncIterator[RepoQueries]:
+    """A RepoQueries bound to ``repo`` on one connection: what a request reads through."""
+    async with database.queries() as queries:
+        yield queries.scoped(repo)
 
 
 @pytest.fixture
 async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator[Database]:
     """Issues closed 1 h, 3 d and 10 d ago; a cancelled one; open issues; runs; events."""
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
 
     def issue(number: int, state: StateLabel | None, **overrides: Any) -> Issue:
@@ -154,7 +164,7 @@ def run_ended(run_id: str, number: int, at: datetime, **overrides: Any) -> RunEn
 @pytest.fixture
 async def with_turns(seeded: Database, db_url: str) -> Database:
     """Two captured turns on r2 and one on r0, an older finished run of the same issue."""
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     await store.apply_event(
         run_ended("r2", 2, NOW - 2 * DAY + timedelta(seconds=30), outcome="failed"),
@@ -188,7 +198,7 @@ async def test_a_no_fault_close_reaches_the_closed_count(
     issue `complete` rather than clearing it. Drive the real events, not a hand-written row.
     """
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     handed_over = make_issue(
         number=20,
@@ -224,7 +234,7 @@ async def test_a_no_fault_close_reaches_the_closed_count(
     await store.close()
 
     database = Database(db_url)
-    async with database.queries() as q:
+    async with scoped(database) as q:
         assert await q.closed_count(DAY) == 1
         assert (await q.state_counts())["complete"] == 1
         # It is on the board, in a terminal column, rather than gone.
@@ -235,7 +245,7 @@ async def test_a_no_fault_close_reaches_the_closed_count(
 
 
 async def test_counts_by_window(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         assert await q.closed_count(DAY) == 1
         assert await q.closed_count(7 * DAY) == 2
         assert await q.runs_count(DAY) == 1
@@ -245,7 +255,7 @@ async def test_counts_by_window(seeded: Database) -> None:
 
 async def test_run_totals_by_window(seeded: Database, db_url: str) -> None:
     """Cost and tokens over the runs runs_count counts: the ones started inside the window."""
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     await store.apply_event(
         RunStarted(
@@ -269,7 +279,7 @@ async def test_run_totals_by_window(seeded: Database, db_url: str) -> None:
         )
     )
     await store.close()
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         day = await q.run_totals(DAY)
         week = await q.run_totals(7 * DAY)
         nothing = await q.run_totals(timedelta(seconds=1))
@@ -283,7 +293,7 @@ async def test_run_totals_by_window(seeded: Database, db_url: str) -> None:
 
 
 async def test_daily_series_zero_fills_and_ends_today(seeded: Database, db_url: str) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         series = await q.daily_series(4)
     conn = await connect(db_url)
     try:
@@ -306,7 +316,7 @@ async def test_daily_series_zero_fills_and_ends_today(seeded: Database, db_url: 
 
 
 async def test_issues_by_state_groups_every_role(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         groups = await q.issues_by_state()
     assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
     assert [row.number for row in groups["todo"]] == [1, 4]  # updated_at desc
@@ -326,7 +336,7 @@ async def test_issues_by_state_caps_every_column(
 ) -> None:
     """Not just complete: an open column that piles up would stretch the board just as far."""
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     snapshots = [
         IssueSnapshot(
@@ -354,7 +364,7 @@ async def test_issues_by_state_caps_every_column(
     ]
     await store.upsert_issues(snapshots)
     await store.close()
-    async with Database(db_url).queries() as q:
+    async with scoped(Database(db_url)) as q:
         groups = await q.issues_by_state()
     assert len(groups["complete"]) == BOARD_LIMIT
     assert [row.number for row in groups["complete"]] == list(range(1, BOARD_LIMIT + 1))
@@ -364,7 +374,7 @@ async def test_issues_by_state_caps_every_column(
 
 async def test_issues_for_state_returns_one_column_past_the_board_cap(seeded: Database) -> None:
     """What the list page is for: the column in full, not the board's five."""
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         rows = await q.issues_for_state("complete")
         todo = await q.issues_for_state("todo")
     assert [row.number for row in rows] == [10, 11, 12]  # closed_at desc
@@ -373,7 +383,7 @@ async def test_issues_for_state_returns_one_column_past_the_board_cap(seeded: Da
 
 
 async def test_issues_for_state_without_a_state_returns_every_column(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         rows = await q.issues_for_state(None)
     assert {row.number for row in rows} == {1, 2, 3, 4, 10, 11, 12}
     assert 5 not in {row.number for row in rows}  # unlabelled: on no column
@@ -386,15 +396,15 @@ async def test_issues_for_state_skips_an_unknown_role(seeded: Database, db_url: 
     try:
         await conn.execute(
             """
-            INSERT INTO issues (number, identifier, title, state, state_label, github_state, url,
-                                created_at, updated_at, seen_at)
-            VALUES (78, 'repo-78', 'Mystery', 'mystery', 'issuebot/mystery', 'open',
-                    'https://github.com/example/repo/issues/78', now(), now(), now())
+            INSERT INTO issues (repo, number, identifier, title, state, state_label,
+                                github_state, url, created_at, updated_at, seen_at)
+            VALUES ('example/repo', 78, 'repo-78', 'Mystery', 'mystery', 'issuebot/mystery',
+                    'open', 'https://github.com/example/repo/issues/78', now(), now(), now())
             """
         )
     finally:
         await conn.close()
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         assert 78 not in {row.number for row in await q.issues_for_state(None)}
         assert await q.issues_for_state("mystery") == []
 
@@ -403,7 +413,7 @@ async def test_issues_for_state_stops_at_the_list_limit(
     db_url: str, make_issue: Callable[..., Issue]
 ) -> None:
     await migrate(db_url)
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     await store.upsert_issues(
         [
@@ -421,14 +431,14 @@ async def test_issues_for_state_stops_at_the_list_limit(
         ]
     )
     await store.close()
-    async with Database(db_url).queries() as q:
+    async with scoped(Database(db_url)) as q:
         rows = await q.issues_for_state("complete")
     assert len(rows) == ISSUE_LIST_LIMIT
     assert rows[0].number == 1
 
 
 async def test_runs_for_issue_newest_first(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         runs = await q.runs_for_issue(2)
         assert await q.runs_for_issue(99) == []
     assert [run.run_id for run in runs] == ["r1", "r2"]
@@ -439,7 +449,7 @@ async def test_runs_for_issue_newest_first(seeded: Database) -> None:
 
 
 async def test_recent_events_newest_first_and_limited(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         events = await q.recent_events(3)
         everything = await q.recent_events(100)
     assert [event.kind for event in events] == ["blocked", "run_ended", "run_started"]
@@ -451,13 +461,13 @@ async def test_recent_events_newest_first_and_limited(seeded: Database) -> None:
 
 
 async def test_snapshot_is_none_until_written(seeded: Database, db_url: str) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         assert await q.snapshot() is None
-    store = PostgresStore(db_url, labels=GitHubLabels())
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
     await store.connect()
     await store.write_snapshot(NOW, {"tick_count": 3})
     await store.close()
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         row = await q.snapshot()
     assert row is not None
     assert (row.at, row.data) == (NOW, {"tick_count": 3})
@@ -465,7 +475,7 @@ async def test_snapshot_is_none_until_written(seeded: Database, db_url: str) -> 
 
 
 async def test_issue_by_number(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         row = await q.issue(3)
         assert await q.issue(99) is None
     assert isinstance(row, IssueRow)
@@ -473,7 +483,7 @@ async def test_issue_by_number(seeded: Database) -> None:
 
 
 async def test_events_for_issue_newest_first_and_limited(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         events = await q.events_for_issue(2, 10)
         two = await q.events_for_issue(2, 2)
         assert await q.events_for_issue(99, 10) == []
@@ -489,7 +499,7 @@ async def test_events_for_issue_newest_first_and_limited(seeded: Database) -> No
 
 
 async def test_turn_summaries_for_issue_newest_run_first(with_turns: Database) -> None:
-    async with with_turns.queries() as q:
+    async with scoped(with_turns) as q:
         turns = await q.turn_summaries_for_issue(2)
         assert await q.turn_summaries_for_issue(99) == []
     assert [(turn.run_id, turn.turn_number) for turn in turns] == [("r2", 1), ("r2", 2), ("r0", 1)]
@@ -514,7 +524,7 @@ async def test_turn_summaries_for_issue_newest_run_first(with_turns: Database) -
 
 
 async def test_turn_returns_the_whole_row_or_none(with_turns: Database) -> None:
-    async with with_turns.queries() as q:
+    async with scoped(with_turns) as q:
         turn = await q.turn("r2", 2)
         assert await q.turn("r2", 9) is None
         assert await q.turn("nope", 1) is None
@@ -529,7 +539,7 @@ async def test_turn_returns_the_whole_row_or_none(with_turns: Database) -> None:
 
 
 async def test_state_counts_follow_the_kanban_predicate(seeded: Database) -> None:
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         counts = await q.state_counts()
     assert counts == {"todo": 2, "in_progress": 1, "review": 1, "rework": 0, "complete": 3}
     assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
@@ -540,15 +550,15 @@ async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: s
     try:
         await conn.execute(
             """
-            INSERT INTO issues (number, identifier, title, state, state_label, github_state, url,
-                                created_at, updated_at, seen_at)
-            VALUES (77, 'repo-77', 'Mystery', 'mystery', 'issuebot/mystery', 'open',
-                    'https://github.com/example/repo/issues/77', now(), now(), now())
+            INSERT INTO issues (repo, number, identifier, title, state, state_label,
+                                github_state, url, created_at, updated_at, seen_at)
+            VALUES ('example/repo', 77, 'repo-77', 'Mystery', 'mystery', 'issuebot/mystery',
+                    'open', 'https://github.com/example/repo/issues/77', now(), now(), now())
             """
         )
     finally:
         await conn.close()
-    async with seeded.queries() as q:
+    async with scoped(seeded) as q:
         groups = await q.issues_by_state()
         counts = await q.state_counts()
     assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
@@ -559,5 +569,173 @@ async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: s
 
 async def test_queries_on_an_empty_schema_report_a_database_error(db_url: str) -> None:
     with pytest.raises(StoreError, match="UndefinedTable"):
-        async with Database(db_url).queries() as q:
+        async with scoped(Database(db_url)) as q:
             await q.snapshot()
+
+
+# --- one database, many repositories ----------------------------------------------------------
+
+
+async def test_scoped_reads_see_only_their_own_repository(
+    seeded: Database, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    """Spec §9: every ``RepoQueries`` method answers for its own repository and no other.
+
+    The other repository is seeded richly enough -- an open issue, a closed ``complete`` one,
+    a finished run with tokens and a captured turn, three events and a snapshot -- that a
+    missing ``repo`` predicate in any one query would change a number below rather than pass.
+    """
+    other = PostgresStore(db_url, repo="example/other", labels=GitHubLabels())
+    await other.connect()
+    try:
+        await other.upsert_issues(
+            [
+                IssueSnapshot(issue=make_issue(number=1, title="Elsewhere"), seen_at=NOW),
+                IssueSnapshot(
+                    issue=make_issue(
+                        number=2,
+                        identifier="other-2",
+                        title="Theirs closed",
+                        state=StateLabel.COMPLETE,
+                        state_labels=("issuebot/complete",),
+                        labels=("issuebot/complete",),
+                        github_state="closed",
+                        closed_at=NOW - HOUR,
+                        updated_at=NOW - HOUR,
+                    ),
+                    seen_at=NOW,
+                ),
+            ]
+        )
+        await other.apply_event(
+            RunStarted(
+                issue_number=1,
+                issue_identifier="other-1",
+                run_id="other-run",
+                attempt=1,
+                session_id="s",
+                workspace_path="/w",
+                at=NOW - HOUR,
+            )
+        )
+        await other.apply_event(
+            run_ended(
+                "other-run",
+                1,
+                NOW - HOUR + timedelta(seconds=30),
+                issue_identifier="other-1",
+                input_tokens=700,
+                output_tokens=70,
+                cost_usd=7.0,
+            ),
+            turns=[capture(1, model="claude-elsewhere")],
+        )
+        await other.apply_event(
+            StateChanged(
+                issue_number=1,
+                issue_identifier="other-1",
+                from_label="issuebot/review",
+                to_label="issuebot/todo",  # keeps issue 1 on the column make_issue put it on
+                actor="human",
+                at=NOW,
+            )
+        )
+        await other.write_snapshot(NOW, {"tick_count": 99})
+    finally:
+        await other.close()
+    async with scoped(seeded, "example/other") as theirs, scoped(seeded) as ours:
+        # issues_for_state
+        assert sorted(row.title for row in await theirs.issues_for_state(None)) == [
+            "Elsewhere",
+            "Theirs closed",
+        ]
+        assert "Elsewhere" not in [row.title for row in await ours.issues_for_state(None)]
+        # issues_by_state: only their two cards, on their own columns
+        board = await theirs.issues_by_state()
+        assert [(role, [row.title for row in rows]) for role, rows in board.items() if rows] == [
+            ("todo", ["Elsewhere"]),
+            ("complete", ["Theirs closed"]),
+        ]
+        assert {"Elsewhere", "Theirs closed"}.isdisjoint(
+            row.title for rows in (await ours.issues_by_state()).values() for row in rows
+        )
+        # state_counts: the board's headers, uncapped, per repository
+        assert await theirs.state_counts() == {
+            "todo": 1,
+            "in_progress": 0,
+            "review": 0,
+            "rework": 0,
+            "complete": 1,
+        }
+        assert await ours.state_counts() == {
+            "todo": 2,
+            "in_progress": 1,
+            "review": 1,
+            "rework": 0,
+            "complete": 3,
+        }
+        # closed_count: theirs closed an hour ago too, and must not reach ours
+        assert await theirs.closed_count(DAY) == 1
+        assert await ours.closed_count(DAY) == 1
+        # runs_for_issue and runs_count
+        assert [run.run_id for run in await theirs.runs_for_issue(1)] == ["other-run"]
+        assert await theirs.runs_count(DAY) == 1
+        assert "other-run" not in [run.run_id for run in await ours.runs_for_issue(1)]
+        assert await ours.runs_count(DAY) == 1
+        # run_totals: their 7.0 must not land in our window's cost
+        theirs_totals = await theirs.run_totals(DAY)
+        assert (theirs_totals.total_tokens, theirs_totals.cost_usd) == (770, pytest.approx(7.0))
+        assert (await ours.run_totals(7 * DAY)).cost_usd == pytest.approx(0.1)
+        # daily_series: two days of buckets, one close and one run each side
+        theirs_days = await theirs.daily_series(2)
+        assert (sum(p.closed for p in theirs_days), sum(p.runs for p in theirs_days)) == (1, 1)
+        ours_days = await ours.daily_series(2)
+        assert (sum(p.closed for p in ours_days), sum(p.runs for p in ours_days)) == (1, 1)
+        # issue: the same number in both repositories is two different issues
+        assert (await theirs.issue(1)).title == "Elsewhere"  # type: ignore[union-attr]
+        assert (await ours.issue(1)).title == "Issue 1"  # type: ignore[union-attr]
+        # recent_events and events_for_issue
+        assert [event.kind for event in await theirs.recent_events(50)] == [
+            "state_changed",
+            "run_ended",
+            "run_started",
+        ]
+        assert "other-run" not in [event.run_id for event in await ours.recent_events(50)]
+        assert len(await theirs.events_for_issue(1, 50)) == 3
+        assert await ours.events_for_issue(1, 50) == []
+        # turn_summaries_for_issue and turn: run_turns is scoped through its run
+        assert [turn.model for turn in await theirs.turn_summaries_for_issue(1)] == [
+            "claude-elsewhere"
+        ]
+        assert await ours.turn_summaries_for_issue(1) == []
+        assert (await theirs.turn("other-run", 1)).model == "claude-elsewhere"  # type: ignore[union-attr]
+        assert await ours.turn("other-run", 1) is None
+        # snapshot
+        assert (await theirs.snapshot()).data == {"tick_count": 99}  # type: ignore[union-attr]
+
+
+async def test_repos_lists_registrations_by_name_and_snapshots_by_repo(
+    seeded: Database, db_url: str
+) -> None:
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    await store.connect()
+    try:
+        await store.write_snapshot(NOW, {"tick_count": 3})
+    finally:
+        await store.close()
+    await seeded.register_repo("zeta/last", GitHubLabels(), "/configs/z.md")
+    await seeded.register_repo("alpha/first", GitHubLabels(review="issuebot/check"), None)
+    await seeded.register_repo("zeta/last", GitHubLabels(), "/configs/z2.md")  # re-register
+    async with seeded.queries() as queries:
+        rows = await queries.repos()
+        assert [(r.repo, r.workflow_path) for r in rows] == [
+            ("alpha/first", None),
+            ("zeta/last", "/configs/z2.md"),
+        ]
+        assert rows[0].labels["review"] == "issuebot/check"
+        assert rows[1].registered_at <= rows[1].seen_at
+        assert await queries.repo("nobody/here") is None
+        assert (await queries.repo("alpha/first")).labels["todo"] == "issuebot/todo"  # type: ignore[union-attr]
+        snapshots = await queries.snapshots()
+        assert set(snapshots) == {REPO}  # only the worker that wrote one, not every registration
+        assert snapshots[REPO].data == {"tick_count": 3}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}issuebot: issues{% endblock %}
+{% block title %}issuebot: {{ repo.name }} issues{% endblock %}
 {% block content %}
 <div class="toolbar">
   <h1>Issues</h1>
@@ -19,7 +19,7 @@
   {% for row in rows %}
   <tr>
     <td class="num">#{{ row.number }}</td>
-    <td><a href="/issues/{{ row.number }}">{{ row.title }}</a></td>
+    <td><a href="{{ repo.base }}/issues/{{ row.number }}">{{ row.title }}</a></td>
     <td>{% if row.state %}<span class="state {{ row.state }}">{{ row.state_label }}</span>{% endif %}</td>
     <td>{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}PR#{{ row.pr_number }}{% endif %}{% if row.pr_state %} <span class="muted">{{ row.pr_state }}</span>{% endif %}{% endif %}</td>
     <td>{{ (row.closed_at or row.updated_at)|age(now) }}</td>

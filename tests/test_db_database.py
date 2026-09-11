@@ -24,12 +24,14 @@ def test_description_hides_the_password() -> None:
 
 def test_store_and_listener_are_built_with_the_url() -> None:
     database = Database(URL, connect=refuse)
-    store = database.store(GitHubLabels())
+    store = database.store(GitHubLabels(), "example/repo")
     assert isinstance(store, PostgresStore)
     assert store._url == URL
-    listener = database.listener(lambda: None)
+    assert store.repo == "example/repo"
+    listener = database.listener(lambda: None, repo="example/repo")
     assert isinstance(listener, RefreshListener)
     assert listener._url == URL
+    assert listener._repo == "example/repo"
 
 
 async def test_probe_reports_an_unreachable_server_without_the_url() -> None:
@@ -62,8 +64,8 @@ async def test_probe_before_and_after_migrate(db_url: str) -> None:
     database = Database(db_url)
     before = await database.probe()
     assert before.server_version.startswith("PostgreSQL ")
-    assert (before.schema_version, before.latest_version, before.behind) == (0, 2, True)
+    assert (before.schema_version, before.latest_version, before.behind) == (0, 3, True)
     result = await database.migrate()
-    assert result.applied == ("0001_initial", "0002_run_turns")
+    assert result.applied == ("0001_initial", "0002_run_turns", "0003_repos")
     after = await database.probe()
-    assert (after.schema_version, after.behind, after.ahead) == (2, False, False)
+    assert (after.schema_version, after.behind, after.ahead) == (3, False, False)

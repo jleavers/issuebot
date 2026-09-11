@@ -22,8 +22,8 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
   the file). Nothing is installed in the
   target repository: it only needs the five `issuebot/*` state labels and the `issuebot/no-fault`
   marker, which `issuebot labels ensure` creates. To work on several repositories, run one
-  self-contained stack per repository (see "More than one repository" below); there is no
-  shared dashboard.
+  worker checkout per repository against one shared database and one dashboard (see "More
+  than one repository" below).
 - `WORKFLOW.md` has two parts. The YAML front matter is the configuration; everything after
   it is the prompt the agent receives, a Jinja2 template that works unchanged for any
   repository. Secrets never go in the file: a field is either omitted (and the well-known
@@ -49,7 +49,8 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
   null` drops the shipped hook; `claude.model: null` takes Claude Code's default). Anything
   after the overlay's front matter replaces the prompt; leave it out to inherit. `validate`
   names the overlay and counts its overrides, and a running worker reports the one in force
-  in `issuebot status`, on the dashboard's worker line and in `/api/v1/state`.
+  in `issuebot status`, on the dashboard's worker line and in
+  `/api/v1/repos/<owner>/<name>/state`.
 - `.env` (copied from `.env.example`, git-ignored) holds the secrets and the identity the
   agent commits with. Docker Compose loads it for the worker; on the host you export the
   variables yourself.
@@ -90,6 +91,7 @@ for the host route use WSL.
 ### Step 1: clone and configure
 
 ```bash
+docker network create issuebot   # once per host: every checkout's containers join it
 git clone git@github.com:jleavers/issuebot.git
 cd issuebot
 cp .env.example .env
@@ -98,6 +100,9 @@ cp .env.example .env
 Fill in `.env`: `GH_TOKEN`, `ANTHROPIC_API_KEY` (or leave it empty and log in once, step 2),
 the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values, and optionally `SLACK_WEBHOOK_URL`.
 `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is taken on your host.
+Leave `COMPOSE_PROFILES=hub,worker` as it is: this checkout is the hub, running the database,
+the dashboard and its own worker (see "More than one repository" below for every other
+checkout, which runs `worker` alone).
 
 Leave the two email addresses as something that is not your own. If you set them to your real
 address and your account has **Keep my email addresses private** turned on, its *Block command
@@ -138,7 +143,6 @@ ignored.
 | `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL; unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
-| `server.port`, `server.bind` | where `issuebot web` listens | `8080`, `0.0.0.0` |
 
 Leave the prompt below the front matter as it is for your first runs. It tells the agent about
 the labels, the single "workpad" comment it keeps on the issue, the `issuebot/<number>-<slug>`
@@ -214,10 +218,11 @@ revoked API key — is caught by the run that hits it. That issue is moved to `i
 at once with a workpad block naming authentication, rather than after `agent.max_attempts`
 opaque failures, and the worker stops claiming anything else. A worker holding dispatch says
 so wherever you look: `issuebot status` prints a `dispatch: held (auth) since ...` line, the
-dashboard's worker line reads `worker held` with the reason, `/healthz` reports
-`"worker": "held"` with the same reason under `dispatch_hold`, and `docker compose logs
-worker` shows `dispatch_auth_held`. The board keeps updating while the hold lasts, since the
-hold stops `claude`, not `gh`. It re-checks the credential every poll and
+dashboard's worker line reads `worker held` with the reason, `/healthz` reports that
+repository's entry in `workers` with `"status": "held"` and the same reason under its
+`dispatch_hold`, and `docker compose logs worker` shows `dispatch_auth_held`. The board keeps
+updating while the hold lasts, since the hold stops `claude`, not `gh`. It re-checks the
+credential every poll and
 picks up where it left off once `claude auth status` reports a login again, so fixing the
 credential is enough and no restart is needed. A `claude` that cannot answer the probe at all
 holds it up for ten polls at most, and then the worker goes back to failing one issue at a
@@ -270,7 +275,8 @@ set -a && . ./.env && set +a                  # the CLI reads the environment, n
 docker compose up -d db                       # optional: history and the dashboard
 export DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot   # optional
 uv run issuebot worker
-uv run issuebot web                           # in a second terminal, needs DATABASE_URL
+DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
+  uv run issuebot web                         # in a second terminal; it reads nothing else
 ```
 
 On the host set `workspace.root` to a directory you can write, such as `~/issuebot-workspaces`;
@@ -361,41 +367,101 @@ both the label and the default.
 
 ### More than one repository
 
-Each worker is self-contained: one `WORKFLOW.md`, one workspace root, one database and one
-dashboard, and nothing is shared between workers. The database has no repository column
-(issues are stored by number, the worker's runtime snapshot is a single row, and
-`issuebot refresh` wakes every worker listening on that database), so two workers must not
-share one. The dashboard reads one database and shows exactly the repository its
-`WORKFLOW.md` names, so each repository gets its own dashboard on its own port. A combined
-view across repositories is on the "later" list in the
-[phased design](docs/superpowers/specs/2026-09-02-issuebot-phased-design.md) and would need
-schema changes.
+One database and one dashboard serve every repository; each repository still gets its own
+worker, in its own checkout, with its own `configs/WORKFLOW.local.md`, workspaces volume
+and Claude login. The checkouts meet on one Docker network.
 
-With Compose the simplest setup is one checkout per repository:
+1. Once per host: `docker network create issuebot`.
+2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
+   so `docker compose up -d` starts the database, the dashboard and this repository's worker.
+3. Every other repository: clone issuebot again, set `github.repo` in its
+   `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`,
+   and `docker compose up -d`. The worker reaches the hub's database as `db` over the shared
+   network and registers itself; it appears in the dashboard's dropdown on its first start.
+4. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`). `/` opens the
+   repository you last chose; the header's dropdown switches.
 
-```bash
-git clone git@github.com:jleavers/issuebot.git issuebot-frontend
-git clone git@github.com:jleavers/issuebot.git issuebot-backend
-```
+`issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
+them from that repository's checkout.
 
-Compose names the project after the directory, so each checkout gets its own `db`, `worker`
-and `web` containers and its own `pgdata`, `workspaces` and `claude-home` volumes. In each
-directory set `github.repo` in `configs/WORKFLOW.local.md`, never in the tracked file, and
-give its `.env` distinct `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` values (say 5432 and
-8080 for one, 5433 and 8081 for the other).
-Everything else can be identical, including `GH_TOKEN` when one token covers both
-repositories. The dashboards are then at http://127.0.0.1:8080 and http://127.0.0.1:8081.
-Because `claude-home` is per project, a Claude Code login has to be repeated for each stack;
-an API key or `CLAUDE_CODE_OAUTH_TOKEN` in each `.env` avoids that. A single checkout can
-drive several stacks with `docker compose -p <name>` and an override file that swaps the
-`configs` mount and the `env_file`, but one directory each is easier to reason about.
+#### Upgrading from one stack per repository
 
-On the host, run one `issuebot worker` and one `issuebot web` per repository, each with its
-own `--workflow` file (or `ISSUEBOT_WORKFLOW`) and that file's own overlay beside it
-(`frontend.md` reads `frontend.local.md`), its own `workspace.root`, its own database
-and its own `server.port` (or `web --port`). A second database on the same PostgreSQL server
-is fine: `docker compose exec db createdb -U issuebot issuebot_backend`, then point that
-worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on first start.
+Schema version 3 adds a repository column to every table, and the migration refuses a
+database that already holds rows because it cannot tell which repository they belong to. The
+route below renames each checkout's old database out of the way and imports into a fresh
+database of the same name, so no `DATABASE_URL` changes anywhere:
+
+1. In the hub checkout, pull the new version and add `COMPOSE_PROFILES=hub,worker` to `.env`;
+   once per host, `docker network create issuebot`.
+2. Stop the old worker and web but keep the database up: `docker compose stop worker web`
+   (the profiles in `.env` do not matter for `stop`; if compose cannot see the old containers,
+   `docker stop` them by name instead).
+3. Move the old data aside and give the hub a fresh database of the same name:
+
+   ```bash
+   docker compose exec db psql -U issuebot -d postgres -c 'ALTER DATABASE issuebot RENAME TO issuebot_old'
+   docker compose exec db createdb -U issuebot issuebot
+   ```
+
+4. Import this checkout's own history before any new worker starts — a started worker
+   registers its repository first, and the import then refuses it. Both URLs point at the
+   hub's own database server, on the port its `.env` publishes:
+
+   ```bash
+   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: the port the hub's db publishes
+   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
+     uv run issuebot import \
+       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot_old
+   ```
+
+   Check that port. A host that runs a database per project often has something else on
+   5432, and the compose default credentials (`issuebot`/`issuebot`) are the same in every
+   checkout, so a wrong port can connect to a different project's PostgreSQL rather than
+   fail. `docker compose port db 5432` prints the hub's.
+
+   The command migrates the fresh database to schema version 3 itself; no separate
+   `issuebot migrate` is needed. The repository and its labels come from that checkout's
+   workflow file; the command refuses to run twice for the same repository.
+
+   If you do need to import a repository again, delete its rows from the hub first — five
+   statements, in this order, with `<owner/name>` as `github.repo` names it (`run_turns`
+   cascades from `runs`, and there is nothing else to clean up):
+
+   ```
+   DELETE FROM events WHERE repo = '<owner/name>';
+   DELETE FROM runs WHERE repo = '<owner/name>';
+   DELETE FROM issues WHERE repo = '<owner/name>';
+   DELETE FROM runtime_snapshot WHERE repo = '<owner/name>';
+   DELETE FROM repos WHERE repo = '<owner/name>';
+   ```
+
+5. `docker compose up -d --build` starts `db`, `web` and this repository's worker.
+6. For every other repository's checkout: pull the new version and set
+   `COMPOSE_PROFILES=worker` in `.env`. Stop its old worker but keep its database up
+   (`docker compose stop worker`), the same ordering step 2 imposes on the hub, so nothing
+   is writing while the import reads. Then import its history into the hub from the host,
+   run from that checkout's directory because the repository comes from its workflow file.
+   Two different ports here: the target is the **hub's** database, as in step 4, while
+   `--from` is this checkout's **own** published port:
+
+   ```bash
+   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: this checkout's own db, the source
+   HUB_DB_PORT=5432               # the hub checkout's ISSUEBOT_DB_PORT, the target
+   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${HUB_DB_PORT}/issuebot \
+     uv run issuebot import \
+       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot
+   ```
+
+   Then remove that checkout's own `db` and `web` containers (`docker compose rm -sf db web`)
+   and `docker compose up -d --build`. Once every import is verified in the dashboard,
+   `issuebot_old` and the other checkouts' `pgdata` volumes can be dropped.
+
+Two smaller changes: the dashboard's URLs moved under `/r/<owner>/<name>/` (the API under
+`/api/v1/repos/<owner>/<name>/`), and the `server` block in `WORKFLOW.md` is no longer
+accepted, since the web takes `--bind` and `--port` instead; delete it. A repository you
+import brings its last runtime snapshot with it, so it reads `stale` in the dashboard until
+its worker's next tick; a repository that only registers, with no import, shows none until
+its first tick.
 
 ### When things go wrong
 
@@ -438,7 +504,8 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
 
   If one ever is, the worker says so instead of serving the old settings quietly. It logs
   `workflow_reload_failed` at ERROR and carries the reason as a config error into
-  `issuebot status`, the dashboard's worker line and `/api/v1/state` — `single-file mount`
+  `issuebot status`, the dashboard's worker line and `/api/v1/repos/<owner>/<name>/state` —
+  `single-file mount`
   when the file is a mount point, which it can tell because a file and its own directory can
   only be on different devices if the file is mounted, and `stale mount` once the host has
   actually replaced it and the file the worker holds has no directory entry left. It is a
@@ -451,8 +518,9 @@ worker's `DATABASE_URL` at `.../issuebot_backend`; it creates the tables on firs
   first. `configs/` is mounted into the container, but the code is baked into the
   image: after pulling a new version of issuebot, run `docker compose build` (or
   `docker compose up --build -d`) before anything else. Upgrading across the move of
-  `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker web`
-  once, so the containers pick up the new mount; check that your edits followed the rename
+  `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker`
+  once, so the worker picks up the new mount (the web no longer mounts `configs`); check
+  that your edits followed the rename
   (`git status`) before starting, and note that `workspace.root` now resolves against
   `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
   make it absolute, because `/configs` is mounted read-only. A setting that a newer
@@ -499,14 +567,17 @@ recent — needs `issuebot labels ensure` run once against the target repository
 checks its labels at startup and refuses to start while one is missing, naming it and the remedy.
 
 The dashboard (`issuebot web`; the compose `web` service publishes it on the host's loopback
-at `ISSUEBOT_WEB_PORT`, default 8080) shows the Kanban of the five label columns, the hero
-stats, two 30-day charts, the running agents and, per issue, its runs with the transcript of
-every captured turn; `/api/v1/state`, `/api/v1/issues/<n>`, `/api/v1/stats?window=7d` and
-`POST /api/v1/refresh` serve the same as JSON and `/healthz` reports the database and the age
-of the worker's last report. It needs `DATABASE_URL` and nothing else, reads `WORKFLOW.md`
-once at start, and has no authentication: keep it on loopback (`server.bind: 127.0.0.1` outside
-Docker) or behind a reverse proxy. Turn logs are captured into the database when a run ends,
-so they outlive the workspace.
+at `ISSUEBOT_WEB_PORT`, default 8080) serves every registered repository under
+`/r/<owner>/<name>/`: the Kanban of the five label columns, the hero stats, two 30-day
+charts, the running agents and, per issue, its runs with the transcript of every captured
+turn. `/` redirects to the repository you last picked (a cookie) or the first registered
+one, and the header's dropdown switches. `/api/v1/repos` lists every registered worker;
+`/api/v1/repos/<owner>/<name>/state`, `/issues/<n>`, `/stats?window=7d` and
+`POST /refresh` serve one repository as JSON, and `/healthz` reports the database and,
+per repository, its worker's status. It needs `DATABASE_URL` and nothing else — no
+workflow — and has no authentication: keep it on loopback (`issuebot web --bind 127.0.0.1`
+outside Docker) or behind a reverse proxy. Turn logs are captured into the database when a
+run ends, so they outlive the workspace.
 
 **The hero's six tiles.** Closed, agents run, cost, tokens, limits and activity, each showing
 two figures: 1 day and 7 days for the first four, the two usage windows for limits, and

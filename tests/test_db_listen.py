@@ -9,7 +9,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from issuebot.db import connect, migrate
+from issuebot.db import migrate
 from issuebot.db.database import Database
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.log import configure_logging
@@ -179,13 +179,58 @@ async def test_close_is_idempotent_and_a_noop_before_start(h: Harness) -> None:
     assert h.listener._task is not None and h.listener._task.cancelled()
 
 
+def notify(payload: str) -> FakeNotify:
+    item = FakeNotify(REFRESH_CHANNEL)
+    item.payload = payload
+    return item
+
+
+async def test_a_scoped_listener_fires_on_its_repo_and_on_an_empty_payload() -> None:
+    h = Harness()
+    h.listener = RefreshListener(
+        URL, h.on_notify, repo="example/repo", connect=h.connect, sleep=h.sleep
+    )
+    h.listener.start()
+    await h.settle()
+    (conn,) = h.connections
+    conn.feed.put_nowait(notify("example/repo"))
+    conn.feed.put_nowait(notify(""))
+    conn.feed.put_nowait(notify("example/other"))
+    conn.feed.put_nowait(notify("not a repo!"))
+    await h.settle()
+    assert h.calls == 2
+    assert h.listener.notified == 4  # every notification is counted, two were filtered
+    assert len(h.logged("db_refresh_other_repo")) == 1
+    (ignored,) = h.logged("refresh_payload_ignored")
+    assert ignored["payload"] == "not a repo!"
+    await h.listener.close()
+
+
+async def test_an_unscoped_listener_fires_on_every_payload(h: Harness) -> None:
+    h.listener.start()
+    await h.settle()
+    (conn,) = h.connections
+    conn.feed.put_nowait(notify("example/other"))
+    conn.feed.put_nowait(notify("anything"))
+    await h.settle()
+    assert h.calls == 2
+    await h.listener.close()
+
+
 # --- against a real server -------------------------------------------------------------------
 
 
 async def test_a_real_notify_reaches_the_callback(db_url: str) -> None:
     await migrate(db_url)
     received = asyncio.Event()
-    listener = RefreshListener(db_url, received.set)
+    calls = 0
+
+    def on_notify() -> None:
+        nonlocal calls
+        calls += 1
+        received.set()
+
+    listener = Database(db_url).listener(on_notify, repo="example/repo")
     listener.start()
     try:
         for _ in range(50):  # wait for LISTEN to be in place
@@ -193,18 +238,15 @@ async def test_a_real_notify_reaches_the_callback(db_url: str) -> None:
                 break
             await asyncio.sleep(0.02)
         await asyncio.sleep(0.1)
-        await Database(db_url).notify_refresh()
+        await Database(db_url).notify_refresh("example/repo")
         await asyncio.wait_for(received.wait(), timeout=2.0)
-        assert listener.notified == 1
-        conn = await connect(db_url)
-        try:
-            await conn.execute(f"NOTIFY {REFRESH_CHANNEL}")
-        finally:
-            await conn.close()
+        assert (calls, listener.notified) == (1, 1)
+        await Database(db_url).notify_refresh("example/other")
         for _ in range(100):
             if listener.notified == 2:
                 break
             await asyncio.sleep(0.02)
-        assert listener.notified == 2
+        assert listener.notified == 2  # counted...
+        assert calls == 1  # ...but not delivered: a different repository
     finally:
         await listener.close()

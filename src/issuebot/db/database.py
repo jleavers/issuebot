@@ -6,14 +6,16 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, classify, connect, describe, error_text, redact
 from issuebot.db.errors import StoreUnavailableError
+from issuebot.db.importer import ImportResult, import_repo
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import MigrationResult, discover_migrations, migrate, schema_version
 from issuebot.db.queries import Queries
-from issuebot.db.store import PostgresStore
+from issuebot.db.store import REGISTER_REPO, PostgresStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,16 +62,50 @@ class Database:
         async with self._open() as conn:
             yield Queries(conn)
 
-    def store(self, labels: GitHubLabels) -> PostgresStore:
-        return PostgresStore(self._url, labels=labels, connect=self._connect)
+    async def register_repo(
+        self, repo: str, labels: GitHubLabels, workflow_path: str | None
+    ) -> None:
+        """Upsert the worker's row in ``repos``: what the dashboard lists and lays out by.
 
-    def listener(self, on_notify: Callable[[], None]) -> RefreshListener:
-        return RefreshListener(self._url, on_notify, connect=self._connect)
-
-    async def notify_refresh(self) -> None:
-        """NOTIFY the refresh channel, which makes a listening worker tick at once."""
+        A one-shot write before the sinks start, so a failure is a startup failure, not a
+        queued item that could be dropped (spec §5).
+        """
         async with self._open() as conn:
-            await conn.execute(f"NOTIFY {REFRESH_CHANNEL}")
+            await conn.execute(
+                REGISTER_REPO,
+                {
+                    "repo": repo,
+                    "labels": Jsonb(labels.model_dump()),
+                    "workflow_path": workflow_path,
+                },
+            )
+
+    async def import_from(
+        self, source_url: str, *, repo: str, labels: GitHubLabels, workflow_path: str | None
+    ) -> ImportResult:
+        """Copy an old single-repository database in, stamped with ``repo`` (spec §4)."""
+        return await import_repo(
+            source_url,
+            self._url,
+            repo=repo,
+            labels=labels,
+            workflow_path=workflow_path,
+            connect=self._connect,
+        )
+
+    def store(self, labels: GitHubLabels, repo: str) -> PostgresStore:
+        return PostgresStore(self._url, repo=repo, labels=labels, connect=self._connect)
+
+    def listener(
+        self, on_notify: Callable[[], None], *, repo: str | None = None
+    ) -> RefreshListener:
+        return RefreshListener(self._url, on_notify, repo=repo, connect=self._connect)
+
+    async def notify_refresh(self, repo: str | None = None) -> None:
+        """NOTIFY the refresh channel: with a repository, that worker ticks at once; without
+        one, every listening worker does."""
+        async with self._open() as conn:
+            await conn.execute("SELECT pg_notify(%s, %s)", (REFRESH_CHANNEL, repo or ""))
 
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[AsyncConnection]:

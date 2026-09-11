@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import re
 from collections.abc import Awaitable, Callable
 
 import psycopg
@@ -11,6 +12,7 @@ from issuebot.db.connection import Connector, connect, error_text, reconnect_del
 from issuebot.log import get_logger
 
 REFRESH_CHANNEL = "issuebot_refresh"
+REPO_PAYLOAD = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")  # RepoName, settings.py
 _LOST = (psycopg.OperationalError, psycopg.InterfaceError)
 
 
@@ -26,11 +28,13 @@ class RefreshListener:
         url: str,
         on_notify: Callable[[], None],
         *,
+        repo: str | None = None,
         connect: Connector = connect,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._url = url
         self._on_notify = on_notify
+        self._repo = repo
         self._connect = connect
         self._sleep = sleep
         self._conn: AsyncConnection | None = None
@@ -80,7 +84,12 @@ class RefreshListener:
             try:
                 async for notification in conn.notifies():
                     self.notified += 1
-                    self._log.info("db_refresh_received", channel=notification.channel)
+                    payload = notification.payload or ""
+                    if not self._accepts(payload):
+                        continue
+                    self._log.info(
+                        "db_refresh_received", channel=notification.channel, payload=payload
+                    )
                     try:
                         self._on_notify()
                     except Exception:
@@ -91,6 +100,17 @@ class RefreshListener:
             except Exception as exc:
                 failures = 1
                 await self._crashed(exc, failures)
+
+    def _accepts(self, payload: str) -> bool:
+        """An empty payload wakes every worker; a repository name wakes that one; anything
+        else is dropped with a warning (spec §5)."""
+        if self._repo is None or not payload or payload == self._repo:
+            return True
+        if REPO_PAYLOAD.match(payload):
+            self._log.debug("db_refresh_other_repo", payload=payload, repo=self._repo)
+        else:
+            self._log.warning("refresh_payload_ignored", payload=payload, repo=self._repo)
+        return False
 
     async def _lost(self, exc: Exception, failures: int) -> None:
         await self._close_connection()

@@ -1,12 +1,15 @@
 {% extends "base.html" %}
-{% block title %}issuebot: {{ repo }}{% endblock %}
+{% block title %}issuebot: {{ repo.name }}{% endblock %}
 {% block content %}
 <div class="toolbar">
-  <h1>{{ repo }}</h1>
-  <button class="poll" type="button" hx-post="/api/v1/refresh" hx-swap="none">Poll now</button>
+  <h1>{{ repo.name }}</h1>
+  <button class="poll" type="button" hx-post="{{ repo.api }}/refresh" hx-swap="none">Poll now</button>
   <span id="refresh-status"></span>
 </div>
 {% include "partials/dashboard.html" %}
+{# app.js reads the charts' configuration off this element: the CSP forbids an inline
+   script, and the API prefix is per repository now, so it cannot be a constant either. #}
+<span id="chart-config" hidden data-stats-url="{{ repo.api }}/stats" data-chart-window="{{ chart_days }}d" data-chart-poll-s="{{ chart_poll_s }}"></span>
 <section class="charts">
   <div class="chart">
     <h2>Issues closed per day ({{ chart_days }} days)</h2>
@@ -20,5 +23,4 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/vendor/chart.umd.js"></script>
-<script src="/static/app.js" data-chart-window="{{ chart_days }}d" data-chart-poll-s="{{ chart_poll_s }}"></script>
 {% endblock %}

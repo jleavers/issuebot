@@ -14,13 +14,27 @@
 <body>
 <header class="top">
   <a class="brand" href="/">issuebot</a>
-  <span class="repo">{{ repo }}</span>
+  {% if repo %}
+  {# A control, not navigation: app.js navigates on change and remembers the choice in a
+     cookie, which is what "/" redirects by. Every option carries where this page kind
+     would land in that repository, so the switch keeps you where you were. #}
+  <select class="repo-switch" aria-label="Repository">
+    {% for option in repo_options %}
+    <option value="{{ option.url }}" data-repo="{{ option.name }}"{% if option.current %} selected{% endif %}>{{ option.name }}</option>
+    {% endfor %}
+  </select>
   <nav>
-    <a href="/">dashboard</a>
-    <a href="/issues">issues</a>
-    <a href="/api/v1/state">api</a>
+    <a href="{{ repo.base }}/">dashboard</a>
+    <a href="{{ repo.base }}/issues">issues</a>
+    <a href="{{ repo.api }}/state">api</a>
     <a href="/healthz">health</a>
   </nav>
+  {% else %}
+  <nav>
+    <a href="/api/v1/repos">api</a>
+    <a href="/healthz">health</a>
+  </nav>
+  {% endif %}
   <!-- a control, not navigation, so it sits beside the nav; the label says "switch the
        theme" until theme.js knows which theme is showing and can name the destination -->
   <button class="theme-toggle" type="button" title="Switch the colour theme" aria-label="Switch the colour theme">
@@ -33,5 +47,9 @@
 </main>
 <script src="/static/vendor/htmx.min.js"></script>
 {% block scripts %}{% endblock %}
+<!-- the repository switch is on every page, so app.js is here rather than in a block. It
+     comes last because the block above is where a page adds a library it needs: app.js
+     draws the charts, and a classic script sees only what already ran. -->
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -54,6 +54,7 @@ from issuebot.db import (
     DatabaseError,
     PostgresSink,
     RefreshListener,
+    describe,
     is_postgres_url,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
@@ -257,12 +258,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workflow_option(refresh)
     refresh.set_defaults(func=cmd_refresh)
 
-    web = subparsers.add_parser(
-        "web", help="serve the dashboard and the JSON API until SIGTERM or SIGINT"
+    importer = subparsers.add_parser(
+        "import",
+        help="copy an old single-repository database into this one, stamped with github.repo",
     )
-    _add_workflow_option(web)
-    web.add_argument("--port", type=int, default=None, help="listen port (default: server.port)")
-    web.add_argument("--bind", default=None, help="listen address (default: server.bind)")
+    _add_workflow_option(importer)
+    importer.add_argument(
+        "--from", dest="source", required=True, metavar="URL", help="the old database's URL"
+    )
+    importer.set_defaults(func=cmd_import)
+
+    web = subparsers.add_parser(
+        "web",
+        help="serve the dashboard and the JSON API until SIGTERM or SIGINT (needs DATABASE_URL)",
+    )
+    web.add_argument("--port", type=int, default=8080, help="listen port (default: 8080)")
+    web.add_argument("--bind", default="0.0.0.0", help="listen address (default: 0.0.0.0)")
     web.set_defaults(func=cmd_web)
     return parser
 
@@ -686,11 +697,9 @@ class _Sinks:
             self.postgres.record_issues(issues)
 
 
-async def _open_database(settings: Settings) -> Database | None:
-    """Migrate at start when database.url is set; None when it is not; raises DatabaseError."""
-    if settings.database.url is None:
-        return None
-    database = _database_factory(settings.database.url.get_secret_value())
+async def _migrate_database(url: str) -> Database:
+    """Migrate at start; raises DatabaseError."""
+    database = _database_factory(url)
     result = await database.migrate()
     get_logger(__name__).info(
         "db_migrated",
@@ -701,12 +710,29 @@ async def _open_database(settings: Settings) -> Database | None:
     return database
 
 
-async def _build_sinks(settings: Settings) -> _Sinks:
-    """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError."""
+async def _open_database(settings: Settings) -> Database | None:
+    """Migrate at start when database.url is set; None when it is not; raises DatabaseError."""
+    if settings.database.url is None:
+        return None
+    return await _migrate_database(settings.database.url.get_secret_value())
+
+
+async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
+    """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError.
+
+    With a database the worker registers its repository first (spec §5): the row the
+    dashboard lists and lays the board out by, refreshed on every start so a label rename
+    reaches it.
+    """
     slack = _slack_sink(settings)
     database = await _open_database(settings)
+    if database is not None:
+        await database.register_repo(settings.github.repo, settings.github.labels, workflow_path)
     postgres = (
-        PostgresSink(database.store(settings.github.labels), description=database.description)
+        PostgresSink(
+            database.store(settings.github.labels, settings.github.repo),
+            description=database.description,
+        )
         if database
         else None
     )
@@ -783,7 +809,7 @@ async def _run_once(
             return 1
         return 0
     try:
-        sinks = await _build_sinks(settings)
+        sinks = await _build_sinks(settings, workflow_path=str(workflow.path))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -920,7 +946,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return asyncio.run(_run_worker(workflow))
 
 
-async def _last_rate_limits(database: Database | None) -> RateLimits | None:
+async def _last_rate_limits(database: Database | None, repo: str) -> RateLimits | None:
     """The reading the previous worker last saw, so a restart does not blank the limits tile.
 
     A reading reaches a worker only while a turn is running, and it lives in memory; restarting
@@ -931,7 +957,7 @@ async def _last_rate_limits(database: Database | None) -> RateLimits | None:
         return None
     try:
         async with database.queries() as queries:
-            row = await queries.snapshot()
+            row = await queries.scoped(repo).snapshot()
     except DatabaseError as exc:
         get_logger(__name__).warning("rate_limits_seed_failed", error=exc.message)
         return None
@@ -941,7 +967,7 @@ async def _last_rate_limits(database: Database | None) -> RateLimits | None:
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     try:
-        sinks = await _build_sinks(workflow.config)
+        sinks = await _build_sinks(workflow.config, workflow_path=str(workflow.path))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -953,14 +979,16 @@ async def _run_worker(workflow: Workflow) -> int:
         run_session=_run_session,
         which=_which,
         claude_auth=_claude_auth,
-        initial_rate_limits=await _last_rate_limits(sinks.database),
+        initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,
     )
     listener: RefreshListener | None = None
     if sinks.database is not None:
-        listener = sinks.database.listener(orchestrator.request_refresh)
+        listener = sinks.database.listener(
+            orchestrator.request_refresh, repo=workflow.config.github.repo
+        )
     sinks.start()
     if listener is not None:
         listener.start()
@@ -987,7 +1015,7 @@ async def _run_worker(workflow: Workflow) -> int:
     return 0
 
 
-# --- migrate, status, stats, refresh ----------------------------------------------------------
+# --- migrate, status, stats, refresh, import --------------------------------------------------
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -1018,13 +1046,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
-    return asyncio.run(_status(database))
+    return asyncio.run(_status(database, workflow.config.github.repo))
 
 
-async def _status(database: Database) -> int:
+async def _status(database: Database, repo: str) -> int:
     try:
-        async with database.queries() as queries:
-            row = await queries.snapshot()
+        async with database.queries() as base:
+            row = await base.scoped(repo).snapshot()
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -1055,12 +1083,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
-    return asyncio.run(_stats(database, args.days))
+    return asyncio.run(_stats(database, workflow.config.github.repo, args.days))
 
 
-async def _stats(database: Database, days: int) -> int:
+async def _stats(database: Database, repo: str, days: int) -> int:
     try:
-        async with database.queries() as queries:
+        async with database.queries() as base:
+            queries = base.scoped(repo)
             view = StatsView(
                 closed_1d=await queries.closed_count(timedelta(days=1)),
                 closed_7d=await queries.closed_count(timedelta(days=7)),
@@ -1083,47 +1112,70 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     database = _database_or_report(workflow.config)
     if database is None:
         return 1
+    repo = workflow.config.github.repo
     try:
-        asyncio.run(database.notify_refresh())
+        asyncio.run(database.notify_refresh(repo))
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    print("[ OK ] refresh: notified issuebot_refresh")
+    print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    workflow = _load_or_report(args)
+    if workflow is None:
+        return 2
+    database = _database_or_report(workflow.config)
+    if database is None:
+        return 1
+    settings = workflow.config
+    try:
+        result = asyncio.run(
+            database.import_from(
+                args.source,
+                repo=settings.github.repo,
+                labels=settings.github.labels,
+                workflow_path=str(workflow.path),
+            )
+        )
+    except DatabaseError as exc:
+        print(f"[FAIL] import: {exc.message}")
+        return 1
+    for table, copied in result.counts.items():
+        print(f"[ OK ] import: {table} {copied}")
+    print(f"[ OK ] import: {settings.github.repo} imported from {describe(args.source)}")
     return 0
 
 
 # --- web -------------------------------------------------------------------------------------
 
 
+_WEB_NOT_CONFIGURED = "[FAIL] database: not configured; export DATABASE_URL"
+
+
 def cmd_web(args: argparse.Namespace) -> int:
-    workflow = _load_or_report(args)
-    if workflow is None:
-        return 2
-    return asyncio.run(_run_web(workflow, port=args.port, bind=args.bind))
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print(_WEB_NOT_CONFIGURED)
+        return 1
+    return asyncio.run(_run_web(url, port=args.port, bind=args.bind))
 
 
-async def _run_web(workflow: Workflow, *, port: int | None, bind: str | None) -> int:
-    """Migrate, build the app and serve it until a stop signal; the database is required;
-    a failed bind is uvicorn's error line and exit 1."""
-    settings = workflow.config
+async def _run_web(url: str, *, port: int, bind: str) -> int:
+    """Migrate, build the app and serve it until a stop signal; a failed bind is uvicorn's
+    error line and exit 1. The web reads no workflow: everything it shows is in the database."""
+    if not 0 <= port <= 65535:
+        print("[FAIL] web: --port must be between 0 and 65535")
+        return 1
     try:
-        database = await _open_database(settings)
+        database = await _migrate_database(url)
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    if database is None:
-        print(_NOT_CONFIGURED)
-        return 1
-    host = bind or settings.server.bind
-    listen_port = settings.server.port if port is None else port
-    if not 0 <= listen_port <= 65535:
-        print("[FAIL] web: --port must be between 0 and 65535")
-        return 1
-    get_logger(__name__).info(
-        "web_started", bind=host, port=listen_port, database=database.description
-    )
+    get_logger(__name__).info("web_started", bind=bind, port=port, database=database.description)
     try:
-        await _serve(create_app(database, settings), host=host, port=listen_port)
+        await _serve(create_app(database), host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
     return 0

@@ -19,3 +19,7 @@ class StoreError(DatabaseError):
 
 class MigrationError(DatabaseError):
     """Migrations could not be discovered or applied."""
+
+
+class ImportRefused(DatabaseError):  # noqa: N818
+    """``issuebot import`` will not run: the source or the target is not what it expects."""
