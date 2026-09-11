@@ -516,10 +516,12 @@ to it, and the shipped `after_create` is that `git fetch --unshallow`, which the
 `git diff origin/HEAD...HEAD` needs. And `hooks.timeout_ms` bounds *each* hook at 60 s by
 default, which a real `npm ci` from a cold cache will overrun; a hook that times out fails the
 session and burns an attempt, so raise it once here for all four. Raising it past about 100 s
-also means raising the `worker` service's `stop_grace_period` in `compose.yaml`, which is set
-to comfortably exceed the shutdown wait (`hooks.timeout_ms` + 20 s) so that Docker never
-SIGKILLs a worker still running `after_run`; 600 s here wants 620 s there. Point `--prefix` at
-wherever the harness keeps its `package.json`, or drop it if that is the repository root.
+also means raising `ISSUEBOT_STOP_GRACE_PERIOD` in this checkout's `.env`, which is the
+`worker` service's `stop_grace_period` and has to exceed the shutdown wait (`hooks.timeout_ms`
++ 20 s) so that Docker never SIGKILLs a worker still running `after_run`; 600 s here wants
+`620s` there, and it takes effect on the `docker compose up -d worker` that recreates the
+container. Point `--prefix` at wherever the harness keeps its `package.json`, or drop it if
+that is the repository root.
 
 **3. Make a missing runtime fail rather than skip.** Installing a runtime so the tests can run
 is pointless if they would still quietly skip, so give the agent the target repository's own
