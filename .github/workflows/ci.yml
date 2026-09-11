@@ -82,7 +82,8 @@ jobs:
       # The opt-in server (#62) is only ever built with the build argument set, so nothing else
       # in CI would notice the PGDG stanza rotting. Its own cache scope: writing mode=max to the
       # default one would replace the cache the build above depends on.
-      - uses: docker/build-push-action@v7
+      - name: build with POSTGRES_VERSION=18
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -98,3 +99,37 @@ jobs:
         run: |
           docker run --rm --entrypoint initdb issuebot:ci-pg --version
           test "$(docker run --rm --entrypoint id issuebot:ci-pg -un)" = issuebot
+      # initdb --version prints a string constant, so on its own it proves almost nothing. The
+      # hooks the README tells an operator to paste are pulled straight out of README.md and
+      # run in the image, under `bash -lc` as WorkspaceManager runs them -- which is also the
+      # only check that the login shell keeps the PATH /etc/profile would otherwise reset.
+      - name: the README's cluster recipe runs in the image
+        run: |
+          mkdir -p /tmp/hooks
+          python3 - <<'PY'
+          import pathlib, re
+          block = re.search(r"```yaml\nhooks:\n(.*?)```",
+                            pathlib.Path("README.md").read_text(), re.S).group(1)
+          hooks, name = {}, None
+          for line in block.splitlines():
+              header = re.fullmatch(r"  (\w+): \|", line)
+              if header:
+                  name = header.group(1); hooks[name] = []
+              elif name and line.startswith("    "):
+                  hooks[name].append(line[4:])
+              elif line.strip():
+                  name = None
+          for key, body in hooks.items():
+              pathlib.Path(f"/tmp/hooks/{key}.sh").write_text("\n".join(body) + "\n")
+          assert set(hooks) == {"before_run", "after_run", "before_remove"}, sorted(hooks)
+          PY
+          docker run --rm -v /tmp/hooks:/hooks:ro --entrypoint bash issuebot:ci-pg -lc '
+            set -eu
+            cd "$(mktemp -d)"
+            bash /hooks/before_run.sh
+            bash /hooks/before_run.sh
+            . .issuebot/pg/env
+            test "$(psql "$ARROWBOT_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "select 1")" = 1
+            bash /hooks/after_run.sh
+            bash /hooks/before_remove.sh
+          '

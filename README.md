@@ -380,11 +380,10 @@ concurrent session is one session's `DROP DATABASE` away from wrecking another's
 So the server binaries go into the image, off by default, and each session runs its own
 throwaway cluster inside its own workspace.
 
-**1. Build the worker image with a server.** Set the major version in this checkout's `.env`
-and rebuild:
+**1. Build the worker image with a server.** Set `ISSUEBOT_POSTGRES_VERSION=18` in this
+checkout's `.env` — `.env.example` carries the key, empty — and rebuild:
 
 ```bash
-echo 'ISSUEBOT_POSTGRES_VERSION=18' >> .env
 docker compose build worker
 docker compose up -d worker
 ```
@@ -411,7 +410,10 @@ hooks:
       --encoding=UTF8 --locale=C.UTF-8 >/dev/null
     pg_ctl -D "$PG/data" status >/dev/null 2>&1 \
       || pg_ctl -D "$PG/data" -w -l "$PG/log" \
-           -o "-c listen_addresses='' -k $PG/sock -c fsync=off" start
+           -o "-c listen_addresses='' -k '$PG/sock' -c fsync=off" start
+    psql -h "$PG/sock" -d postgres -tAc \
+      "select 1 from pg_database where datname='arrowbot_test'" | grep -q 1 \
+      || createdb -h "$PG/sock" arrowbot_test
     printf 'export ARROWBOT_DATABASE_URL=postgresql://issuebot@/arrowbot_test?host=%s\n' \
       "$PG/sock" > "$PG/env"
   after_run: |
@@ -420,8 +422,11 @@ hooks:
     pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
 ```
 
-Rename `ARROWBOT_DATABASE_URL` to whatever the target repository reads, and the database name
-with it.
+Rename `ARROWBOT_DATABASE_URL` to whatever the target repository reads, and `arrowbot_test` to
+whatever database it expects — in both the `createdb` line and the DSN. `initdb` makes only
+`postgres` and the two templates, so without that line the very first connection dies with
+`FATAL: database "arrowbot_test" does not exist`, and `.issuebot/pg/log` shows a perfectly
+healthy server. Drop the line only if the suite creates its own database.
 
 **3. Tell the agent the file exists.** Add one line to the prompt below the front matter:
 
@@ -440,9 +445,10 @@ Why it is shaped this way:
   one session's teardown cannot touch another's data, and `finish_terminal` takes the cluster
   with the workspace when the issue leaves.
 - **A Unix socket, `listen_addresses=''`.** No port to allocate, so no collisions between
-  concurrent sessions, and nothing outside the container can reach it. It also keeps the DSN on
-  loopback for target repositories that refuse a non-loopback host: `urlsplit` on
-  `postgresql://issuebot@/db?host=/path/sock` reports no hostname at all. Keep the socket
+  concurrent sessions, and nothing outside the container can reach it. It also satisfies a
+  target repository that refuses a non-loopback host, because there is no host to refuse:
+  `urlsplit` on `postgresql://issuebot@/db?host=/path/sock` reports no hostname at all, and the
+  query string survives the DSN rewriting such suites tend to do. Keep the socket
   directory inside the workspace root — the kernel caps a socket path at about 107 bytes, which
   `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
 - **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
@@ -458,8 +464,10 @@ Why it is shaped this way:
 - **`hooks.timeout_ms` (60 s by default) is ample**: `initdb` takes a couple of seconds and the
   start after it is immediate.
 
-If the suite still reports no server, run the hook by hand to see why:
-`docker compose exec worker bash -lc 'cd /workspaces/<repo>-<number> && cat .issuebot/pg/log'`.
+If a session still reports no server, the postmaster's own log says why:
+`docker compose exec worker bash -lc 'cat /workspaces/<repo>-<number>/.issuebot/pg/log'`. Drop
+the `-lc` and the hooks' `PATH` goes with it, which is a quick way to reproduce a
+`command not found`.
 
 ### More than one repository
 

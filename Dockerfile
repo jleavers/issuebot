@@ -42,7 +42,10 @@ RUN apt-get update \
 # has without the argument. Debian trixie ships PostgreSQL 17 only, so the version comes from
 # PGDG, with the same keyring-and-list shape as the gh stanza above. postgresql-common lands
 # first so that create_main_cluster can be turned off before the server package's postinst
-# runs: its "main" cluster would be root-owned, and the sessions make their own anyway.
+# runs: its "main" cluster would be root-owned, and the sessions make their own anyway. The
+# drop-in rather than createcluster.conf itself, which is a dpkg conffile carrying defaults
+# worth keeping; its last line already includes the directory. Both halves are asserted, since
+# the postinst only *skips* the cluster and a setting it stopped reading would say nothing.
 # /opt/postgresql is a stable name for the versioned directory, so the ENV below can put it on
 # PATH without expanding POSTGRES_VERSION inside the ${VAR:+...} that keeps it off the default
 # image's PATH. The profile.d line is not a duplicate of that ENV: hooks run under `bash -lc`
@@ -64,8 +67,12 @@ RUN if [ -n "${POSTGRES_VERSION}" ]; then \
         > /etc/apt/sources.list.d/pgdg.list \
    && apt-get update \
    && apt-get install -y --no-install-recommends postgresql-common \
-   && echo "create_main_cluster = false" > /etc/postgresql-common/createcluster.conf \
+   && mkdir -p /etc/postgresql-common/createcluster.d \
+   && echo "create_main_cluster = false" \
+        > /etc/postgresql-common/createcluster.d/99-issuebot.conf \
+   && test "$(pg_conftool /etc/postgresql-common/createcluster.conf show -bs create_main_cluster)" = off \
    && apt-get install -y --no-install-recommends "postgresql-${POSTGRES_VERSION}" \
+   && test ! -e "/var/lib/postgresql/${POSTGRES_VERSION}/main" \
    && rm -rf /var/lib/apt/lists/* \
    && ln -s "/usr/lib/postgresql/${POSTGRES_VERSION}" /opt/postgresql \
    && printf 'PATH="/opt/postgresql/bin:$PATH"\n' > /etc/profile.d/issuebot-postgresql.sh \
