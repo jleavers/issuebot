@@ -449,11 +449,12 @@ Why it is shaped this way:
   nobody else is in.
 - **`initdb` refuses to run as root**, and the container runs as uid 1000, so that is one
   problem the image does not have.
-- **Three hooks, not two.** `before_run` starts it idempotently (`pg_ctl status || pg_ctl
-  start`), so a second turn or a retry reuses the cluster instead of rebuilding it; `after_run`
-  stops it; and `before_remove` stops it again, because `finish_terminal` deletes the workspace
-  and a postmaster whose data directory has vanished would otherwise sit there until the
-  container restarts.
+- **Three hooks, not two.** `before_run` runs once per session and starts the cluster
+  idempotently (`pg_ctl status || pg_ctl start`), so a retry or a rework session on the same
+  workspace reuses it rather than paying for `initdb` again; `after_run` stops it at the end of
+  the session; and `before_remove` stops it again, because `finish_terminal` deletes the
+  workspace and a postmaster whose data directory has vanished would otherwise sit there until
+  the container restarts.
 - **`hooks.timeout_ms` (60 s by default) is ample**: `initdb` takes a couple of seconds and the
   start after it is immediate.
 
