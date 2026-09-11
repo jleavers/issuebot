@@ -151,9 +151,9 @@ USER issuebot
 # which hands psycopg bytes where a suite expects str and errors out every postgres-marked test
 # in teardown (#66). Set for every build rather than inside the ${POSTGRES_VERSION:+...} above,
 # because the locale is not the server's business: git, psql, sort and the agent's own shell all
-# read it. C.utf8 is built into glibc on trixie, so there is nothing to install for it. LANG and
-# not LC_ALL: LC_ALL overrides every category, which would stop a target repository's own LC_*
-# settings from taking effect.
+# read it. C.UTF-8 (which `locale -a` spells C.utf8) is built into glibc on trixie, so there is
+# nothing to install for it. LANG and not LC_ALL: LC_ALL overrides every category, which would
+# stop a target repository's own LC_* settings from taking effect.
 ENV HOME=/home/issuebot \
     LANG=C.UTF-8 \
     PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
