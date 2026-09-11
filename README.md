@@ -64,16 +64,23 @@ it counts as a completion too — on a backlog of aged issues that triage is mos
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
    appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
    personal access token restricted to the target repository with Contents, Issues and
-   Pull requests set to read and write, plus Commit statuses read (for CI that posts commit
-   statuses rather than Actions check runs); Metadata read is mandatory and the UI adds it for
-   you. Do not go looking for a Checks permission: fine-grained tokens
+   Pull requests set to read and write, plus Actions read (so a session can read why a CI run
+   failed) and Commit statuses read (for CI that posts commit statuses rather than Actions
+   check runs); Metadata read is mandatory and the UI adds it for you. Do not go looking for a
+   Checks permission: fine-grained tokens
    [cannot call the Checks API](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#limitations-of-fine-grained-personal-access-tokens),
-   so it is not in the list. Contents read is what lets `gh pr checks --watch` read a PR's check
-   rollup, so it works with the permissions above. If the agent may edit files under
-   `.github/workflows/`, also grant Workflows — read and write is its only level, and without it
-   any push touching those files is rejected. A classic token with the `repo` scope works too;
-   it needs `workflow` adding for the same reason. The account needs permission to push branches
-   and open PRs in the target repository.
+   so it is not in the list — and that limit is worth understanding before a session meets it.
+   `gh pr checks` reads a pull request's rollup as `CheckRun`s, which are Checks API data, so
+   against CI that runs on GitHub Actions it reports the aggregate state and refuses every
+   context: `Resource not accessible by personal access token`, once per job. The route that
+   does work is the Actions one — `gh run list`, `gh run view <id> --log` and
+   `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` — which is what Actions read buys, and
+   why the workflow's "wait for checks" step is performable at all. If the agent may edit files
+   under `.github/workflows/`, also grant Workflows — read and write is its only level, and
+   without it any push touching those files is rejected. A classic token with the `repo` scope
+   works too; it needs `workflow` adding for the same reason, and it reads check runs where a
+   fine-grained token cannot. The account needs permission to push branches and open PRs in the
+   target repository.
 2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
    (see step 2 below for the container).
 3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
