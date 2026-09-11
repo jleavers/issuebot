@@ -55,10 +55,15 @@ the others. Leave it there.
 CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) and, in the
 `docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
 under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
-before the Docker build, on every PR. That job builds the image twice (#62): the default one,
-which must carry no `initdb`, and a second with `POSTGRES_VERSION=18` in its own `type=gha`
-cache scope, which must have `initdb` on `PATH`, still run as `issuebot`, and survive the
-README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
+before the Docker build, on every PR. That job builds the image twice (#62, #64): the default
+one, which must carry no `initdb`, `node` or `npm`, and a second, `issuebot:ci-toolchain`, with
+both `POSTGRES_VERSION=18` and `NODE_VERSION=24` in its own `type=gha` cache scope (one build,
+not two: the checks are about what is on `PATH` and under which uid, not about the arguments
+interacting), which must answer `initdb --version`, `node --version` and `npm --version` on its
+own `PATH` and in a login shell, still run as `issuebot`, run one `npm ci` over a
+dependency-free fixture as `issuebot` with the registry pointed at a dead port (so the writable
+`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), and survive
+the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Dependabot covers uv, Docker and Actions weekly.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the

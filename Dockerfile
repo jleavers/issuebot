@@ -98,11 +98,21 @@ RUN if [ -n "${POSTGRES_VERSION}" ]; then \
 # node --version and npm --version are asserted here for the reason initdb --version and
 # claude --version are: a moved download or a renamed archive has to fail the build, not the
 # first session that runs `npm ci`.
+# --no-same-owner because nodejs.org's tarballs store uid 1001 (their `iojs` build user), which
+# tar honours when it runs as root: without it the whole runtime would belong to a uid that is
+# in no /etc/passwd entry here, and a release built under 1000 would hand the agent -- which
+# runs unattended, model-authored code -- write access to its own interpreter. root-owned and
+# 0755, as the apt half already is.
 # The pin moves by hand. A tarball fetched by URL is invisible to Dependabot, the same way
-# MIN_CLAUDE_VERSION is; nodejs.org's own release schedule is the thing to watch.
+# MIN_CLAUDE_VERSION is; nodejs.org's own release schedule is the thing to watch. A major on
+# its own is the only accepted value -- latest-v24.21.0.x does not exist, and curl would fail
+# the build with nothing but exit 22 to say why.
 ARG NODE_VERSION=""
 RUN if [ -n "${NODE_VERSION}" ]; then \
-      arch="$(dpkg --print-architecture)" \
+      case "${NODE_VERSION}" in \
+        *[!0-9]*) echo "NODE_VERSION is a major on its own, e.g. 24, not ${NODE_VERSION}" >&2; exit 1 ;; \
+      esac \
+   && arch="$(dpkg --print-architecture)" \
    && case "${arch}" in \
         amd64) node_arch=x64 ;; \
         arm64) node_arch=arm64 ;; \
@@ -115,7 +125,7 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
    && test -n "${tarball}" \
    && curl -fsSLO "${dist}/${tarball}" \
    && sha256sum -c --ignore-missing SHASUMS256.txt \
-   && tar -xzf "${tarball}" -C /opt \
+   && tar --no-same-owner -xzf "${tarball}" -C /opt \
    && rm -f "${tarball}" SHASUMS256.txt \
    && ln -s "/opt/$(basename "${tarball}" .tar.gz)" /opt/node \
    && printf 'PATH="/opt/node/bin:$PATH"\n' > /etc/profile.d/issuebot-node.sh \

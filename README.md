@@ -505,23 +505,46 @@ In that checkout's `configs/WORKFLOW.local.md`:
 
 ```yaml
 hooks:
+  timeout_ms: 600000
   after_create: |
     if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
     npm ci --prefix tests/web/js
 ```
 
-The first line is not decoration either: an overlay hook *replaces* the base one rather than
-appending to it, and the shipped `after_create` is that `git fetch --unshallow`, which the
-self-review's `git diff origin/HEAD...HEAD` needs. Point `--prefix` at wherever the harness
-keeps its `package.json`, or drop it if that is the repository root.
+Neither extra line is decoration. An overlay hook *replaces* the base one rather than appending
+to it, and the shipped `after_create` is that `git fetch --unshallow`, which the self-review's
+`git diff origin/HEAD...HEAD` needs. And `hooks.timeout_ms` bounds *each* hook at 60 s by
+default, which a real `npm ci` from a cold cache will overrun; a hook that times out fails the
+session and burns an attempt, so raise it once here for all four. Raising it past about 100 s
+also means raising the `worker` service's `stop_grace_period` in `compose.yaml`, which is set
+to comfortably exceed the shutdown wait (`hooks.timeout_ms` + 20 s) so that Docker never
+SIGKILLs a worker still running `after_run`; 600 s here wants 620 s there. Point `--prefix` at
+wherever the harness keeps its `package.json`, or drop it if that is the repository root.
 
 **3. Make a missing runtime fail rather than skip.** Installing a runtime so the tests can run
-is pointless if they would still quietly skip, so add the target repository's own "the harness
-must work" switch to the env file the `before_run` recipe above writes:
+is pointless if they would still quietly skip, so give the agent the target repository's own
+"the harness must work" switch. It goes in the env file `before_run` writes. That file is
+truncated every session — the recipe in the section above ends with a `printf … > "$PG/env"` —
+so the line has to come from the same hook rather than be appended to the file by hand. One
+more line after that `printf`:
 
+```bash
+printf 'export ARROWBOT_JS_HARNESS=1\n' >> "$PG/env"
 ```
-export ARROWBOT_JS_HARNESS=1
+
+If the target repository needs no PostgreSQL, there is no recipe above to append to and
+`before_run` exists only for this, writing the same file from nothing:
+
+```yaml
+hooks:
+  before_run: |
+    mkdir -p .issuebot
+    printf 'export ARROWBOT_JS_HARNESS=1\n' > .issuebot/env
 ```
+
+— and then the prompt line that step 3 of the section above describes names *that* path:
+"`. .issuebot/env` before running the tests". Without it the agent has no reason to source the
+file, and the export reaches nothing.
 
 `ARROWBOT_JS_HARNESS` is arrowbot's variable — its CI sets it so the harness *fails* rather
 than skips when `node` or jsdom is unavailable; use whatever the target repository calls its
@@ -529,8 +552,7 @@ equivalent. It goes in the env file for the same reason the DSN does: the agent 
 run under a filtered environment (`PASSTHROUGH_NAMES` and `PASSTHROUGH_PREFIXES` in
 `src/issuebot/agent/runner.py`), so a variable exported by `before_run` or set on the compose
 service never reaches `pytest`. Writing it into a file inside the workspace and sourcing it is
-what carries it across — and a repository that needs no PostgreSQL can write an env file
-holding nothing but this one line, sourced the same way.
+what carries it across.
 
 `npm`'s cache and logs live under `$HOME/.npm`, inside the container's `issuebot` home, so they
 survive between sessions and are gone when the container is recreated. If a session reports
