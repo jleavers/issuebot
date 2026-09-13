@@ -34,6 +34,7 @@ from issuebot.agent.runner import (
 )
 from issuebot.agent.session import (
     BLOCKED_MARKER,
+    BLOCKER_LIMIT,
     RunResult,
     StopReason,
     blocker_from,
@@ -52,6 +53,7 @@ from issuebot.agent.workspace import (
 
 __all__ = [
     "BLOCKED_MARKER",
+    "BLOCKER_LIMIT",
     "CLAUDE_PROBE_TIMEOUT_S",
     "CONTINUATION_TEMPLATE",
     "MIN_CLAUDE_VERSION",

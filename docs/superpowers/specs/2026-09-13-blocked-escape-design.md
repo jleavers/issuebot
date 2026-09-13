@@ -1,7 +1,7 @@
 # The session says it is blocked, and the worker escalates at once
 
 Date: 2026-09-13
-Status: approved, not implemented
+Status: implemented
 
 ## Problem
 
@@ -63,7 +63,10 @@ succeeded at what it could do and stopped for a reason, which is what `StopReaso
   the text after the marker on the *first non-empty line* when that line starts with the
   marker, stripped; `None` for any other text, including one that mentions `BLOCKED:` later
   on. An empty reason after the marker reads as `None` too, so a bare `BLOCKED:` does not
-  escape with an empty block. Case-sensitive: the prompt gives the exact spelling.
+  escape with an empty block. The reason is capped at 500 characters (`BLOCKER_LIMIT`): the
+  workpad's Blockers section is the long-form brief, and an unbounded line would fail the
+  escape's comment update and loop its retry. Case-sensitive: the prompt gives the exact
+  spelling.
 - In `_run_turns`, after the turn is recorded and the issue refreshed, the checks run in
   this order: cancelled; issue missing; issue moved (`issue_moved`, which wins because the
   label is the truth and the agent may have handed off in the same turn); then, new, `blocker

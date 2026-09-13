@@ -23,13 +23,18 @@ StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "ca
 # so the escape happens at the end of that turn rather than after max_turns.
 BLOCKED_MARKER = "BLOCKED:"
 
+# The reason is one line by contract and the workpad's Blockers section is the long-form
+# brief, so the escape block, the Slack line and the log never carry more than this.
+BLOCKER_LIMIT = 500
+
 
 def blocker_from(result_text: str | None) -> str | None:
     """The blocker line's reason when the turn's final message begins with the marker.
 
     Only the first non-empty line counts, and only when it starts with the marker: a message
     that mentions the word later is a report, not a stop. An empty reason reads as no marker,
-    so a bare ``BLOCKED:`` cannot escape an issue with an empty block.
+    so a bare ``BLOCKED:`` cannot escape an issue with an empty block. The reason is capped at
+    ``BLOCKER_LIMIT`` characters.
     """
     if not result_text:
         return None
@@ -39,7 +44,7 @@ def blocker_from(result_text: str | None) -> str | None:
             continue
         if not stripped.startswith(BLOCKED_MARKER):
             return None
-        reason = stripped[len(BLOCKED_MARKER) :].strip()
+        reason = stripped[len(BLOCKED_MARKER) :].strip()[:BLOCKER_LIMIT]
         return reason or None
     return None
 
@@ -371,6 +376,8 @@ async def _turn_loop(
         if state.issue.state is not StateLabel.IN_PROGRESS or not state.issue.dispatchable:
             state.stop("issue_moved")
             return
+        # A budget_exceeded turn continues past `turn.ok` and reaches this check; its
+        # result_text is claude's own cap message, which never starts with the marker.
         blocker = blocker_from(turn.result_text)
         if blocker is not None:
             state.blocker = blocker

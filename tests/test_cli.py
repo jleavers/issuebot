@@ -1461,8 +1461,7 @@ def test_run_once_reports_an_exhausted_turn_budget(
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     out = capsys.readouterr().out
     assert (
-        "turn budget exhausted; issue #42 remains in_progress (the blocked escape is Phase 4)"
-        in out
+        "turn budget exhausted; issue #42 remains in_progress (the worker would escalate it)" in out
     )
 
 

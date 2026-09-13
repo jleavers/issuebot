@@ -13,7 +13,14 @@ import pytest
 import structlog
 
 from issuebot.agent.runner import TurnObserver, TurnResult
-from issuebot.agent.session import BLOCKED_MARKER, RunResult, blocker_from, new_run_id, run_session
+from issuebot.agent.session import (
+    BLOCKED_MARKER,
+    BLOCKER_LIMIT,
+    RunResult,
+    blocker_from,
+    new_run_id,
+    run_session,
+)
 from issuebot.agent.workspace import WorkspaceManager
 from issuebot.config import Settings, Workflow
 from issuebot.events import Event, EventBus, RunEnded, RunStarted
@@ -193,12 +200,15 @@ def test_new_run_id_is_sortable_and_unique() -> None:
         ("blocked: lower case is not the marker", None),
         ("", None),
         (None, None),
+        ("BLOCKED: " + "x" * 600, "x" * 500),
+        ("BLOCKED: " + "y" * 500, "y" * 500),
     ],
 )
 def test_blocker_from_reads_the_marker_off_the_first_line(
     text: str | None, expected: str | None
 ) -> None:
     assert BLOCKED_MARKER == "BLOCKED:"
+    assert BLOCKER_LIMIT == 500
     assert blocker_from(text) == expected
 
 
@@ -276,6 +286,17 @@ async def test_a_blocked_final_message_stops_the_run_at_that_turn(tmp_path: Path
     ended = h.recorder.events[-1]
     assert isinstance(ended, RunEnded)
     assert (ended.outcome, ended.error, ended.turns) == ("succeeded", None, 1)
+
+
+async def test_the_run_finished_log_line_carries_the_blocker(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_turns=2)
+    runner = ScriptedRunner(texts={1: "BLOCKED: a credential is missing; a human must add it"})
+    with structlog.testing.capture_logs() as logs:
+        await h.run(runner)
+    finished = [entry for entry in logs if entry["event"] == "run_finished"]
+    assert len(finished) == 1
+    assert finished[0]["stop_reason"] == "blocked"
+    assert finished[0]["blocker"] == "a credential is missing; a human must add it"
 
 
 async def test_a_marker_later_in_the_message_does_not_stop_the_run(tmp_path: Path) -> None:
