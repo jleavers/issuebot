@@ -374,6 +374,30 @@ def test_the_repos_api_lists_every_registration_with_its_worker(h: Harness) -> N
     }
 
 
+def test_healthz_and_state_report_a_worker_that_cannot_read_github(h: Harness) -> None:
+    """Nothing else in the snapshot distinguishes an outage from a quiet board (#88)."""
+    hold = DispatchHold(
+        kind="github",
+        reason=(
+            "GitHub is not answering this worker: transport: http 502: Bad Gateway "
+            "\u2014 githubstatus.com: Pull Requests, major outage"
+        ),
+        since=HELD_SINCE,
+    )
+    h.queries.snapshot_rows["example/repo"] = snapshot(age_s=5.0, dispatch_hold=hold)
+    h.queries.snapshot_row = snapshot(age_s=5.0, dispatch_hold=hold)
+    body = h.client.get("/healthz").json()
+    assert body["worker"] == "held"
+    assert body["workers"]["example/repo"]["status"] == "held"
+    assert body["workers"]["example/repo"]["dispatch_hold"]["kind"] == "github"
+    state = h.client.get(f"{API}/state").json()
+    assert state["worker"]["dispatch_hold"]["kind"] == "github"
+    assert (
+        "githubstatus.com: Pull Requests, major outage"
+        in (state["worker"]["dispatch_hold"]["reason"])
+    )
+
+
 def test_healthz_maps_every_worker_and_reports_the_worst(h: Harness) -> None:
     h.register("acme/frontend")
     h.queries.snapshot_rows["example/repo"] = snapshot(age_s=5.0)
