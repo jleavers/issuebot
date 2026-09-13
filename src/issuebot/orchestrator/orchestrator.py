@@ -62,6 +62,7 @@ from issuebot.orchestrator.state import (
     RuntimeSnapshot,
     StopCause,
     backoff_ms,
+    conflict_candidate,
     observe_transition,
     sort_candidates,
 )
@@ -72,8 +73,9 @@ CANDIDATE_STATES: tuple[StateLabel, ...] = (
     StateLabel.REWORK,
     StateLabel.TODO,
 )
-# Fetched instead of CANDIDATE_STATES when an on_issues observer is attached: review is polled
-# for the history store only; the dispatch loop never runs it (Phase 6 spec §8.1).
+# Fetched instead of CANDIDATE_STATES when an on_issues observer is attached or the conflict
+# bounce is on (`fetch_states`): review is polled for the history store and the bounce only; the
+# dispatch loop never runs it (Phase 6 spec §8.1).
 OBSERVED_STATES: tuple[StateLabel, ...] = (*CANDIDATE_STATES, StateLabel.REVIEW)
 SHUTDOWN_MARGIN_S = 10.0
 # How many ticks an authentication hold (#20) waits for a probe that cannot answer before it
@@ -83,6 +85,12 @@ MAX_UNREADABLE_AUTH_PROBES = 10
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
 # environment, stdout or None. A seam like `which`, so tests never spawn a process.
 ClaudeAuthProbe = Callable[[str, Mapping[str, str]], str | None]
+
+
+def fetch_states(*, observed: bool, conflicts: bool) -> tuple[StateLabel, ...]:
+    """Which states a poll fetches: review rides along for the history store, or for the
+    conflict bounce, and the dispatch loop never runs it either way."""
+    return OBSERVED_STATES if observed or conflicts else CANDIDATE_STATES
 
 
 def _utcnow() -> datetime:
@@ -528,16 +536,47 @@ class Orchestrator:
         self._reported_reload_error = message
         self._log.error("workflow_reload_failed", path=str(self._workflow.path), error=message)
 
+    def _conflict_limit(self) -> int:
+        return self._workflow.config.agent.max_conflict_reworks
+
     async def _fetch_issues(self) -> Sequence[Issue] | None:
         """The polled issues, reported to the observer; None when the fetch failed."""
-        states = OBSERVED_STATES if self._on_issues is not None else CANDIDATE_STATES
+        states = fetch_states(
+            observed=self._on_issues is not None, conflicts=self._conflict_limit() > 0
+        )
         try:
             issues = await self._adapter.fetch_issues_by_states(states)
         except GitHubError as exc:
             self._log.warning("candidates_fetch_failed", error=str(exc))
             return None
         self._report_issues(issues)
+        await self._bounce_conflicts(issues)
         return issues
+
+    async def _bounce_conflicts(self, issues: Sequence[Issue]) -> None:
+        """Move each review issue whose pull request conflicts to rework (spec §3, §4).
+
+        Skipped for an issue the orchestrator still holds: a running entry in its review
+        grace would read the move as a human's and stop for the wrong reason, and a retry is
+        an in-flight decision about the same issue. The next poll gets it.
+        """
+        limit = self._conflict_limit()
+        if limit <= 0:
+            return
+        for issue in issues:
+            if not conflict_candidate(issue):
+                continue
+            if issue.id in self._running or issue.id in self._retries:
+                continue
+            outcome = await actions.conflict_rework(
+                self._adapter, self._bus, issue, limit=limit, now=self._now()
+            )
+            if outcome == "limit_noted":
+                self._log.debug(
+                    "conflict_rework_limit_noted",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                )
 
     async def _poll_issues(self) -> None:
         """Keep the history store current while dispatch is held, so the board does not go stale.
@@ -545,9 +584,10 @@ class Orchestrator:
         An authentication hold stops ``claude``, not ``gh``, and a preflight hold may name only
         ``claude.command``; either way the fetch still works and the board can stay current. A
         hold that ``fetch_preflight`` reports on skips this, since the request would only fail.
-        The request is worth making at all only when an observer is watching.
+        The request is worth making at all only when an observer is watching or the conflict
+        bounce is on: a conflict is about the board, not about dispatch.
         """
-        if self._on_issues is None:
+        if self._on_issues is None and self._conflict_limit() <= 0:
             return
         await self._fetch_issues()
 

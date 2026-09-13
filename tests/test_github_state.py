@@ -52,6 +52,7 @@ def test_state_label_values_match_settings_field_names() -> None:
         (StateLabel.IN_PROGRESS, StateLabel.REVIEW, Actor.AGENT),
         (StateLabel.IN_PROGRESS, StateLabel.REVIEW, Actor.ISSUEBOT),
         (StateLabel.REVIEW, StateLabel.REWORK, Actor.HUMAN),
+        (StateLabel.REVIEW, StateLabel.REWORK, Actor.ISSUEBOT),
         (StateLabel.REVIEW, StateLabel.TODO, Actor.HUMAN),
         (StateLabel.IN_PROGRESS, StateLabel.TODO, Actor.HUMAN),
         (StateLabel.REVIEW, StateLabel.COMPLETE, Actor.ISSUEBOT),
@@ -80,7 +81,7 @@ def test_disallowed_transitions(
 
 
 def test_transition_table_size() -> None:
-    assert len(TRANSITIONS) == 10
+    assert len(TRANSITIONS) == 11
 
 
 def test_active_and_terminal_partition() -> None:

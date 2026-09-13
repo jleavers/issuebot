@@ -14,6 +14,7 @@ from issuebot.github.models import (
     Issue,
     LabelEnsured,
     LinkedPr,
+    Mergeable,
     PrState,
     RateLimit,
     RepoInfo,
@@ -46,6 +47,7 @@ class _FakePr:
     closes: int
     state: PrState = "open"
     merged_at: datetime | None = None
+    mergeable: Mergeable = "mergeable"
 
 
 class FakeGitHub:
@@ -284,6 +286,10 @@ class FakeGitHub:
     def close_pr(self, pr_number: int) -> None:
         self._require_pr(pr_number).state = "closed"
 
+    def set_pr_mergeable(self, pr_number: int, mergeable: Mergeable) -> None:
+        """What GitHub's test merge would answer for the pull request from now on."""
+        self._require_pr(pr_number).mergeable = mergeable
+
     def close_issue(self, number: int) -> None:
         record = self._require_issue(number)
         record.state = "closed"
@@ -346,6 +352,7 @@ class FakeGitHub:
             url=f"https://github.com/{self.repo}/pull/{pr.number}",
             state=pr.state,
             merged_at=pr.merged_at,
+            mergeable=pr.mergeable,
         )
 
     def _node(self, record: _FakeIssue) -> dict[str, Any]:
@@ -368,6 +375,7 @@ class FakeGitHub:
                         "url": f"https://github.com/{self.repo}/pull/{pr.number}",
                         "state": _PR_STATE_UPPER[pr.state],
                         "mergedAt": pr.merged_at.isoformat() if pr.merged_at else None,
+                        "mergeable": pr.mergeable.upper(),
                     }
                     for pr in self._prs.values()
                     if pr.closes == record.number

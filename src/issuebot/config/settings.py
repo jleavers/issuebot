@@ -88,6 +88,9 @@ class AgentSettings(_Model):
     max_turns: int = Field(default=5, ge=1)
     max_attempts: int = Field(default=3, ge=1)
     max_retry_backoff_ms: int = Field(default=300_000, ge=1000)
+    # How many times the worker may move one issue from review to rework because its pull
+    # request conflicts with the default branch; 0 turns the automatic bounce off.
+    max_conflict_reworks: int = Field(default=3, ge=0)
     self_review: bool = True
 
 

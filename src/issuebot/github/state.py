@@ -29,6 +29,7 @@ TRANSITIONS: frozenset[tuple[StateLabel | None, StateLabel, Actor]] = frozenset(
         (StateLabel.IN_PROGRESS, StateLabel.REVIEW, Actor.AGENT),
         (StateLabel.IN_PROGRESS, StateLabel.REVIEW, Actor.ISSUEBOT),
         (StateLabel.REVIEW, StateLabel.REWORK, Actor.HUMAN),
+        (StateLabel.REVIEW, StateLabel.REWORK, Actor.ISSUEBOT),
         (StateLabel.REVIEW, StateLabel.TODO, Actor.HUMAN),
         (StateLabel.IN_PROGRESS, StateLabel.TODO, Actor.HUMAN),
         (StateLabel.REVIEW, StateLabel.COMPLETE, Actor.ISSUEBOT),
@@ -47,7 +48,11 @@ LABEL_STYLES: dict[StateLabel, LabelStyle] = {
     StateLabel.TODO: LabelStyle("0E8A16", "Queued for issuebot; a human sets this"),
     StateLabel.IN_PROGRESS: LabelStyle("FBCA04", "An issuebot agent is working on it"),
     StateLabel.REVIEW: LabelStyle("1D76DB", "PR opened; waiting for human review"),
-    StateLabel.REWORK: LabelStyle("D93F0B", "Reviewer wants changes; issuebot will pick it up"),
+    StateLabel.REWORK: LabelStyle(
+        "D93F0B",
+        "Reviewer wants changes, or the PR conflicts with the default branch; "
+        "issuebot will pick it up",
+    ),
     StateLabel.COMPLETE: LabelStyle(
         "5319E7", "Closed by a merged issuebot PR, or after issuebot found no fault"
     ),
