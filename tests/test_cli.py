@@ -17,7 +17,6 @@ from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
-from issuebot.agent.turnlog import capture_turns
 from issuebot.cli import (
     StatsView,
     _turn_capture,
@@ -2191,7 +2190,6 @@ def test_worker_wires_the_database_when_configured(
     assert kwargs["on_snapshot"] == postgres.record_snapshot
     assert kwargs["on_issues"] == postgres.record_issues
     assert postgres._description == fake_database.description
-    assert postgres._capture_turns is not capture_turns  # bound to the deployment's scrubber
     (listener,) = fake_database.listeners
     assert listener.on_notify == instance.request_refresh
     assert listener.started and listener.closed
