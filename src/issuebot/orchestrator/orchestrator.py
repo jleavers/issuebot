@@ -91,6 +91,9 @@ MAX_FETCH_FAILURES = 3
 # `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
 # the probe's verdict).
 GITHUB_HOLD_KEY = "github"
+# How much of `gh`'s complaint the hold's reason carries. Neither `gh`'s stderr nor GitHub's
+# GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
+MAX_HOLD_ERROR_CHARS = 300
 
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
 # environment, stdout or None. A seam like `which`, so tests never spawn a process.
@@ -111,9 +114,18 @@ def _utcnow() -> datetime:
 
 
 def _github_hold_reason(error: str, status_note: str | None) -> str:
-    """The GitHub hold's reason: this worker's own evidence, the status page as annotation."""
-    reason = f"GitHub is not answering this worker: {error}"
+    """The GitHub hold's reason: this worker's own evidence, the status page as annotation.
+
+    ``error`` is capped for the same reason the annotation is: it is ``gh``'s stderr or every
+    GraphQL message GitHub sent, neither of them bounded, and this string is written to the
+    snapshot on every tick the hold lasts and drawn on the dashboard's worker line.
+    """
+    reason = f"GitHub is not answering this worker: {_clipped(error, MAX_HOLD_ERROR_CHARS)}"
     return f"{reason} \u2014 githubstatus.com: {status_note}" if status_note else reason
+
+
+def _clipped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
 
 
 class OrchestratorStartupError(Exception):
@@ -469,11 +481,12 @@ class Orchestrator:
         network rather than at GitHub's.
         """
         try:
-            payload = await asyncio.to_thread(self._github_status)
+            status = parse_status_summary(await asyncio.to_thread(self._github_status))
         except Exception as exc:
+            # Reading *and* parsing: `tick` is not a place to find out that a third party's
+            # body was the one shape its reader did not survive.
             self._log.debug("github_status_probe_failed", error=f"{type(exc).__name__}: {exc}")
             return None
-        status = parse_status_summary(payload)
         return None if status is None else status.detail
 
     def _hold_dispatch(self, error: str) -> None:

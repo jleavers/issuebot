@@ -647,8 +647,9 @@ them from that repository's checkout.
   time the error changes, WARNING in between, since an idle worker says nothing else. The
   first poll that answers lifts it and dispatch resumes, with no restart. A single failed poll
   does not hold anything: `gh` retries a transport error of its own, and an `HTTP 5xx` or a
-  timeout is classified `transport` and retried, so it takes a minute and a half of silence at
-  the default interval before the worker stops claiming. Holding is the safe side — a worker
+  timeout is classified `transport` and retried. The count is three consecutive *polls*, which
+  is a minute and a half at the default `polling.interval_ms` and less when an `issuebot
+  refresh` has brought ticks closer together. Holding is the safe side — a worker
   that cannot read the board has no business claiming from it — and a due retry waits with it
   rather than spending an attempt on a claim that is going to fail.
 

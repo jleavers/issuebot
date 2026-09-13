@@ -476,7 +476,12 @@ def _github_status_check() -> Check:
     fetches raised.
     """
     subject = "github.status"
-    status = parse_status_summary(_github_status())
+    try:
+        status = parse_status_summary(_github_status())
+    except Exception as exc:
+        # A third party cannot be allowed to end `validate` with a traceback in place of the
+        # twelve checks that come after it.
+        return Check(subject, "warn", f"githubstatus.com could not be read: {type(exc).__name__}")
     if status is None:
         return Check(subject, "warn", "githubstatus.com did not answer; this check is advisory")
     if status.operational:

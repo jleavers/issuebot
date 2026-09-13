@@ -71,6 +71,12 @@ def fetch_status_summary(
     Blocking, so callers on the event loop run it in a thread. Never raises: a status page
     that cannot answer must not be able to break the caller that asked (#17). Only ``http``
     and ``https`` are fetched, so no override of the URL can turn this into a file read.
+
+    ``timeout_s`` bounds the connection and the read, not the name lookup: ``urlopen`` resolves
+    before it has a socket to set a timeout on. A host whose nameservers are unreachable --
+    which is one of the ways the ``gh`` polls come to fail in the first place -- can therefore
+    spend its resolver's own budget here. Callers ask once per hold, so the cost is bounded by
+    that rather than by this.
     """
     log = get_logger(__name__)
     try:
@@ -97,7 +103,9 @@ def parse_status_summary(payload: str | None) -> GitHubStatus | None:
         return None
     try:
         document = json.loads(payload)
-    except ValueError, TypeError:
+    except ValueError, TypeError, RecursionError:
+        # RecursionError is the one json.loads raises that is neither: ~100k levels of nesting
+        # is about 200 KB, which fits inside MAX_BODY_BYTES, so the read cap does not cover it.
         return None
     if not isinstance(document, dict):
         return None
@@ -140,7 +148,12 @@ def _impaired(components: object) -> tuple[str, ...]:
 
 
 def _incident_names(incidents: object) -> tuple[str, ...]:
-    """The unresolved incidents' names: what the page reports when no component is marked."""
+    """The incidents' names: what the page reports when no component has been marked yet.
+
+    Not filtered on ``status``: the Statuspage *summary* carries only unresolved incidents, and
+    a reader that cannot rely on the shape (see ``parse_status_summary``) has no business
+    deciding an incident is over from a field that may be missing.
+    """
     if not isinstance(incidents, list):
         return ()
     named: list[str] = []

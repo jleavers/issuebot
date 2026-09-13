@@ -2719,6 +2719,58 @@ async def test_a_status_page_that_cannot_answer_costs_the_annotation_and_nothing
     assert h.github_status_calls == 1
 
 
+async def test_a_second_outage_reads_the_status_page_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once per hold, not once per process: the release has to re-arm the probe."""
+    h = Harness(tmp_path)
+    h.github_status_output = GITHUB_DOWN
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    first = held(h)
+    assert first is not None and h.github_status_calls == 1
+    outage.down = False
+    await h.tick()
+    assert held(h) is None
+    h.clock.advance(600.0)
+    outage.down = True
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    second = held(h)
+    assert second is not None and h.github_status_calls == 2
+    assert second.since > first.since
+
+
+async def test_a_status_body_the_parser_cannot_survive_cannot_end_the_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`json.loads` raises RecursionError on a deeply nested body, and this runs mid-outage."""
+    h = Harness(tmp_path)
+    h.github_status_output = "[" * 100_000 + "]" * 100_000
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.reason == "GitHub is not answering this worker: transport: http 502: Bad Gateway"
+
+
+async def test_a_hold_reason_does_not_carry_an_unbounded_complaint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gh`'s stderr is not capped, and the reason is stored and drawn on every tick it lasts."""
+    h = Harness(tmp_path)
+    outage = FetchOutage(h, monkeypatch)
+    outage.error = "x" * 5_000
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert len(hold.reason) < 400
+    assert hold.reason.endswith("\u2026")
+
+
 async def test_the_status_page_is_never_read_while_the_board_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -448,7 +448,7 @@ floor, not the shipped version, and moves by hand.
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
-  reports the server and schema versions (behind warns, ahead or unreachable fails), a
+  reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a
   human is running this and there is no dispatch to hold), a

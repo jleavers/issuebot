@@ -509,6 +509,38 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert "14 checks: 0 failed, 2 warnings" in out
 
 
+def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    github_status: FakeGitHubStatus,
+) -> None:
+    """A third party must not end `validate` with a traceback in place of the checks after it."""
+    github_status.payload = "[" * 100_000 + "]" * 100_000
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.status: githubstatus.com did not answer" in out
+    assert "[ OK ] prompt:" in out
+    assert "14 checks: 0 failed, 2 warnings" in out
+
+
+def test_validate_survives_a_status_probe_that_raises(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+) -> None:
+    def exploding() -> str | None:
+        raise RuntimeError("the status page went up in smoke")
+
+    monkeypatch.setattr("issuebot.cli._github_status", exploding)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
+    assert "14 checks: 0 failed, 2 warnings" in out
+
+
 def test_validate_checks_the_status_page_even_without_gh(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
