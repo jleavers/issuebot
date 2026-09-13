@@ -185,7 +185,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
-[ OK ] database.url: connected (PostgreSQL 18.1); schema version 2
+[ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
 13 checks: 0 failed, 2 warnings
@@ -625,85 +625,6 @@ and Claude login. The checkouts meet on one Docker network.
 
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
-
-#### Upgrading from one stack per repository
-
-Schema version 3 adds a repository column to every table, and the migration refuses a
-database that already holds rows because it cannot tell which repository they belong to. The
-route below renames each checkout's old database out of the way and imports into a fresh
-database of the same name, so no `DATABASE_URL` changes anywhere:
-
-1. In the hub checkout, pull the new version and add `COMPOSE_PROFILES=hub,worker` to `.env`;
-   once per host, `docker network create issuebot`.
-2. Stop the old worker and web but keep the database up: `docker compose stop worker web`
-   (the profiles in `.env` do not matter for `stop`; if compose cannot see the old containers,
-   `docker stop` them by name instead).
-3. Move the old data aside and give the hub a fresh database of the same name:
-
-   ```bash
-   docker compose exec db psql -U issuebot -d postgres -c 'ALTER DATABASE issuebot RENAME TO issuebot_old'
-   docker compose exec db createdb -U issuebot issuebot
-   ```
-
-4. Import this checkout's own history before any new worker starts — a started worker
-   registers its repository first, and the import then refuses it. Both URLs point at the
-   hub's own database server, on the port its `.env` publishes:
-
-   ```bash
-   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: the port the hub's db publishes
-   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
-     uv run issuebot import \
-       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot_old
-   ```
-
-   Check that port. A host that runs a database per project often has something else on
-   5432, and the compose default credentials (`issuebot`/`issuebot`) are the same in every
-   checkout, so a wrong port can connect to a different project's PostgreSQL rather than
-   fail. `docker compose port db 5432` prints the hub's.
-
-   The command migrates the fresh database to schema version 3 itself; no separate
-   `issuebot migrate` is needed. The repository and its labels come from that checkout's
-   workflow file; the command refuses to run twice for the same repository.
-
-   If you do need to import a repository again, delete its rows from the hub first — five
-   statements, in this order, with `<owner/name>` as `github.repo` names it (`run_turns`
-   cascades from `runs`, and there is nothing else to clean up):
-
-   ```
-   DELETE FROM events WHERE repo = '<owner/name>';
-   DELETE FROM runs WHERE repo = '<owner/name>';
-   DELETE FROM issues WHERE repo = '<owner/name>';
-   DELETE FROM runtime_snapshot WHERE repo = '<owner/name>';
-   DELETE FROM repos WHERE repo = '<owner/name>';
-   ```
-
-5. `docker compose up -d --build` starts `db`, `web` and this repository's worker.
-6. For every other repository's checkout: pull the new version and set
-   `COMPOSE_PROFILES=worker` in `.env`. Stop its old worker but keep its database up
-   (`docker compose stop worker`), the same ordering step 2 imposes on the hub, so nothing
-   is writing while the import reads. Then import its history into the hub from the host,
-   run from that checkout's directory because the repository comes from its workflow file.
-   Two different ports here: the target is the **hub's** database, as in step 4, while
-   `--from` is this checkout's **own** published port:
-
-   ```bash
-   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: this checkout's own db, the source
-   HUB_DB_PORT=5432               # the hub checkout's ISSUEBOT_DB_PORT, the target
-   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${HUB_DB_PORT}/issuebot \
-     uv run issuebot import \
-       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot
-   ```
-
-   Then remove that checkout's own `db` and `web` containers (`docker compose rm -sf db web`)
-   and `docker compose up -d --build`. Once every import is verified in the dashboard,
-   `issuebot_old` and the other checkouts' `pgdata` volumes can be dropped.
-
-Two smaller changes: the dashboard's URLs moved under `/r/<owner>/<name>/` (the API under
-`/api/v1/repos/<owner>/<name>/`), and the `server` block in `WORKFLOW.md` is no longer
-accepted, since the web takes `--bind` and `--port` instead; delete it. A repository you
-import brings its last runtime snapshot with it, so it reads `stale` in the dashboard until
-its worker's next tick; a repository that only registers, with no import, shows none until
-its first tick.
 
 ### When things go wrong
 

@@ -54,7 +54,6 @@ from issuebot.db import (
     DatabaseError,
     PostgresSink,
     RefreshListener,
-    describe,
     is_postgres_url,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
@@ -257,16 +256,6 @@ def build_parser() -> argparse.ArgumentParser:
     refresh = subparsers.add_parser("refresh", help="ask a running worker to poll now (NOTIFY)")
     _add_workflow_option(refresh)
     refresh.set_defaults(func=cmd_refresh)
-
-    importer = subparsers.add_parser(
-        "import",
-        help="copy an old single-repository database into this one, stamped with github.repo",
-    )
-    _add_workflow_option(importer)
-    importer.add_argument(
-        "--from", dest="source", required=True, metavar="URL", help="the old database's URL"
-    )
-    importer.set_defaults(func=cmd_import)
 
     web = subparsers.add_parser(
         "web",
@@ -1119,32 +1108,6 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         print(f"[FAIL] database: {exc.message}")
         return 1
     print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
-    return 0
-
-
-def cmd_import(args: argparse.Namespace) -> int:
-    workflow = _load_or_report(args)
-    if workflow is None:
-        return 2
-    database = _database_or_report(workflow.config)
-    if database is None:
-        return 1
-    settings = workflow.config
-    try:
-        result = asyncio.run(
-            database.import_from(
-                args.source,
-                repo=settings.github.repo,
-                labels=settings.github.labels,
-                workflow_path=str(workflow.path),
-            )
-        )
-    except DatabaseError as exc:
-        print(f"[FAIL] import: {exc.message}")
-        return 1
-    for table, copied in result.counts.items():
-        print(f"[ OK ] import: {table} {copied}")
-    print(f"[ OK ] import: {settings.github.repo} imported from {describe(args.source)}")
     return 0
 
 

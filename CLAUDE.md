@@ -29,7 +29,6 @@ uv run issuebot status               # the worker's last runtime snapshot, read 
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
 uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
-uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set)
@@ -314,15 +313,9 @@ floor, not the shipped version, and moves by hand.
   when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
-  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `importer.py`: `import_repo`
-  copies a version-2, single-repository database into the hub (refusing a source not at that
-  exact schema version, and a repository already registered in the target), streaming `issues`,
-  `runs`, `run_turns`, `events` and `runtime_snapshot` through a server-side cursor in batches
-  of 500 so a large `run_turns` never has to fit in memory, everything landing in one target
-  transaction; its own `IMPORT_TURN` carries `run_turns.captured_at` across as it is, rather
-  than the sink's `INSERT_TURN`, which stamps `now()`. `database.py`: the `Database`
+  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
   facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `register_repo`,
-  `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`, `import_from`);
+  `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`);
   one connection per call, no pool. Constants, not settings; a `database.url`
   change needs a restart. Tests: `db_url` (conftest) creates a schema per test and skips without
   `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
@@ -436,10 +429,7 @@ floor, not the shipped version, and moves by hand.
   while dispatch is held), `stats [--days N]` (also `scoped(repo)`; `by_state` from
   `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
   the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
-  issuebot_refresh for <repo>`), `import --from URL` (copies a version-2, single-repository
-  database into this one, stamped with `github.repo` and its labels; `[FAIL] import:` and exit
-  1 on refusal — wrong source schema version, or the repository already registered — or a
-  connection failure) and
+  issuebot_refresh for <repo>`) and
   `web [--bind HOST] [--port N]` (reads `DATABASE_URL` alone — no `--workflow`, no other
   setting, and no workflow file to fail loading — `[FAIL] database: not configured; export
   DATABASE_URL` without it, distinct from every other command's `... or set database.url:
