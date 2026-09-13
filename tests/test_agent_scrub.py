@@ -1,5 +1,9 @@
 """Tests for the session-capture scrubber (hermetic, pure)."""
 
+import json
+import time
+from pathlib import Path
+
 import pytest
 
 from issuebot.agent.scrub import MIN_SECRET_LENGTH, REDACTED, Scrubber
@@ -9,6 +13,7 @@ TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
 KEY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
 OAUTH = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789"
 WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXXXXXX"
+SAMPLE = Path(__file__).parent / "fixtures" / "runs" / "20260904T202535Z-0964cd"
 
 
 def settings(**overrides: object) -> Settings:
@@ -22,8 +27,8 @@ def settings(**overrides: object) -> Settings:
 
 def test_a_known_value_is_masked_wherever_it_appears() -> None:
     scrubber = Scrubber(secrets=["s3cretvalue!"])
-    text = 'export X="s3cretvalue!"; echo s3cretvalue!s3cretvalue!'
-    assert scrubber.scrub(text) == f'export X="{REDACTED}"; echo {REDACTED}{REDACTED}'
+    text = 'export X="s3cretvalue!"; echo s3cretvalue!;s3cretvalue!'
+    assert scrubber.scrub(text) == f'export X="{REDACTED}"; echo {REDACTED};{REDACTED}'
 
 
 def test_a_short_known_value_is_left_alone() -> None:
@@ -34,8 +39,31 @@ def test_a_short_known_value_is_left_alone() -> None:
 
 
 def test_a_value_containing_another_is_masked_whole() -> None:
-    scrubber = Scrubber(secrets=["innerpart", "outer-innerpart-end"])
-    assert scrubber.scrub("outer-innerpart-end") == REDACTED
+    scrubber = Scrubber(secrets=["innerpartvalue", "outer-innerpartvalue-end"])
+    assert scrubber.scrub("outer-innerpartvalue-end") == REDACTED
+
+
+def test_a_known_value_is_masked_as_a_whole_word() -> None:
+    """`***` in the tail of a number or a word would break a JSON line or a name."""
+    scrubber = Scrubber(secrets=["abcdefghijkl"])
+    assert (
+        scrubber.scrub("xabcdefghijkl abcdefghijkl1 abcdefghijkl-x")
+        == "xabcdefghijkl abcdefghijkl1 ***-x"
+    )
+
+
+def test_an_all_digit_value_is_left_alone() -> None:
+    scrubber = Scrubber(secrets=["123456789012"])
+    assert scrubber.secrets == 0
+    assert scrubber.scrub('{"n":123456789012}') == '{"n":123456789012}'
+    assert scrubber.scrub("PASSWORD=123456789012") == f"PASSWORD={REDACTED}"
+
+
+def test_a_known_value_is_masked_in_its_json_spelling() -> None:
+    scrubber = Scrubber(secrets=['p"ss\\word!!!!'])
+    assert scrubber.secrets == 1
+    line = json.dumps({"text": 'p"ss\\word!!!!'})
+    assert json.loads(scrubber.scrub(line)) == {"text": REDACTED}
 
 
 def test_an_empty_scrubber_masks_shapes_only() -> None:
@@ -62,6 +90,8 @@ def test_an_empty_scrubber_masks_shapes_only() -> None:
             f"postgresql://issuebot:{REDACTED}@db:5432/issuebot",
         ),
         ("postgresql://issuebot@db/issuebot", "postgresql://issuebot@db/issuebot"),
+        ("redis://:hunter2secret@host:6379/0", f"redis://:{REDACTED}@host:6379/0"),
+        ("x" + "a.b-" * 8 + "://u:p@h", "x" + "a.b-" * 8 + f"://u:{REDACTED}@h"),
         ("https://user:p%40ss@host/", f"https://user:{REDACTED}@host/"),
         ("DATABASE_PASSWORD=abc PGPASSWD=def", f"DATABASE_PASSWORD={REDACTED} PGPASSWD={REDACTED}"),
         ("MY_API_KEY=abc my_secret=def", f"MY_API_KEY={REDACTED} my_secret={REDACTED}"),
@@ -93,6 +123,20 @@ def test_the_home_directory_reads_tilde() -> None:
     assert scrubber.home is True
     text = "cwd /home/alice/ws/repo, HOME=/home/alice, not /home/alice2/x nor /home/alice-old"
     assert scrubber.scrub(text) == "cwd ~/ws/repo, HOME=~, not /home/alice2/x nor /home/alice-old"
+
+
+def test_the_home_directory_needs_a_boundary_before_it_too() -> None:
+    assert (
+        Scrubber(home="/root").scrub("--root-dir /root/x file:///root") == "--root-dir ~/x file://~"
+    )
+    assert Scrubber(home="/home/alice").scrub("/mnt/home/alice/x") == "/mnt/home/alice/x"
+
+
+def test_a_long_scheme_like_run_scrubs_in_linear_time() -> None:
+    text = "a.b-" * (16 * 1024) + "://u:p@h"
+    started = time.perf_counter()
+    assert Scrubber().scrub(text) == "a.b-" * (16 * 1024) + f"://u:{REDACTED}@h"
+    assert time.perf_counter() - started < 1.0
 
 
 def test_the_dashed_spelling_of_home_reads_tilde_too() -> None:
@@ -130,7 +174,7 @@ def test_scrubbing_is_idempotent() -> None:
 def test_for_deployment_collects_the_settings_and_environment_secrets_and_home() -> None:
     config = settings(
         github={"repo": "acme/widgets", "token": "literal-token-value"},
-        database={"url": "postgresql://issuebot:db%20passw0rd@db/issuebot"},
+        database={"url": "postgresql://issuebot:db%20passw0rd!@db/issuebot"},
         notifications={"slack": {"webhook_url": WEBHOOK}},
     )
     environ = {
@@ -145,7 +189,7 @@ def test_for_deployment_collects_the_settings_and_environment_secrets_and_home()
     scrubber = Scrubber.for_deployment(config, environ)
     assert scrubber.home is True
     text = (
-        "literal-token-value db%20passw0rd db passw0rd anthropic-key-value oauth-token-value "
+        "literal-token-value db%20passw0rd! db passw0rd! anthropic-key-value oauth-token-value "
         "gh-token-value my-password-value /usr/bin:/bin C.UTF-8 /home/alice/ws"
     )
     assert scrubber.scrub(text) == " ".join([REDACTED] * 7 + ["/usr/bin:/bin", "C.UTF-8", "~/ws"])
@@ -155,6 +199,25 @@ def test_for_deployment_with_nothing_configured_still_masks_shapes() -> None:
     scrubber = Scrubber.for_deployment(settings(), {})
     assert (scrubber.secrets, scrubber.home) == (0, False)
     assert scrubber.scrub(f"{TOKEN} /home/alice") == f"{REDACTED} /home/alice"
+
+
+def test_the_compose_default_password_does_not_eat_the_transcript() -> None:
+    """`issuebot` is the compose default's database password; masking it as a known value
+    would take every label and repository name with it. The DSN shape covers the DSN."""
+    config = settings(database={"url": "postgresql://issuebot:issuebot@db:5432/issuebot"})
+    scrubber = Scrubber.for_deployment(config, {"HOME": "/home/jleavers"})
+    assert scrubber.secrets == 0
+    text = (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")
+    assert scrubber.scrub(text) == text
+    assert scrubber.scrub("postgresql://issuebot:issuebot@db:5432/issuebot") == (
+        f"postgresql://issuebot:{REDACTED}@db:5432/issuebot"
+    )
+
+
+def test_every_scrubbed_sample_line_still_parses() -> None:
+    scrubber = Scrubber(secrets=["literal-token-value"], home="/home/jleavers")
+    for line in (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8").splitlines():
+        assert json.loads(scrubber.scrub(line))
 
 
 def test_for_deployment_ignores_an_unparseable_database_url() -> None:

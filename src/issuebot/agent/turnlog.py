@@ -6,12 +6,15 @@ applies the size caps and parses the summary the dashboard shows. It never raise
 unreadable directory yields nothing, an unreadable stream file skips its turn, a missing
 prompt or stderr file is empty.
 
-It is the one scrubbing step. The files are the agent's stdout tee'd byte for byte, and
-issuebot put its own ``GH_TOKEN`` into that process's environment, so nothing downstream --
-the ``run_turns`` rows, the dashboard's raw views, the committed fixture -- may take the
-file as it is: every persisted copy is this function's output. Scrubbing runs before each
-cap, so a cap can never leave the head or tail of a credential at its edge; the byte counts
-still report the files as they are on disk.
+It is the one scrubbing step for these files. They are the agent's stdout tee'd byte for
+byte, and issuebot put its own ``GH_TOKEN`` into that process's environment, so nothing
+downstream -- the ``run_turns`` rows, the dashboard's raw views, the committed fixture --
+may take a file as it is: every persisted copy is this function's output. The prompt,
+stderr and result-text caps run after scrubbing, so none can leave the head or tail of a
+credential at its edge; the stream's two caps are whole-line (a stub for an oversized line,
+a head of lines) and run before it, on the raw bytes, which is also why a mask that grows
+a value can leave the stored stream a few bytes over ``STREAM_LIMIT``. The byte counts
+report the files as they are on disk.
 """
 
 import json

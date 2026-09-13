@@ -2206,18 +2206,18 @@ def test_the_sink_captures_turns_through_the_deployment_scrubber(tmp_path: Path)
     config = Settings.model_validate(
         {"github": {"repo": "acme/widgets", "token": "literal-token-value"}}
     )
-    capture = _turn_capture(config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1"})
+    capture = _turn_capture(config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"})
     line = json.dumps(
         {
             "type": "result",
             "subtype": "success",
-            "result": "env: GH_TOKEN=literal-token-value key-value-1 at /home/alice/ws",
+            "result": "env: GH_TOKEN=literal-token-value key-value-1234 at /home/alice/ws",
         }
     )
     (tmp_path / "turn-1.jsonl").write_text(line + "\n")
     (turn,) = capture(tmp_path)
     assert turn.result_text == "env: GH_TOKEN=*** *** at ~/ws"
-    assert "literal-token-value" not in turn.stream and "key-value-1" not in turn.stream
+    assert "literal-token-value" not in turn.stream and "key-value-1234" not in turn.stream
 
 
 def test_worker_seeds_the_orchestrator_with_the_last_stored_reading(
