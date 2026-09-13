@@ -711,6 +711,19 @@ its first tick.
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
+- **GitHub itself.** The worker reads and writes its whole state machine through `gh`, and
+  nothing it reports distinguishes a GitHub incident from a quiet board. Preflight checks only
+  that `gh` is on `PATH` and that the token is set, so an outage never holds dispatch: a failed
+  poll logs `candidates_fetch_failed` and the tick carries on, and `issuebot status`,
+  `/healthz` and the dashboard all go on showing a healthy worker — correctly, because the
+  worker is healthy. Transport failures at least retry, an `HTTP 5xx` or a timeout being
+  classified `transport`. What cannot be handled is GitHub answering `200` with stale data: a
+  label write that reports success and is not visible on the next read leaves the worker acting
+  on a state GitHub will later contradict, and there is nothing to see anywhere. So subscribe
+  [githubstatus.com](https://www.githubstatus.com/) to the same Slack channel the worker posts
+  to, and an incident arrives in the timeline beside the runs it explains. Subscribe rather
+  than have the worker poll it: an incident is published when a human declares it, which can be
+  twenty minutes after the first failed write, so the page is a witness and never a gate.
 - **Cost.** Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
   times `agent.max_turns` — `5.0` and `5` mean up to $25 before the issue is escalated. The
   right value is yours to pick and the checked-in `5.0` is only a starting point: on an API
