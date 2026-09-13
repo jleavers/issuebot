@@ -110,6 +110,19 @@ def test_human_move_to_rework() -> None:
     assert fmt(event) == f":repeat: {ISSUE} `issuebot/review` → `issuebot/rework` by a human"
 
 
+def test_issuebot_move_to_rework_links_the_pull_request() -> None:
+    """The conflict bounce: issuebot's own move back to rework, naming the PR that conflicts."""
+    event = state_changed(
+        from_label="issuebot/review",
+        to_label="issuebot/rework",
+        actor="issuebot",
+        pr_url=PR_URL,
+    )
+    assert fmt(event) == (
+        f":repeat: {ISSUE} `issuebot/review` → `issuebot/rework` by issuebot · {PR}"
+    )
+
+
 def test_labels_stripped_reads_no_label() -> None:
     event = state_changed(from_label="issuebot/review", to_label=None)
     assert fmt(event) == f":label: {ISSUE} `issuebot/review` → no label by issuebot"

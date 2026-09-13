@@ -207,6 +207,29 @@ def test_follow_up_and_rework_context(make_issue: Callable[..., Issue]) -> None:
     assert "Linked pull request: #51 (open)" in text
 
 
+def test_rework_context_names_both_authors(make_issue: Callable[..., Issue]) -> None:
+    """issuebot moves an issue to rework too, on a merge conflict, and the agent must not
+    go looking for review comments that do not exist."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue, linked_pr=PR), rework=True)
+    )
+    assert "or issuebot did because the pull request conflicts with the default branch" in text
+    assert "`### Issuebot merge conflict` block says which" in text
+
+
+def test_workpad_update_starts_from_the_current_body(make_issue: Callable[..., Issue]) -> None:
+    """issuebot appends blocks between sessions; a PATCH from a stale local copy would erase
+    the merge-conflict count the cap is read from."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert "Start every update from the comment's current body" in text
+    assert "issues/comments/<id> --jq .body > .issuebot/workpad.md" in text
+    assert "keep them where they are" in text
+
+
 def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(
@@ -276,3 +299,30 @@ def test_after_create_unshallows_a_shallow_clone() -> None:
     assert hook is not None
     assert "git rev-parse --is-shallow-repository" in hook
     assert "git fetch --unshallow" in hook
+
+
+def test_keeps_the_branch_mergeable(make_issue: Callable[..., Issue]) -> None:
+    """Sibling sessions fork from the same default branch, so the second PR to land conflicts.
+
+    The prompt merges the default branch in before the push, reads the PR's mergeability
+    back after it, and does both again on every revisit, a rework included. Merge, never
+    rebase: a rebase of a pushed branch needs the force-push ground rule 6 forbids.
+    """
+    workflow = load()
+    renderer = PromptRenderer(workflow.prompt_template)
+    repo = workflow.config.github.repo
+    fresh = renderer.render(context(workflow, dispatched(make_issue)))
+    rework = renderer.render(
+        context(workflow, dispatched(make_issue, linked_pr=PR), attempt=2, rework=True)
+    )
+    for text in (fresh, rework):
+        # Step 5: the default branch is merged in before the push, not after the reviewer asks.
+        assert "git merge origin/HEAD" in text
+        # Step 6: the answer GitHub computes, polled until it stops reading UNKNOWN.
+        assert f"gh pr view <number> -R {repo} --json mergeable --jq .mergeable" in text
+        assert "CONFLICTING" in text
+        assert "UNKNOWN" in text
+        # And the bar the label command waits for.
+        assert "reads `MERGEABLE`" in text
+    # A rework addresses the conflict before the comments, which may be about code it moves.
+    assert "before the review comments" in rework

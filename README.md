@@ -11,9 +11,11 @@ repository. You put the `issuebot/todo` label on an issue; the worker clones the
 runs Claude Code on the issue unattended, pushes a branch, opens a pull request and moves the
 issue to `issuebot/review`. You review the PR like any other. Merging it closes the issue and
 the worker marks it `issuebot/complete`; labelling it `issuebot/rework` sends it back to the
-agent with your review comments. An issue whose reported defect turns out not to happen comes
-back with the evidence and the `issuebot/no-fault` marker instead of a pull request, and closing
-it counts as a completion too — on a backlog of aged issues that triage is most of the value.
+agent with your review comments. The worker does that itself when a sibling merge leaves the
+pull request conflicting, up to `agent.max_conflict_reworks` times. An issue whose reported
+defect turns out not to happen comes back with the evidence and the `issuebot/no-fault` marker
+instead of a pull request, and closing it counts as a completion too — on a backlog of aged
+issues that triage is most of the value.
 
 ### What is configured where
 
@@ -148,6 +150,7 @@ ignored.
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
+| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
@@ -193,7 +196,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
-[ OK ] database.url: connected (PostgreSQL 18.1); schema version 2
+[ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
 13 checks: 0 failed, 2 warnings
@@ -334,7 +337,10 @@ claims the issue and runs one session with the logs on your terminal.
 - **Send it back.** Leave review comments on the PR, then move the issue from
   `issuebot/review` to `issuebot/rework` (remove one label, add the other: an issue carrying
   two state labels is ignored until that is fixed). The agent resumes on the same branch and
-  PR, reads every comment, addresses each one and returns the issue to review.
+  PR, reads every comment, addresses each one and returns the issue to review. You need not do
+  this for a merge conflict: when a sibling PR merges and yours turns `CONFLICTING`, the worker
+  moves the issue to `issuebot/rework` itself and records each bounce in the workpad, up to
+  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
@@ -634,91 +640,25 @@ and Claude login. The checkouts meet on one Docker network.
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
 
-#### Upgrading from one stack per repository
-
-Schema version 3 adds a repository column to every table, and the migration refuses a
-database that already holds rows because it cannot tell which repository they belong to. The
-route below renames each checkout's old database out of the way and imports into a fresh
-database of the same name, so no `DATABASE_URL` changes anywhere:
-
-1. In the hub checkout, pull the new version and add `COMPOSE_PROFILES=hub,worker` to `.env`;
-   once per host, `docker network create issuebot`.
-2. Stop the old worker and web but keep the database up: `docker compose stop worker web`
-   (the profiles in `.env` do not matter for `stop`; if compose cannot see the old containers,
-   `docker stop` them by name instead).
-3. Move the old data aside and give the hub a fresh database of the same name:
-
-   ```bash
-   docker compose exec db psql -U issuebot -d postgres -c 'ALTER DATABASE issuebot RENAME TO issuebot_old'
-   docker compose exec db createdb -U issuebot issuebot
-   ```
-
-4. Import this checkout's own history before any new worker starts — a started worker
-   registers its repository first, and the import then refuses it. Both URLs point at the
-   hub's own database server, on the port its `.env` publishes:
-
-   ```bash
-   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: the port the hub's db publishes
-   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
-     uv run issuebot import \
-       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot_old
-   ```
-
-   Check that port. A host that runs a database per project often has something else on
-   5432, and the compose default credentials (`issuebot`/`issuebot`) are the same in every
-   checkout, so a wrong port can connect to a different project's PostgreSQL rather than
-   fail. `docker compose port db 5432` prints the hub's.
-
-   The command migrates the fresh database to schema version 3 itself; no separate
-   `issuebot migrate` is needed. The repository and its labels come from that checkout's
-   workflow file; the command refuses to run twice for the same repository.
-
-   If you do need to import a repository again, delete its rows from the hub first — five
-   statements, in this order, with `<owner/name>` as `github.repo` names it (`run_turns`
-   cascades from `runs`, and there is nothing else to clean up):
-
-   ```
-   DELETE FROM events WHERE repo = '<owner/name>';
-   DELETE FROM runs WHERE repo = '<owner/name>';
-   DELETE FROM issues WHERE repo = '<owner/name>';
-   DELETE FROM runtime_snapshot WHERE repo = '<owner/name>';
-   DELETE FROM repos WHERE repo = '<owner/name>';
-   ```
-
-5. `docker compose up -d --build` starts `db`, `web` and this repository's worker.
-6. For every other repository's checkout: pull the new version and set
-   `COMPOSE_PROFILES=worker` in `.env`. Stop its old worker but keep its database up
-   (`docker compose stop worker`), the same ordering step 2 imposes on the hub, so nothing
-   is writing while the import reads. Then import its history into the hub from the host,
-   run from that checkout's directory because the repository comes from its workflow file.
-   Two different ports here: the target is the **hub's** database, as in step 4, while
-   `--from` is this checkout's **own** published port:
-
-   ```bash
-   set -a && . ./.env && set +a   # ISSUEBOT_DB_PORT: this checkout's own db, the source
-   HUB_DB_PORT=5432               # the hub checkout's ISSUEBOT_DB_PORT, the target
-   DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${HUB_DB_PORT}/issuebot \
-     uv run issuebot import \
-       --from postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot
-   ```
-
-   Then remove that checkout's own `db` and `web` containers (`docker compose rm -sf db web`)
-   and `docker compose up -d --build`. Once every import is verified in the dashboard,
-   `issuebot_old` and the other checkouts' `pgdata` volumes can be dropped.
-
-Two smaller changes: the dashboard's URLs moved under `/r/<owner>/<name>/` (the API under
-`/api/v1/repos/<owner>/<name>/`), and the `server` block in `WORKFLOW.md` is no longer
-accepted, since the web takes `--bind` and `--port` instead; delete it. A repository you
-import brings its last runtime snapshot with it, so it reads `stale` in the dashboard until
-its worker's next tick; a repository that only registers, with no import, shows none until
-its first tick.
-
 ### When things go wrong
 
 - **Blocked.** If the agent hits a true external blocker (a missing tool, credential or
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
+- **GitHub itself.** The worker reads and writes its whole state machine through `gh`, and
+  nothing it reports distinguishes a GitHub incident from a quiet board. Preflight checks only
+  that `gh` is on `PATH` and that the token is set, so an outage never holds dispatch: a failed
+  poll logs `candidates_fetch_failed` and the tick carries on, and `issuebot status`,
+  `/healthz` and the dashboard all go on showing a healthy worker — correctly, because the
+  worker is healthy. Transport failures at least retry, an `HTTP 5xx` or a timeout being
+  classified `transport`. What cannot be handled is GitHub answering `200` with stale data: a
+  label write that reports success and is not visible on the next read leaves the worker acting
+  on a state GitHub will later contradict, and there is nothing to see anywhere. So subscribe
+  [githubstatus.com](https://www.githubstatus.com/) to the same Slack channel the worker posts
+  to, and an incident arrives in the timeline beside the runs it explains. Subscribe rather
+  than have the worker poll it: an incident is published when a human declares it, which can be
+  twenty minutes after the first failed write, so the page is a witness and never a gate.
 - **Cost.** Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
   times `agent.max_turns` — `5.0` and `5` mean up to $25 before the issue is escalated. The
   right value is yours to pick and the checked-in `5.0` is only a starting point: on an API

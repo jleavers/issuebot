@@ -8,7 +8,9 @@ Python 3.14 with `uv`; `src` layout; package `issuebot`.
 
 ```bash
 uv sync                              # create .venv and install (uses uv.lock)
-uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip)
+uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip;
+                                     #   conftest pins PYTHON_COLORS=0, since 3.14 argparse
+                                     #   colourises help and the shell would otherwise decide)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 docker compose --profile test up -d --wait test-db   # a throwaway postgres:18 on an ephemeral port
 DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
@@ -27,7 +29,6 @@ uv run issuebot status               # the worker's last runtime snapshot, read 
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
 uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
-uv run issuebot import --from URL    # copy a version-2 database into this one, stamped with github.repo
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set)
@@ -115,7 +116,8 @@ floor, not the shipped version, and moves by hand.
   is how `claim` makes the marker the *last* session's verdict rather than a label nothing ever
   removes; both adapters ensure it and report it missing alongside the five roles);
   frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`; `Issue.author` is the opening
-  login, `None` for a deleted account); `GitHubAdapter`
+  login, `None` for a deleted account; `LinkedPr.mergeable` is GitHub's `MergeableState`
+  lowercased, `unknown` when absent); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
@@ -195,14 +197,23 @@ floor, not the shipped version, and moves by hand.
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
   counts include triage, and only a genuine abandonment still clears the label).
+  `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`): a `review` issue whose
+  open PR reads `conflicting` is moved to `rework` by issuebot, label first and then a
+  `### Issuebot merge conflict` workpad block, whose count is the bounce number (a note that
+  fails after the label moved logs `conflict_rework_note_failed` and still counts as reworked;
+  only a failure before it logs `conflict_rework_failed` and is retried next tick); at
+  `agent.max_conflict_reworks` (default 3, `0` off) it writes one `... conflict limit` block
+  and stays in `review`. `_bounce_conflicts` runs after every fetch, observer or not
+  (`fetch_states`), skipping issues in `_running` or `_retries`.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
   tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
-  `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
-  fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
+  `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
+  slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
+  backoff; `escape`; `slots`) and handles worker exits
   (the session's final transition is published before any release; `max_turns` while
   `in_progress` or `max_attempts` failures → the blocked escape).
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
@@ -331,15 +342,9 @@ floor, not the shipped version, and moves by hand.
   when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
   `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
-  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `importer.py`: `import_repo`
-  copies a version-2, single-repository database into the hub (refusing a source not at that
-  exact schema version, and a repository already registered in the target), streaming `issues`,
-  `runs`, `run_turns`, `events` and `runtime_snapshot` through a server-side cursor in batches
-  of 500 so a large `run_turns` never has to fit in memory, everything landing in one target
-  transaction; its own `IMPORT_TURN` carries `run_turns.captured_at` across as it is, rather
-  than the sink's `INSERT_TURN`, which stamps `now()`. `database.py`: the `Database`
+  `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
   facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `register_repo`,
-  `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`, `import_from`);
+  `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`);
   one connection per call, no pool. Constants, not settings; a `database.url`
   change needs a restart. Tests: `db_url` (conftest) creates a schema per test and skips without
   `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
@@ -453,10 +458,7 @@ floor, not the shipped version, and moves by hand.
   while dispatch is held), `stats [--days N]` (also `scoped(repo)`; `by_state` from
   `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
   the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
-  issuebot_refresh for <repo>`), `import --from URL` (copies a version-2, single-repository
-  database into this one, stamped with `github.repo` and its labels; `[FAIL] import:` and exit
-  1 on refusal — wrong source schema version, or the repository already registered — or a
-  connection failure) and
+  issuebot_refresh for <repo>`) and
   `web [--bind HOST] [--port N]` (reads `DATABASE_URL` alone — no `--workflow`, no other
   setting, and no workflow file to fail loading — `[FAIL] database: not configured; export
   DATABASE_URL` without it, distinct from every other command's `... or set database.url:
@@ -496,7 +498,7 @@ anything reading or writing issue state goes through these:
 | `issuebot/todo` | human |
 | `issuebot/in-progress` | agent, when work starts |
 | `issuebot/review` | agent, when PR opened or no fault found |
-| `issuebot/rework` | human, if the PR needs more work |
+| `issuebot/rework` | human, if the PR needs more work; or issuebot, when the PR conflicts with the default branch (bounded by `agent.max_conflict_reworks`) |
 | `issuebot/no-fault` | agent, beside `review`, when it found no fault (a marker, not a state) |
 | `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault` |
 

@@ -35,6 +35,32 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def no_ansi_colour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin argparse's colour off, so an assertion on help text reads a plain string.
+
+    Python 3.14 gave ``ArgumentParser`` ``color=True`` by default, so nothing in the CLI opted
+    in: every parser colourises whenever ``_colorize.can_colorize()`` agrees, and then
+    ``usage: issuebot`` is two escape sequences apart (#81). Whether it agrees is the
+    developer's shell talking -- a tty, ``FORCE_COLOR``, ``NO_COLOR`` -- which is how one
+    person's green suite is another's failure. One fixture answers it for the whole suite, so
+    the next formatting change is one edit rather than one per assertion.
+
+    ``PYTHON_COLORS`` is the variable that settles it rather than joining the argument: it is
+    the first thing ``can_colorize`` looks at, ahead of ``NO_COLOR``, ``FORCE_COLOR`` and the
+    tty test, so ``0`` is off whatever else is set, ``pytest -s`` in a terminal included. The
+    one interpreter that disagrees is ``python -E``, which ignores the variable and so takes
+    the suite back to guessing; nothing runs it that way, ``uv run pytest`` and CI included.
+
+    It is also the one colour variable pytest itself ignores -- pytest reads ``PY_COLORS``,
+    ``NO_COLOR`` and ``FORCE_COLOR`` -- so pinning it leaves pytest's own red and green alone.
+
+    Set rather than deleted, and so on ``os.environ``, which is how it reaches the tests that
+    spawn ``issuebot`` as a subprocess as well as the ones that call ``main`` in process.
+    """
+    monkeypatch.setenv("PYTHON_COLORS", "0")
+
+
 @pytest.fixture
 def make_issue() -> Callable[..., Issue]:
     """Build a consistent Issue; pass field overrides as keyword arguments."""
@@ -89,12 +115,5 @@ def _fresh_schema() -> Iterator[str]:
 @pytest.fixture
 def db_url() -> Iterator[str]:
     """A DATABASE_URL scoped to a fresh schema; skipped when no database is configured."""
-    with _fresh_schema() as url:
-        yield url
-
-
-@pytest.fixture
-def source_db_url() -> Iterator[str]:
-    """A second fresh schema on the same server: the old, single-repository database."""
     with _fresh_schema() as url:
         yield url

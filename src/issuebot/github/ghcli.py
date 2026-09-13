@@ -32,7 +32,7 @@ ISSUE_FIELDS = """fragment IssueFields on Issue {
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }
   closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
-    nodes { number url state mergedAt }
+    nodes { number url state mergedAt mergeable }
   }
 }"""
 

@@ -6,10 +6,15 @@ from typing import Any
 
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
-from issuebot.github.models import Issue, LinkedPr, PrState, StateLabel
+from issuebot.github.models import Issue, LinkedPr, Mergeable, PrState, StateLabel
 
 _PR_STATES: dict[str, PrState] = {"OPEN": "open", "CLOSED": "closed", "MERGED": "merged"}
 _PR_RANK: dict[PrState, int] = {"merged": 0, "open": 1, "closed": 2}
+_MERGEABLE: dict[str, Mergeable] = {
+    "MERGEABLE": "mergeable",
+    "CONFLICTING": "conflicting",
+    "UNKNOWN": "unknown",
+}
 
 
 def label_name(labels: GitHubLabels, role: StateLabel) -> str:
@@ -142,12 +147,19 @@ def _select_pr(connection: Any) -> LinkedPr | None:
             continue
         if not isinstance(url, str) or state is None:
             continue
+        raw_mergeable = item.get("mergeable")
+        mergeable = (
+            _MERGEABLE.get(raw_mergeable, "unknown")
+            if isinstance(raw_mergeable, str)
+            else "unknown"
+        )
         candidates.append(
             LinkedPr(
                 number=number,
                 url=url,
                 state=state,
                 merged_at=_optional_timestamp(item.get("mergedAt")),
+                mergeable=mergeable,
             )
         )
     if not candidates:

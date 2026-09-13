@@ -27,6 +27,7 @@ class StateLabel(StrEnum):
 
 GitHubState = Literal["open", "closed"]
 PrState = Literal["open", "closed", "merged"]
+Mergeable = Literal["mergeable", "conflicting", "unknown"]
 LabelOutcome = Literal["created", "updated", "unchanged"]
 
 
@@ -36,6 +37,8 @@ class LinkedPr:
     url: str
     state: PrState
     merged_at: datetime | None
+    # GitHub's MergeableState, lowercased; "unknown" when it has not been computed or asked for.
+    mergeable: Mergeable = "unknown"
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

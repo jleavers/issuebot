@@ -33,13 +33,18 @@ def node(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def pr(number: int, state: str, merged_at: str | None = None) -> dict[str, Any]:
-    return {
+def pr(
+    number: int, state: str, merged_at: str | None = None, mergeable: str | None = "MERGEABLE"
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
         "number": number,
         "url": f"https://github.com/example/repo/pull/{number}",
         "state": state,
         "mergedAt": merged_at,
     }
+    if mergeable is not None:
+        fields["mergeable"] = mergeable
+    return fields
 
 
 # --- errors ----------------------------------------------------------------------
@@ -184,6 +189,29 @@ def test_unusable_pr_reference_is_skipped() -> None:
     refs = {"nodes": [{"number": "x"}, None, pr(52, "OPEN")]}
     issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
     assert issue.linked_pr is not None and issue.linked_pr.number == 52
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("MERGEABLE", "mergeable"), ("CONFLICTING", "conflicting"), ("UNKNOWN", "unknown")],
+)
+def test_linked_pr_carries_mergeability(raw: str, expected: str) -> None:
+    refs = {"nodes": [pr(52, "OPEN", mergeable=raw)]}
+    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    assert issue.linked_pr is not None
+    assert issue.linked_pr.mergeable == expected
+
+
+@pytest.mark.parametrize("raw", [None, "", "WEIRD", 7])
+def test_absent_or_unrecognised_mergeability_reads_unknown(raw: object) -> None:
+    """An older response, or a value GitHub adds later, must never look like a conflict."""
+    reference = pr(52, "OPEN", mergeable=None)
+    if raw is not None:
+        reference["mergeable"] = raw
+    refs = {"nodes": [reference]}
+    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    assert issue.linked_pr is not None
+    assert issue.linked_pr.mergeable == "unknown"
 
 
 @pytest.mark.parametrize(

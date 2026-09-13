@@ -28,15 +28,17 @@ from issuebot.events import (
     PrOpened,
     StateChanged,
 )
-from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, Issue, StateLabel
+from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, Issue, StateLabel
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
+    CANDIDATE_STATES,
     MAX_UNREADABLE_AUTH_PROBES,
     OBSERVED_STATES,
     Orchestrator,
     OrchestratorStartupError,
     RunObserver,
+    fetch_states,
     preflight,
 )
 from issuebot.orchestrator.state import RunningEntry
@@ -60,6 +62,7 @@ agent:
   max_turns: {max_turns}
   max_attempts: {max_attempts}
   max_retry_backoff_ms: {max_retry_backoff_ms}
+  max_conflict_reworks: {max_conflict_reworks}
 claude:
   command: {claude}
   turn_timeout_ms: 30000
@@ -195,6 +198,7 @@ class Harness:
         stall_timeout_ms: int = 300_000,
         interval_ms: int = 30_000,
         max_retry_backoff_ms: int = 300_000,
+        max_conflict_reworks: int = 3,
         hooks: dict[str, str] | None = None,
         prompt: str = "Task {{ issue.identifier }}",
         claude: str = "claude",
@@ -223,6 +227,7 @@ class Harness:
             stall_timeout_ms=stall_timeout_ms,
             interval_ms=interval_ms,
             max_retry_backoff_ms=max_retry_backoff_ms,
+            max_conflict_reworks=max_conflict_reworks,
             hooks=hooks,
             prompt=prompt,
         )
@@ -287,6 +292,7 @@ class Harness:
         stall_timeout_ms: int = 300_000,
         interval_ms: int = 30_000,
         max_retry_backoff_ms: int = 300_000,
+        max_conflict_reworks: int = 3,
         hooks: dict[str, str] | None = None,
         prompt: str = "Task {{ issue.identifier }}",
         text: str | None = None,
@@ -299,6 +305,7 @@ class Harness:
             max_turns=max_turns,
             max_attempts=max_attempts,
             max_retry_backoff_ms=max_retry_backoff_ms,
+            max_conflict_reworks=max_conflict_reworks,
             claude=self.claude,
             claude_extra=self.claude_extra(),
             stall_timeout_ms=stall_timeout_ms,
@@ -343,6 +350,12 @@ class Harness:
         return self.github.add_issue(
             title or f"Issue {number}", labels=(label, *extra_labels), number=number
         )
+
+    def add_conflicting_review(self, number: int, *, pr_number: int) -> Issue:
+        issue = self.add_issue(number, "review")
+        self.github.open_pr(number, pr_number=pr_number)
+        self.github.set_pr_mergeable(pr_number, "conflicting")
+        return issue
 
     def workspace_dir(self, identifier: str) -> Path:
         path = self.root / identifier
@@ -1903,7 +1916,7 @@ async def test_missing_workflow_file_is_reported_not_fatal(tmp_path: Path) -> No
 
 
 async def test_preflight_failure_skips_dispatch_but_reconciles(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+    h = Harness(tmp_path, max_conflict_reworks=0)  # nothing polls review, so no fetch at all
     h.add_issue(1, "todo")
     await h.tick()
     h.add_issue(2, "todo")
@@ -2157,8 +2170,23 @@ async def test_on_issues_receives_a_fired_retry_refresh(tmp_path: Path) -> None:
     assert h.orchestrator.retries == {}
 
 
-async def test_without_an_observer_review_is_not_fetched(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+@pytest.mark.parametrize(
+    ("observed", "conflicts", "expected"),
+    [
+        (False, False, CANDIDATE_STATES),
+        (True, False, OBSERVED_STATES),
+        (False, True, OBSERVED_STATES),
+        (True, True, OBSERVED_STATES),
+    ],
+)
+def test_fetch_states_adds_review_for_either_reason(
+    observed: bool, conflicts: bool, expected: tuple[StateLabel, ...]
+) -> None:
+    assert fetch_states(observed=observed, conflicts=conflicts) == expected
+
+
+async def test_without_an_observer_or_the_bounce_review_is_not_fetched(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_conflict_reworks=0)
     h.add_issue(1, "review")
     await h.tick()
     assert h.polled == []
@@ -2331,3 +2359,183 @@ async def test_end_to_end_with_the_fakes(tmp_path: Path) -> None:
     assert str(runs[0]) in body
     totals = h.orchestrator.snapshot().totals
     assert totals.input_tokens > 0 and totals.cost_usd > 0
+
+
+# --- conflict bounce (spec 2026-09-13-conflict-rework-design.md) ----------------------------
+
+
+async def test_a_conflicting_review_issue_is_bounced_then_dispatched_as_rework(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+    assert h.calls("fetch_issues_by_states")[-1] == (OBSERVED_STATES,)
+    assert h.calls("set_state") == [(1, StateLabel.REWORK)]
+    body = h.github.comments_for(1)[0].body
+    assert body.startswith(f"{WORKPAD_MARKER}\n\n### Issuebot merge conflict (")
+    assert "(bounce 1 of 3)" in body
+    changed = h.recorder.of(StateChanged)
+    assert [(e.from_label, e.to_label, e.actor) for e in changed] == [
+        ("issuebot/review", "issuebot/rework", "issuebot")
+    ]
+    assert h.orchestrator.running == {}
+    await h.tick()
+    assert list(h.orchestrator.running) == ["1"]
+    assert h.run_for(1).kwargs["rework"] is True
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_bounce_waits_for_the_review_grace_to_end(tmp_path: Path) -> None:
+    """A running entry would report the move as a human's and stop for the wrong reason."""
+    h = Harness(tmp_path, interval_ms=30_000)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.workspace_dir("repo-1")
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, "conflicting")
+    h.clock.advance(30)
+    await h.tick()  # grace starts; the entry is still running
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == [(1, StateLabel.IN_PROGRESS)]
+    h.clock.advance(30)
+    await h.tick()  # grace over: the entry is stopped, but it has not exited yet
+    assert h.entry(1).cancel.is_set()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    await h.drain()
+    assert h.orchestrator.running == {}
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+    assert h.recorder.of(StateChanged)[-1].actor == "issuebot"
+
+
+@pytest.mark.parametrize(
+    ("pr_state", "mergeable"),
+    [
+        ("open", "mergeable"),
+        ("open", "unknown"),
+        ("merged", "conflicting"),
+        ("closed", "conflicting"),
+    ],
+)
+async def test_only_an_open_conflicting_pr_is_bounced(
+    tmp_path: Path, pr_state: str, mergeable: str
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, mergeable)  # type: ignore[arg-type]
+    if pr_state == "merged":
+        h.github.merge_pr(7)
+        h.github.reopen_issue(1)  # merge_pr closes the issue; a closed one is swept, not bounced
+    elif pr_state == "closed":
+        h.github.close_pr(7)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == []
+    assert h.github.comments_for(1) == []
+
+
+async def test_the_setting_at_zero_turns_the_bounce_off(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_conflict_reworks=0)
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    assert h.calls("fetch_issues_by_states")[-1] == (CANDIDATE_STATES,)
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == []
+
+
+async def test_the_setting_at_zero_with_an_observer_still_does_not_bounce(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_conflict_reworks=0, observe_issues=True)
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    assert h.calls("fetch_issues_by_states")[-1] == (OBSERVED_STATES,)
+    assert h.github.issue(1).state is StateLabel.REVIEW
+
+
+async def test_a_held_worker_still_bounces(tmp_path: Path) -> None:
+    """The hold stops claude, not gh; a conflict is about the board, not dispatch."""
+    h = Harness(tmp_path)
+    h.which_missing = {"claude"}
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    assert h.snapshots[-1].dispatch_hold is not None
+    assert h.github.issue(1).state is StateLabel.REWORK
+    await h.tick()
+    assert h.orchestrator.running == {}  # held: bounced, not dispatched
+
+
+async def test_the_bounce_stops_at_the_limit(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_conflict_reworks=1)
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+    await h.tick()  # dispatched as rework
+    assert list(h.orchestrator.running) == ["1"]
+    # The session returns the issue to review; the fake PR still reads conflicting, as it
+    # would after the next sibling merge.
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_state=StateLabel.REVIEW, final_issue=h.github.issue(1))
+    await h.fire(1.0)  # the continuation retry a review exit queues; it finds review and clears
+    assert h.orchestrator.running == {}
+    assert h.orchestrator.retries == {}
+    h.github.calls.clear()
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == []
+    body = h.github.comments_for(1)[0].body
+    assert body.count("### Issuebot merge conflict (") == 1
+    assert "### Issuebot merge conflict limit (" in body
+    await h.tick()
+    assert h.github.comments_for(1)[0].body == body
+
+
+async def test_a_bounce_failure_is_logged_and_retried_next_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+    original = h.github.set_state
+    refusals = {"left": 1}
+
+    async def refuse_once(*args: Any, **kwargs: Any) -> None:
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise GitHubError("server_error", "injected")
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(h.github, "set_state", refuse_once)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.github.comments_for(1) == []
+    assert any(entry["event"] == "conflict_rework_failed" for entry in logs)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+
+
+async def test_the_bounce_skips_an_issue_with_a_queued_retry(tmp_path: Path) -> None:
+    """A queued retry is an in-flight decision about the same issue, so the bounce leaves it
+    alone until the retry has been fired; the next poll gets it."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()  # dispatched
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, "conflicting")
+    # A session that reaches review queues a continuation retry and releases the entry.
+    await h.exit(h.run_for(1), final_state=StateLabel.REVIEW, final_issue=h.github.issue(1))
+    assert h.orchestrator.running == {}
+    assert list(h.orchestrator.retries) == ["1"]
+    h.github.calls.clear()
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == []
+    assert h.github.comments_for(1) == []
+    await h.fire(1.0)  # the continuation retry finds review and clears
+    assert h.orchestrator.retries == {}
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+    assert h.calls("set_state") == [(1, StateLabel.REWORK)]

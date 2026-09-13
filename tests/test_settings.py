@@ -38,6 +38,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.agent.max_turns == 5
     assert s.agent.max_attempts == 3
     assert s.agent.max_retry_backoff_ms == 300_000
+    assert s.agent.max_conflict_reworks == 3
     assert s.claude.command == "claude"
     assert s.claude.model is None
     assert s.claude.permission_mode == "auto"
@@ -118,6 +119,7 @@ def test_label_must_not_be_empty() -> None:
         ("agent", "max_turns", 0),
         ("agent", "max_attempts", 0),
         ("agent", "max_retry_backoff_ms", 999),
+        ("agent", "max_conflict_reworks", -1),
         ("claude", "command", ""),
         ("claude", "max_budget_usd", 0),
         ("claude", "turn_timeout_ms", 0),
@@ -129,6 +131,11 @@ def test_constraints_reject_out_of_range_values(section: str, field: str, value:
     with pytest.raises(ValidationError) as exc:
         Settings.model_validate({**MINIMAL, section: {field: value}})
     assert f"{section}.{field}" in _locs(exc.value)
+
+
+def test_zero_conflict_reworks_is_the_off_switch() -> None:
+    s = Settings.model_validate({**MINIMAL, "agent": {"max_conflict_reworks": 0}})
+    assert s.agent.max_conflict_reworks == 0
 
 
 @pytest.mark.parametrize("mode", ["auto", "acceptEdits", "dontAsk", "bypassPermissions"])

@@ -24,6 +24,7 @@ from issuebot.orchestrator.state import (
     RuntimeSnapshot,
     backoff_ms,
     claimed_snapshot,
+    conflict_candidate,
     observe_transition,
     rate_limits_from_dict,
     sort_candidates,
@@ -91,6 +92,37 @@ def test_sort_candidates_ranks_orphans_then_rework_then_todo(
 def test_state_label_name_is_the_raw_label_or_none(make_issue: Callable[..., Issue]) -> None:
     assert state_label_name(make_issue(state_labels=("Issuebot/Todo",))) == "Issuebot/Todo"
     assert state_label_name(make_issue(state=None, state_labels=())) is None
+
+
+def _pr(state: str = "open", mergeable: str = "conflicting") -> LinkedPr:
+    return LinkedPr(
+        number=51,
+        url="https://github.com/example/repo/pull/51",
+        state=state,  # type: ignore[arg-type]
+        merged_at=None,
+        mergeable=mergeable,  # type: ignore[arg-type]
+    )
+
+
+def test_conflict_candidate_is_an_open_conflicting_pr_on_a_review_issue(
+    make_issue: Callable[..., Issue],
+) -> None:
+    review = {"state": StateLabel.REVIEW, "state_labels": ("issuebot/review",)}
+    assert conflict_candidate(make_issue(**review, linked_pr=_pr()))
+    assert not conflict_candidate(make_issue(**review, linked_pr=None))
+    assert not conflict_candidate(make_issue(**review, linked_pr=_pr(mergeable="mergeable")))
+    assert not conflict_candidate(make_issue(**review, linked_pr=_pr(mergeable="unknown")))
+    assert not conflict_candidate(make_issue(**review, linked_pr=_pr(state="merged")))
+    assert not conflict_candidate(make_issue(**review, linked_pr=_pr(state="closed")))
+    assert not conflict_candidate(make_issue(**review, linked_pr=_pr(), dispatchable=False))
+    assert not conflict_candidate(
+        make_issue(state=StateLabel.REWORK, state_labels=("issuebot/rework",), linked_pr=_pr())
+    )
+    assert not conflict_candidate(
+        make_issue(
+            state=StateLabel.IN_PROGRESS, state_labels=("issuebot/in-progress",), linked_pr=_pr()
+        )
+    )
 
 
 def test_claimed_snapshot_replaces_only_the_state_labels(
