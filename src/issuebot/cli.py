@@ -38,6 +38,8 @@ from issuebot.agent import (
     settings_with_model,
 )
 from issuebot.agent.runner import RateLimits
+from issuebot.agent.scrub import Scrubber
+from issuebot.agent.turnlog import TurnCapture, capture_turns
 from issuebot.config import (
     ConfigError,
     GitHubLabels,
@@ -721,6 +723,7 @@ async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
         PostgresSink(
             database.store(settings.github.labels, settings.github.repo),
             description=database.description,
+            capture=_turn_capture(settings, os.environ),
         )
         if database
         else None
@@ -731,6 +734,24 @@ async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
     if postgres is not None:
         sinks.append(postgres)
     return _Sinks(EventBus(sinks), slack, postgres, database)
+
+
+def _turn_capture(
+    settings: Settings, environ: Mapping[str, str]
+) -> Callable[[Path], list[TurnCapture]]:
+    """The sink's capture, bound to this deployment's scrubber (#79).
+
+    ``capture_turns`` scrubs credential shapes on its own; what only the worker can add
+    are the values it holds -- the token it put in the agent's environment, the database
+    password, the webhook -- and the home directory every path it prints names.
+    """
+    scrubber = Scrubber.for_deployment(settings, environ)
+    get_logger(__name__).info("turn_scrubber", secrets=scrubber.secrets, home=scrubber.home)
+
+    def capture(log_dir: Path) -> list[TurnCapture]:
+        return capture_turns(log_dir, scrubber=scrubber)
+
+    return capture
 
 
 _NOT_CONFIGURED = "[FAIL] database: not configured; export DATABASE_URL or set database.url: $VAR"

@@ -1,9 +1,17 @@
-"""Capture a run's turn files (stream-json, prompt, stderr) for the database, capped.
+"""Capture a run's turn files (stream-json, prompt, stderr) for the database, scrubbed and capped.
 
 The runner writes ``turn-N.jsonl``, ``turn-N.prompt.md`` and ``turn-N.stderr.log`` under a run's
-log directory. ``capture_turns`` reads them once, applies the size caps and parses the summary
-the dashboard shows. It never raises: an unreadable directory yields nothing, an unreadable
-stream file skips its turn, a missing prompt or stderr file is empty.
+log directory. ``capture_turns`` reads them once, passes every text through the ``Scrubber``,
+applies the size caps and parses the summary the dashboard shows. It never raises: an
+unreadable directory yields nothing, an unreadable stream file skips its turn, a missing
+prompt or stderr file is empty.
+
+It is the one scrubbing step. The files are the agent's stdout tee'd byte for byte, and
+issuebot put its own ``GH_TOKEN`` into that process's environment, so nothing downstream --
+the ``run_turns`` rows, the dashboard's raw views, the committed fixture -- may take the
+file as it is: every persisted copy is this function's output. Scrubbing runs before each
+cap, so a cap can never leave the head or tail of a credential at its edge; the byte counts
+still report the files as they are on disk.
 """
 
 import json
@@ -12,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from issuebot.agent.scrub import Scrubber
+
 PROMPT_LIMIT = 256 * 1024
 LINE_LIMIT = 64 * 1024
 STREAM_LIMIT = 2 * 1024 * 1024
@@ -19,6 +29,9 @@ STDERR_LIMIT = 64 * 1024
 RESULT_TEXT_LIMIT = 4 * 1024
 OMITTED_TYPE = "issuebot_omitted"
 TURN_FILE = re.compile(r"^turn-(\d+)\.jsonl$")
+# The shapes alone: what a caller gets without naming this deployment's secrets and home.
+# The worker builds ``Scrubber.for_deployment`` and hands the sink a capture bound to it.
+DEFAULT_SCRUBBER = Scrubber()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -48,8 +61,9 @@ class TurnCapture:
     truncated: bool
 
 
-def capture_turns(log_dir: Path) -> list[TurnCapture]:
-    """Every turn-N.jsonl under ``log_dir`` with its prompt and stderr, capped; never raises."""
+def capture_turns(log_dir: Path, *, scrubber: Scrubber = DEFAULT_SCRUBBER) -> list[TurnCapture]:
+    """Every turn-N.jsonl under ``log_dir`` with its prompt and stderr, scrubbed and capped;
+    never raises."""
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -67,7 +81,7 @@ def capture_turns(log_dir: Path) -> list[TurnCapture]:
             continue
         prompt = _read(log_dir / f"turn-{number}.prompt.md")
         stderr = _read(log_dir / f"turn-{number}.stderr.log")
-        captures.append(_capture(number, raw, prompt, stderr))
+        captures.append(_capture(number, raw, prompt, stderr, scrubber))
     return captures
 
 
@@ -78,7 +92,9 @@ def _read(path: Path) -> bytes:
         return b""
 
 
-def _capture(turn_number: int, raw: bytes, prompt: bytes, stderr: bytes) -> TurnCapture:
+def _capture(
+    turn_number: int, raw: bytes, prompt: bytes, stderr: bytes, scrubber: Scrubber
+) -> TurnCapture:
     lines = [line for line in raw.splitlines() if line.strip()]
     messages = [_message(line) for line in lines]
     stored: list[bytes] = []
@@ -106,6 +122,8 @@ def _capture(turn_number: int, raw: bytes, prompt: bytes, stderr: bytes) -> Turn
     usage = result.get("usage")
     usage = usage if isinstance(usage, dict) else {}
     result_text = _string(result.get("result"))
+    if result_text is not None:
+        result_text = scrubber.scrub(result_text)[:RESULT_TEXT_LIMIT]
     return TurnCapture(
         turn_number=turn_number,
         model=_string(init.get("model")),
@@ -118,14 +136,14 @@ def _capture(turn_number: int, raw: bytes, prompt: bytes, stderr: bytes) -> Turn
         output_tokens=_int(usage.get("output_tokens")),
         cost_usd=_float(result.get("total_cost_usd")),
         duration_ms=_int(result.get("duration_ms")),
-        result_text=result_text[:RESULT_TEXT_LIMIT] if result_text is not None else None,
-        prompt=_text(prompt[:PROMPT_LIMIT]),
+        result_text=result_text,
+        prompt=_head(scrubber.scrub(_text(prompt)), PROMPT_LIMIT),
         prompt_bytes=len(prompt),
-        stream=_text(b"\n".join(kept) + b"\n") if kept else "",
+        stream=scrubber.scrub(_text(b"\n".join(kept) + b"\n")) if kept else "",
         stream_bytes=len(raw),
         stream_lines=len(lines),
         omitted_lines=omitted,
-        stderr=_text(stderr[-STDERR_LIMIT:]),
+        stderr=_tail(scrubber.scrub(_text(stderr)), STDERR_LIMIT),
         stderr_bytes=len(stderr),
         truncated=truncated,
     )
@@ -135,6 +153,16 @@ def _text(data: bytes) -> str:
     """Decode with replacement, then swap out NUL: PostgreSQL rejects ``\\x00`` in ``text``,
     and it is valid UTF-8 so ``errors="replace"`` alone would let it through."""
     return data.decode("utf-8", errors="replace").replace("\x00", "�")
+
+
+def _head(text: str, limit: int) -> str:
+    """The first ``limit`` bytes of ``text`` as UTF-8, a character split by the cut dropped."""
+    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+
+
+def _tail(text: str, limit: int) -> str:
+    """The last ``limit`` bytes of ``text`` as UTF-8, a character split by the cut dropped."""
+    return text.encode("utf-8")[-limit:].decode("utf-8", errors="ignore")
 
 
 def _message(line: bytes) -> dict[str, Any] | None:

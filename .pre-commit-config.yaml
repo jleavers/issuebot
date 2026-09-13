@@ -1,4 +1,5 @@
-# Recorded agent runs and vendored libraries are kept byte-for-byte as their authors wrote them.
+# Recorded agent runs are kept as the scrubber wrote them (the tests pin their sizes) and
+# vendored libraries byte-for-byte as their authors wrote them.
 exclude: ^(tests/fixtures/runs/|src/issuebot/web/static/vendor/)
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

@@ -162,12 +162,30 @@ floor, not the shipped version, and moves by hand.
   turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
   Runtime turn events go to a `TurnObserver`, not the bus.
   Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
-  `capture_turns(log_dir)` reads a run's `turn-N.jsonl`, `.prompt.md` and `.stderr.log` into
-  `TurnCapture`s, capped (prompt 256 KiB head; a stream line over 64 KiB becomes an
-  `issuebot_omitted` stub; 2 MiB of head lines plus the last `result` line; stderr 64 KiB tail;
-  result text 4 KiB), with the summary parsed from the init and result lines; it never raises.
-  `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7), kept byte-for-byte
-  (pre-commit excludes it).
+  `capture_turns(log_dir, scrubber=DEFAULT_SCRUBBER)` reads a run's `turn-N.jsonl`, `.prompt.md`
+  and `.stderr.log` into `TurnCapture`s, scrubbed and capped (prompt 256 KiB head; a stream
+  line over 64 KiB becomes an `issuebot_omitted` stub; 2 MiB of head lines plus the last
+  `result` line; stderr 64 KiB tail; result text 4 KiB), with the summary parsed from the init
+  and result lines; it never raises. It is the one scrubbing step between the workspace and
+  anything durable (#79): the files are claude's stdout tee'd byte for byte, and issuebot put
+  `GH_TOKEN` into that process's environment, so the `run_turns` rows, the dashboard's raw
+  `text/plain` views and the committed fixture are all this function's output and never the
+  file. `scrub.py`: `Scrubber(secrets=, home=)` masks known values (`***`, a floor of
+  `MIN_SECRET_LENGTH` so a short one cannot mangle prose), credential shapes whatever their
+  source (GitHub `ghp_`/`github_pat_` tokens, `sk-ant-` keys, `hooks.slack.com` webhooks, a
+  URL's userinfo password, `NAME=value` where the name ends `TOKEN`/`SECRET`/`PASSWORD`/
+  `PASSWD`/`API_KEY`, an `Authorization:` header) and the home directory as `~`, in its
+  dashed spelling too (Claude Code's `~/.claude/projects/-home-alice-ws/`); scrubbing is
+  idempotent. `Scrubber.for_deployment(settings, environ)` collects `github.token`, the
+  `database.url` password, `notifications.slack.webhook_url`, every environment variable whose
+  name ends like a secret, and `HOME`; `cli._turn_capture` binds it into the sink's `capture`
+  and logs `turn_scrubber` with the count, never a value. The default carries the shapes alone,
+  so no caller can get the raw file back. Scrubbing runs before each cap, so a cap cannot leave
+  the edge of a credential; the `*_bytes` counts still report the files on disk. Session ids
+  are not scrubbed: `runs.session_id` stores and the dashboard shows the same id beside the
+  transcript. `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7) as the
+  scrubber wrote it -- its home was `/home/jleavers` -- and a test proves it is the scrubber's
+  fixed point; pre-commit excludes it because the tests pin its sizes.
 - `issuebot.orchestrator`: one asyncio task owns the schedule. `state.py` (pure): `RunningEntry`,
   `RetryEntry`, `DispatchHold`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
   attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
