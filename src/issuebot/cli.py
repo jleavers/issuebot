@@ -558,6 +558,7 @@ def _sample_context(settings: Settings) -> PromptContext:
         number=1,
         title="Sample issue",
         body="Sample description.",
+        author="sample-user",
         github_state="open",
         state=StateLabel.IN_PROGRESS,
         state_labels=(label,),

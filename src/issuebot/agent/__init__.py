@@ -3,8 +3,10 @@
 from issuebot.agent.errors import AgentError, AgentErrorCategory, outcome_for
 from issuebot.agent.prompt import (
     CONTINUATION_TEMPLATE,
+    GitHubText,
     PromptContext,
     PromptRenderer,
+    github_text,
     issue_variables,
 )
 from issuebot.agent.runner import (
@@ -50,6 +52,7 @@ __all__ = [
     "ClaudeAuth",
     "ClaudeAuthVerdict",
     "ClaudeRunner",
+    "GitHubText",
     "HookResult",
     "PromptContext",
     "PromptRenderer",
@@ -67,6 +70,7 @@ __all__ = [
     "classify_result",
     "claude_auth_status",
     "describe_claude_auth",
+    "github_text",
     "issue_variables",
     "merge_workspace_env",
     "new_run_id",
