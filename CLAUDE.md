@@ -8,7 +8,9 @@ Python 3.14 with `uv`; `src` layout; package `issuebot`.
 
 ```bash
 uv sync                              # create .venv and install (uses uv.lock)
-uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip)
+uv run pytest                        # tests (hermetic; no network, no Docker; DB tests skip;
+                                     #   conftest pins PYTHON_COLORS=0, since 3.14 argparse
+                                     #   colourises help and the shell would otherwise decide)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 docker compose --profile test up -d --wait test-db   # a throwaway postgres:18 on an ephemeral port
 DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
