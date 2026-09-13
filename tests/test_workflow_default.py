@@ -132,6 +132,26 @@ def test_workpad_update_starts_from_the_current_body(make_issue: Callable[..., I
     assert "keep them where they are" in text
 
 
+def test_a_run_that_never_executed_does_not_hold_the_issue(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """A solo operator out of Actions minutes gets every check red with zero-step jobs; that
+    is not the code, and it must not park a finished issue behind a turn-budget escape."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue, linked_pr=PR))
+    )
+    # Step 6: the zero-step test and where to record it.
+    assert "every failed job reports zero steps" in text
+    assert "--json jobs" in text
+    assert "treat the checks as not run" in text
+    # The completion bar: green checks, or a run that never executed with the suite green locally.
+    assert "or every failed check is a run that never executed" in text
+    assert "green locally on that commit" in text
+    # A job that ran steps and failed still holds the issue.
+    assert "A job that ran steps and failed still holds the issue" in text
+
+
 def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(
