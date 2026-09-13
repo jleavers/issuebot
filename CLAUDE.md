@@ -292,7 +292,10 @@ floor, not the shipped version, and moves by hand.
   by recording as they go: releasing and re-holding within a tick would restart `since` on a
   hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
   `_probe_github_status` annotates the hold once, when it engages, through the
-  `github_status` seam (default `fetch_status_summary`) in a thread: never a gate, so silence,
+  `github_status` seam (default `fetch_status_summary`) in a thread under
+  `GITHUB_STATUS_DEADLINE_S` (the fetch's socket timeout does not bound the name lookup, and
+  the tick is where worker exits and the refresh are waited on; the thread runs on, but nothing
+  waits for it): never a gate, so a timeout, silence,
   an exception or a body of the wrong shape costs the annotation and nothing else, and an
   `All Systems Operational` reading is still carried, since it points at the operator's own
   network rather than GitHub's.

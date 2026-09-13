@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2769,6 +2770,36 @@ async def test_a_hold_reason_does_not_carry_an_unbounded_complaint(
     assert hold is not None
     assert len(hold.reason) < 400
     assert hold.reason.endswith("\u2026")
+
+
+async def test_a_status_probe_that_will_not_return_cannot_stall_the_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetch's socket timeout does not reach the name lookup, and the tick is also where
+    worker exits and the refresh are waited on."""
+    h = Harness(tmp_path)
+    FetchOutage(h, monkeypatch)
+    released = threading.Event()
+
+    def wedged() -> str | None:
+        h.github_status_calls += 1
+        released.wait(30)  # a resolver with nowhere to ask
+        return None
+
+    monkeypatch.setattr(h.orchestrator, "_github_status", wedged)
+    monkeypatch.setattr(orchestrator_module, "GITHUB_STATUS_DEADLINE_S", 0.05)
+    try:
+        for _ in range(MAX_FETCH_FAILURES):
+            await h.tick()
+        hold = held(h)
+        assert hold is not None
+        # Held on this worker's own evidence, with no annotation and no delay.
+        assert hold.reason == (
+            "GitHub is not answering this worker: transport: http 502: Bad Gateway"
+        )
+        assert h.github_status_calls == 1
+    finally:
+        released.set()
 
 
 async def test_the_status_page_is_never_read_while_the_board_answers(

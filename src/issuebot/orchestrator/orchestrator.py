@@ -87,6 +87,10 @@ MAX_UNREADABLE_AUTH_PROBES = 10
 # already retries a transport error of its own, so one failure is a blip and not an outage;
 # three in a row is a minute and a half at the default interval, and is not.
 MAX_FETCH_FAILURES = 3
+# How long a tick will wait for the status page before giving up on the annotation. Longer
+# than the fetch's own socket timeout, because that one does not bound the name lookup, and
+# short enough that a wedged resolver cannot hold up a poll interval's worth of work.
+GITHUB_STATUS_DEADLINE_S = 10.0
 # The GitHub hold is one outage however differently it words itself from poll to poll, so
 # `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
 # the probe's verdict).
@@ -479,12 +483,24 @@ class Orchestrator:
         -- so it can name an outage the worker has already found, and nothing else. An
         operational answer is still worth carrying: it tells the operator to look at their own
         network rather than at GitHub's.
+
+        Bounded on the wall clock as well as on the socket. ``fetch_status_summary``'s own
+        timeout does not reach the name lookup, and a host whose nameservers are unreachable --
+        one of the ways the ``gh`` polls come to fail in the first place -- can spend its
+        resolver's whole budget there. Awaiting that inline would stall the tick, and with it
+        the worker exits and the refresh the same loop is waiting on. The thread is not
+        cancellable and runs on to its own end, but nothing waits for it: the probe is an
+        annotation, and one it does not get in time is one it does not get.
         """
         try:
-            status = parse_status_summary(await asyncio.to_thread(self._github_status))
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(self._github_status), GITHUB_STATUS_DEADLINE_S
+            )
+            status = parse_status_summary(payload)
         except Exception as exc:
-            # Reading *and* parsing: `tick` is not a place to find out that a third party's
-            # body was the one shape its reader did not survive.
+            # The timeout, the read *and* the parse: `tick` is not the place to find out that a
+            # third party's body was the one shape its reader did not survive. TimeoutError is
+            # an Exception, so the one handler covers all three.
             self._log.debug("github_status_probe_failed", error=f"{type(exc).__name__}: {exc}")
             return None
         return None if status is None else status.detail

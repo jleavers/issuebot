@@ -75,8 +75,10 @@ def fetch_status_summary(
     ``timeout_s`` bounds the connection and the read, not the name lookup: ``urlopen`` resolves
     before it has a socket to set a timeout on. A host whose nameservers are unreachable --
     which is one of the ways the ``gh`` polls come to fail in the first place -- can therefore
-    spend its resolver's own budget here. Callers ask once per hold, so the cost is bounded by
-    that rather than by this.
+    spend its resolver's own budget here. A caller that cannot afford to wait that long has to
+    put its own deadline around this one, which is what the worker does
+    (``GITHUB_STATUS_DEADLINE_S``); ``validate`` does not, being a human at a terminal who can
+    stop it.
     """
     log = get_logger(__name__)
     try:
