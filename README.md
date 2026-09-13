@@ -313,7 +313,10 @@ the worker creates it.
    keeps one workpad comment on the issue with its plan, checklist and notes, edited in
    place. `issuebot issues list` and `issuebot status` show the same from the terminal.
 4. When the PR is open and its checks are green, the agent labels the issue
-   `issuebot/review`. If Slack is configured, that state change is posted. An issue whose
+   `issuebot/review`. Checks that Actions never ran (every failed job has zero steps: the
+   account is out of minutes, or on a billing hold) do not hold a finished issue, provided
+   the same suite, lint and format are green locally on that commit; a job that ran and
+   failed still does. If Slack is configured, that state change is posted. An issue whose
    reported behaviour no longer happens reaches the same label by the other route: the agent
    records the reproduction it ran and what it found instead in the workpad, and hands over
    with no PR attached.

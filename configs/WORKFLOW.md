@@ -182,7 +182,7 @@ Run this before moving the issue to `{{ labels.review }}`, and again whenever ne
 3. Every actionable comment, from a human or a bot, is blocking until you have either changed code, tests or docs to address it or posted an explicit, justified reply on that thread.
 4. Track each item and its resolution in the workpad.
 5. Re-run validation after feedback-driven changes and push.
-6. Wait for checks: `gh pr checks <number> -R {{ repo }} --watch`. If any fail, fix, push and repeat.
+6. Wait for checks: `gh pr checks <number> -R {{ repo }} --watch`. If any fail, first find out whether the run executed at all: `gh run list -R {{ repo }} --branch <branch> --limit 1 --json databaseId,conclusion`, then `gh run view <id> -R {{ repo }} --json jobs --jq '[.jobs[] | select(.conclusion == "failure") | (.steps | length)] | all(. == 0)'`. When that reads `true`, every failed job reports zero steps: Actions declined to run it (exhausted minutes, a billing hold, a runner outage), which is not your code. Record the run id and the local results under `Validation` in the workpad and treat the checks as not run. Otherwise fix, push and repeat.
 
 ## No fault found
 
@@ -224,7 +224,7 @@ Then:
 Two routes reach `{{ labels.review }}`: this one, when you changed something, and No fault found above, which has its own bar. For this one, every line must be true:
 
 - The workpad plan, acceptance criteria and validation checklists are complete and accurate.
-- Validation is green for the latest commit; pull request checks are green.
+- Validation is green for the latest commit, and pull request checks are green, or every failed check is a run that never executed (zero-step jobs, recorded in the workpad under `Validation`) while the same suite, lint and format are green locally on that commit. A job that ran steps and failed still holds the issue.
 - The feedback sweep is complete: no actionable comment remains.
 - The branch is pushed and the pull request body contains `Closes #{{ issue.number }}`.
 - The pull request's `mergeable` reads `MERGEABLE`.
