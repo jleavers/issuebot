@@ -161,7 +161,9 @@ def test_help_stays_plain_when_the_environment_asks_for_colour(
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("FORCE_COLOR", "1")
     assert main([]) == 2
-    assert "\x1b[" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "usage: issuebot" in out  # not merely "no escapes": empty output has none either
+    assert "\x1b[" not in out
 
 
 def test_unknown_command_exits_two() -> None:

@@ -48,9 +48,12 @@ def no_ansi_colour(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ``PYTHON_COLORS`` is the variable that settles it rather than joining the argument: it is
     the first thing ``can_colorize`` looks at, ahead of ``NO_COLOR``, ``FORCE_COLOR`` and the
-    tty test, so ``0`` is off whatever else is set, ``pytest -s`` in a terminal included. It
-    is also the one colour variable pytest itself does not read (it takes ``PY_COLORS`` and
-    ``NO_COLOR``), so pinning it leaves pytest's own red and green alone.
+    tty test, so ``0`` is off whatever else is set, ``pytest -s`` in a terminal included. The
+    one interpreter that disagrees is ``python -E``, which ignores the variable and so takes
+    the suite back to guessing; nothing runs it that way, ``uv run pytest`` and CI included.
+
+    It is also the one colour variable pytest itself ignores -- pytest reads ``PY_COLORS``,
+    ``NO_COLOR`` and ``FORCE_COLOR`` -- so pinning it leaves pytest's own red and green alone.
 
     Set rather than deleted, and so on ``os.environ``, which is how it reaches the tests that
     spawn ``issuebot`` as a subprocess as well as the ones that call ``main`` in process.
