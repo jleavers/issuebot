@@ -158,13 +158,15 @@ layout rather than rediscovering it.`
 
 const writeBack = (name) => `
 
-Before you return, write your JSON result to:
+**Write this file before any other file you write, and before you return:**
 
     ${runDir}/${name}
 
 Write exactly the object you are returning, pretty-printed. That file is this run's
-crash-resistance record: if the session dies, the sweep resumes from what is on disk. Write it
-BEFORE you return, not after.`
+crash-resistance record: if the session dies, the sweep resumes from what is on disk. A task
+that also asks you for prose writes this JSON first and the prose second -- so that the two can
+never disagree about what you concluded, and so that a crash between them costs the prose,
+which can be regenerated, rather than the data, which cannot.`
 
 // --- phase 1: recon --------------------------------------------------------------------
 
@@ -385,8 +387,9 @@ Findings that survived refutation:
 
 ${JSON.stringify(survivors, null, 2)}
 
-Write the same content as Markdown to ${runDir}/04-clusters.md — one section per cluster with
-its four fields, then the singletons — as well as the JSON.${writeBack('04-clusters.json')}`
+Return the JSON object and write nothing else. Do not also write a Markdown version: the report
+pass renders the prose from exactly what you return, so a second representation written here
+could only drift from it.${writeBack('04-clusters.json')}`
 
 const criticPrompt = (allFindings) => `${WHERE}
 
@@ -442,8 +445,10 @@ what they must decide. In this order:
 1. A header: the swept commit \`${sha}\`, the stamp \`${stamp}\`, and the repository.
 2. The funnel as a table — findings per lane, refuted, confirmed, escalated, clustered. The
    numbers are ${JSON.stringify(counts)}.
-3. The clusters in severity order, each with its root cause, invariant, blast radius, fix
-   shape, the finding ids behind it, and its dedupe verdict.
+3. The clusters in severity order, numbered 1..N in the order you present them. Every reference
+   to a cluster anywhere else in the report -- in the summary at the top especially -- uses that
+   same number. A summary that says "file cluster 2" while section 2 is a different cluster is
+   worse than no summary.
 4. The singletons, with why each is unclustered, and a note that only \`critical\` singletons
    are proposed for filing.
 5. The coverage gaps, verbatim from the critic — this is what the next sweep starts from.

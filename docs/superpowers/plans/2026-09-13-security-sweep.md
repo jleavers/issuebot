@@ -23,7 +23,7 @@ Every task's requirements include this section. Every implementer and reviewer d
 - **A PreToolUse hook (`~/.claude/hooks/gh-pr-edit-guard.sh`) blocks title and body flags on `gh pr create`, `gh pr edit` and `gh issue create`.** Use `gh api` instead, write the body to a temp `.md` file in a **separate Bash call** from the `gh api` call (the hook aborts the whole call, so a chained heredoc never runs), and pass it with **capital** `-F body=@file.md` — lowercase `-f` posts the literal string. Any file whose own content mentions those flags must be written with the **Write tool**, not a heredoc, or the hook fires on the command text. This plan is such a file.
 - `.pre-commit-config.yaml` runs `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-added-large-files` and ruff. `check-yaml` will parse the skill's YAML front matter. Run `uv run pre-commit run --files <paths>` before every commit and `uv run pre-commit run --all-files` before pushing.
 - Commit messages: conventional prefix plus the attribution trailer the harness requires as the last lines, with a blank line before them.
-- **Artefact paths are fixed by the spec and are load-bearing.** `<runDir>` is `.claude/security-sweeps/<stamp>/`; the files are `run.json`, `01-surface-map.md`, `02-findings-<lane>.json`, `03-verdicts-<lane>.json`, `03-escalated-<id>.json`, `04-clusters.json`, `04-clusters.md`, `04-gaps.md`, `05-dedupe.json`, `report-<stamp>.md`, `06-filed.json`. A resume reads these names; renaming one breaks recovery silently.
+- **Artefact paths are fixed by the spec and are load-bearing.** `<runDir>` is `.claude/security-sweeps/<stamp>/`; the files are `run.json`, `01-surface-map.md`, `02-findings-<lane>.json`, `03-verdicts-<lane>.json`, `03-escalated-<id>.json`, `04-clusters.json`, `04-gaps.md`, `05-dedupe.json`, `report-<stamp>.md`, `06-filed.json`. A resume reads these names; renaming one breaks recovery silently. Triage writes **only** the JSON: the shakedown had it write a Markdown twin fifteen seconds earlier and then refine its clustering, leaving the human-readable file a whole cluster short.
 - `<stamp>` is UTC, `YYYYMMDDTHHMMSSZ`, produced by `date -u +%Y%m%dT%H%M%SZ`. Never a local timestamp: the repository is used from two hosts.
 - **The four lanes are `copycat`, `secrets`, `hostile-issue`, `services`**, spelled exactly that way in the script, the prompts, the artefact filenames and the report. The completeness critic's `suggested_lane` is one of those four or `new`.
 - Severities are exactly `critical`, `high`, `medium`, `low`, in that rank order.
@@ -332,13 +332,15 @@ layout rather than rediscovering it.`
 
 const writeBack = (name) => `
 
-Before you return, write your JSON result to:
+**Write this file before any other file you write, and before you return:**
 
     ${runDir}/${name}
 
 Write exactly the object you are returning, pretty-printed. That file is this run's
-crash-resistance record: if the session dies, the sweep resumes from what is on disk. Write it
-BEFORE you return, not after.`
+crash-resistance record: if the session dies, the sweep resumes from what is on disk. A task
+that also asks you for prose writes this JSON first and the prose second -- so that the two can
+never disagree about what you concluded, and so that a crash between them costs the prose,
+which can be regenerated, rather than the data, which cannot.`
 
 // --- phase 1: recon --------------------------------------------------------------------
 
@@ -559,8 +561,9 @@ Findings that survived refutation:
 
 ${JSON.stringify(survivors, null, 2)}
 
-Write the same content as Markdown to ${runDir}/04-clusters.md — one section per cluster with
-its four fields, then the singletons — as well as the JSON.${writeBack('04-clusters.json')}`
+Return the JSON object and write nothing else. Do not also write a Markdown version: the report
+pass renders the prose from exactly what you return, so a second representation written here
+could only drift from it.${writeBack('04-clusters.json')}`
 
 const criticPrompt = (allFindings) => `${WHERE}
 
@@ -616,8 +619,10 @@ what they must decide. In this order:
 1. A header: the swept commit \`${sha}\`, the stamp \`${stamp}\`, and the repository.
 2. The funnel as a table — findings per lane, refuted, confirmed, escalated, clustered. The
    numbers are ${JSON.stringify(counts)}.
-3. The clusters in severity order, each with its root cause, invariant, blast radius, fix
-   shape, the finding ids behind it, and its dedupe verdict.
+3. The clusters in severity order, numbered 1..N in the order you present them. Every reference
+   to a cluster anywhere else in the report -- in the summary at the top especially -- uses that
+   same number. A summary that says "file cluster 2" while section 2 is a different cluster is
+   worse than no summary.
 4. The singletons, with why each is unclustered, and a note that only \`critical\` singletons
    are proposed for filing.
 5. The coverage gaps, verbatim from the critic — this is what the next sweep starts from.
