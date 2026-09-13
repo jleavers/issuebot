@@ -979,6 +979,73 @@ async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> No
     assert h.recorder.of(StateChanged)[1].actor == "issuebot"
 
 
+async def test_a_blocked_stop_while_in_progress_escapes_with_the_agents_reason(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.comment(1, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    reason = "GitHub Actions is not allocating runners; a human must clear the billing hold."
+    await h.exit(
+        h.run_for(1),
+        stop_reason="blocked",
+        blocker=reason,
+        final_state=StateLabel.IN_PROGRESS,
+        final_issue=h.github.issue(1),
+        turns=1,
+    )
+    assert h.orchestrator.retries == {}
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    body = h.github.comments_for(1)[0].body
+    assert "### Issuebot blocked (" in body
+    assert f"\n\n{reason}\n" in body
+    assert "(attempt 1, 1 turn)" in body
+    assert "Turn budget" not in body
+    assert h.recorder.kinds == ["state_changed", "state_changed", "blocked"]
+    assert h.recorder.of(Blocked)[0].reason == reason
+    assert h.recorder.of(StateChanged)[1].actor == "issuebot"
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
+async def test_a_blocked_stop_without_a_line_still_escapes(tmp_path: Path) -> None:
+    """Defensive: the session never produces this pair, but the escape must not write None."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        stop_reason="blocked",
+        blocker=None,
+        final_state=StateLabel.IN_PROGRESS,
+        final_issue=h.github.issue(1),
+    )
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.recorder.of(Blocked)[0].reason == "the session reported a blocker"
+
+
+async def test_a_blocked_stop_after_the_label_moved_is_released(tmp_path: Path) -> None:
+    """The label is the truth: if the agent handed off, there is nothing to escape."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(
+        h.run_for(1),
+        stop_reason="blocked",
+        blocker="written after the hand-off",
+        final_state=StateLabel.REVIEW,
+        final_issue=h.github.issue(1),
+    )
+    assert h.github.comments_for(1) == []
+    assert h.recorder.of(Blocked) == []
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    await h.fire(1.0)  # the continuation retry a succeeded exit queues; review releases it
+    assert h.orchestrator.retries == {}
+    assert h.orchestrator.running == {}
+
+
 async def test_escape_failure_is_retried_with_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -77,7 +77,7 @@ No description provided.
 ## Ground rules
 
 1. This is an unattended session. Nobody will answer a question, so do not ask any, and do not ask a person to perform follow-up actions.
-2. Stop early only for a true external blocker: a required tool, credential or permission that is missing and cannot be obtained in-session. Record what is missing and the exact human action needed in the workpad, then end the turn. An issue whose reported defect no longer happens is not a blocker and not a failure: it is the No fault found outcome below.
+2. Stop early only for a true external blocker: a required tool, credential or permission that is missing and cannot be obtained in-session. Record what is missing and the exact human action needed in the workpad, then end the turn with `BLOCKED: <one line: what is missing and the exact human action>` as the first line of your final message; issuebot escalates the issue at once, so do not spend further turns re-checking the same blocker. An issue whose reported defect no longer happens is not a blocker and not a failure: it is the No fault found outcome below.
 3. Your final message reports completed actions and blockers only. No "next steps for the user".
 4. Work only in the current directory, a clone of `{{ repo }}`. The `.issuebot/` directory inside it is ignored by git; use it for scratch files.
 5. Follow the repository's own instructions (`CLAUDE.md`, `AGENTS.md`, contributing guides) where they exist. Where they conflict with this workflow, they win for how to run tools, commit and open pull requests; this workflow wins for labels and the workpad.
@@ -232,7 +232,7 @@ Two routes reach `{{ labels.review }}`: this one, when you changed something, an
 - The self-review ran on the final diff and its findings are recorded.
 {% endif %}
 
-Only then run the label command from the Labels section. If the bar cannot be met because of a true external blocker, write the blocker brief in the workpad instead and end the turn; issuebot will escalate.
+Only then run the label command from the Labels section. If the bar cannot be met because of a true external blocker, write the blocker brief in the workpad, make `BLOCKED: <one line>` the first line of your final message and end the turn; issuebot escalates at once.
 
 ## Rework flow
 

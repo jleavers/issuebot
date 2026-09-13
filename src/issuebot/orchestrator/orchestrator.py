@@ -1063,6 +1063,12 @@ class Orchestrator:
                 )
                 await self._escape(entry, reason, result)
                 return
+            if result.stop_reason == "blocked" and result.final_state is StateLabel.IN_PROGRESS:
+                # The agent said so on its final line (spec 2026-09-13-blocked-escape-design.md);
+                # an external blocker does not clear by retrying, so escape now.
+                reason = result.blocker or "the session reported a blocker"
+                await self._escape(entry, reason, result)
+                return
             self._schedule(
                 entry.issue,
                 attempt=1,

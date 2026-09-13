@@ -32,7 +32,15 @@ from issuebot.agent.runner import (
     settings_with_model,
     workspace_environment,
 )
-from issuebot.agent.session import RunResult, StopReason, new_run_id, run_session
+from issuebot.agent.session import (
+    BLOCKED_MARKER,
+    BLOCKER_LIMIT,
+    RunResult,
+    StopReason,
+    blocker_from,
+    new_run_id,
+    run_session,
+)
 from issuebot.agent.workspace import (
     HookResult,
     SessionRecord,
@@ -44,6 +52,8 @@ from issuebot.agent.workspace import (
 )
 
 __all__ = [
+    "BLOCKED_MARKER",
+    "BLOCKER_LIMIT",
     "CLAUDE_PROBE_TIMEOUT_S",
     "CONTINUATION_TEMPLATE",
     "MIN_CLAUDE_VERSION",
@@ -67,6 +77,7 @@ __all__ = [
     "Workspace",
     "WorkspaceManager",
     "agent_environment",
+    "blocker_from",
     "check_envelopes",
     "classify_result",
     "claude_auth_status",

@@ -976,7 +976,12 @@ def render_run_summary(result: RunResult) -> str:
     if result.stop_reason == "max_turns":
         lines.append(
             f"turn budget exhausted; issue #{result.issue_number} remains {state} "
-            "(the blocked escape is Phase 4)"
+            "(the worker would escalate it)"
+        )
+    elif result.stop_reason == "blocked":
+        lines.append(
+            f"blocked: {result.blocker or 'no reason given'}; issue #{result.issue_number} "
+            f"remains {state} (the worker would escalate it)"
         )
     elif result.error_category is not None:
         lines.append(f"error: {result.error_category}: {result.error}")

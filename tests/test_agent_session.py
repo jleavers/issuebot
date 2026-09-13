@@ -13,7 +13,14 @@ import pytest
 import structlog
 
 from issuebot.agent.runner import TurnObserver, TurnResult
-from issuebot.agent.session import RunResult, new_run_id, run_session
+from issuebot.agent.session import (
+    BLOCKED_MARKER,
+    BLOCKER_LIMIT,
+    RunResult,
+    blocker_from,
+    new_run_id,
+    run_session,
+)
 from issuebot.agent.workspace import WorkspaceManager
 from issuebot.config import Settings, Workflow
 from issuebot.events import Event, EventBus, RunEnded, RunStarted
@@ -39,9 +46,15 @@ class StubGh:
 class ScriptedRunner:
     """Returns one scripted TurnResult per call ("ok" or an error category) and records calls."""
 
-    def __init__(self, *outcomes: str, on_turn: Callable[[int], None] | None = None) -> None:
+    def __init__(
+        self,
+        *outcomes: str,
+        on_turn: Callable[[int], None] | None = None,
+        texts: dict[int, str] | None = None,
+    ) -> None:
         self.script = list(outcomes)
         self.on_turn = on_turn
+        self.texts = texts or {}
         self.calls: list[dict[str, object]] = []
 
     async def run_turn(
@@ -88,7 +101,7 @@ class ScriptedRunner:
             cost_usd=0.25,
             duration_ms=1000,
             permission_denials=0,
-            result_text="done",
+            result_text=self.texts.get(turn_number, "done"),
             error_category=category if failed else None,  # type: ignore[arg-type]
             error=f"injected {category}" if failed else None,
             stdout_path=log_dir / f"turn-{turn_number}.jsonl",
@@ -168,6 +181,37 @@ def test_new_run_id_is_sortable_and_unique() -> None:
     assert new_run_id() != new_run_id()
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "BLOCKED: gh cannot reach api.github.com; a human must fix DNS",
+            "gh cannot reach api.github.com; a human must fix DNS",
+        ),
+        ("BLOCKED:no space after the colon", "no space after the colon"),
+        (
+            "\n\n  BLOCKED: after blank lines and indentation  \nmore",
+            "after blank lines and indentation",
+        ),
+        ("Done. BLOCKED: mentioned later on the first line", None),
+        ("Finished the PR.\nBLOCKED: only on the second line", None),
+        ("BLOCKED:", None),
+        ("BLOCKED:   ", None),
+        ("blocked: lower case is not the marker", None),
+        ("", None),
+        (None, None),
+        ("BLOCKED: " + "x" * 600, "x" * 500),
+        ("BLOCKED: " + "y" * 500, "y" * 500),
+    ],
+)
+def test_blocker_from_reads_the_marker_off_the_first_line(
+    text: str | None, expected: str | None
+) -> None:
+    assert BLOCKED_MARKER == "BLOCKED:"
+    assert BLOCKER_LIMIT == 500
+    assert blocker_from(text) == expected
+
+
 async def test_stops_when_the_agent_moves_the_issue(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     runner = ScriptedRunner(on_turn=lambda _: h.github.human_set_state(42, StateLabel.REVIEW))
@@ -221,6 +265,70 @@ async def test_runs_until_max_turns_with_continuation_prompts(tmp_path: Path) ->
     ended = h.recorder.events[-1]
     assert isinstance(ended, RunEnded)
     assert ended.turns == 3
+
+
+async def test_a_blocked_final_message_stops_the_run_at_that_turn(tmp_path: Path) -> None:
+    """Ground rule 2's marker: the session stops after the turn that carries it, so the
+    orchestrator can escape at once instead of burning the turn budget re-checking."""
+    h = Harness(tmp_path, max_turns=3)
+    line = "BLOCKED: `gh` cannot reach api.github.com from this network; a human must fix DNS"
+    runner = ScriptedRunner(texts={1: line + "\n\nThe workpad's Blockers section has the brief."})
+    result = await h.run(runner, run_id="run-b")
+    assert result.stop_reason == "blocked"
+    assert result.outcome == "succeeded"
+    assert result.error_category is None
+    assert (
+        result.blocker == "`gh` cannot reach api.github.com from this network; a human must fix DNS"
+    )
+    assert result.turns == 1
+    assert result.final_state is StateLabel.IN_PROGRESS
+    assert [call["turn_number"] for call in runner.calls] == [1]
+    ended = h.recorder.events[-1]
+    assert isinstance(ended, RunEnded)
+    assert (ended.outcome, ended.error, ended.turns) == ("succeeded", None, 1)
+
+
+async def test_the_run_finished_log_line_carries_the_blocker(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_turns=2)
+    runner = ScriptedRunner(texts={1: "BLOCKED: a credential is missing; a human must add it"})
+    with structlog.testing.capture_logs() as logs:
+        await h.run(runner)
+    finished = [entry for entry in logs if entry["event"] == "run_finished"]
+    assert len(finished) == 1
+    assert finished[0]["stop_reason"] == "blocked"
+    assert finished[0]["blocker"] == "a credential is missing; a human must add it"
+
+
+async def test_a_marker_later_in_the_message_does_not_stop_the_run(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_turns=2)
+    runner = ScriptedRunner(texts={1: "Pushed the fix.\nBLOCKED: is a word I used in a note."})
+    result = await h.run(runner)
+    assert result.stop_reason == "max_turns"
+    assert result.blocker is None
+    assert result.turns == 2
+
+
+async def test_a_moved_issue_wins_over_the_marker(tmp_path: Path) -> None:
+    """The label is the truth: an agent that handed off and also wrote the marker is done."""
+    h = Harness(tmp_path, max_turns=3)
+    runner = ScriptedRunner(
+        on_turn=lambda _: h.github.human_set_state(42, StateLabel.REVIEW),
+        texts={1: "BLOCKED: written by mistake after the hand-off"},
+    )
+    result = await h.run(runner)
+    assert result.stop_reason == "issue_moved"
+    assert result.blocker is None
+    assert result.final_state is StateLabel.REVIEW
+
+
+async def test_a_failed_turn_with_the_marker_still_fails(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_turns=3)
+    runner = ScriptedRunner("process_exit", texts={1: "BLOCKED: the process died anyway"})
+    result = await h.run(runner)
+    assert result.outcome == "failed"
+    assert result.stop_reason == "failure"
+    assert result.error_category == "process_exit"
+    assert result.blocker is None
 
 
 async def test_closed_issue_stops_as_moved(tmp_path: Path) -> None:
