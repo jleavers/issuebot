@@ -47,6 +47,8 @@ class Issue:
     number: int
     title: str
     body: str | None
+    author: str | None
+    """The login that opened the issue; ``None`` when GitHub no longer has the account."""
     github_state: GitHubState
     state: StateLabel | None
     state_labels: tuple[str, ...]

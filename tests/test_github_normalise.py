@@ -19,6 +19,7 @@ def node(**overrides: Any) -> dict[str, Any]:
         "number": 42,
         "title": "Add retry backoff",
         "body": "We need exponential backoff.",
+        "author": {"login": "reporter"},
         "state": "OPEN",
         "url": "https://github.com/example/repo/issues/42",
         "createdAt": "2026-09-01T09:00:00Z",
@@ -84,6 +85,7 @@ def test_full_record() -> None:
     assert issue.number == 42
     assert issue.title == "Add retry backoff"
     assert issue.body == "We need exponential backoff."
+    assert issue.author == "reporter"
     assert issue.github_state == "open"
     assert issue.state is StateLabel.IN_PROGRESS
     assert issue.state_labels == ("issuebot/in-progress",)
@@ -121,6 +123,12 @@ def test_minimal_closed_record() -> None:
 
 def test_empty_body_is_none() -> None:
     assert issue_from_node(node(body=""), repo=REPO, labels=LABELS).body is None
+
+
+@pytest.mark.parametrize("author", [None, {}, {"login": ""}, {"login": 7}, "ghost"])
+def test_deleted_or_unusable_author_is_none(author: Any) -> None:
+    """GitHub sends ``author: null`` once the account is gone; the envelope then says so."""
+    assert issue_from_node(node(author=author), repo=REPO, labels=LABELS).author is None
 
 
 def test_two_state_labels_is_a_conflict() -> None:

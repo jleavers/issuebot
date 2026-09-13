@@ -28,6 +28,7 @@ ID_BATCH_SIZE = 50
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body state url createdAt updatedAt closedAt
+  author { login }
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }
   closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {

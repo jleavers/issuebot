@@ -46,6 +46,7 @@ def make_issue() -> Callable[..., Issue]:
             "number": 42,
             "title": "Add retry backoff",
             "body": None,
+            "author": "reporter",
             "github_state": "open",
             "state": StateLabel.TODO,
             "state_labels": ("issuebot/todo",),

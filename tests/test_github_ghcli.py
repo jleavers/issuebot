@@ -11,7 +11,7 @@ from pydantic import SecretStr
 
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError
-from issuebot.github.ghcli import ID_BATCH_SIZE, GhCliAdapter, by_ids_query
+from issuebot.github.ghcli import ID_BATCH_SIZE, ISSUE_FIELDS, GhCliAdapter, by_ids_query
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
 from issuebot.github.runner import GhResult
 from issuebot.github.state import LabelStyle
@@ -675,3 +675,8 @@ async def test_probe_responses_are_validated(stdout: str) -> None:
         with pytest.raises(GitHubError) as exc:
             await call()
         assert exc.value.category == "response"
+
+
+def test_issue_fields_fetch_the_author() -> None:
+    """The prompt's envelope names the author, so the fragment has to ask for one (#76)."""
+    assert "author { login }" in ISSUE_FIELDS

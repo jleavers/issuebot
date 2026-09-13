@@ -31,6 +31,7 @@ class _FakeIssue:
     number: int
     title: str
     body: str | None
+    author: str | None
     state: str
     labels: list[str]
     assignees: list[str]
@@ -228,6 +229,7 @@ class FakeGitHub:
         labels: Iterable[str] = (),
         number: int | None = None,
         assignees: Iterable[str] = (),
+        author: str | None = "reporter",
     ) -> Issue:
         if number is None:
             number = self._next_number
@@ -239,6 +241,7 @@ class FakeGitHub:
             number=number,
             title=title,
             body=body,
+            author=author,
             state="open",
             labels=list(labels),
             assignees=list(assignees),
@@ -354,6 +357,7 @@ class FakeGitHub:
             "number": record.number,
             "title": record.title,
             "body": record.body,
+            "author": {"login": record.author} if record.author is not None else None,
             "state": "OPEN" if record.state == "open" else "CLOSED",
             "url": self._issue_url(record.number),
             "createdAt": record.created_at.isoformat(),
