@@ -114,6 +114,33 @@ def slack_post(monkeypatch: pytest.MonkeyPatch) -> FakeSlackPost:
     return fake
 
 
+class FakeGitHubStatus:
+    """Stands in for the githubstatus.com fetch: answers "operational" unless a test says else."""
+
+    OPERATIONAL = json.dumps(
+        {
+            "status": {"indicator": "none", "description": "All Systems Operational"},
+            "components": [{"name": "Pull Requests", "status": "operational", "group": False}],
+        }
+    )
+
+    def __init__(self) -> None:
+        self.payload: str | None = self.OPERATIONAL
+        self.calls = 0
+
+    def __call__(self) -> str | None:
+        self.calls += 1
+        return self.payload
+
+
+@pytest.fixture(autouse=True)
+def github_status(monkeypatch: pytest.MonkeyPatch) -> FakeGitHubStatus:
+    """Autouse: no test reaches githubstatus.com, and `validate` is the same offline or not."""
+    fake = FakeGitHubStatus()
+    monkeypatch.setattr("issuebot.cli._github_status", fake)
+    return fake
+
+
 @pytest.fixture(autouse=True)
 def fake_database(monkeypatch: pytest.MonkeyPatch) -> FakeDatabase:
     """Every CLI command talks to this stand-in instead of a real PostgreSQL server."""
@@ -204,7 +231,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
+    assert out.rstrip().endswith("14 checks: 0 failed, 1 warnings")
     assert "secret-token-value" not in out
 
 
@@ -226,7 +253,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
+    assert out.rstrip().endswith("14 checks: 0 failed, 1 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -360,7 +387,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "13 checks: 0 failed, 1 warnings" in out
+    assert "14 checks: 0 failed, 1 warnings" in out
 
 
 def _validate_with_database(
@@ -384,7 +411,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "13 checks: 1 failed, 0 warnings" in out
+    assert "14 checks: 1 failed, 0 warnings" in out
     assert fake_database.urls == []
 
 
@@ -423,7 +450,75 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "13 checks: 0 failed, 1 warnings" in out
+    assert "14 checks: 0 failed, 1 warnings" in out
+
+
+# --- validate: github.status (#88) -------------------------------------------------
+
+
+def test_validate_reports_an_operational_status_page(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    github_status: FakeGitHubStatus,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    assert "[ OK ] github.status: All Systems Operational" in capsys.readouterr().out
+    assert github_status.calls == 1
+
+
+def test_validate_warns_about_an_incident_without_failing(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    github_status: FakeGitHubStatus,
+) -> None:
+    """Advisory: a human is running this and there is no dispatch to hold (#88)."""
+    github_status.payload = json.dumps(
+        {
+            "status": {"indicator": "major", "description": "Partial System Outage"},
+            "components": [
+                {"name": "Pull Requests", "status": "major_outage", "group": False},
+                {"name": "Actions", "status": "degraded_performance", "group": False},
+            ],
+        }
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.status: incident in progress \u2014 "
+        "Pull Requests, major outage; Actions, degraded performance" in out
+    )
+    assert "14 checks: 0 failed, 2 warnings" in out
+
+
+def test_validate_says_so_when_the_status_page_does_not_answer(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    github_status: FakeGitHubStatus,
+) -> None:
+    """An offline host still validates: the check names its own blank and never fails."""
+    github_status.payload = None
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
+    assert "14 checks: 0 failed, 2 warnings" in out
+
+
+def test_validate_checks_the_status_page_even_without_gh(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    github_status: FakeGitHubStatus,
+) -> None:
+    """The page has nothing to do with `gh`, so a missing `gh` must not silence it."""
+    monkeypatch.setattr("issuebot.cli._which", lambda name: None)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    assert "[ OK ] github.status: All Systems Operational" in capsys.readouterr().out
 
 
 def test_validate_fails_when_the_schema_is_ahead(
@@ -456,7 +551,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "13 checks: 0 failed, 0 warnings" in out
+    assert "14 checks: 0 failed, 0 warnings" in out
     assert "secret" not in out
 
 
@@ -622,7 +717,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("13 checks: 0 failed, 1 warnings")
+    assert out.rstrip().endswith("14 checks: 0 failed, 1 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(

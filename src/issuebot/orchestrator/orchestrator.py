@@ -43,6 +43,8 @@ from issuebot.github import (
     GitHubError,
     Issue,
     StateLabel,
+    fetch_status_summary,
+    parse_status_summary,
 )
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
@@ -81,10 +83,21 @@ SHUTDOWN_MARGIN_S = 10.0
 # How many ticks an authentication hold (#20) waits for a probe that cannot answer before it
 # gives up and lets dispatch resume. Ten polls is five minutes at the default interval.
 MAX_UNREADABLE_AUTH_PROBES = 10
+# How many polls in a row must fail to read the board before dispatch is held (#88). `gh`
+# already retries a transport error of its own, so one failure is a blip and not an outage;
+# three in a row is a minute and a half at the default interval, and is not.
+MAX_FETCH_FAILURES = 3
+# The GitHub hold is one outage however differently it words itself from poll to poll, so
+# `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
+# the probe's verdict).
+GITHUB_HOLD_KEY = "github"
 
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
 # environment, stdout or None. A seam like `which`, so tests never spawn a process.
 ClaudeAuthProbe = Callable[[str, Mapping[str, str]], str | None]
+# githubstatus.com's summary body, or None. A seam for the same reason: no test reaches the
+# network, and nothing issuebot decides depends on the answer.
+GitHubStatusProbe = Callable[[], str | None]
 
 
 def fetch_states(*, observed: bool, conflicts: bool) -> tuple[StateLabel, ...]:
@@ -95,6 +108,12 @@ def fetch_states(*, observed: bool, conflicts: bool) -> tuple[StateLabel, ...]:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _github_hold_reason(error: str, status_note: str | None) -> str:
+    """The GitHub hold's reason: this worker's own evidence, the status page as annotation."""
+    reason = f"GitHub is not answering this worker: {error}"
+    return f"{reason} \u2014 githubstatus.com: {status_note}" if status_note else reason
 
 
 class OrchestratorStartupError(Exception):
@@ -158,6 +177,15 @@ class RunObserver:
 
 
 @dataclass(frozen=True, slots=True)
+class _Hold:
+    """One tick's answer to "why will this worker not claim?", before it reaches the snapshot."""
+
+    kind: DispatchHoldKind
+    reason: str
+    key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _WorkerExited:
     issue_id: str
 
@@ -180,6 +208,7 @@ class Orchestrator:
         run_session: RunSessionFn = run_session,
         which: Callable[[str], str | None] = shutil.which,
         claude_auth: ClaudeAuthProbe = claude_auth_status,
+        github_status: GitHubStatusProbe = fetch_status_summary,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
@@ -195,6 +224,7 @@ class Orchestrator:
         self._run_session = run_session
         self._which = which
         self._claude_auth = claude_auth
+        self._github_status = github_status
         self._clock = clock
         self._now = now
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
@@ -220,6 +250,13 @@ class Orchestrator:
         # keeps the last reading instead of blanking the limits tile until the next dispatch.
         self._rate_limits: RateLimits | None = initial_rate_limits
         self._unreadable_auth_probes = 0
+        # The GitHub hold of #88: consecutive failed reads of the board, the reason they hold
+        # dispatch (None while they do not), and the status page's annotation on it, read once
+        # when the hold engages rather than on every poll.
+        self._fetch_failures = 0
+        self._github_block: str | None = None
+        self._github_note: str | None = None
+        self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
@@ -338,8 +375,8 @@ class Orchestrator:
         output = await asyncio.to_thread(self._claude_auth, found, self._environ)
         return describe_claude_auth(output)
 
-    async def _auth_held(self) -> bool:
-        """True while an authentication failure holds dispatch; re-probes once per tick.
+    async def _auth_hold(self) -> _Hold | None:
+        """The hold an authentication failure puts on dispatch, or None; re-probes once per tick.
 
         A run that failed to authenticate (#20) is evidence the worker cannot work any issue,
         so it stops claiming rather than escalating one issue after another with an opaque
@@ -353,14 +390,14 @@ class Orchestrator:
         caller has just run preflight, so ``claude.command`` resolves.
         """
         if self._auth_block is None:
-            return False
+            return None
         auth = await self._probe_claude_auth(self._workflow.config.claude.command)
         if auth.verdict in ("ok", "ambiguous"):
             self._log.info(
                 "dispatch_auth_recovered", claude_auth=auth.detail, error=self._auth_block
             )
             self._release_hold()
-            return False
+            return None
         if auth.verdict == "logged_out":
             self._unreadable_auth_probes = 0
         else:
@@ -373,17 +410,71 @@ class Orchestrator:
                     error=self._auth_block,
                 )
                 self._release_hold()
-                return False
-        self._hold_snapshot(
-            "auth", f"claude authentication unavailable: {auth.detail}", key=auth.verdict
-        )
+                return None
         if self._auth_block != self._reported_auth_block:
             self._log.error("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
             self._reported_auth_block = self._auth_block
         else:
             # An idle worker says nothing else, so the hold keeps reporting itself.
             self._log.warning("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
-        return True
+        return _Hold("auth", f"claude authentication unavailable: {auth.detail}", key=auth.verdict)
+
+    async def _note_fetch_failure(self, error: str) -> None:
+        """Count a failed read of the board and, past the threshold, hold dispatch (#88).
+
+        This is first-party evidence that *this* worker cannot reach GitHub: it needs nobody
+        to declare an incident, it fires the moment the reads start failing, and it fails safe,
+        since a worker that cannot read the board has no business claiming from it. One failure
+        is a blip -- ``gh`` retries a transport error of its own before issuebot ever sees it --
+        so a hold waits for ``MAX_FETCH_FAILURES`` polls in a row.
+        """
+        self._fetch_failures += 1
+        if self._fetch_failures < MAX_FETCH_FAILURES:
+            return
+        if self._github_block is None:
+            # The hold engages now, which is the one moment the status page is read: once per
+            # outage, off the event loop, and nowhere that dispatch depends on the answer.
+            self._github_note = await self._probe_github_status()
+        self._github_block = _github_hold_reason(error, self._github_note)
+        context = {
+            "error": error,
+            "failures": self._fetch_failures,
+            "github_status": self._github_note,
+        }
+        if self._github_block != self._reported_github_block:
+            self._log.error("dispatch_github_held", **context)
+            self._reported_github_block = self._github_block
+        else:
+            # An idle worker says nothing else, so the hold keeps reporting itself.
+            self._log.warning("dispatch_github_held", **context)
+
+    def _note_fetch_success(self) -> None:
+        """The board answered, so any GitHub hold lifts at once (#88)."""
+        if self._github_block is not None:
+            self._log.info(
+                "dispatch_github_recovered", failures=self._fetch_failures, error=self._github_block
+            )
+        self._fetch_failures = 0
+        self._github_block = None
+        self._github_note = None
+        self._reported_github_block = None
+
+    async def _probe_github_status(self) -> str | None:
+        """What githubstatus.com says, as annotation only; None when it does not answer.
+
+        Fails open in every direction. The page is a lagging indicator -- it answered "All
+        Systems Operational" through the first twenty-three minutes of the 2026-09-13 incident
+        -- so it can name an outage the worker has already found, and nothing else. An
+        operational answer is still worth carrying: it tells the operator to look at their own
+        network rather than at GitHub's.
+        """
+        try:
+            payload = await asyncio.to_thread(self._github_status)
+        except Exception as exc:
+            self._log.debug("github_status_probe_failed", error=f"{type(exc).__name__}: {exc}")
+            return None
+        status = parse_status_summary(payload)
+        return None if status is None else status.detail
 
     def _hold_dispatch(self, error: str) -> None:
         """Stop claiming issues until a probe reports the credential works again."""
@@ -422,10 +513,11 @@ class Orchestrator:
         await self.reconcile()
         self._reload_workflow()
         dispatched = 0
+        hold: _Hold | None = None
         problems = preflight(self._workflow.config, which=self._which)
         if problems:
             message = "; ".join(problems)
-            self._hold_snapshot("preflight", message)
+            hold = _Hold("preflight", message)
             if message != self._reported_preflight:
                 self._log.error("dispatch_preflight_failed", problems=problems)
                 self._reported_preflight = message
@@ -434,13 +526,13 @@ class Orchestrator:
                 await self._poll_issues()
         else:
             self._reported_preflight = None
-            if await self._auth_held():
-                # _auth_held has recorded the hold; the fetch still works, so the board stays
-                # fresh while nothing is claimed (#29).
+            hold = await self._auth_hold()
+            if hold is not None:
+                # The fetch still works, so the board stays fresh while nothing is claimed (#29).
                 await self._poll_issues()
             else:
-                self._release_snapshot_hold()
                 dispatched = await self._dispatch_candidates()
+        self._settle_dispatch_hold(hold)
         self._tick_count += 1
         self._last_tick_at = self._now()
         self._log.debug(
@@ -452,6 +544,23 @@ class Orchestrator:
             slots=self._slots(),
         )
         self._publish_snapshot()
+
+    def _settle_dispatch_hold(self, hold: _Hold | None) -> None:
+        """Record this tick's one hold: the caller's if it has one, else GitHub's, else none.
+
+        One place decides, and it decides after the fetch, because the snapshot carries a
+        single hold whose ``since`` has to survive a tick that re-derives the same reason:
+        releasing and re-holding would restart the clock on a hold that never lifted.
+        ``preflight`` and ``auth`` outrank ``github`` -- both name something the operator can
+        fix on this host, and a ``gh`` that will not run is why the fetch failed rather than a
+        second, independent fault.
+        """
+        if hold is None and self._github_block is not None:
+            hold = _Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
+        if hold is None:
+            self._release_snapshot_hold()
+        else:
+            self._hold_snapshot(hold.kind, hold.reason, key=hold.key)
 
     def _slots(self) -> int:
         return max(self._workflow.config.agent.max_concurrent_agents - len(self._running), 0)
@@ -548,7 +657,9 @@ class Orchestrator:
             issues = await self._adapter.fetch_issues_by_states(states)
         except GitHubError as exc:
             self._log.warning("candidates_fetch_failed", error=str(exc))
+            await self._note_fetch_failure(str(exc))
             return None
+        self._note_fetch_success()
         self._report_issues(issues)
         await self._bounce_conflicts(issues)
         return issues
@@ -1086,6 +1197,18 @@ class Orchestrator:
                 kind="auth",
                 delay_ms=settings.polling.interval_ms,
                 error=f"claude authentication unavailable: {self._auth_block}",
+            )
+            return
+        if self._github_block is not None:
+            # Claiming is a write to the board this worker has just failed to read (#88), so a
+            # retry waits with dispatch rather than spending an attempt on a request that is
+            # going to fail. The escape above goes first for the same reason it does under an
+            # authentication hold: it is the one retry whose whole job is to leave a note.
+            self._requeue(
+                entry,
+                kind="github",
+                delay_ms=settings.polling.interval_ms,
+                error=self._github_block,
             )
             return
         try:

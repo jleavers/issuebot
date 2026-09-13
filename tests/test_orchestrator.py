@@ -33,6 +33,7 @@ from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
+    MAX_FETCH_FAILURES,
     MAX_UNREADABLE_AUTH_PROBES,
     OBSERVED_STATES,
     Orchestrator,
@@ -242,6 +243,10 @@ class Harness:
         self.which_missing: set[str] = set()
         self.claude_auth_output: str | None = LOGGED_IN
         self.claude_auth_calls: list[tuple[str, Mapping[str, str]]] = []
+        # githubstatus.com never answers unless a test says so, so no test reaches the network
+        # and the annotation is absent exactly where it is not being exercised (#88).
+        self.github_status_output: str | None = None
+        self.github_status_calls = 0
         self.orchestrator = Orchestrator(
             self.workflow,
             bus=self.bus,
@@ -251,6 +256,7 @@ class Harness:
             run_session=run_session if real_sessions else self.sessions,
             which=self.which,
             claude_auth=self.claude_auth,
+            github_status=self.github_status,
             clock=self.clock,
             now=self.now,
             environ=self.environ,
@@ -273,6 +279,10 @@ class Harness:
     def claude_auth(self, command: str, environ: Mapping[str, str]) -> str | None:
         self.claude_auth_calls.append((command, environ))
         return self.claude_auth_output
+
+    def github_status(self) -> str | None:
+        self.github_status_calls += 1
+        return self.github_status_output
 
     def make_runner(self, settings: Settings) -> ClaudeRunner:
         self.runner_settings.append(settings)
@@ -2539,3 +2549,268 @@ async def test_the_bounce_skips_an_issue_with_a_queued_retry(tmp_path: Path) -> 
     await h.tick()
     assert h.github.issue(1).state is StateLabel.REWORK
     assert h.calls("set_state") == [(1, StateLabel.REWORK)]
+
+
+# --- the GitHub hold (#88) ----------------------------------------------------------------
+
+GITHUB_DOWN = json.dumps(
+    {
+        "status": {"indicator": "major", "description": "Partial System Outage"},
+        "components": [{"name": "Pull Requests", "status": "major_outage", "group": False}],
+    }
+)
+GITHUB_UP = json.dumps(
+    {"status": {"indicator": "none", "description": "All Systems Operational"}, "components": []}
+)
+
+
+class FetchOutage:
+    """The board goes unreadable the way an outage makes it: the poll fails, nothing else does.
+
+    Narrower than ``fail_next``, which would also consume the terminal sweep's calls and the
+    running refresh's, and it is only the poll that #88 counts.
+    """
+
+    def __init__(self, h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.error = "http 502: Bad Gateway"
+        self.down = True
+        self._original = h.github.fetch_issues_by_states
+        monkeypatch.setattr(h.github, "fetch_issues_by_states", self)
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.down:
+            raise GitHubError("transport", self.error)
+        return await self._original(*args, **kwargs)
+
+
+def held(h: Harness) -> Any:
+    return h.snapshots[-1].dispatch_hold
+
+
+async def test_one_failed_poll_does_not_hold_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gh` retries a transport error of its own, so a single failure is a blip, not an outage."""
+    h = Harness(tmp_path)
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES - 1):
+        await h.tick()
+        assert held(h) is None
+    assert outage.down
+
+
+async def test_consecutive_failed_polls_hold_dispatch_and_say_so_in_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap #88 names: the board stops moving and every surface reads as a healthy worker."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert (hold.kind, hold.since) == ("github", h.now())
+    assert hold.reason == "GitHub is not answering this worker: transport: http 502: Bad Gateway"
+    # The worker itself is fine; only the hold says why the board is not moving.
+    assert (h.snapshots[-1].config_valid, h.snapshots[-1].config_error) == (True, None)
+    assert h.sessions.runs == []
+
+
+async def test_the_first_successful_poll_releases_the_hold_and_dispatch_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    assert held(h) is not None
+    outage.down = False
+    with capture_logs() as lines:
+        await h.tick()
+    assert held(h) is None
+    assert [line["event"] for line in lines if line["event"] == "dispatch_github_recovered"]
+    assert len(h.sessions.runs) == 1
+
+
+async def test_a_poll_that_succeeds_before_the_threshold_starts_the_count_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Consecutive, not cumulative: a flaky link that keeps answering is not an outage."""
+    h = Harness(tmp_path)
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES * 3):
+        outage.down = not outage.down
+        await h.tick()
+        assert held(h) is None
+
+
+async def test_the_hold_keeps_the_moment_it_started_as_the_error_rewords_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One outage answers differently from poll to poll; the operator wants its real age."""
+    h = Harness(tmp_path)
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    started = held(h)
+    assert started is not None
+    h.clock.advance(120.0)
+    outage.error = "http 503: Service Unavailable"
+    await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.since == started.since
+    assert "503" in hold.reason
+
+
+async def test_the_status_page_annotates_the_hold_and_is_read_once_per_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lagging indicator can name an outage this worker has already found, and nothing more."""
+    h = Harness(tmp_path)
+    h.github_status_output = GITHUB_DOWN
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES + 3):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.reason == (
+        "GitHub is not answering this worker: transport: http 502: Bad Gateway"
+        " \u2014 githubstatus.com: Pull Requests, major outage"
+    )
+    # Once when the hold engaged, and never again while it lasts: a third party stays out of
+    # the steady-state tick path.
+    assert h.github_status_calls == 1
+
+
+async def test_an_operational_status_page_is_still_worth_carrying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "GitHub says it is fine" points the operator at their own network instead of GitHub's."""
+    h = Harness(tmp_path)
+    h.github_status_output = GITHUB_UP
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.reason.endswith("githubstatus.com: All Systems Operational")
+
+
+async def test_a_status_page_that_cannot_answer_costs_the_annotation_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail open, both ways: neither silence nor an exception may change what issuebot does."""
+    h = Harness(tmp_path)
+    FetchOutage(h, monkeypatch)
+
+    def exploding() -> str | None:
+        h.github_status_calls += 1
+        raise RuntimeError("the status page went up in smoke")
+
+    monkeypatch.setattr(h.orchestrator, "_github_status", exploding)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.reason == "GitHub is not answering this worker: transport: http 502: Bad Gateway"
+    assert h.github_status_calls == 1
+
+
+async def test_the_status_page_is_never_read_while_the_board_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    for _ in range(MAX_FETCH_FAILURES + 2):
+        await h.tick()
+    assert h.github_status_calls == 0
+
+
+async def test_the_hold_reports_itself_every_tick_but_shouts_only_when_it_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An idle worker says nothing else, and an operator reading ERROR wants news in it."""
+    h = Harness(tmp_path)
+    outage = FetchOutage(h, monkeypatch)
+    with capture_logs() as lines:
+        for _ in range(MAX_FETCH_FAILURES + 2):
+            await h.tick()
+        outage.error = "http 503: Service Unavailable"
+        await h.tick()
+    levels = [line["log_level"] for line in lines if line["event"] == "dispatch_github_held"]
+    assert levels == ["error", "warning", "warning", "error"]
+
+
+async def test_a_preflight_hold_outranks_a_github_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` that will not run is why the poll failed, not a second, independent fault."""
+    h = Harness(tmp_path, observe_issues=True)
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    assert held(h).kind == "github"
+    h.which_missing = {"gh"}
+    await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert (hold.kind, hold.reason) == ("preflight", "'gh' not found on PATH")
+
+
+async def test_an_authentication_hold_outranks_a_github_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **AUTH_FAILURE)
+    h.claude_auth_output = LOGGED_OUT
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.kind == "auth"
+    # The GitHub hold is still counted underneath, and surfaces the moment the credential does.
+    h.claude_auth_output = LOGGED_IN
+    await h.tick()
+    assert held(h).kind == "github"
+
+
+async def test_a_due_retry_waits_while_the_board_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claiming is a write to a board this worker has just failed to read three times."""
+    h = Harness(tmp_path, max_attempts=3)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), outcome="failed", stop_reason="failure", error_category="transport")
+    assert h.retry(1).kind == "failure"
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    await h.fire(60.0)
+    assert h.retry(1).kind == "github"
+    assert len(h.sessions.runs) == 1
+    outage.down = False
+    await h.tick()
+    await h.fire(60.0)
+    assert len(h.sessions.runs) == 2
+
+
+async def test_the_github_hold_survives_the_round_trip_through_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    data = h.orchestrator.snapshot().to_dict()
+    assert data["dispatch_hold"] == {
+        "kind": "github",
+        "reason": "GitHub is not answering this worker: transport: http 502: Bad Gateway",
+        "since": h.now().isoformat(),
+    }

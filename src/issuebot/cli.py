@@ -64,7 +64,9 @@ from issuebot.github import (
     GitHubError,
     Issue,
     StateLabel,
+    fetch_status_summary,
     model_label_style,
+    parse_status_summary,
 )
 from issuebot.github.normalise import repo_short_name
 from issuebot.log import LOG_LEVELS, configure_logging, get_logger
@@ -107,6 +109,7 @@ _claude_auth = claude_auth_status
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
+_github_status = fetch_status_summary
 _database_factory: Callable[[str], Database] = Database
 
 
@@ -330,6 +333,7 @@ def run_checks(
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
+    checks.append(_github_status_check())
     checks.append(_database_check(cfg))
     checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
@@ -460,6 +464,24 @@ def _claude_auth_check(command: str) -> Check:
 
 def _version_text(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
+
+
+def _github_status_check() -> Check:
+    """githubstatus.com, and advisory in both directions (#88).
+
+    A human is running this and there is no dispatch to hold, so a lagging indicator is still
+    worth printing and cannot wedge anything. It never fails the command: the page is a third
+    party, the worst it can cost is one line and ``SUMMARY_TIMEOUT_S``, and issuebot decides
+    nothing by it. A worker gets the same reading as annotation on a hold its own failed
+    fetches raised.
+    """
+    subject = "github.status"
+    status = parse_status_summary(_github_status())
+    if status is None:
+        return Check(subject, "warn", "githubstatus.com did not answer; this check is advisory")
+    if status.operational:
+        return Check(subject, "ok", status.description)
+    return Check(subject, "warn", f"incident in progress \u2014 {status.detail}")
 
 
 def _database_check(settings: Settings) -> Check:

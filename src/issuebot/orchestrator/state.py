@@ -13,8 +13,8 @@ from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
 
-RetryKind = Literal["continuation", "failure", "escape", "slots", "auth"]
-DispatchHoldKind = Literal["preflight", "auth"]
+RetryKind = Literal["continuation", "failure", "escape", "slots", "auth", "github"]
+DispatchHoldKind = Literal["preflight", "auth", "github"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 
 CONTINUATION_DELAY_MS = 1_000
@@ -218,7 +218,8 @@ class Counters:
 class DispatchHold:
     """Why a worker that is still ticking will not claim an issue (#29).
 
-    ``preflight`` is a missing executable or token, ``auth`` the authentication hold of #20.
+    ``preflight`` is a missing executable or token, ``auth`` the authentication hold of #20,
+    ``github`` the one of #88: consecutive failures to read the board from this worker.
     ``since`` is when this reason first held dispatch, so a hold that outlives its cause is
     visible as one; a changed reason starts it again.
     """
