@@ -11,9 +11,11 @@ repository. You put the `issuebot/todo` label on an issue; the worker clones the
 runs Claude Code on the issue unattended, pushes a branch, opens a pull request and moves the
 issue to `issuebot/review`. You review the PR like any other. Merging it closes the issue and
 the worker marks it `issuebot/complete`; labelling it `issuebot/rework` sends it back to the
-agent with your review comments. An issue whose reported defect turns out not to happen comes
-back with the evidence and the `issuebot/no-fault` marker instead of a pull request, and closing
-it counts as a completion too — on a backlog of aged issues that triage is most of the value.
+agent with your review comments. The worker does that itself when a sibling merge leaves the
+pull request conflicting, up to `agent.max_conflict_reworks` times. An issue whose reported
+defect turns out not to happen comes back with the evidence and the `issuebot/no-fault` marker
+instead of a pull request, and closing it counts as a completion too — on a backlog of aged
+issues that triage is most of the value.
 
 ### What is configured where
 
@@ -148,6 +150,7 @@ ignored.
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
+| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
@@ -326,7 +329,10 @@ claims the issue and runs one session with the logs on your terminal.
 - **Send it back.** Leave review comments on the PR, then move the issue from
   `issuebot/review` to `issuebot/rework` (remove one label, add the other: an issue carrying
   two state labels is ignored until that is fixed). The agent resumes on the same branch and
-  PR, reads every comment, addresses each one and returns the issue to review.
+  PR, reads every comment, addresses each one and returns the issue to review. You need not do
+  this for a merge conflict: when a sibling PR merges and yours turns `CONFLICTING`, the worker
+  moves the issue to `issuebot/rework` itself and records each bounce in the workpad, up to
+  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:

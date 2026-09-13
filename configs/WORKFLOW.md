@@ -44,7 +44,7 @@ You are working on GitHub issue `{{ issue.identifier }}` (#{{ issue.number }}) i
 {% if rework %}
 ## Rework context
 
-- A reviewer moved this issue from `{{ labels.review }}` to `{{ labels.rework }}`: the pull request needs more work.
+- A reviewer moved this issue from `{{ labels.review }}` to `{{ labels.rework }}` because the pull request needs more work, or issuebot did because the pull request conflicts with the default branch; the workpad's last `### Issuebot merge conflict` block says which. There may be no review comments in the second case.
 {% if issue.pr %}
 - The pull request is #{{ issue.pr.number }} ({{ issue.pr.state }}): {{ issue.pr.url }}. Keep that branch and that pull request; do not open a new one.
 {% else %}

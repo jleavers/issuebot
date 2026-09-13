@@ -14,7 +14,7 @@
     1. issuebot/todo: set by human
     2. issuebot/in-progress: set by agent when work ongoing
     3. issuebot/review: set by agent when PR opened
-    4. issuebot/rework: set by human if PR needs more work
+    4. issuebot/rework: set by human if PR needs more work (or by issuebot when the PR conflicts with the default branch)
     5. issuebot/complete: set automatically when issue closed (by merge of linked PR)
 - We *do* want a web dashboard: Kanban view of issue label tatus in columns, plus some hero stats, e.g. number of issues closed in 1 day/7 days, number of agents spun up, both point in time numbers and graph over time
 - Slack notifications to channel when status changes

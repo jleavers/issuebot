@@ -114,7 +114,8 @@ floor, not the shipped version, and moves by hand.
   to `complete`; `set_state(..., clear_markers=True)` is the one caller that does strip it, which
   is how `claim` makes the marker the *last* session's verdict rather than a label nothing ever
   removes; both adapters ensure it and report it missing alongside the five roles);
-  frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `GitHubAdapter`
+  frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`); `LinkedPr.mergeable` is
+  GitHub's `MergeableState` lowercased, `unknown` when absent; `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
@@ -176,6 +177,12 @@ floor, not the shipped version, and moves by hand.
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
   counts include triage, and only a genuine abandonment still clears the label).
+  `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`): a `review` issue whose
+  open PR reads `conflicting` is moved to `rework` by issuebot, label first and then a
+  `### Issuebot merge conflict` workpad block, whose count is the bounce number; at
+  `agent.max_conflict_reworks` (default 3, `0` off) it writes one `... conflict limit` block
+  and stays in `review`. `_bounce_conflicts` runs after every fetch, observer or not
+  (`fetch_states`), skipping issues in `_running` or `_retries`.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
@@ -477,7 +484,7 @@ anything reading or writing issue state goes through these:
 | `issuebot/todo` | human |
 | `issuebot/in-progress` | agent, when work starts |
 | `issuebot/review` | agent, when PR opened or no fault found |
-| `issuebot/rework` | human, if the PR needs more work |
+| `issuebot/rework` | human, if the PR needs more work; or issuebot, when the PR conflicts with the default branch (bounded by `agent.max_conflict_reworks`) |
 | `issuebot/no-fault` | agent, beside `review`, when it found no fault (a marker, not a state) |
 | `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault` |
 
