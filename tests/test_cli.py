@@ -19,6 +19,7 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceMana
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.cli import (
     StatsView,
+    _turn_capture,
     main,
     not_runnable,
     render_issue_table,
@@ -2195,6 +2196,26 @@ def test_worker_wires_the_database_when_configured(
     store = fake_database.store_obj
     assert [event.kind for event in store.events] == ["state_changed"]
     assert store.closed
+
+
+def test_the_sink_captures_turns_through_the_deployment_scrubber(tmp_path: Path) -> None:
+    """The worker's own token, put into the agent's environment by issuebot, and the home
+    directory every path names, are what the capture masks on top of the credential shapes."""
+    config = Settings.model_validate(
+        {"github": {"repo": "acme/widgets", "token": "literal-token-value"}}
+    )
+    capture = _turn_capture(config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"})
+    line = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "env: GH_TOKEN=literal-token-value key-value-1234 at /home/alice/ws",
+        }
+    )
+    (tmp_path / "turn-1.jsonl").write_text(line + "\n")
+    (turn,) = capture(tmp_path)
+    assert turn.result_text == "env: GH_TOKEN=*** *** at ~/ws"
+    assert "literal-token-value" not in turn.stream and "key-value-1234" not in turn.stream
 
 
 def test_worker_seeds_the_orchestrator_with_the_last_stored_reading(

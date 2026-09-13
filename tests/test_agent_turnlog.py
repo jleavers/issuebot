@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from issuebot.agent import turnlog
+from issuebot.agent.scrub import REDACTED, Scrubber
 from issuebot.agent.turnlog import OMITTED_TYPE, TurnCapture, capture_turns
 
 SAMPLE = Path(__file__).parent / "fixtures" / "runs" / "20260904T202535Z-0964cd"
@@ -54,7 +55,7 @@ def only(captures: list[TurnCapture]) -> TurnCapture:
 def test_the_sample_turn_is_captured_whole() -> None:
     capture = only(capture_turns(SAMPLE))
     assert capture.turn_number == 1
-    assert (capture.stream_lines, capture.stream_bytes) == (95, 115429)
+    assert (capture.stream_lines, capture.stream_bytes) == (95, 114948)
     assert (capture.omitted_lines, capture.truncated) == (0, False)
     assert capture.stream == (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")
     assert all(json.loads(line) for line in capture.stream.splitlines())
@@ -238,3 +239,91 @@ def test_the_last_result_and_init_lines_win(tmp_path: Path) -> None:
     write_turn(tmp_path, 1, [INIT, RESULT, second_init, second_result])
     capture = only(capture_turns(tmp_path))
     assert (capture.model, capture.subtype) == ("claude-sonnet-5", "error_during_execution")
+
+
+# --- scrubbing (#79) -------------------------------------------------------------------------
+
+
+TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+
+
+def test_every_captured_text_is_scrubbed(tmp_path: Path) -> None:
+    """The stream, its result text, the prompt and stderr all pass through the scrubber; the
+    byte counts still describe the files on disk."""
+    scrubber = Scrubber(secrets=["s3cretvalue!"], home="/home/alice")
+    result = json.dumps({"type": "result", "subtype": "success", "result": f"used {TOKEN}"})
+    env = json.dumps(
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "GH_TOKEN=s3cretvalue!"}]},
+        }
+    )
+    write_turn(
+        tmp_path,
+        1,
+        [INIT, env, result],
+        **{"prompt.md": "clone at /home/alice/ws", "stderr.log": "postgresql://u:pw@h/d"},
+    )
+    capture = only(capture_turns(tmp_path, scrubber=scrubber))
+    assert "s3cretvalue!" not in capture.stream and TOKEN not in capture.stream
+    assert json.loads(capture.stream.splitlines()[1])["message"]["content"][0]["content"] == (
+        f"GH_TOKEN={REDACTED}"
+    )
+    assert capture.result_text == f"used {REDACTED}"
+    assert capture.prompt == "clone at ~/ws"
+    assert capture.stderr == f"postgresql://u:{REDACTED}@h/d"
+    assert capture.prompt_bytes == len("clone at /home/alice/ws")
+    assert capture.stderr_bytes == len("postgresql://u:pw@h/d")
+    assert capture.stream_bytes == len(INIT) + len(env) + len(result) + 3
+
+
+def test_the_default_scrubber_masks_shapes(tmp_path: Path) -> None:
+    write_turn(tmp_path, 1, [assistant(f"my token is {TOKEN}")])
+    capture = only(capture_turns(tmp_path))
+    assert TOKEN not in capture.stream and REDACTED in capture.stream
+
+
+def test_caps_are_applied_after_scrubbing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A credential straddling a cap must not leave its head in the prompt or its tail in
+    stderr, and the result text is cut after masking."""
+    monkeypatch.setattr(turnlog, "PROMPT_LIMIT", 10)
+    monkeypatch.setattr(turnlog, "STDERR_LIMIT", 10)
+    monkeypatch.setattr(turnlog, "RESULT_TEXT_LIMIT", 8)
+    result = json.dumps({"type": "result", "result": f"at {TOKEN} end"})
+    write_turn(
+        tmp_path,
+        1,
+        [result],
+        **{"prompt.md": f"abcdef {TOKEN}", "stderr.log": f"{TOKEN} uvwxyz"},
+    )
+    capture = only(capture_turns(tmp_path))
+    assert capture.prompt == f"abcdef {REDACTED}"
+    assert capture.stderr == f"{REDACTED} uvwxyz"
+    assert capture.result_text == f"at {REDACTED} e"
+
+
+def test_a_cap_drops_a_character_it_would_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(turnlog, "PROMPT_LIMIT", 3)
+    monkeypatch.setattr(turnlog, "STDERR_LIMIT", 3)
+    write_turn(tmp_path, 1, [INIT], **{"prompt.md": "aé", "stderr.log": "éa"})
+    capture = only(capture_turns(tmp_path))
+    assert (capture.prompt, capture.prompt_bytes) == ("aé", 3)
+    assert (capture.stderr, capture.stderr_bytes) == ("éa", 3)
+    monkeypatch.setattr(turnlog, "PROMPT_LIMIT", 2)
+    monkeypatch.setattr(turnlog, "STDERR_LIMIT", 2)
+    capture = only(capture_turns(tmp_path))
+    assert (capture.prompt, capture.stderr) == ("a", "a")
+
+
+def test_the_sample_is_the_scrubbers_fixed_point() -> None:
+    """The committed fixture is ``capture_turns``' output, not an exception to it: it was
+    recorded under ``/home/jleavers`` and scrubbing it again, with that home, changes nothing."""
+    scrubber = Scrubber(secrets=["not-in-the-sample"], home="/home/jleavers")
+    for name in ("turn-1.jsonl", "turn-1.prompt.md", "turn-1.stderr.log"):
+        text = (SAMPLE / name).read_text(encoding="utf-8")
+        assert scrubber.scrub(text) == text, name
+    assert "/home/jleavers" not in (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")
+    capture = only(capture_turns(SAMPLE, scrubber=scrubber))
+    assert capture.stream == (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")

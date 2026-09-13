@@ -763,7 +763,8 @@ The dashboard (`issuebot web`; the compose `web` service publishes it on the hos
 at `ISSUEBOT_WEB_PORT`, default 8080) serves every registered repository under
 `/r/<owner>/<name>/`: the Kanban of the five label columns, the hero stats, two 30-day
 charts, the running agents and, per issue, its runs with the transcript of every captured
-turn. `/` redirects to the repository you last picked (a cookie) or the first registered
+turn (scrubbed before it is stored: issuebot's own token, keys and webhook, anything shaped
+like a credential, and the operator's home directory never reach the database). `/` redirects to the repository you last picked (a cookie) or the first registered
 one, and the header's dropdown switches. `/api/v1/repos` lists every registered worker;
 `/api/v1/repos/<owner>/<name>/state`, `/issues/<n>`, `/stats?window=7d` and
 `POST /refresh` serve one repository as JSON, and `/healthz` reports the database and,

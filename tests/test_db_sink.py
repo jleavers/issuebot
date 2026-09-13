@@ -371,7 +371,7 @@ async def test_run_ended_captures_the_turn_files(h: Harness, tmp_path: Path) -> 
     assert (turn.turn_number, turn.model, turn.stream_lines) == (1, "claude-opus-5", 95)
     captured = h.logged("db_turns_captured")[0]
     assert (captured["run_id"], captured["turns"]) == ("20260904T202535Z-0964cd", 1)
-    assert captured["stream_bytes"] == 115429
+    assert captured["stream_bytes"] == 114948
 
 
 async def test_a_missing_log_dir_gives_no_captures(h: Harness, tmp_path: Path) -> None:
