@@ -15,6 +15,7 @@ import http.client
 import json
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
 from issuebot.log import get_logger
@@ -70,7 +71,8 @@ def fetch_status_summary(
 
     Blocking, so callers on the event loop run it in a thread. Never raises: a status page
     that cannot answer must not be able to break the caller that asked (#17). Only ``http``
-    and ``https`` are fetched, so no override of the URL can turn this into a file read.
+    and ``https`` are fetched -- on every redirect hop, not just the URL handed in -- so no
+    override of the URL can turn this into a file read.
 
     ``timeout_s`` bounds the connection and the read, not the name lookup: ``urlopen`` resolves
     before it has a socket to set a timeout on. A host whose nameservers are unreachable --
@@ -86,12 +88,31 @@ def fetch_status_summary(
             log.debug("github_status_unreadable", error="unsupported URL scheme")
             return None
         request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            body = response.read(MAX_BODY_BYTES)
+        with _opener().open(request, timeout=timeout_s) as response:
+            return response.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
     except (OSError, ValueError, http.client.HTTPException) as exc:
         log.debug("github_status_unreadable", error=f"{type(exc).__name__}: {exc}")
         return None
-    return body.decode("utf-8", errors="replace")
+
+
+class _SchemeCheckedRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-checks the scheme on every hop, which the stock handler does not.
+
+    ``HTTPRedirectHandler`` permits ``http``, ``https`` *and* ``ftp``, so checking the URL
+    handed in bounds only the first request. Refusing a redirect is not a loss here: the caller
+    treats it as no answer, which is what every other unreadable page reads as.
+    """
+
+    def redirect_request(  # type: ignore[override]
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        if urlsplit(newurl).scheme not in _SCHEMES:
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_SchemeCheckedRedirect)
 
 
 def parse_status_summary(payload: str | None) -> GitHubStatus | None:

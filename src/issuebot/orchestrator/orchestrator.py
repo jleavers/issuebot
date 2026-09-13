@@ -84,8 +84,9 @@ SHUTDOWN_MARGIN_S = 10.0
 # gives up and lets dispatch resume. Ten polls is five minutes at the default interval.
 MAX_UNREADABLE_AUTH_PROBES = 10
 # How many polls in a row must fail to read the board before dispatch is held (#88). `gh`
-# already retries a transport error of its own, so one failure is a blip and not an outage;
-# three in a row is a minute and a half at the default interval, and is not.
+# already retries a transport error of its own, so one failure is a blip and not an outage.
+# Three in a row is not: the third failure is a minute after the first at the default interval,
+# and sooner when a refresh has brought ticks together, which errs towards holding.
 MAX_FETCH_FAILURES = 3
 # How long a tick will wait for the status page before giving up on the annotation. Longer
 # than the fetch's own socket timeout, because that one does not bound the name lookup, and
@@ -125,7 +126,8 @@ def _github_hold_reason(error: str, status_note: str | None) -> str:
     snapshot on every tick the hold lasts and drawn on the dashboard's worker line.
     """
     reason = f"GitHub is not answering this worker: {_clipped(error, MAX_HOLD_ERROR_CHARS)}"
-    return f"{reason} \u2014 githubstatus.com: {status_note}" if status_note else reason
+    # The note carries its own stamp, so it joins with a space: "githubstatus.com at 12:01Z: ...".
+    return f"{reason} \u2014 githubstatus.com {status_note}" if status_note else reason
 
 
 def _clipped(text: str, limit: int) -> str:
@@ -438,11 +440,11 @@ class Orchestrator:
     async def _note_fetch_failure(self, error: str) -> None:
         """Count a failed read of the board and, past the threshold, hold dispatch (#88).
 
-        This is first-party evidence that *this* worker cannot reach GitHub: it needs nobody
-        to declare an incident, it fires the moment the reads start failing, and it fails safe,
-        since a worker that cannot read the board has no business claiming from it. One failure
-        is a blip -- ``gh`` retries a transport error of its own before issuebot ever sees it --
-        so a hold waits for ``MAX_FETCH_FAILURES`` polls in a row.
+        This is first-party evidence that *this* worker cannot reach GitHub: it needs nobody to
+        declare an incident, and it fails safe, since a worker that cannot read the board has no
+        business claiming from it. One failure is a blip -- ``gh`` retries a transport error of
+        its own before issuebot ever sees it -- so a hold waits for ``MAX_FETCH_FAILURES`` polls
+        in a row, which is the third failure rather than the third interval.
         """
         self._fetch_failures += 1
         if self._fetch_failures < MAX_FETCH_FAILURES:
@@ -450,7 +452,7 @@ class Orchestrator:
         if self._github_block is None:
             # The hold engages now, which is the one moment the status page is read: once per
             # outage, off the event loop, and nowhere that dispatch depends on the answer.
-            self._github_note = await self._probe_github_status()
+            self._github_note = self._stamped(await self._probe_github_status())
         self._github_block = _github_hold_reason(error, self._github_note)
         context = {
             "error": error,
@@ -470,10 +472,34 @@ class Orchestrator:
             self._log.info(
                 "dispatch_github_recovered", failures=self._fetch_failures, error=self._github_block
             )
+        self._forget_fetch_failures()
+
+    def _note_fetch_skipped(self) -> None:
+        """This tick asked GitHub nothing, so it has nothing to say about GitHub.
+
+        A hold is a claim about now. When a preflight problem covers the fetch itself, or an
+        authentication hold has no observer and no conflict bounce to poll for, no request is
+        made at all -- and a block left over from before it would have ``_fire`` requeue a retry
+        blaming GitHub while the snapshot names preflight. The outranking hold is what is
+        reported either way; this only stops the stale one contradicting it.
+        """
+        self._forget_fetch_failures()
+
+    def _forget_fetch_failures(self) -> None:
         self._fetch_failures = 0
         self._github_block = None
         self._github_note = None
         self._reported_github_block = None
+
+    def _stamped(self, note: str | None) -> str | None:
+        """When the reading was taken, which the reading itself does not say.
+
+        It is taken once, at the moment the hold engages, and then sits on ``issuebot status``,
+        ``<repo.api>/state`` and the dashboard for the whole outage. The page lags -- it read
+        "All Systems Operational" for the first twenty-three minutes of the 2026-09-13 incident
+        -- so an hour in, "operational" without a time on it is actively misleading.
+        """
+        return None if note is None else f"at {self._now():%H:%M}Z: {note}"
 
     async def _probe_github_status(self) -> str | None:
         """What githubstatus.com says, as annotation only; None when it does not answer.
@@ -550,7 +576,10 @@ class Orchestrator:
             if message != self._reported_preflight:
                 self._log.error("dispatch_preflight_failed", problems=problems)
                 self._reported_preflight = message
-            if not fetch_preflight(self._workflow.config, which=self._which):
+            if fetch_preflight(self._workflow.config, which=self._which):
+                # `gh` or the token is what is missing, so nothing is asked of GitHub (#88).
+                self._note_fetch_skipped()
+            else:
                 # Only `claude` is missing, so the board can still be kept current (#29).
                 await self._poll_issues()
         else:
@@ -728,6 +757,7 @@ class Orchestrator:
         bounce is on: a conflict is about the board, not about dispatch.
         """
         if self._on_issues is None and self._conflict_limit() <= 0:
+            self._note_fetch_skipped()
             return
         await self._fetch_issues()
 

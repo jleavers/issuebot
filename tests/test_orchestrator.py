@@ -30,11 +30,13 @@ from issuebot.events import (
     StateChanged,
 )
 from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, Issue, StateLabel
+from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     MAX_FETCH_FAILURES,
+    MAX_HOLD_ERROR_CHARS,
     MAX_UNREADABLE_AUTH_PROBES,
     OBSERVED_STATES,
     Orchestrator,
@@ -2679,7 +2681,7 @@ async def test_the_status_page_annotates_the_hold_and_is_read_once_per_outage(
     assert hold is not None
     assert hold.reason == (
         "GitHub is not answering this worker: transport: http 502: Bad Gateway"
-        " \u2014 githubstatus.com: Pull Requests, major outage"
+        " \u2014 githubstatus.com at 12:00Z: Pull Requests, major outage"
     )
     # Once when the hold engaged, and never again while it lasts: a third party stays out of
     # the steady-state tick path.
@@ -2697,7 +2699,7 @@ async def test_an_operational_status_page_is_still_worth_carrying(
         await h.tick()
     hold = held(h)
     assert hold is not None
-    assert hold.reason.endswith("githubstatus.com: All Systems Operational")
+    assert hold.reason.endswith("githubstatus.com at 12:00Z: All Systems Operational")
 
 
 async def test_a_status_page_that_cannot_answer_costs_the_annotation_and_nothing_else(
@@ -2762,14 +2764,24 @@ async def test_a_hold_reason_does_not_carry_an_unbounded_complaint(
 ) -> None:
     """`gh`'s stderr is not capped, and the reason is stored and drawn on every tick it lasts."""
     h = Harness(tmp_path)
+    # The longest reason there is: a capped complaint and a capped annotation behind it.
+    h.github_status_output = json.dumps(
+        {
+            "status": {"indicator": "major", "description": "Partial System Outage"},
+            "components": [
+                {"name": f"Component {index} with a long name", "status": "major_outage"}
+                for index in range(20)
+            ],
+        }
+    )
     outage = FetchOutage(h, monkeypatch)
     outage.error = "x" * 5_000
     for _ in range(MAX_FETCH_FAILURES):
         await h.tick()
     hold = held(h)
     assert hold is not None
-    assert len(hold.reason) < 400
-    assert hold.reason.endswith("\u2026")
+    assert "\u2026 \u2014 githubstatus.com at 12:00Z: " in hold.reason
+    assert len(hold.reason) <= MAX_HOLD_ERROR_CHARS + MAX_DETAIL_CHARS + 100
 
 
 async def test_a_status_probe_that_will_not_return_cannot_stall_the_tick(
@@ -2802,9 +2814,7 @@ async def test_a_status_probe_that_will_not_return_cannot_stall_the_tick(
         released.set()
 
 
-async def test_the_status_page_is_never_read_while_the_board_answers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_the_status_page_is_never_read_while_the_board_answers(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.add_issue(1, "todo")
     for _ in range(MAX_FETCH_FAILURES + 2):

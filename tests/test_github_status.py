@@ -178,19 +178,25 @@ class LocalStatusPage:
                 pass
 
         self.user_agent: str | None = None
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._handler = Handler
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     @property
     def url(self) -> str:
+        assert self._server is not None, "the page is bound only inside the context manager"
         host, port = self._server.server_address[:2]
         return f"http://{host}:{port}/summary.json"
 
     def __enter__(self) -> LocalStatusPage:
+        # Bound here rather than in __init__, so a page never entered leaves no listener behind.
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
+        assert self._server is not None and self._thread is not None
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)

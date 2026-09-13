@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -78,6 +79,7 @@ from issuebot.notifications import (
     urllib_post,
 )
 from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
+from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
 
@@ -466,21 +468,37 @@ def _version_text(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
 
 
+def _probe_status_page() -> str | None:
+    """``_github_status()`` under a wall-clock deadline; raises ``TimeoutError`` past it."""
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="github-status")
+    try:
+        return executor.submit(_github_status).result(timeout=GITHUB_STATUS_DEADLINE_S)
+    finally:
+        # Never `wait=True`: a thread stuck in `getaddrinfo` is the case this exists for.
+        executor.shutdown(wait=False)
+
+
 def _github_status_check() -> Check:
     """githubstatus.com, and advisory in both directions (#88).
 
     A human is running this and there is no dispatch to hold, so a lagging indicator is still
-    worth printing and cannot wedge anything. It never fails the command: the page is a third
-    party, the worst it can cost is one line and ``SUMMARY_TIMEOUT_S``, and issuebot decides
-    nothing by it. A worker gets the same reading as annotation on a hold its own failed
-    fetches raised.
+    worth printing and cannot wedge anything. It never fails the command, and it is bounded: the
+    probe runs in a thread this waits ``GITHUB_STATUS_DEADLINE_S`` for, because
+    ``fetch_status_summary``'s own timeout does not reach the name lookup, and a host with dead
+    nameservers would otherwise hold up every check after this one. The thread is left to finish
+    on its own -- it writes nothing, and the process is about to exit. A worker gets the same
+    reading, under the same deadline, as annotation on a hold its own failed fetches raised.
     """
     subject = "github.status"
     try:
-        status = parse_status_summary(_github_status())
+        status = parse_status_summary(_probe_status_page())
     except Exception as exc:
         # A third party cannot be allowed to end `validate` with a traceback in place of the
-        # twelve checks that come after it.
+        # three checks after it -- or, since `run_checks` would raise before returning, in place
+        # of all fourteen printed lines.
+        get_logger(__name__).debug(
+            "github_status_check_failed", error=f"{type(exc).__name__}: {exc}"
+        )
         return Check(subject, "warn", f"githubstatus.com could not be read: {type(exc).__name__}")
     if status is None:
         return Check(subject, "warn", "githubstatus.com did not answer; this check is advisory")

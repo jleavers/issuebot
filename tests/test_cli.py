@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -523,6 +524,32 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
     assert "14 checks: 0 failed, 2 warnings" in out
+
+
+def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+) -> None:
+    """urllib's timeout does not reach the name lookup, and this is a human at a terminal."""
+    released = threading.Event()
+
+    def wedged() -> str | None:
+        released.wait(30)  # a resolver with nowhere to ask
+        return None
+
+    monkeypatch.setattr("issuebot.cli._github_status", wedged)
+    monkeypatch.setattr("issuebot.cli.GITHUB_STATUS_DEADLINE_S", 0.05)
+    monkeypatch.setenv("GH_TOKEN", "t")
+    try:
+        assert main(["validate", "--workflow", str(GOOD)]) == 0
+        out = capsys.readouterr().out
+        assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
+        # The checks after it still ran, which is the whole point of the deadline.
+        assert "[ OK ] prompt:" in out
+        assert "14 checks: 0 failed, 2 warnings" in out
+    finally:
+        released.set()
 
 
 def test_validate_survives_a_status_probe_that_raises(

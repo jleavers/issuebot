@@ -282,8 +282,14 @@ floor, not the shipped version, and moves by hand.
   failing, when the request would only fail too.
   A GitHub outage passes preflight, which is local (#88): `_fetch_issues` counts consecutive
   `GitHubError`s and, at `MAX_FETCH_FAILURES` (3), holds dispatch with a `github` hold whose
-  reason is the last error; `_note_fetch_success` releases it on the first poll that answers,
+  reason is the last error, capped (`MAX_HOLD_ERROR_CHARS`: `gh`'s stderr is not);
+  `_note_fetch_success` releases it on the first poll that answers, `_note_fetch_skipped`
+  forgets the count on a tick that asks GitHub nothing (a hold is a claim about now, and a
+  stale one would have `_fire` blame GitHub while the snapshot names preflight),
   and one failure is a blip, since `gh` retries a transport error before issuebot sees it.
+  Nothing skips `_dispatch_candidates` for it, unlike the auth hold: the claim comes from the
+  poll, so a failed poll offers nothing to claim, and the reported hold is therefore always
+  derived from a fetch that failed on that very tick rather than from a remembered verdict.
   First-party evidence that *this* worker cannot read the board, so it needs nobody to declare
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still

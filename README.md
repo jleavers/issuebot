@@ -647,17 +647,24 @@ them from that repository's checkout.
   time the error changes, WARNING in between, since an idle worker says nothing else. The
   first poll that answers lifts it and dispatch resumes, with no restart. A single failed poll
   does not hold anything: `gh` retries a transport error of its own, and an `HTTP 5xx` or a
-  timeout is classified `transport` and retried. The count is three consecutive *polls*, which
-  is a minute and a half at the default `polling.interval_ms` and less when an `issuebot
-  refresh` has brought ticks closer together. Holding is the safe side — a worker
+  timeout is classified `transport` and retried. The count is three consecutive *polls*, and
+  it is the third failure that holds, so at the default `polling.interval_ms` that is a minute
+  after the first one — less when an `issuebot refresh` has brought ticks closer together, which
+  errs towards holding. Holding is the safe side — a worker
   that cannot read the board has no business claiming from it — and a due retry waits with it
   rather than spending an attempt on a claim that is going to fail.
+
+  Nothing checks the hold before claiming, and nothing needs to: the claim comes from the poll,
+  so a poll that failed offers nothing to claim, and the hold you see is always derived from a
+  poll that failed on this very tick rather than from a remembered verdict. What the hold does
+  change is the retry queue, which would otherwise write to the board without reading it first.
 
   When the hold engages, the worker reads
   [githubstatus.com](https://www.githubstatus.com/) once and appends what it says to the
   reason, so the line reads `GitHub is not answering this worker: transport: http 502: Bad
-  Gateway — githubstatus.com: Pull Requests, major outage`. That is annotation and never a
-  gate: an incident is published when a human declares it, which can be twenty minutes after
+  Gateway — githubstatus.com at 12:01Z: Pull Requests, major outage`. The reading is stamped
+  because it is taken once, when the hold engages, and then stands for the whole outage. That is
+  annotation and never a gate: an incident is published when a human declares it, which can be twenty minutes after
   the first failed write, so a slow, silent or nonsensical answer costs the annotation and
   nothing else. `All Systems Operational` is worth reading too — it points you at your own
   network rather than at GitHub's. `issuebot validate` reports the same page as a
