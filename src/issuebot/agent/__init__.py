@@ -6,7 +6,7 @@ from issuebot.agent.prompt import (
     GitHubText,
     PromptContext,
     PromptRenderer,
-    github_text,
+    check_envelopes,
     issue_variables,
 )
 from issuebot.agent.runner import (
@@ -67,10 +67,10 @@ __all__ = [
     "Workspace",
     "WorkspaceManager",
     "agent_environment",
+    "check_envelopes",
     "classify_result",
     "claude_auth_status",
     "describe_claude_auth",
-    "github_text",
     "issue_variables",
     "merge_workspace_env",
     "new_run_id",

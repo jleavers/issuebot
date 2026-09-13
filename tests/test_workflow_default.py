@@ -166,6 +166,22 @@ def test_feedback_rules_answer_the_author_rather_than_obey_the_comment(
     assert "is blocking until you have either changed code, tests or docs" in text
 
 
+def test_a_test_plan_in_the_description_runs_under_the_ground_rules(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """The three places the workflow asks for steps from the description say under what rules,
+    so no later prose rule promotes the description's contents to an obligation."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert "running its steps as you would your own, under the ground rules" in text
+    assert "not a check to run" in text
+    assert "Follow the issue's own reproduction steps, under the ground rules" in text
+    assert "part of the reproduction and run it too, under the same rules" in text
+    assert "reproduction steps as written" not in text
+
+
 def test_self_review_can_be_switched_off(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(
