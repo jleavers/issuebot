@@ -17,7 +17,31 @@ from issuebot.events import EventBus, RunEnded, RunOutcome, RunStarted
 from issuebot.github import GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
 
-StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "cancelled"]
+StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "cancelled", "blocked"]
+
+# The first line of a blocked turn's final message (prompt ground rule 2). Read by the session,
+# so the escape happens at the end of that turn rather than after max_turns.
+BLOCKED_MARKER = "BLOCKED:"
+
+
+def blocker_from(result_text: str | None) -> str | None:
+    """The blocker line's reason when the turn's final message begins with the marker.
+
+    Only the first non-empty line counts, and only when it starts with the marker: a message
+    that mentions the word later is a report, not a stop. An empty reason reads as no marker,
+    so a bare ``BLOCKED:`` cannot escape an issue with an empty block.
+    """
+    if not result_text:
+        return None
+    for line in result_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith(BLOCKED_MARKER):
+            return None
+        reason = stripped[len(BLOCKED_MARKER) :].strip()
+        return reason or None
+    return None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -42,6 +66,8 @@ class RunResult:
     final_issue: Issue | None
     workspace_path: Path | None
     log_dir: Path | None
+    # The reason after ``BLOCKED:`` on a blocked turn's final message; None for every other stop.
+    blocker: str | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -68,6 +94,7 @@ class _State:
     stop_reason: StopReason | None = None
     error_category: AgentErrorCategory | None = None
     error: str | None = None
+    blocker: str | None = None
 
     def fail(self, category: AgentErrorCategory, message: str | None) -> None:
         self.error_category = category
@@ -117,6 +144,7 @@ class _State:
             final_issue=self.final_issue,
             workspace_path=self.workspace_path,
             log_dir=self.log_dir,
+            blocker=self.blocker,
         )
 
 
@@ -204,6 +232,7 @@ async def run_session(
             turns=result.turns,
             cost_usd=result.cost_usd,
             error=_error_text(result),
+            blocker=result.blocker,
         )
         return result
     finally:
@@ -341,6 +370,11 @@ async def _turn_loop(
         state.final_issue = refreshed[0]
         if state.issue.state is not StateLabel.IN_PROGRESS or not state.issue.dispatchable:
             state.stop("issue_moved")
+            return
+        blocker = blocker_from(turn.result_text)
+        if blocker is not None:
+            state.blocker = blocker
+            state.stop("blocked")
             return
         if turn_number == max_turns:
             state.stop("max_turns")
