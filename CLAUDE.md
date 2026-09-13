@@ -508,6 +508,21 @@ Planned infrastructure: Docker, Python 3.14, PostgreSQL, GitHub Actions CI
   wire up `terraform_fmt`, `terraform_validate` and `terraform_tflint` from
   antonbabenko/pre-commit-terraform.
 
+## Security sweeps
+
+`/security-sweep` audits `origin/main` — not the local checkout — in a throwaway detached
+worktree, with four threat-model lanes (`copycat`, `secrets`, `hostile-issue`, `services`)
+behind independent refuters, clusters what survives by root cause, and files only the clusters
+a human approves. Run artefacts land in `.claude/security-sweeps/<UTC stamp>/` and are
+git-ignored: a report names weaknesses that are not fixed yet, so the public record is the
+issues the approval gate files, not the report. The skill is
+`.claude/skills/security-sweep/SKILL.md`, the fan-out is
+`.claude/workflows/security-sweep.js`, and the design is
+`docs/superpowers/specs/2026-09-13-security-sweep-design.md`.
+
+A session that has just edited the workflow cannot invoke it by name — the registry is read
+once at session start — so use `Workflow({scriptPath: ...})` there.
+
 ## Creating PRs
 
 Per the user's global instructions, set PR title/body via the REST API rather
