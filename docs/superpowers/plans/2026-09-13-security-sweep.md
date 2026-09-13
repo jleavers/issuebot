@@ -909,6 +909,20 @@ Workflow({
 
 `worktree` and `runDir` must be absolute: the agents resolve them directly.
 
+**If that reports `Workflow "security-sweep" not found`, pass `scriptPath` instead:**
+
+```
+Workflow({
+  scriptPath: "<repo>/.claude/workflows/security-sweep.js",
+  args: {...}
+})
+```
+
+The workflow registry is read once when the session starts, so a session that just created or
+edited the file does not see the name — which is every session that works on the sweep itself.
+`scriptPath` takes precedence over `name` and always resolves. This is not an error worth
+investigating when it happens; it is the expected state until the next session.
+
 It runs recon, then four threat-model lanes (`copycat`, `secrets`, `hostile-issue`,
 `services`) with an independent refuter behind each, then a second refuter for up to
 `escalationCap` confirmed critical/high findings, then triage and the completeness critic in
