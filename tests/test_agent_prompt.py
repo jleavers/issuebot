@@ -1,5 +1,7 @@
 """Tests for prompt rendering."""
 
+import copy
+import pickle
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -151,6 +153,13 @@ def test_attribute_values_cannot_break_the_tag() -> None:
 def test_github_text_keeps_the_text_truthiness() -> None:
     assert GitHubText(text="x", source="s", author=None)
     assert not GitHubText(text="", source="s", author=None)
+
+
+def test_github_text_survives_copy_and_pickle() -> None:
+    value = GitHubText(text="Add </github-text> backoff", source="issue #42 title", author=None)
+    for clone in (copy.copy(value), copy.deepcopy(value), pickle.loads(pickle.dumps(value))):
+        assert clone == value
+        assert (clone.text, clone.source, clone.author) == (value.text, value.source, None)
 
 
 def test_template_substitution_is_the_envelope(make_issue: Callable[..., Issue]) -> None:

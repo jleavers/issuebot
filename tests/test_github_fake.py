@@ -48,6 +48,13 @@ def test_add_issue_produces_normalised_issue(fake: FakeGitHub) -> None:
     assert second.state is None and not second.dispatchable
 
 
+def test_add_issue_carries_the_author_through_the_node(fake: FakeGitHub) -> None:
+    assert fake.add_issue("By the default reporter").author == "reporter"
+    assert fake.add_issue("By a named account", author="mallory").author == "mallory"
+    # GitHub sends ``author: null`` once the account is deleted; the fake does the same.
+    assert fake.add_issue("By a deleted account", author=None).author is None
+
+
 async def test_fetch_by_states_filters_open_issues_by_role(fake: FakeGitHub) -> None:
     todo = fake.add_issue("A", labels=("issuebot/todo",))
     fake.add_issue("B", labels=("issuebot/review",))

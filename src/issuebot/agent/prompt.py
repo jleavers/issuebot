@@ -58,7 +58,8 @@ class GitHubText(str):
     which refuses an output whose envelopes do not pair up. A tag inside the text is
     neutralised, so the text cannot end its own envelope. Truthiness is the text's, so
     ``{% if issue.body %}`` still guards a missing body. ``text`` is the raw value, which a
-    template only reaches by naming it (``issue.body.text``, or ``| striptags``).
+    template only reaches by naming it (``issue.body.text``); ``| striptags`` is not that, since
+    it unescapes the neutralised tag back into a real one and the render is then refused.
     """
 
     text: str
@@ -71,6 +72,11 @@ class GitHubText(str):
         value.source = source
         value.author = author
         return value
+
+    def __getnewargs_ex__(self) -> tuple[tuple[str], dict[str, str | None]]:
+        # ``copy`` and ``pickle`` rebuild a ``str`` subclass through ``__new__``, and ours
+        # takes keyword arguments a bare ``str`` does not.
+        return (self.text,), {"source": self.source, "author": self.author}
 
     def __bool__(self) -> bool:
         return bool(self.text)

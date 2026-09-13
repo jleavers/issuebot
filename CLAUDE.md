@@ -134,7 +134,8 @@ floor, not the shipped version, and moves by hand.
   wraps, anything in the text a reader could take for the tag (`</github-text>`, `< github-text`)
   is defanged to `&lt;…` so the text cannot end its own envelope, truthiness is the text's
   (`{% if issue.body %}` still guards), string filters operate on the envelope rather than
-  raising, and `.text` (or `| striptags`) is the raw value a template only reaches by name.
+  raising, and `.text` is the raw value a template only reaches by name (`| striptags` is not:
+  it unescapes the neutralised tag back into a real one, and the render is refused).
   `PromptRenderer` enforces the structure, not just the value: after every render
   `check_envelopes` walks the output and a cut, nested or stray tag (a `| truncate` on the
   body) is a `prompt_error` naming the source, as is any exception a filter raises, so
