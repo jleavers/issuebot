@@ -90,10 +90,3 @@ def db_url() -> Iterator[str]:
     """A DATABASE_URL scoped to a fresh schema; skipped when no database is configured."""
     with _fresh_schema() as url:
         yield url
-
-
-@pytest.fixture
-def source_db_url() -> Iterator[str]:
-    """A second fresh schema on the same server: the old, single-repository database."""
-    with _fresh_schema() as url:
-        yield url

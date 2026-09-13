@@ -30,7 +30,6 @@ from issuebot.config import GitHubLabels, GitHubSettings, Settings
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
-    ImportRefused,
     MigrationResult,
     Probe,
     StoreError,
@@ -1711,7 +1710,6 @@ def _db_workflow(
         ["status"],
         ["stats"],
         ["refresh"],
-        ["import", "--from", "postgresql://x@y/z"],
     ],
 )
 def test_database_commands_need_a_configured_url(
@@ -1736,7 +1734,6 @@ def test_database_commands_need_a_configured_url(
         ["status"],
         ["stats"],
         ["refresh"],
-        ["import", "--from", "postgresql://x@y/z"],
     ],
 )
 def test_database_commands_exit_two_on_an_unloadable_workflow(
@@ -2103,46 +2100,6 @@ def test_refresh_notifies_and_reports_failures(
     fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
     assert main(["refresh", "--workflow", str(path)]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
-
-
-def test_import_copies_a_source_and_reports_the_counts(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_database: FakeDatabase,
-) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    source = "postgresql://issuebot:old@127.0.0.1:5433/issuebot"
-    assert main(["import", "--from", source, "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == (
-        "[ OK ] import: issues 3\n"
-        "[ OK ] import: runs 2\n"
-        "[ OK ] import: run_turns 5\n"
-        "[ OK ] import: events 9\n"
-        "[ OK ] import: runtime_snapshot 1\n"
-        "[ OK ] import: example/repo imported from postgresql://issuebot@127.0.0.1:5433/issuebot\n"
-    )
-    ((src, repo, labels, workflow_path),) = fake_database.imports
-    assert (src, repo, workflow_path) == (source, "example/repo", str(path))
-    assert labels == GitHubLabels()
-
-
-def test_import_reports_a_refusal(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_database: FakeDatabase,
-) -> None:
-    path = _db_workflow(tmp_path, monkeypatch)
-    fake_database.import_error = ImportRefused("source is at schema version 3, expected 2")
-    assert main(["import", "--from", "postgresql://x@y/z", "--workflow", str(path)]) == 1
-    assert capsys.readouterr().out == "[FAIL] import: source is at schema version 3, expected 2\n"
-
-
-def test_import_needs_a_source(tmp_path: Path) -> None:
-    with pytest.raises(SystemExit) as exc:
-        main(["import", "--workflow", str(GOOD)])
-    assert exc.value.code == 2
 
 
 # --- the database in run-once and worker ------------------------------------------------------

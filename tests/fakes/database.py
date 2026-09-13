@@ -7,7 +7,7 @@ from typing import Any
 
 from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
-from issuebot.db import DatabaseError, ImportResult, MigrationResult, Probe
+from issuebot.db import DatabaseError, MigrationResult, Probe
 from issuebot.db.queries import (
     DailyPoint,
     EventRow,
@@ -221,11 +221,6 @@ class FakeDatabase:
         self.notified_repos: list[str | None] = []
         self.notify_error: DatabaseError | None = None
         self.opened = 0
-        self.imports: list[tuple[str, str, GitHubLabels, str | None]] = []
-        self.import_error: DatabaseError | None = None
-        self.import_result = ImportResult(
-            counts={"issues": 3, "runs": 2, "run_turns": 5, "events": 9, "runtime_snapshot": 1}
-        )
 
     def factory(self, url: str) -> FakeDatabase:
         self.urls.append(url)
@@ -257,14 +252,6 @@ class FakeDatabase:
         if self.register_error is not None:
             raise self.register_error
         self.registrations.append((repo, labels, workflow_path))
-
-    async def import_from(
-        self, source_url: str, *, repo: str, labels: GitHubLabels, workflow_path: str | None
-    ) -> ImportResult:
-        if self.import_error is not None:
-            raise self.import_error
-        self.imports.append((source_url, repo, labels, workflow_path))
-        return self.import_result
 
     def store(self, labels: GitHubLabels, repo: str) -> FakeStore:
         self.labels = labels

@@ -19,12 +19,10 @@ from issuebot.db.connection import (
 from issuebot.db.database import Database, Probe
 from issuebot.db.errors import (
     DatabaseError,
-    ImportRefused,
     MigrationError,
     StoreError,
     StoreUnavailableError,
 )
-from issuebot.db.importer import ImportResult, import_repo
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import (
     ADVISORY_LOCK_KEY,
@@ -77,8 +75,6 @@ __all__ = [
     "Database",
     "DatabaseError",
     "EventRow",
-    "ImportRefused",
-    "ImportResult",
     "IssueRow",
     "IssueSnapshot",
     "Migration",
@@ -107,7 +103,6 @@ __all__ = [
     "describe",
     "discover_migrations",
     "error_text",
-    "import_repo",
     "is_postgres_url",
     "migrate",
     "reconnect_delay",
