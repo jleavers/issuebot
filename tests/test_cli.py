@@ -1983,6 +1983,26 @@ def test_render_status_names_the_overlay_in_force() -> None:
     assert lines[1] == "workflow: /configs/WORKFLOW.md (config valid)"
 
 
+def test_render_status_names_a_github_hold(tmp_path: Path) -> None:
+    """The surface #88 is about: an operator asking a quiet worker why the board is not moving."""
+    data = dict(SNAPSHOT_DATA)
+    data["dispatch_hold"] = {
+        "kind": "github",
+        "reason": (
+            "GitHub is not answering this worker: transport: http 502: Bad Gateway "
+            "\u2014 githubstatus.com: Pull Requests, major outage"
+        ),
+        "since": "2026-09-04T11:55:00+00:00",
+    }
+    row = SnapshotRow(at=SNAPSHOT_AT, written_at=SNAPSHOT_AT, data=data)
+    lines = render_status(row, now=SNAPSHOT_AT).splitlines()
+    assert lines[3] == (
+        "dispatch: held (github) since 2026-09-04T11:55:00Z: "
+        "GitHub is not answering this worker: transport: http 502: Bad Gateway "
+        "\u2014 githubstatus.com: Pull Requests, major outage"
+    )
+
+
 def test_render_status_names_a_held_dispatch() -> None:
     """A held worker keeps ticking, so nothing else in the snapshot says it has stopped."""
     data = dict(SNAPSHOT_DATA)

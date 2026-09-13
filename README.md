@@ -188,10 +188,11 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
+[ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-13 checks: 0 failed, 2 warnings
+14 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
@@ -638,19 +639,34 @@ them from that repository's checkout.
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
-- **GitHub itself.** The worker reads and writes its whole state machine through `gh`, and
-  nothing it reports distinguishes a GitHub incident from a quiet board. Preflight checks only
-  that `gh` is on `PATH` and that the token is set, so an outage never holds dispatch: a failed
-  poll logs `candidates_fetch_failed` and the tick carries on, and `issuebot status`,
-  `/healthz` and the dashboard all go on showing a healthy worker — correctly, because the
-  worker is healthy. Transport failures at least retry, an `HTTP 5xx` or a timeout being
-  classified `transport`. What cannot be handled is GitHub answering `200` with stale data: a
-  label write that reports success and is not visible on the next read leaves the worker acting
-  on a state GitHub will later contradict, and there is nothing to see anywhere. So subscribe
+- **GitHub itself.** The worker reads and writes its whole state machine through `gh`, so an
+  outage stops the board. Three failed polls in a row hold dispatch: `issuebot status` prints
+  `dispatch: held (github) since ...`, the dashboard's worker line reads `worker held`,
+  `/healthz` reports that repository's entry in `workers` with `"status": "held"`, and
+  `docker compose logs worker` shows `dispatch_github_held` — ERROR the first time and each
+  time the error changes, WARNING in between, since an idle worker says nothing else. The
+  first poll that answers lifts it and dispatch resumes, with no restart. A single failed poll
+  does not hold anything: `gh` retries a transport error of its own, and an `HTTP 5xx` or a
+  timeout is classified `transport` and retried, so it takes a minute and a half of silence at
+  the default interval before the worker stops claiming. Holding is the safe side — a worker
+  that cannot read the board has no business claiming from it — and a due retry waits with it
+  rather than spending an attempt on a claim that is going to fail.
+
+  When the hold engages, the worker reads
+  [githubstatus.com](https://www.githubstatus.com/) once and appends what it says to the
+  reason, so the line reads `GitHub is not answering this worker: transport: http 502: Bad
+  Gateway — githubstatus.com: Pull Requests, major outage`. That is annotation and never a
+  gate: an incident is published when a human declares it, which can be twenty minutes after
+  the first failed write, so a slow, silent or nonsensical answer costs the annotation and
+  nothing else. `All Systems Operational` is worth reading too — it points you at your own
+  network rather than at GitHub's. `issuebot validate` reports the same page as a
+  `github.status` line, which can warn but never fails.
+
+  What none of this catches is GitHub answering `200` with stale data: a label write that
+  reports success and is not visible on the next read leaves the worker acting on a state
+  GitHub will later contradict, and there is no error to count. So subscribe
   [githubstatus.com](https://www.githubstatus.com/) to the same Slack channel the worker posts
-  to, and an incident arrives in the timeline beside the runs it explains. Subscribe rather
-  than have the worker poll it: an incident is published when a human declares it, which can be
-  twenty minutes after the first failed write, so the page is a witness and never a gate.
+  to as well, and an incident arrives in the timeline beside the runs it explains.
 - **Cost.** Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
   times `agent.max_turns` — `5.0` and `5` mean up to $25 before the issue is escalated. The
   right value is yours to pick and the checked-in `5.0` is only a starting point: on an API

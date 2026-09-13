@@ -120,7 +120,13 @@ floor, not the shipped version, and moves by hand.
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
-  `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`).
+  `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`);
+  `status.py` (`fetch_status_summary`, `parse_status_summary` → `GitHubStatus`), the
+  githubstatus.com Statuspage summary read as annotation and never as a gate (#88). The one
+  place in the package that is not `gh`: it is not the GitHub API, it decides nothing, and it
+  is total in both directions -- `http`/`https` only, a 5 s timeout, a bounded read, and
+  anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
+  `github` dispatch hold and `validate`'s `github.status` check.
 - `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`); `PromptRenderer` (Jinja2
   `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `attempt`,
@@ -260,9 +266,10 @@ floor, not the shipped version, and moves by hand.
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
-  Both holds are carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
+  Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
-  builds) or `auth` (`claude authentication unavailable: <the probe's detail>`), and `since`
+  builds), `auth` (`claude authentication unavailable: <the probe's detail>`) or `github`
+  (#88, below), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
   one restarts it. A held worker keeps ticking, so without it `issuebot status`,
   `/api/v1/repos/<owner>/<name>/state`,
@@ -273,6 +280,22 @@ floor, not the shipped version, and moves by hand.
   claiming), so the history the dashboard renders stays current for as long as it lasts --
   unless `fetch_preflight` (the `gh` and `github.token` half of `preflight`) is what is
   failing, when the request would only fail too.
+  A GitHub outage passes preflight, which is local (#88): `_fetch_issues` counts consecutive
+  `GitHubError`s and, at `MAX_FETCH_FAILURES` (3), holds dispatch with a `github` hold whose
+  reason is the last error; `_note_fetch_success` releases it on the first poll that answers,
+  and one failure is a blip, since `gh` retries a transport error before issuebot sees it.
+  First-party evidence that *this* worker cannot read the board, so it needs nobody to declare
+  an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
+  because claiming is a write to a board the worker has just failed to read; `escape` still
+  goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
+  (preflight > auth > github) *after* the fetch, from a `_Hold` the branches return rather than
+  by recording as they go: releasing and re-holding within a tick would restart `since` on a
+  hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
+  `_probe_github_status` annotates the hold once, when it engages, through the
+  `github_status` seam (default `fetch_status_summary`) in a thread: never a gate, so silence,
+  an exception or a body of the wrong shape costs the annotation and nothing else, and an
+  `All Systems Operational` reading is still carried, since it points at the operator's own
+  network rather than GitHub's.
 - `issuebot.notifications`: the Slack sink, imported by `cli` only. `messages.py` (pure):
   `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
   by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
@@ -415,7 +438,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (thirteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (fourteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
@@ -426,6 +449,9 @@ floor, not the shipped version, and moves by hand.
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails), a
+  a `github.status` check that reads githubstatus.com through the `_github_status` seam and
+  warns on an incident or on a page that will not answer but can never fail (advisory: a
+  human is running this and there is no dispatch to hold), a
   `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
   and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
   `labels ensure` (the five state labels, the `no_fault` marker, and one per
@@ -454,9 +480,10 @@ floor, not the shipped version, and moves by hand.
   uvicorn (uvicorn's lines go through structlog; SIGTERM/SIGINT exit 0; a port in use is
   uvicorn's error and exit 1); exit codes 0/1/2 (ok / failed / workflow unloadable) for every
   command but `web`, which loads no workflow and so only ever returns 0 or 1.
-  Tests substitute `_which`, `_claude_version`, `_claude_auth`, `_adapter_factory`, `_run_session`,
+  Tests substitute `_which`, `_claude_version`, `_claude_auth`, `_github_status`,
+  `_adapter_factory`, `_run_session`,
   `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
-  `_serve`.
+  `_serve` (`_github_status` through an autouse fixture, so no test reaches the network).
 
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).
