@@ -144,6 +144,26 @@ def test_no_command_prints_help_and_exits_two(capsys: pytest.CaptureFixture[str]
     assert "usage: issuebot" in capsys.readouterr().out
 
 
+def test_help_stays_plain_when_the_environment_asks_for_colour(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The guard behind every assertion above that reads help text (#81).
+
+    ``FORCE_COLOR`` is what a CI runner or a developer's shell sets, and on 3.14 it is enough
+    to colourise argparse on its own; only ``conftest``'s ``no_ansi_colour`` outranks it. So
+    this fails wherever it is run if that fixture goes away -- unlike an assertion on plain
+    output alone, which passes on any machine that happens not to ask for colour.
+
+    ``NO_COLOR`` goes because it outranks ``FORCE_COLOR`` in turn, and a shell that exports it
+    would otherwise keep this test green for the wrong reason -- which is the very accident
+    that hid the bug in the first place.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert main([]) == 2
+    assert "\x1b[" not in capsys.readouterr().out
+
+
 def test_unknown_command_exits_two() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["frobnicate"])
