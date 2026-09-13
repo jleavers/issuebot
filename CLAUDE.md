@@ -179,7 +179,9 @@ floor, not the shipped version, and moves by hand.
   counts include triage, and only a genuine abandonment still clears the label).
   `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`): a `review` issue whose
   open PR reads `conflicting` is moved to `rework` by issuebot, label first and then a
-  `### Issuebot merge conflict` workpad block, whose count is the bounce number; at
+  `### Issuebot merge conflict` workpad block, whose count is the bounce number (a note that
+  fails after the label moved logs `conflict_rework_note_failed` and still counts as reworked;
+  only a failure before it logs `conflict_rework_failed` and is retried next tick); at
   `agent.max_conflict_reworks` (default 3, `0` off) it writes one `... conflict limit` block
   and stays in `review`. `_bounce_conflicts` runs after every fetch, observer or not
   (`fetch_states`), skipping issues in `_running` or `_retries`.
@@ -189,8 +191,9 @@ floor, not the shipped version, and moves by hand.
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
   tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
-  `on_issues` observer is attached; dispatch while slots remain; snapshot) and a queue wait that
-  fires retries (continuation 1 s; failure backoff; `escape`; `slots`) and handles worker exits
+  `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
+  slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
+  backoff; `escape`; `slots`) and handles worker exits
   (the session's final transition is published before any release; `max_turns` while
   `in_progress` or `max_attempts` failures → the blocked escape).
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks

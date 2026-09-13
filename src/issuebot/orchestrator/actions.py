@@ -200,11 +200,19 @@ async def conflict_rework(
     The workpad is the counter: each bounce leaves a ``CONFLICT_HEADING`` block, so the count
     survives a restart and a person can read it. Label first, note second: a note without
     the label would be counted again on the next tick, while a label without the note still
-    gets the conflict resolved by the rework session (Step 6 of the prompt).
+    gets the conflict resolved by the rework session (Step 6 of the prompt). The transition is
+    published between the label and the note, so the Slack line goes out even when the note
+    fails.
     """
     log = get_logger(__name__)
     pr = issue.linked_pr
     if pr is None:
+        log.warning(
+            "conflict_rework_failed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            error="issue has no linked pull request",
+        )
         return "failed"
     try:
         workpad = await adapter.find_workpad_comment(issue.number)

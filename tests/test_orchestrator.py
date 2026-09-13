@@ -2514,3 +2514,28 @@ async def test_a_bounce_failure_is_logged_and_retried_next_tick(
     assert any(entry["event"] == "conflict_rework_failed" for entry in logs)
     await h.tick()
     assert h.github.issue(1).state is StateLabel.REWORK
+
+
+async def test_the_bounce_skips_an_issue_with_a_queued_retry(tmp_path: Path) -> None:
+    """A queued retry is an in-flight decision about the same issue, so the bounce leaves it
+    alone until the retry has been fired; the next poll gets it."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()  # dispatched
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, "conflicting")
+    # A session that reaches review queues a continuation retry and releases the entry.
+    await h.exit(h.run_for(1), final_state=StateLabel.REVIEW, final_issue=h.github.issue(1))
+    assert h.orchestrator.running == {}
+    assert list(h.orchestrator.retries) == ["1"]
+    h.github.calls.clear()
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.calls("set_state") == []
+    assert h.github.comments_for(1) == []
+    await h.fire(1.0)  # the continuation retry finds review and clears
+    assert h.orchestrator.retries == {}
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+    assert h.calls("set_state") == [(1, StateLabel.REWORK)]

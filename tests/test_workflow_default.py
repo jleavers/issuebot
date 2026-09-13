@@ -120,6 +120,18 @@ def test_rework_context_names_both_authors(make_issue: Callable[..., Issue]) -> 
     assert "`### Issuebot merge conflict` block says which" in text
 
 
+def test_workpad_update_starts_from_the_current_body(make_issue: Callable[..., Issue]) -> None:
+    """issuebot appends blocks between sessions; a PATCH from a stale local copy would erase
+    the merge-conflict count the cap is read from."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert "Start every update from the comment's current body" in text
+    assert "issues/comments/<id> --jq .body > .issuebot/workpad.md" in text
+    assert "keep them where they are" in text
+
+
 def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(

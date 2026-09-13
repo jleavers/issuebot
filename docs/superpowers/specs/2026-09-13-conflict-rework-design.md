@@ -1,7 +1,7 @@
 # The worker bounces a conflicting review PR to rework
 
 Date: 2026-09-13
-Status: approved, not implemented
+Status: implemented
 
 ## Problem
 
@@ -48,7 +48,8 @@ the marker.
 **Counting bounces in memory** was rejected because restarting is how the worker is
 deployed, and a count that resets on restart is a cap that does not hold. The workpad is
 the source of truth the rest of the system already writes to, and a count a person can read
-there is a count they can argue with.
+there is a count they can argue with. It rests on the agent not overwriting the blocks, so the
+prompt's Workpad section has the agent start every update from the comment's current body.
 
 ## Design
 
@@ -147,7 +148,8 @@ async def conflict_rework(
    Label first, note second. If the note fails, the rework session still resolves the
    conflict through Step 6 and the count is short by one, which errs toward one more
    bounce; a note without the label would be counted again on the next tick, which errs
-   toward a bounce nobody made. Then publish
+   toward a bounce nobody made. The transition is published between the two, so the Slack
+   line goes out even when the note fails. Then publish
    `StateChanged(from=review, to=rework, actor="issuebot", pr_url=...)`, so the Slack line
    reads `review → rework by issuebot · PR #51`. Return `reworked`.
 3. **At the cap** (`count >= limit`): if the workpad already carries a
@@ -172,7 +174,9 @@ is untouched: the bounce reports itself the way `claim` does, and the reconcile 
 it because of the running-table rule above.
 
 Logging: `conflict_rework` (INFO: issue, PR, bounce `n` of `limit`), `conflict_rework_limit`
-(WARNING, once, when the limit block is written), `conflict_rework_failed` (WARNING).
+(WARNING, once, when the limit block is written), `conflict_rework_failed` (WARNING) and
+`conflict_rework_note_failed` (WARNING, the note failed after the label moved; the count is
+short by one).
 
 ### 5. Prompt
 

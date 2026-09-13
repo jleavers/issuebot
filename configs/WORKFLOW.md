@@ -118,6 +118,7 @@ One persistent comment on the issue is the single source of truth for plan, prog
 - Find it: `gh api repos/{{ repo }}/issues/{{ issue.number }}/comments --paginate --jq '.[] | select(.body | startswith("{{ workpad_marker }}")) | .id'`
 - Create it if missing, from the template at the end of this document: write the body to `.issuebot/workpad.md`, then `gh api -X POST repos/{{ repo }}/issues/{{ issue.number }}/comments -F body=@.issuebot/workpad.md`
 - Update it in place: `gh api -X PATCH repos/{{ repo }}/issues/comments/<id> -F body=@.issuebot/workpad.md`
+- Start every update from the comment's current body, not from a stale local file: fetch it first (`gh api repos/{{ repo }}/issues/comments/<id> --jq .body > .issuebot/workpad.md`), then edit. issuebot appends its own `### Issuebot ...` blocks between sessions (a blocker, a merge conflict); keep them where they are.
 - Never post separate progress or summary comments. Edit the workpad immediately after each milestone: reproduction captured, plan changed, code landed, validation run, review feedback addressed, blocker found.
 - Treat any `Validation`, `Test Plan` or `Testing` section in the issue description as acceptance input: mirror it in the workpad as required checkboxes and complete it.
 
