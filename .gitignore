@@ -7,17 +7,19 @@ build/
 .pytest_cache/
 .ruff_cache/
 
-# Claude Code's per-repo working directory. Today this holds NOTHING BUT
+# Claude Code's per-repo working directory. The transient things in it are
 # `worktrees/` -- git worktrees nested inside the repo itself, one per parallel
-# session, each a full checkout with its own `.git` file. Untracked, they show
+# session, each a full checkout with its own `.git` file -- and the security-sweep
+# run artefacts ignored at the end of this file. Untracked, they show
 # up as a permanent `?? .claude/` in every `git status` and are one `git add -A`
 # away from being swept in, which is the same failure mode the vendor-material
 # rules above already guard against.
 #
 # SCOPED TO THE TRANSIENT PARTS, not to `.claude/` wholesale, deliberately:
-# `.claude/settings.json`, `.claude/agents/` and `.claude/skills/` are shared
-# project configuration that a team may well WANT tracked, and a blanket
-# `.claude/` would silently ignore them the day someone adds one. What is
+# `.claude/settings.json`, `.claude/agents/`, `.claude/skills/` and
+# `.claude/workflows/` are shared project configuration that a team may well WANT
+# tracked -- `skills/security-sweep/` and `workflows/security-sweep.js` are, and a
+# blanket `.claude/` would have silently ignored them. What is
 # ignored here is what is machine-local by nature -- a worktree belongs to one
 # checkout on one host, and `settings.local.json` is per-user by Claude Code's
 # own convention.
@@ -44,3 +46,11 @@ configs/*.local.md
 # as `.claude/worktrees/` above -- untracked it would sit in every `git status`
 # one `git add -A` away from being swept into a commit.
 .superpowers/
+
+# Security-sweep run artefacts: one directory per run, holding the surface map, the raw
+# per-lane findings, the refuters' verdicts, the clusters and the report. Machine-local and
+# per-run by nature, like `.claude/worktrees/` above, and untracked for a second reason that
+# matters more: a report names weaknesses that are not fixed yet, and committing it would
+# publish them on the day this repository goes public, ahead of any fix. The public record is
+# the issues the sweep's approval gate files, which are written for that audience on purpose.
+.claude/security-sweeps/

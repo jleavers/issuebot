@@ -96,7 +96,7 @@ git check-ignore -v .claude/security-sweeps/probe/run.json
 git status --porcelain | wc -l
 ```
 
-Expected: `check-ignore` prints the `.gitignore` line number and pattern; `git status --porcelain` prints `0`.
+Expected: `check-ignore` prints the `.gitignore` line number and pattern; `git status --porcelain` prints `1` — the in-progress `.gitignore` edit itself, and nothing else.
 
 - [ ] **Step 4: Remove the probe**
 
@@ -123,7 +123,7 @@ mkdir -p "$RD" && echo '{"probe":true}' > "$RD/run.json"
 git status --porcelain | wc -l
 ```
 
-Expected: the worktree is prepared at a detached HEAD; the two `rev-parse` outputs are **identical** (this is the whole staleness guarantee — the worktree is the tree a reader would clone, whatever the local checkout is doing); `git status --porcelain` prints `0`.
+Expected: the worktree is prepared at a detached HEAD; the two `rev-parse` outputs are **identical** (this is the whole staleness guarantee — the worktree is the tree a reader would clone, whatever the local checkout is doing); `git status --porcelain` still prints only the `.gitignore` edit, proving the new worktree and the populated run directory are both ignored.
 
 - [ ] **Step 6: Prove cleanup leaves nothing behind**
 
@@ -140,10 +140,10 @@ Expected: `git worktree list` no longer shows `security-sweep-$STAMP`; `.git/wor
 
 ```bash
 rm "$RD/run.json" && rmdir "$RD" .claude/security-sweeps
-git status --porcelain | wc -l
+git status --porcelain
 ```
 
-Expected: `0`.
+Expected: ` M .gitignore` alone.
 
 - [ ] **Step 8: Commit**
 
