@@ -177,9 +177,12 @@ floor, not the shipped version, and moves by hand.
   `parse_rate_limits` reads a `rate_limit_event` line into `RateLimits(five_hour, seven_day,
   observed_at)` of `RateLimitWindow(utilization, resets_at)`, total like `turnlog` because the
   line's shape is claude's and undocumented, and `StreamParser` reports it as a `rate_limits`
-  turn event carrying the reading; `run_session` (turns, refresh between turns, `RunResult`, publishes
-  `RunStarted`/`RunEnded`); `classify_result` maps a turn's last result (or its absence) to an
-  `AgentErrorCategory`, `auth_failed` among them (see `issuebot.orchestrator`).
+  turn event carrying the reading; `run_session` (turns, refresh between turns, `RunResult`,
+  publishes `RunStarted`/`RunEnded`; a turn whose final message begins `BLOCKED:` stops the run
+  with `stop_reason` `blocked` and the line in `RunResult.blocker`, read by `blocker_from` off
+  the first non-empty line, checked after `issue_moved` and before `max_turns`);
+  `classify_result` maps a turn's last result (or its absence) to an `AgentErrorCategory`,
+  `auth_failed` among them (see `issuebot.orchestrator`).
   `budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
   caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
   same session with a fresh ledger. Failing there would end the run, and the retry after it
@@ -245,9 +248,10 @@ floor, not the shipped version, and moves by hand.
   tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
   slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
-  backoff; `escape`; `slots`) and handles worker exits
-  (the session's final transition is published before any release; `max_turns` while
-  `in_progress` or `max_attempts` failures → the blocked escape).
+  backoff; `escape`; `slots`) and handles worker exits (the session's final transition is
+  published before any release; `max_turns` or `blocked` while `in_progress`, or `max_attempts`
+  failures → the blocked escape, a `blocked` stop's block carrying the agent's own `BLOCKED:`
+  line; no retry, since an external blocker does not clear by retrying).
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
   that session's model.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry

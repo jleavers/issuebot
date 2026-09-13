@@ -1215,6 +1215,7 @@ class StubSession:
         self.stop_reason = "issue_moved"
         self.error_category: str | None = None
         self.final_state: StateLabel | None = StateLabel.REVIEW
+        self.blocker: str | None = None
 
     async def __call__(
         self,
@@ -1251,6 +1252,7 @@ class StubSession:
             final_issue=None,
             workspace_path=workspace,
             log_dir=workspace / ".issuebot" / "runs" / run_id,
+            blocker=self.blocker,
         )
 
 
@@ -1462,6 +1464,27 @@ def test_run_once_reports_an_exhausted_turn_budget(
         "turn budget exhausted; issue #42 remains in_progress (the blocked escape is Phase 4)"
         in out
     )
+
+
+def test_run_once_reports_a_blocked_stop(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    stub_session.stop_reason = "blocked"
+    stub_session.blocker = "gh cannot reach api.github.com; a human must fix DNS"
+    stub_session.final_state = StateLabel.IN_PROGRESS
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert "succeeded (blocked) after 2 turns" in out
+    assert (
+        "blocked: gh cannot reach api.github.com; a human must fix DNS; issue #42 remains "
+        "in_progress (the worker would escalate it)"
+    ) in out
 
 
 def test_run_once_reports_failure_and_exits_one(

@@ -250,6 +250,19 @@ def test_a_run_that_never_executed_does_not_hold_the_issue(
     assert "A job that ran steps and failed still holds the issue" in text
 
 
+def test_a_blocked_turn_marks_its_final_message(make_issue: Callable[..., Issue]) -> None:
+    """The session reads the marker off the final message, so the prompt must name it in both
+    places the agent decides to stop: ground rule 2 and the completion bar."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue, linked_pr=PR))
+    )
+    assert text.count("`BLOCKED: <one line") == 2
+    assert "the first line of your final message; issuebot escalates the issue at once" in text
+    assert "do not spend further turns re-checking the same blocker" in text
+    assert "issuebot will escalate" not in text
+
+
 def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(

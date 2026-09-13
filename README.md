@@ -238,6 +238,13 @@ the login is in place; `docker compose logs worker` has the line. Only a definit
 in" stops it: a `claude` that does not answer in time is logged as a warning and the worker
 starts anyway.
 
+A session that hits a true external blocker (a credential it does not have, a tool it cannot
+install, a service it cannot reach) writes the brief to the workpad and puts `BLOCKED: <one
+line>` at the top of its final message. The worker moves the issue to `issuebot/review` at the
+end of that turn with that line in the workpad block, rather than after `agent.max_turns`
+re-checks of the same blocker; the turn budget stays as the fallback for a session that stops
+without saying why.
+
 A credential that stops working *after* startup — an expired `CLAUDE_CODE_OAUTH_TOKEN`, a
 revoked API key — is caught by the run that hits it. That issue is moved to `issuebot/review`
 at once with a workpad block naming authentication, rather than after `agent.max_attempts`
