@@ -92,6 +92,18 @@ def test_close_pr_does_not_close_issue(fake: FakeGitHub) -> None:
     assert snapshot.linked_pr is not None and snapshot.linked_pr.state == "closed"
 
 
+def test_pr_mergeability_round_trips_through_the_node(fake: FakeGitHub) -> None:
+    """The fake emits GitHub's upper-case value so the shared normaliser lowercases it."""
+    issue = fake.add_issue("A", labels=("issuebot/review",))
+    pr = fake.open_pr(issue.number)
+    assert pr.mergeable == "mergeable"
+    assert fake.issue(issue.number).linked_pr.mergeable == "mergeable"  # type: ignore[union-attr]
+    fake.set_pr_mergeable(pr.number, "conflicting")
+    assert fake.issue(issue.number).linked_pr.mergeable == "conflicting"  # type: ignore[union-attr]
+    fake.set_pr_mergeable(pr.number, "unknown")
+    assert fake.issue(issue.number).linked_pr.mergeable == "unknown"  # type: ignore[union-attr]
+
+
 async def test_set_state_is_exclusive_and_bumps_updated_at(fake: FakeGitHub) -> None:
     issue = fake.add_issue("A", labels=("bug", "issuebot/todo", "issuebot/review"))
     assert fake.issue(issue.number).state is None
