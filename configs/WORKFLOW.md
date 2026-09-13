@@ -7,8 +7,8 @@ polling:
 workspace:
   root: /workspaces
 hooks:
-  # The built-in clone is shallow; the self-review's `git diff origin/HEAD...HEAD` and a
-  # rework's merge of the default branch need the merge base.
+  # The built-in clone is shallow; the self-review's `git diff origin/HEAD...HEAD` and the
+  # merges of the default branch (before the push, and on a rework) need the merge base.
   after_create: |
     if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
 agent:
@@ -124,7 +124,7 @@ One persistent comment on the issue is the single source of truth for plan, prog
 ## Step 0: route
 
 - `{{ labels.in_progress }}` with no pull request: execution flow (Steps 1 to 6).
-- `{{ labels.in_progress }}` with a pull request (a continuation, or rework): run the feedback sweep (Step 6) first, then continue where the workpad stopped.
+- `{{ labels.in_progress }}` with a pull request (a continuation, or rework): run Step 6 first, then continue where the workpad stopped.
 - Any other label (`gh issue view {{ issue.number }} -R {{ repo }} --json labels`): the orchestrator and you disagree; report it and end the turn without changes.
 
 ## Step 1: plan and reproduce
@@ -166,20 +166,22 @@ This review is a first gate, not an independent one: a reviewer on the pull requ
 
 ## Step 5: pull request
 
-1. Push the branch: `git push -u origin HEAD`.
-2. Write the pull request body to `.issuebot/pr.md`: a summary of the change, how it was validated, and the line `Closes #{{ issue.number }}`.
-3. Open it against the default branch: `gh pr create -R {{ repo }} --title "<concise title>" --body-file .issuebot/pr.md`, unless the repository's own instructions prescribe another way to open pull requests; then follow those.
-4. Record the pull request number under `Notes` in the workpad.
+1. Bring the branch up to date first: `git fetch origin && git merge origin/HEAD`. Other sessions work other issues at the same time, and their pull requests land on the default branch while you work, so a branch that was clean when you cut it may conflict now. Resolve any conflict keeping the intent of both sides, commit the merge, and if it changed anything re-run validation. Merge, never rebase: a rebase of a pushed branch needs the force-push that Ground rule 6 forbids.
+2. Push the branch: `git push -u origin HEAD`.
+3. Write the pull request body to `.issuebot/pr.md`: a summary of the change, how it was validated, and the line `Closes #{{ issue.number }}`.
+4. Open it against the default branch: `gh pr create -R {{ repo }} --title "<concise title>" --body-file .issuebot/pr.md`, unless the repository's own instructions prescribe another way to open pull requests; then follow those.
+5. Record the pull request number under `Notes` in the workpad.
 
-## Step 6: feedback sweep and checks
+## Step 6: mergeability, feedback sweep and checks
 
 Run this before moving the issue to `{{ labels.review }}`, and again whenever new feedback arrives:
 
-1. Gather feedback from every channel: `gh pr view <number> -R {{ repo }} --comments`, `gh api repos/{{ repo }}/pulls/<number>/comments`, `gh pr view <number> -R {{ repo }} --json reviews`.
-2. Every actionable comment, from a human or a bot, is blocking until you have either changed code, tests or docs to address it or posted an explicit, justified reply on that thread.
-3. Track each item and its resolution in the workpad.
-4. Re-run validation after feedback-driven changes and push.
-5. Wait for checks: `gh pr checks <number> -R {{ repo }} --watch`. If any fail, fix, push and repeat.
+1. Check that the pull request is mergeable: `gh pr view <number> -R {{ repo }} --json mergeable --jq .mergeable`. GitHub computes the answer after every push, so `UNKNOWN` means wait a few seconds and ask again. `CONFLICTING` means another pull request landed on the default branch since your last merge: `git fetch origin && git merge origin/HEAD`, resolve as in Step 5, re-run validation, push, and ask again until it reads `MERGEABLE`.
+2. Gather feedback from every channel: `gh pr view <number> -R {{ repo }} --comments`, `gh api repos/{{ repo }}/pulls/<number>/comments`, `gh pr view <number> -R {{ repo }} --json reviews`.
+3. Every actionable comment, from a human or a bot, is blocking until you have either changed code, tests or docs to address it or posted an explicit, justified reply on that thread.
+4. Track each item and its resolution in the workpad.
+5. Re-run validation after feedback-driven changes and push.
+6. Wait for checks: `gh pr checks <number> -R {{ repo }} --watch`. If any fail, fix, push and repeat.
 
 ## No fault found
 
@@ -224,6 +226,7 @@ Two routes reach `{{ labels.review }}`: this one, when you changed something, an
 - Validation is green for the latest commit; pull request checks are green.
 - The feedback sweep is complete: no actionable comment remains.
 - The branch is pushed and the pull request body contains `Closes #{{ issue.number }}`.
+- The pull request's `mergeable` reads `MERGEABLE`.
 {% if self_review %}
 - The self-review ran on the final diff and its findings are recorded.
 {% endif %}
@@ -234,7 +237,7 @@ Only then run the label command from the Labels section. If the bar cannot be me
 
 1. Re-read the issue description and every human comment; identify explicitly what will be done differently.
 2. Keep the existing branch and pull request; do not close or recreate them.
-3. Run the feedback sweep (Step 6), then implement the changes (Step 3){% if self_review %}, self-review them (Step 4){% endif %}, push, and return to the completion bar.
+3. Run Step 6: a conflict with the default branch is resolved before the review comments, which may be about code the merge moves. Then implement the changes (Step 3){% if self_review %}, self-review them (Step 4){% endif %}, push, and return to the completion bar.
 
 ## Follow-up issues
 
