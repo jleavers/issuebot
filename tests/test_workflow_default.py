@@ -178,3 +178,30 @@ def test_after_create_unshallows_a_shallow_clone() -> None:
     assert hook is not None
     assert "git rev-parse --is-shallow-repository" in hook
     assert "git fetch --unshallow" in hook
+
+
+def test_keeps_the_branch_mergeable(make_issue: Callable[..., Issue]) -> None:
+    """Sibling sessions fork from the same default branch, so the second PR to land conflicts.
+
+    The prompt merges the default branch in before the push, reads the PR's mergeability
+    back after it, and does both again on every revisit, a rework included. Merge, never
+    rebase: a rebase of a pushed branch needs the force-push ground rule 6 forbids.
+    """
+    workflow = load()
+    renderer = PromptRenderer(workflow.prompt_template)
+    repo = workflow.config.github.repo
+    fresh = renderer.render(context(workflow, dispatched(make_issue)))
+    rework = renderer.render(
+        context(workflow, dispatched(make_issue, linked_pr=PR), attempt=2, rework=True)
+    )
+    for text in (fresh, rework):
+        # Step 5: the default branch is merged in before the push, not after the reviewer asks.
+        assert "git merge origin/HEAD" in text
+        # Step 6: the answer GitHub computes, polled until it stops reading UNKNOWN.
+        assert f"gh pr view <number> -R {repo} --json mergeable --jq .mergeable" in text
+        assert "CONFLICTING" in text
+        assert "UNKNOWN" in text
+        # And the bar the label command waits for.
+        assert "reads `MERGEABLE`" in text
+    # A rework addresses the conflict before the comments, which may be about code it moves.
+    assert "before the review comments" in rework
