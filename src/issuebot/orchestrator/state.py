@@ -52,6 +52,18 @@ def pr_url(issue: Issue) -> str | None:
     return issue.linked_pr.url if issue.linked_pr is not None else None
 
 
+def conflict_candidate(issue: Issue) -> bool:
+    """A review issue whose open pull request GitHub reports as conflicting (spec §3)."""
+    pr = issue.linked_pr
+    return (
+        issue.state is StateLabel.REVIEW
+        and issue.dispatchable
+        and pr is not None
+        and pr.state == "open"
+        and pr.mergeable == "conflicting"
+    )
+
+
 def claimed_snapshot(issue: Issue, labels: GitHubLabels) -> Issue:
     """The issue after ``claim``: state labels replaced, markers dropped, the rest kept."""
     dropped = {name.lower() for name in (*labels.as_tuple(), *labels.markers())}
