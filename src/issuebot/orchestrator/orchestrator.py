@@ -900,6 +900,15 @@ class Orchestrator:
                 entry.stop("stalled", f"no activity for {elapsed:.0f} s")
 
     async def _refresh_running(self) -> None:
+        """Re-read the issues this worker is running, to notice moves and closures.
+
+        Deliberately not counted towards the GitHub hold (#88), even though this read fails in
+        an outage too. The hold is about whether the board can be *claimed from*, and that is
+        the poll's question: a poll that fails offers nothing to claim, and a poll that answers
+        means the board is readable whatever this one did. Counting both into one threshold
+        would make "three in a row" mean two different things and could hold dispatch while the
+        poll is answering perfectly well.
+        """
         ids = list(self._running)
         try:
             refreshed = await self._adapter.fetch_issues_by_ids(ids)

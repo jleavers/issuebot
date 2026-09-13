@@ -290,6 +290,9 @@ floor, not the shipped version, and moves by hand.
   Nothing skips `_dispatch_candidates` for it, unlike the auth hold: the claim comes from the
   poll, so a failed poll offers nothing to claim, and the reported hold is therefore always
   derived from a fetch that failed on that very tick rather than from a remembered verdict.
+  `_refresh_running`'s failures are not counted, though they fail in an outage too: the hold is
+  about whether the board can be claimed from, which is the poll's question, and one threshold
+  over two call sites would mean two different things.
   First-party evidence that *this* worker cannot read the board, so it needs nobody to declare
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
