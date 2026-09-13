@@ -70,6 +70,7 @@ def issue_from_node(node: Mapping[str, Any], *, repo: str, labels: GitHubLabels)
         number=number,
         title=title,
         body=body if isinstance(body, str) and body else None,
+        author=_login(node.get("author")),
         github_state=github_state,
         state=state,
         state_labels=state_labels,
@@ -116,6 +117,12 @@ def _label_names(connection: Any) -> tuple[str, ...]:
             if lowered not in seen:
                 seen.append(lowered)
     return tuple(seen)
+
+
+def _login(actor: Any) -> str | None:
+    """The login of one ``Actor`` node; ``None`` for a deleted account (GitHub sends null)."""
+    login = actor.get("login") if isinstance(actor, Mapping) else None
+    return login if isinstance(login, str) and login else None
 
 
 def _logins(connection: Any) -> tuple[str, ...]:

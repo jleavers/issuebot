@@ -50,6 +50,7 @@ class Issue:
     number: int
     title: str
     body: str | None
+    author: str | None  # the login that opened it; None once GitHub has deleted the account
     github_state: GitHubState
     state: StateLabel | None
     state_labels: tuple[str, ...]
