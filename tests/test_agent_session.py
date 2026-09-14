@@ -127,10 +127,14 @@ class Harness:
         max_turns: int = 3,
         template: str = TEMPLATE,
         hooks: dict[str, str] | None = None,
+        token: str | None = None,
     ) -> None:
+        github: dict[str, object] = {"repo": "example/repo"}
+        if token is not None:
+            github["token"] = token
         self.settings = Settings.model_validate(
             {
-                "github": {"repo": "example/repo"},
+                "github": github,
                 "workspace": {"root": str(tmp_path / "workspaces")},
                 "agent": {"max_turns": max_turns},
                 "hooks": hooks or {},
@@ -467,6 +471,19 @@ async def test_before_run_failure_is_hook_error(tmp_path: Path) -> None:
     assert result.error is not None
     assert "exit status 4" in result.error
     assert runner.calls == []
+
+
+async def test_a_hooks_stderr_is_scrubbed_before_it_becomes_the_runs_error(tmp_path: Path) -> None:
+    """A hook runs with the token in its environment (#91): what it prints on the way out is
+    masked where the HookResult is built, so RunEnded.error never carries it."""
+    hook = 'echo "token $GH_TOKEN at $HOME/ws" >&2; exit 4'
+    h = Harness(tmp_path, hooks={"before_run": hook}, token="literal-token-value")
+    result = await h.run(ScriptedRunner())
+    assert result.error_category == "hook_error"
+    assert result.error == "before_run hook failed: exit status 4: token *** at ~/ws"
+    ended = h.recorder.events[-1]
+    assert isinstance(ended, RunEnded)
+    assert ended.error == "hook_error: before_run hook failed: exit status 4: token *** at ~/ws"
 
 
 async def test_workspace_failure_fails_before_any_turn(tmp_path: Path) -> None:

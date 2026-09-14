@@ -18,8 +18,10 @@ from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
+from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
     StatsView,
+    _deployment_scrubber,
     _turn_capture,
     main,
     not_runnable,
@@ -2400,7 +2402,10 @@ def test_the_sink_captures_turns_through_the_deployment_scrubber(tmp_path: Path)
     config = Settings.model_validate(
         {"github": {"repo": "acme/widgets", "token": "literal-token-value"}}
     )
-    capture = _turn_capture(config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"})
+    scrubber = _deployment_scrubber(
+        config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"}
+    )
+    capture = _turn_capture(scrubber)
     line = json.dumps(
         {
             "type": "result",
@@ -2412,6 +2417,19 @@ def test_the_sink_captures_turns_through_the_deployment_scrubber(tmp_path: Path)
     (turn,) = capture(tmp_path)
     assert turn.result_text == "env: GH_TOKEN=*** *** at ~/ws"
     assert "literal-token-value" not in turn.stream and "key-value-1234" not in turn.stream
+
+
+def test_worker_hands_the_orchestrator_the_deployment_scrubber(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_orchestrator: type[StubOrchestrator]
+) -> None:
+    """The blocked escape writes a log directory on the public issue; the scrubber that knows
+    the home directory is the one the worker built (#91)."""
+    monkeypatch.setenv("HOME", "/home/alice")
+    monkeypatch.setenv("SOME_API_KEY", "key-value-1234")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    scrubber = stub_orchestrator.instances[0].kwargs["scrubber"]
+    assert isinstance(scrubber, Scrubber)
+    assert scrubber.scrub("key-value-1234 at /home/alice/ws") == "*** at ~/ws"
 
 
 def test_worker_seeds_the_orchestrator_with_the_last_stored_reading(

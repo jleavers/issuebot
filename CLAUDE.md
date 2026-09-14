@@ -182,7 +182,22 @@ floor, not the shipped version, and moves by hand.
   with `stop_reason` `blocked` and the line in `RunResult.blocker`, read by `blocker_from` off
   the first non-empty line, checked after `issue_moved` and before `max_turns`);
   `classify_result` maps a turn's last result (or its absence) to an `AgentErrorCategory`,
-  `auth_failed` among them (see `issuebot.orchestrator`).
+  `auth_failed` among them (see `issuebot.orchestrator`), and builds the turn's message from
+  claude's own words: the result text, or the last line of stderr. That message is the run's
+  `error`, which leaves the workspace without passing `capture_turns` -- to `events`,
+  `runs.error`, Slack and the blocked-escape workpad block -- so it is scrubbed at the source
+  (#91): `ClaudeRunner` owns a `Scrubber.for_deployment` built from its settings and
+  environment, `classify_result` takes it as `scrubber` and masks both parts *before* the
+  500-character `_MESSAGE_LIMIT` cut (a cut inside a credential leaves a fragment the shapes
+  no longer recognise), `finish` scrubs every `TurnResult.error` and `result_text` (the
+  `BLOCKED:` line is read off the latter), and `_Emitter` scrubs `TurnEvent.detail` before
+  its own debug line. A runner built without settings, and `classify_result` called bare, use
+  `DEFAULT_SCRUBBER` (`scrub.py`), the shapes alone. The turn files on disk stay claude's
+  bytes; `capture_turns` is their step. A hook's output takes the same exit -- its last
+  stderr line is `HookResult.summary`, which `before_run hook failed: ...` quotes into the
+  run's error -- and a hook runs with the token in its environment, so `WorkspaceManager`
+  owns the same `Scrubber.for_deployment` and scrubs both tails where the `HookResult` is
+  built, before the cut that keeps their end.
   `budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
   caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
   same session with a fresh ledger. Failing there would end the run, and the retry after it
@@ -200,7 +215,8 @@ floor, not the shipped version, and moves by hand.
   process's environment, so the `run_turns` rows, the dashboard's raw `text/plain` views and
   the committed fixture are all this function's output and never the file (a failed turn's
   `error`, built from claude's words too, takes another exit to `runs`, Slack and the
-  workpad: #91). `scrub.py`: `Scrubber(secrets=, home=)` masks known values as whole words
+  workpad, and is scrubbed where it is built: #91, above). `scrub.py`: `Scrubber(secrets=,
+  home=)` masks known values as whole words
   (`***`; a floor of `MIN_SECRET_LENGTH`, 12, since the compose default's database password
   is the eight letters of `issuebot` and the DSN shape masks it in DSN form without every
   label and repository in the stream going too; an all-digit value is skipped, since a JSON
@@ -213,8 +229,11 @@ floor, not the shipped version, and moves by hand.
   `~/.claude/projects/-home-alice-ws/`); scrubbing is idempotent.
   `Scrubber.for_deployment(settings, environ)` collects `github.token`, the `database.url`
   password, `notifications.slack.webhook_url`, every environment variable whose name ends
-  like a secret, and `HOME`; `cli._turn_capture` binds it into the sink's `capture` and logs
-  `turn_scrubber` with the count, never a value. The default carries the shapes alone, so no
+  like a secret, and `HOME`; `cli._deployment_scrubber` builds it once per command, logs
+  `turn_scrubber` with the count, never a value, and hands it to the sink's `capture`
+  (`_turn_capture`), to `PostgresSink` for `log_dir` and to the `Orchestrator` for the
+  blocked escape (#91, below); each session's `ClaudeRunner` builds its own from the same
+  settings and environment. The default carries the shapes alone, so no
   caller can get the raw file back. The prompt, stderr and result caps run after scrubbing,
   so none can leave the edge of a credential; the stream's caps are whole-line and run on
   the raw bytes first; the `*_bytes` counts still report the files on disk. Session ids are
@@ -251,7 +270,14 @@ floor, not the shipped version, and moves by hand.
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is
   published before any release; `max_turns` or `blocked` while `in_progress`, or `max_attempts`
   failures → the blocked escape, a `blocked` stop's block carrying the agent's own `BLOCKED:`
-  line; no retry, since an external blocker does not clear by retrying).
+  line; no retry, since an external blocker does not clear by retrying). `_escape` scrubs
+  the `BlockedContext`'s `reason` and `log_dir` through the orchestrator's `scrubber` (a
+  constructor argument, `DEFAULT_SCRUBBER` unless `cli` passes the deployment's) before
+  `blocked_escape` writes them on the public issue (#91): the reason quotes the run's error,
+  already scrubbed at its source, but the log directory names the operator's home, which only
+  the deployment's scrubber reads as `~`. `_after_failure` scrubs its `error` once on entry
+  for the same reason: a `worker crashed: <exc>` names whatever the exception did, and the
+  retry it schedules carries the message into the snapshot's `retrying` rows.
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
   that session's model.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
@@ -391,7 +417,10 @@ floor, not the shipped version, and moves by hand.
   into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
   with backoff and retries the item in flight; a `run_ended` item's turn files are captured
   once, in a thread, before its first write attempt (`db_turns_captured`,
-  `db_turns_capture_failed`); statement failures are dropped and counted; `close()` drains for
+  `db_turns_capture_failed`), and then its `log_dir` is scrubbed (`scrubber=`, the
+  deployment's from `cli`) so `runs.log_dir` and the event's payload, which the dashboard's
+  issue page renders, carry the home directory as `~` while the capture read the real path
+  (#91); statement failures are dropped and counted; `close()` drains for
   up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
   callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload -- every worker
   wakes -- or one matching its own repository, logs another repository's at debug

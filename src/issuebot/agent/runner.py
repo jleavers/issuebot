@@ -9,7 +9,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol
 from pydantic import SecretStr
 
 from issuebot.agent.errors import AgentErrorCategory
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.config import Settings
 from issuebot.log import get_logger
 
@@ -534,7 +535,11 @@ def is_auth_failure(*texts: str | None) -> bool:
 
 
 def classify_result(
-    result: dict[str, Any] | None, exit_code: int | None, stderr_tail: str
+    result: dict[str, Any] | None,
+    exit_code: int | None,
+    stderr_tail: str,
+    *,
+    scrubber: Scrubber = DEFAULT_SCRUBBER,
 ) -> tuple[AgentErrorCategory | None, str | None]:
     """Map the final result (or its absence) and the exit code to a failure category.
 
@@ -542,8 +547,14 @@ def classify_result(
     problem (#20), and reports its last line; a result's own text is read for one only when
     the subtype says claude failed, because a "success" result carries the agent's final
     message, which may discuss API keys without one having failed.
+
+    The message is built from claude's own words, and it leaves the workspace without passing
+    ``capture_turns`` (#91): it becomes the run's ``error``, which reaches the ``events`` and
+    ``runs`` tables, Slack and the blocked-escape workpad block. So both parts go through
+    ``scrubber`` here, and *before* the ``_MESSAGE_LIMIT`` cut, since a cut that lands inside
+    a credential would leave a fragment the shapes no longer recognise.
     """
-    stderr_line = _last_line(stderr_tail)
+    stderr_line = _capped(scrubber.scrub(_last_line(stderr_tail)))
     auth = is_auth_failure(stderr_tail)
     if result is None:
         message = f"claude exited with status {exit_code} before reporting a result"
@@ -551,7 +562,7 @@ def classify_result(
         return category, _with_tail(message, stderr_line)
     subtype = _string(result.get("subtype")) or ""
     is_error = bool(result.get("is_error"))
-    text = _result_text(result)
+    text = _capped(scrubber.scrub(_result_text(result)))
     if subtype == "error_max_budget_usd":
         return "budget_exceeded", text or "claude stopped at the --max-budget-usd cap"
     if is_error or subtype != "success":
@@ -572,12 +583,17 @@ def _with_tail(message: str, tail: str) -> str:
 
 
 def _result_text(result: dict[str, Any]) -> str:
+    """The result's own text, uncapped: the cap runs after the scrub (see ``classify_result``)."""
     text = _string(result.get("result"))
     if not text:
         errors = result.get("errors")
         if isinstance(errors, list):
             text = "; ".join(str(item) for item in errors)
-    return (text or "")[:_MESSAGE_LIMIT]
+    return text or ""
+
+
+def _capped(text: str) -> str:
+    return text[:_MESSAGE_LIMIT]
 
 
 def _string(value: object) -> str | None:
@@ -630,6 +646,11 @@ class ClaudeRunner:
         self._root = settings.workspace.root.resolve()
         self._environ = dict(os.environ if environ is None else environ)
         self._timeout_s = settings.claude.turn_timeout_ms / 1000
+        # The runner is built from the settings that hold the token and under the environment
+        # the scrubber reads, so it owns the scrubber and masks at the source (#91): every
+        # ``TurnResult.error`` and ``result_text``, and every ``TurnEvent.detail``, rather than
+        # each sink they reach.
+        self._scrubber = Scrubber.for_deployment(settings, self._environ)
         self._log = get_logger(__name__)
 
     def build_argv(self, *, session_id: str, resume: bool) -> list[str]:
@@ -679,12 +700,15 @@ class ClaudeRunner:
         stdout_path = log_dir / f"turn-{turn_number}.jsonl"
         stderr_path = log_dir / f"turn-{turn_number}.stderr.log"
         parser = StreamParser(turn_number=turn_number, expected_session_id=session_id)
-        emit = _Emitter(observer, self._log)
+        emit = _Emitter(observer, self._log, self._scrubber)
         started = time.monotonic()
 
         def finish(
             category: AgentErrorCategory | None, error: str | None, exit_code: int | None
         ) -> TurnResult:
+            # `classify_result` has scrubbed its own message already; the runner's own
+            # messages (a path, an OSError) have not. Scrubbing is idempotent.
+            error = self._scrub(error)
             result = parser.result or {}
             usage = result.get("usage")
             usage = usage if isinstance(usage, dict) else {}
@@ -704,7 +728,7 @@ class ClaudeRunner:
                 cost_usd=_float(result.get("total_cost_usd")),
                 duration_ms=_int(result.get("duration_ms")),
                 permission_denials=len(result.get("permission_denials") or []),
-                result_text=_string(result.get("result")),
+                result_text=self._scrub(_string(result.get("result"))),
                 error_category=category,
                 error=error,
                 stdout_path=stdout_path,
@@ -803,7 +827,9 @@ class ClaudeRunner:
 
         emit(_event("process_exit", parser, detail=str(exit_code)))
         if category is None:
-            category, error = classify_result(parser.result, exit_code, _stderr_tail(stderr_path))
+            category, error = classify_result(
+                parser.result, exit_code, _stderr_tail(stderr_path), scrubber=self._scrubber
+            )
         if category is None:
             emit(_event("turn_completed", parser, detail=parser.model))
         elif category == "turn_timeout":
@@ -811,6 +837,9 @@ class ClaudeRunner:
         else:
             emit(_event("turn_failed", parser, detail=error))
         return finish(category, error, exit_code)
+
+    def _scrub(self, text: str | None) -> str | None:
+        return None if text is None else self._scrubber.scrub(text)
 
     async def _read_stream(
         self,
@@ -861,13 +890,22 @@ class ClaudeRunner:
 
 
 class _Emitter:
-    """Logs every turn event and hands it to the observer, isolating observer failures."""
+    """Logs every turn event and hands it to the observer, isolating observer failures.
 
-    def __init__(self, observer: TurnObserver | None, log: Any) -> None:
+    ``detail`` is scrubbed on the way through: a failed turn's carries the error message,
+    which is claude's words (#91), and the log line below is the first place it lands.
+    """
+
+    def __init__(
+        self, observer: TurnObserver | None, log: Any, scrubber: Scrubber = DEFAULT_SCRUBBER
+    ) -> None:
         self._observer = observer
         self._log = log
+        self._scrubber = scrubber
 
     def __call__(self, event: TurnEvent) -> None:
+        if event.detail is not None:
+            event = replace(event, detail=self._scrubber.scrub(event.detail))
         self._log.debug(
             "claude_turn_event",
             kind=event.kind,
@@ -921,6 +959,6 @@ def _stderr_tail(path: Path) -> str:
 
 
 def _last_line(text: str) -> str:
-    """The last non-blank line of a tail, capped: the part worth putting in a message."""
+    """The last non-blank line of a tail, uncapped: the part worth putting in a message."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[-1][:_MESSAGE_LIMIT] if lines else ""
+    return lines[-1] if lines else ""
