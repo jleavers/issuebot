@@ -2718,8 +2718,9 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
     probed: list[str] = []
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
-    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe", lambda accounts, environ: probed.extend(accounts) or []
+    )
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     # One account and three concurrent sessions is the sharing #121 is about, so it warns.
@@ -2770,8 +2771,9 @@ def test_validate_reports_a_pool_of_session_accounts(
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
     probed: list[str] = []
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
-    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe", lambda accounts, environ: probed.extend(accounts) or []
+    )
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert (
@@ -2791,8 +2793,7 @@ def test_validate_fails_a_pool_with_no_credential_in_the_environment(
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
-    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: a pool of session accounts needs a credential" in out
@@ -2804,14 +2805,15 @@ def test_validate_fails_when_the_worker_cannot_give_a_workspace_to_the_account(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
     monkeypatch.setattr(
-        "issuebot.cli._group_complaint",
-        lambda account: f"this process is not a member of {account}'s group (gid 1001)",
+        "issuebot.cli._run_as_probe",
+        lambda accounts, environ: [
+            f"this process is not a member of {a}'s group (gid 1001)" for a in accounts
+        ],
     )
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] agent.run_as: agent: this process is not a member of agent's group" in out
+    assert "[FAIL] agent.run_as: this process is not a member of agent's group" in out
 
 
 def test_validate_warns_when_a_pool_is_smaller_than_the_concurrency(
@@ -2820,8 +2822,7 @@ def test_validate_warns_when_a_pool_is_smaller_than_the_concurrency(
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
-    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "fewer than agent.max_concurrent_agents (3): dispatch is capped by the pool" in out
@@ -2834,10 +2835,11 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
     monkeypatch.setattr(
         "issuebot.cli._run_as_probe",
-        lambda user, environ: f"cannot run as {user!r}: sudo: a password is required",
+        lambda accounts, environ: [
+            f"cannot run as {a!r}: sudo: a password is required" for a in accounts
+        ],
     )
-    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] agent.run_as: agent: cannot run as 'agent': sudo: a password is required" in out
+    assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
     assert "15 checks: 1 failed, 1 warnings" in out

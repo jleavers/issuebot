@@ -863,13 +863,13 @@ that matters on your host.
 - **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
   (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
   worker (`issuebot`, uid 1000) that supervises and credentials it (#75), and -- with a pool
-  configured, see "One account per concurrent session" below -- at a different uid from every
-  other session running beside it (#121). So the session runs
+  configured, see "One account per concurrent session" under step 2 -- at a different uid from
+  every other session running beside it (#121). So the session runs
   with no permission prompts and may do as it likes at its own uid, but the worker's code
   (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
   in a hub checkout the dashboard password), its home and the state it keeps inside a
   workspace are all out of the session's reach, and the worker cannot become root or anything
-  but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
+  but a session account. `GH_TOKEN` is the one credential the session is given, since it clones and
   pushes with it, which is why the token should be scoped to the repository. The session's
   login is its own, in `/home/agent/.claude`. The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and

@@ -10,11 +10,14 @@ from pathlib import Path
 import pytest
 
 from issuebot.agent.accounts import (
+    SEALED_DIR_MODE,
     WORKSPACE_DIR_MODE,
     AccountRegistry,
     account_gid,
     credential_complaint,
     group_complaint,
+    pool_complaint,
+    seal,
     session_account,
     settings_with_run_as,
     share_with,
@@ -176,3 +179,50 @@ def test_a_record_that_will_not_read_is_reported_rather_than_ignored(tmp_path: P
     (tmp_path / ".issuebot" / "accounts.json").write_text(json.dumps({"version": 1}))
     with pytest.raises(AgentError, match="not a mapping"):
         registry(tmp_path).bound("a")
+
+
+def _two_accounts_sharing_a_group() -> tuple[str, str] | None:
+    """Two real accounts with one primary group, or None on a host that has no such pair."""
+    by_gid: dict[int, str] = {}
+    for entry in pwd.getpwall():
+        first = by_gid.setdefault(entry.pw_gid, entry.pw_name)
+        if first != entry.pw_name:
+            return first, entry.pw_name
+    return None
+
+
+def test_a_pool_whose_accounts_share_a_primary_group_walls_nothing_off() -> None:
+    """`useradd -g agents` for every member is an easy way to build a pool that separates
+    nothing, since the group is what `share_with` opens a directory to (#121)."""
+    assert pool_complaint([ME]) is None
+    with pytest.raises(AgentError, match="no account named"):
+        pool_complaint([ME, "no-such-account-x"])
+    pair = _two_accounts_sharing_a_group()
+    if pair is None:  # pragma: no cover - every distribution this runs on has one
+        pytest.skip("no two accounts on this host share a primary group")
+    complaint = pool_complaint(list(pair))
+    assert complaint is not None and "share a primary group" in complaint
+
+
+def test_an_idle_workspace_is_closed_to_every_account(tmp_path: Path) -> None:
+    """A workspace outlives its run, and there are fewer accounts than workspaces, so an open
+    idle one would eventually sit beside a session running as the same account (#121)."""
+    path = tmp_path / "ws"
+    path.mkdir()
+    share_with(path, ME)
+    assert stat.S_IMODE(path.stat().st_mode) == WORKSPACE_DIR_MODE
+    seal(path)
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+    assert not SEALED_DIR_MODE & (stat.S_IRWXG | stat.S_IRWXO)
+    # Never raises: this runs on the way out of a run.
+    seal(tmp_path / "gone")
+
+
+def test_two_writers_do_not_lose_a_binding(tmp_path: Path) -> None:
+    """`run-once` is the operator's debugging tool and may run beside a live worker, so the
+    read-modify-write is locked rather than racy."""
+    first, second = registry(tmp_path), registry(tmp_path)
+    assert first.allocate("a") == "agent-1"
+    assert second.allocate("b") == "agent-2"
+    assert first.bindings() == {"a": "agent-1", "b": "agent-2"}
+    assert (tmp_path / ".issuebot" / "accounts.lock").is_file()

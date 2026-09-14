@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -16,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, get_args
 
-from issuebot.agent.accounts import REGISTRY_DIR, session_account, share_with
+from issuebot.agent.accounts import REGISTRY_DIR, seal, session_account, share_with
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
@@ -147,9 +148,10 @@ class WorkspaceManager:
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
         if path.name == REGISTRY_DIR:
-            # The worker keeps its account bindings there (#121), and a workspace is removed
-            # wholesale. No real identifier sanitises to it -- every one carries a `/` and a
-            # `#`, so it is hashed -- but the record is not something to lose to a near miss.
+            # The worker keeps its account bindings there (#121), and a workspace is
+            # removed wholesale. Load-bearing rather than belt-and-braces: an identifier is
+            # `<repo>-<number>`, which needs no sanitising, so a repository named `.issuebot`
+            # would otherwise put a workspace exactly where the record lives.
             raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
@@ -222,11 +224,44 @@ class WorkspaceManager:
             return False
         if self._runas is None:
             return True
-        return all(_owned_by_me(p) for p in (path, state, state / "runs", state / CREATED_MARKER))
+        if not all(_owned_by_me(p) for p in (path, state, state / "runs", state / CREATED_MARKER)):
+            return False
+        # And the clone has to belong to the account that will work in it (#121). A binding
+        # that moved -- the pool shrank, the setting changed -- leaves a tree the new account
+        # cannot write, and git would fail every command rather than say so: re-clone instead.
+        return _owned_by(path / ".git", self._account)
 
     def _share(self, path: Path) -> None:
         if self._account is not None:
             share_with(path, self._account)
+
+    def seal(self, path: Path) -> None:
+        """Close a workspace the run has finished with (#121).
+
+        A workspace outlives its run -- an issue in ``review`` keeps its clone for days -- and
+        there are fewer accounts than workspaces, so an idle one that stayed open would
+        eventually sit beside a session running as the same account. Sealed, nothing but the
+        worker can traverse into it, and the next dispatch opens it again for its own account.
+        Never raises: this runs on the way out of a run.
+        """
+        if self._account is not None:
+            seal(path)
+
+    def seal_idle(self) -> None:
+        """Seal every workspace under the root: what a worker does before it claims anything.
+
+        A run's own seal is in its ``finally``, so the only way one stays open is a worker that
+        was killed outright. Startup is where that is put right, since nothing is running yet.
+        """
+        if self._account is None:
+            return
+        try:
+            children = list(self.root.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if child.name != REGISTRY_DIR and child.is_dir() and _owned_by_me(child):
+                seal(child)
 
     def _make_state_dir(self, path: Path) -> None:
         state = path / ".issuebot"
@@ -271,6 +306,10 @@ class WorkspaceManager:
         path = self.path_for(identifier)
         if not path.exists():
             return False
+        # Open again: `before_remove` runs as the account and the delegated unlink is its own,
+        # and a workspace reaching this is a sealed one nine times in ten (#121).
+        with contextlib.suppress(AgentError):
+            self._share(path)
         await self.run_hook("before_remove", path)
         await self._remove_tree(path, "cannot remove workspace")
         self._log.info("workspace_removed", workspace=str(path))
@@ -467,6 +506,16 @@ def _owned_by_me(path: Path) -> bool:
     try:
         return path.lstat().st_uid == os.getuid()
     except OSError:
+        return False
+
+
+def _owned_by(path: Path, account: str | None) -> bool:
+    """True when ``path`` belongs to ``account``; False when either cannot be resolved."""
+    if account is None:
+        return True
+    try:
+        return path.lstat().st_uid == pwd.getpwnam(account).pw_uid
+    except OSError, KeyError:
         return False
 
 

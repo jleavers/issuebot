@@ -30,6 +30,8 @@ from issuebot.agent import (
 from issuebot.agent.accounts import (
     AccountRegistry,
     credential_complaint,
+    group_complaint,
+    pool_complaint,
     session_account,
     settings_with_run_as,
 )
@@ -105,6 +107,9 @@ GITHUB_STATUS_DEADLINE_S = 10.0
 # `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
 # the probe's verdict).
 GITHUB_HOLD_KEY = "github"
+# And the same for the account registry (#121): one unreadable record, however the
+# complaint is worded from tick to tick.
+ACCOUNTS_HOLD_KEY = "accounts"
 # How much of `gh`'s complaint the hold's reason carries. Neither `gh`'s stderr nor GitHub's
 # GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
 MAX_HOLD_ERROR_CHARS = 300
@@ -119,12 +124,31 @@ class ClaudeAuthProbe(Protocol):
 
 
 class RunAsProbe(Protocol):
-    def __call__(self, user: str, environ: Mapping[str, str], /) -> str | None: ...
+    def __call__(self, accounts: Sequence[str], environ: Mapping[str, str], /) -> list[str]: ...
 
 
-def probe_run_as(user: str, environ: Mapping[str, str]) -> str | None:
-    """None when the worker can run a command as ``user`` (#75), else why not."""
-    return RunAs(user).probe(agent_environment(environ, token=None))
+def probe_run_as(accounts: Sequence[str], environ: Mapping[str, str]) -> list[str]:
+    """Every reason these accounts cannot be the sessions' own (#75, #121), or ``[]``.
+
+    Three questions, and the first that fails is the one worth reporting: can the worker run a
+    command as the account at all, can it give a workspace to that account's group, and -- for
+    a pool -- do the accounts have groups of their own, without which each could enter the
+    others' workspaces. The account is named only when there is more than one, since a single
+    account's own error already says which it is.
+    """
+    env = agent_environment(environ, token=None)
+    problems = []
+    for account in accounts:
+        error = RunAs(account).probe(env) or group_complaint(account)
+        if error is not None:
+            problems.append(f"{account}: {error}" if len(accounts) > 1 else error)
+    if problems:
+        return problems
+    try:
+        shared = pool_complaint(accounts)
+    except AgentError as exc:
+        return [exc.message]
+    return [] if shared is None else [shared]
 
 
 # githubstatus.com's summary body, or None. A seam for the same reason: no test reaches the
@@ -320,6 +344,10 @@ class Orchestrator:
         # dispatch (None while they do not), and the status page's annotation on it, read once
         # when the hold engages rather than on every poll.
         self._fetch_failures = 0
+        # The account registry of #121: why this tick could not bind a workspace to an account,
+        # which is a hold rather than a silent skip -- without it `issuebot status`, the
+        # dashboard and `/healthz` would all read as healthy while nothing was ever claimed.
+        self._accounts_block: str | None = None
         self._github_block: str | None = None
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
@@ -403,10 +431,11 @@ class Orchestrator:
                 problems.append(f"labels missing: {names}; run issuebot labels ensure")
         # The boundary the deployment asked for has to exist before an issue is claimed
         # (#75): a delegation that does not work would fail every run instead.
-        for account in settings.agent.run_as:
-            error = await asyncio.to_thread(self._run_as_probe, account, self._environ)
-            if error is not None:
-                problems.append(f"agent.run_as: {error}")
+        if settings.agent.run_as:
+            unusable = await asyncio.to_thread(
+                self._run_as_probe, settings.agent.run_as, self._environ
+            )
+            problems.extend(f"agent.run_as: {error}" for error in unusable)
         # A pool shares no login between its accounts on purpose (#121), so the credential has
         # to be one `claude` needs no file for. Refusing here rather than per run: every
         # session would fail to authenticate, which is #17's rule for a definite logged-out.
@@ -421,6 +450,10 @@ class Orchestrator:
             self._log.warning("orchestrator_startup_warning", claude_auth=auth.detail)
         if problems:
             self._startup_failed(problems)
+        # Nothing is running, so every workspace on disk is idle: a worker that was killed
+        # outright could have left one open to its account (#121). Close them all; the next
+        # dispatch opens the one it needs.
+        self._workspaces.seal_idle()
         self._log.info(
             "orchestrator_started",
             claude_auth=auth.detail,
@@ -672,10 +705,12 @@ class Orchestrator:
         One place decides, and it decides after the fetch, because the snapshot carries a
         single hold whose ``since`` has to survive a tick that re-derives the same reason:
         releasing and re-holding would restart the clock on a hold that never lifted.
-        ``preflight`` and ``auth`` outrank ``github`` -- both name something the operator can
-        fix on this host, and a ``gh`` that will not run is why the fetch failed rather than a
-        second, independent fault.
+        ``preflight`` and ``auth`` outrank ``accounts`` and ``github`` -- all three name
+        something the operator can fix on this host, and a ``gh`` that will not run is why the
+        fetch failed rather than a second, independent fault.
         """
+        if hold is None and self._accounts_block is not None:
+            hold = _Hold("accounts", self._accounts_block, key=ACCOUNTS_HOLD_KEY)
         if hold is None and self._github_block is not None:
             hold = _Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
         if hold is None:
@@ -826,6 +861,9 @@ class Orchestrator:
         await self._fetch_issues()
 
     async def _dispatch_candidates(self) -> int:
+        # Cleared here and set by `_bind_account`, so the hold is this tick's answer: a tick
+        # with nothing to claim holds nothing, whatever the last one found (#121).
+        self._accounts_block = None
         issues = await self._fetch_issues()
         if issues is None:
             return 0
@@ -896,6 +934,9 @@ class Orchestrator:
         try:
             account = self._pool.bound(key) or self._pool.allocate(key, busy=busy)
         except AgentError as exc:
+            # A record that will not read is not "busy": it stops every candidate, so it holds
+            # dispatch and says so rather than leaving a healthy-looking worker idle (#121).
+            self._accounts_block = exc.message
             self._log.warning("account_bind_failed", issue_number=issue.number, error=exc.message)
             return None, False
         if account is None or account in busy:
@@ -1475,7 +1516,7 @@ class Orchestrator:
                 entry,
                 kind="slots",
                 delay_ms=settings.polling.interval_ms,
-                error="the workspace's session account is busy",
+                error=self._accounts_block or "the workspace's session account is busy",
             )
             return
         attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1

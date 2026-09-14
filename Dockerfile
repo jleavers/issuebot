@@ -249,9 +249,9 @@ ENV LANG=C.UTF-8 \
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
- && test "$(sudo -n -u agent-1 id -u)" = 1011 \
  && sudo -n -H -u agent claude --version \
- && sudo -n -H -u agent-1 claude --version
+ && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \
+      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; }
 
 WORKDIR /app
 # Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind

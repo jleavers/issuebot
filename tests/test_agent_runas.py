@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.agent.accounts import WORKSPACE_DIR_MODE
+from issuebot.agent.accounts import SEALED_DIR_MODE, WORKSPACE_DIR_MODE
 from issuebot.agent.runas import MODULE, RunAs, RunAsError
 from issuebot.agent.runner import ClaudeRunner
 from issuebot.agent.workspace import WorkspaceManager
@@ -210,18 +210,49 @@ async def test_workspace_creation_and_removal_run_as_the_account(
     commands = [c["command"][c["command"].index("--") + 1 :] for c in calls]
     assert commands[0][:3] == ["gh", "repo", "clone"], commands
     assert all(c["u"] == ME for c in calls)
-    # Reuse, then removal: the account's files go through the helper, the worker's own after.
-    # Reuse re-applies the mode and the group (#121), so a workspace whose bound account
-    # changed is one its own session can still enter.
-    ws.path.chmod(0o1777)
-    (ws.path / ".issuebot").chmod(0o1777)
+    # A finished run seals the workspace: it stays on disk for the next dispatch but is closed
+    # to every account until then (#121).
+    manager.seal(ws.path)
+    assert stat.S_IMODE(ws.path.stat().st_mode) == SEALED_DIR_MODE
+    # Reuse opens it again, and re-applies the group as well as the mode, so a workspace whose
+    # bound account changed is not left open to the previous one.
     again = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert not again.created
     for shared in (ws.path, state):
         assert stat.S_IMODE(shared.stat().st_mode) == WORKSPACE_DIR_MODE
+    # A clone owned by another account is a remnant, not a workspace to reuse: git would fail
+    # every command in it rather than say so.
+    manager.seal(ws.path)
+    manager.seal_idle()
+    assert stat.S_IMODE(ws.path.stat().st_mode) == SEALED_DIR_MODE
     assert await manager.remove("example-42") is True
     assert not ws.path.exists()
     assert [c["command"][-2] for c in calls[len(commands) :]] == [] or any(
         "remove" in c["command"]
         for c in [json.loads(line) for line in record.read_text().splitlines()]
     )
+
+
+def test_a_clone_owned_by_another_account_is_not_a_workspace_to_reuse(tmp_path: Path) -> None:
+    """A binding that moved -- the pool shrank, the setting changed -- leaves a tree the new
+    account cannot write, and git would fail every command in it rather than say so (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    state = path / ".issuebot"
+    (state / "runs").mkdir(parents=True)
+    (state / "created").touch()
+
+    def manager_for(account: str) -> WorkspaceManager:
+        cfg = Settings.model_validate(
+            {
+                "github": {"repo": "example/repo"},
+                "workspace": {"root": str(root)},
+                "agent": {"run_as": account},
+            }
+        )
+        return WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+
+    assert manager_for(ME)._is_complete(path)
+    # `nobody` exists everywhere this runs and is never the account the tests run as.
+    assert not manager_for("nobody")._is_complete(path)

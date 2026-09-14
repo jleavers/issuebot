@@ -13,9 +13,17 @@ the two halves of that:
   the workspace root that only the worker can write, never a fact derived from the directory.
   Deriving it would hand the choice to whoever writes the issue the key is built from, which
   is exactly the account a hostile session would want to be given.
-- **The wall.** `share_with` makes a workspace directory `1770`, owner the worker and group
-  that account's own, so the worker keeps its sticky state, the bound session works inside,
-  and a sibling session's uid cannot so much as enter. The root above it stays `0755`.
+- **The wall.** A workspace is open to exactly one account and only while that account's
+  session is running in it. `share_with` makes the directory `1770`, owner the worker and
+  group the bound account's own, so the worker keeps its sticky state and the bound session
+  works inside; `seal` puts it back to `0700` when the run ends, so nothing but the worker can
+  even traverse into an idle one. The root above it stays `0755`.
+
+  Both halves are needed, because a workspace outlives its run: an issue sitting in `review`
+  keeps its clone for days, accounts are fewer than workspaces, and without the seal a hostile
+  session would eventually be handed an account that also holds an honest, idle workspace --
+  and could rewrite the clone that issue's rework will commit and push. At most one workspace
+  per account is open at a time, since dispatch will not claim an issue whose account is busy.
 
 The worker must therefore be a member of every session account's group -- POSIX lets the
 owner of a file change its group only to one it belongs to -- which the image arranges and
@@ -23,11 +31,12 @@ owner of a file change its group only to one it belongs to -- which the image ar
 """
 
 import contextlib
+import fcntl
 import json
 import os
 import pwd
 import tempfile
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from issuebot.agent.errors import AgentError
@@ -38,9 +47,14 @@ from issuebot.log import get_logger
 # account has to be known before the clone, and a clone needs an empty directory.
 REGISTRY_DIR = ".issuebot"
 REGISTRY_FILE = "accounts.json"
+REGISTRY_LOCK = "accounts.lock"
 REGISTRY_VERSION = 1
 # Owner the worker (rwx, sticky), group the bound account (rwx), everyone else nothing.
 WORKSPACE_DIR_MODE = 0o1770
+# What an idle workspace goes back to: the worker alone, so no session can traverse into it
+# however its own account is bound. A directory nobody may enter is one whose contents' own
+# modes stop mattering, which is why this is a mode change and not a recursive chown.
+SEALED_DIR_MODE = 0o0700
 # Which environment variables carry a credential `claude` needs no file for (#121). A pool
 # refuses to run without one of them: see `credential_complaint`.
 ENV_CREDENTIAL_NAMES: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
@@ -108,7 +122,7 @@ def group_complaint(account: str) -> str | None:
         gid = account_gid(account)
     except AgentError as exc:
         return exc.message
-    if os.getuid() == 0 or gid == os.getgid() or gid in os.getgroups():
+    if os.getuid() == 0 or gid == os.getegid() or gid in os.getgroups():
         return None
     return (
         f"this process is not a member of {account}'s group (gid {gid}), "
@@ -135,6 +149,35 @@ def share_with(path: Path, account: str) -> None:
         ) from exc
 
 
+def seal(path: Path) -> None:
+    """Close ``path`` to every account but the worker's. Never raises: the caller is on its way
+    out of a run, and a directory that cannot be sealed is one the worker already cannot read,
+    which the next dispatch reports for itself."""
+    try:
+        os.chmod(path, SEALED_DIR_MODE)
+    except OSError as exc:
+        get_logger(__name__).warning("workspace_seal_failed", workspace=str(path), error=str(exc))
+
+
+def pool_complaint(accounts: Sequence[str]) -> str | None:
+    """Why this pool would not separate its sessions, or ``None``.
+
+    Two accounts sharing a primary group share every workspace bound to either of them, since
+    the group is what `share_with` opens a directory to. `useradd -g agents` is an easy way to
+    build exactly that, and it would leave a pool that validates, runs, and walls nothing off.
+    """
+    gids: dict[int, str] = {}
+    for account in accounts:
+        gid = account_gid(account)
+        first = gids.setdefault(gid, account)
+        if first != account:
+            return (
+                f"{first} and {account} share a primary group (gid {gid}), so each could enter "
+                "the other's workspaces: give every session account a group of its own"
+            )
+    return None
+
+
 class AccountRegistry:
     """The worker's record of which pool account each workspace belongs to.
 
@@ -154,6 +197,27 @@ class AccountRegistry:
     @property
     def path(self) -> Path:
         return self._root / REGISTRY_DIR / REGISTRY_FILE
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the registry's lock for a read-modify-write.
+
+        The worker is normally the only writer, but `run-once` is the operator's debugging tool
+        and may be run beside a live worker: without this the two would race and one binding
+        would be lost. An advisory lock on a file of its own, so the record itself is never the
+        thing being opened for write while another process reads it.
+        """
+        path = self.path.parent / REGISTRY_LOCK
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            handle = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise AgentError("workspace_error", f"cannot lock {path}: {exc}") from exc
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(handle)
 
     def bindings(self) -> dict[str, str]:
         """Every recorded binding whose account is still in the pool."""
@@ -175,29 +239,31 @@ class AccountRegistry:
         rather than putting two concurrent sessions back at one uid. An already-bound ``key``
         keeps its account, busy or not -- that is `bound`'s answer, and the caller checks it.
         """
-        bindings = self._load()
-        existing = bindings.get(key)
-        if existing is not None:
-            return existing
-        load = dict.fromkeys(self._accounts, 0)
-        for account in bindings.values():
-            load[account] += 1
-        free = [name for name in self._accounts if name not in busy]
-        if not free:
-            return None
-        chosen = min(free, key=lambda name: (load[name], self._accounts.index(name)))
-        bindings[key] = chosen
-        self._store(bindings)
+        with self._locked():
+            bindings = self._load()
+            existing = bindings.get(key)
+            if existing is not None:
+                return existing
+            load = dict.fromkeys(self._accounts, 0)
+            for account in bindings.values():
+                load[account] += 1
+            free = [name for name in self._accounts if name not in busy]
+            if not free:
+                return None
+            chosen = min(free, key=lambda name: (load[name], self._accounts.index(name)))
+            bindings[key] = chosen
+            self._store(bindings)
         self._log.info("account_bound", workspace_key=key, account=chosen)
         return chosen
 
     def release(self, key: str) -> None:
         """Forget ``key``'s binding, which a removed workspace no longer needs."""
-        bindings = self._load()
-        account = bindings.pop(key, None)
-        if account is None:
-            return
-        self._store(bindings)
+        with self._locked():
+            bindings = self._load()
+            account = bindings.pop(key, None)
+            if account is None:
+                return
+            self._store(bindings)
         self._log.info("account_released", workspace_key=key, account=account)
 
     def prune(self, keep: Collection[str]) -> None:
@@ -205,15 +271,17 @@ class AccountRegistry:
         load for ever. ``keep`` is the keys with a session running, whose workspace may not
         exist yet: never derived from the directory, only expired by it.
         """
-        bindings = self._load()
-        live = {
-            key: account
-            for key, account in bindings.items()
-            if key in keep or (self._root / key).is_dir()
-        }
-        if live != bindings:
+        with self._locked():
+            bindings = self._load()
+            live = {
+                key: account
+                for key, account in bindings.items()
+                if key in keep or (self._root / key).is_dir()
+            }
+            if live == bindings:
+                return
             self._store(live)
-            self._log.info("accounts_pruned", dropped=sorted(set(bindings) - set(live)))
+        self._log.info("accounts_pruned", dropped=sorted(set(bindings) - set(live)))
 
     # --- the file ---------------------------------------------------------------------
 

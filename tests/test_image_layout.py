@@ -39,11 +39,15 @@ def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() ->
 
 
 def test_ci_proves_one_session_cannot_enter_another_sessions_workspace() -> None:
-    assert "from issuebot.agent.accounts import share_with" in CI
+    assert "from issuebot.agent.accounts import seal, share_with" in CI
     assert 'test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 1011 1770"' in CI
     assert "wrote into the other session workspace" in CI
     assert "listed the other session workspace" in CI
     assert "a pool account can invoke sudo" in CI
+    # An idle workspace is closed to its own account too: it outlives the run, and there
+    # are fewer accounts than workspaces.
+    assert 'test "$(stat -c "%u %g %a" /workspaces/idle)" = "1000 1011 700"' in CI
+    assert "a session entered a sealed workspace bound to its own account" in CI
 
 
 def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:

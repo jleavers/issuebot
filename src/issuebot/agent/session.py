@@ -298,6 +298,9 @@ async def _execute(
     finally:
         await workspaces.run_hook("after_run", workspace.path)
         _save(workspaces, workspace.path, state.session_record(state.turns, state.outcome))
+        # Last, and after the hook that still needs to run inside it: the workspace stays on
+        # disk for the next dispatch but is closed to every account until then (#121).
+        workspaces.seal(workspace.path)
 
 
 async def _turn_loop(

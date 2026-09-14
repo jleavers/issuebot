@@ -87,9 +87,10 @@ the credential never lands in a home.
 - **The binding is to a workspace, not to a run.** A reworked issue is dispatched again into
   the same clone, and a different uid could not write it. `AccountRegistry` is the worker's own
   record — `<workspace.root>/.issuebot/accounts.json`, `0600` in a `0700` directory, read fresh
-  on every call so a restart sees it. `allocate` binds the least-loaded account that no session
-  is currently running as, `bound` answers without binding, and `prune` (on the terminal sweep)
-  forgets a workspace that is gone. Beside the workspaces rather than inside one, because the
+  on every call so a restart sees it, and under an advisory lock, since `run-once` is the
+  operator's debugging tool and may be run beside a live worker. `allocate` binds the
+  least-loaded account that no session is currently running as, `bound` answers without
+  binding, and `prune` (on the terminal sweep) forgets a workspace that is gone. Beside the workspaces rather than inside one, because the
   account has to be known before the clone and a clone needs an empty directory.
 
   **Never derived from the directory.** A binding computed from the workspace key would be a
@@ -99,17 +100,42 @@ the credential never lands in a home.
 
 - **Dispatch waits rather than sharing.** `_bind_account` runs before the claim, so a candidate
   whose account is busy is left on the board instead of being moved to `in-progress` to sit
-  there. Effective concurrency is therefore `min(max_concurrent_agents, pool size)`, and
-  `validate` warns when the pool is the smaller of the two.
+  there; a due retry in the same position is requeued rather than dropped, so its attempt count
+  survives. Effective concurrency is therefore `min(max_concurrent_agents, pool size)`, and
+  `validate` warns when the pool is the smaller of the two. A record that will not read is not
+  "busy": it stops every candidate, so it holds dispatch as a fourth `DispatchHold` kind
+  (`accounts`, #29) rather than leaving a worker that looks healthy and claims nothing.
 
-- **The wall.** `share_with` makes a workspace directory `1770`, owner the worker (sticky, so
-  `session.json` and `runs/` stay the worker's, as #75 established) and group the bound
-  account's own. A sibling session's uid is in neither, so it cannot enter, list or write. The
-  root above stays `0755`. POSIX lets the owner of a file change its group only to one it
-  belongs to, so the worker is a supplementary member of every session account's group; that
-  membership buys the worker nothing else, since every session home is `0700`, and the worker
-  is the more privileged side of the line in any case. `group_complaint` is the pure check
-  `validate` reports before a worker ever claims an issue.
+- **The wall.** A workspace is open to exactly one account, and only while that account's
+  session is running in it. `share_with` makes the directory `1770`, owner the worker (sticky,
+  so `session.json` and `runs/` stay the worker's, as #75 established) and group the bound
+  account's own: a sibling session's uid is in neither, so it cannot enter, list or write.
+  `seal` puts it back to `0700` when the run ends, and a worker seals every workspace at
+  startup, since the only way one stays open is a worker killed outright. The root above stays
+  `0755`.
+
+  Both halves are needed, because a workspace outlives its run. An issue sitting in `review`
+  keeps its clone for days; accounts are fewer than workspaces, so the binding is many-to-one;
+  and without the seal a hostile session would eventually be handed an account that also held
+  an honest, idle workspace, and could rewrite the clone that issue's rework will commit and
+  push — the same attack one level along. Sealed, an idle workspace is unreachable by every
+  account, so its contents' own modes stop mattering; and at most one workspace per account is
+  open at a time, since dispatch will not claim an issue whose account is busy.
+
+  POSIX lets the owner of a file change its group only to one it belongs to, so the worker is a
+  supplementary member of every session account's group; that membership buys the worker
+  nothing else, since every session home is `0700`, and the worker is the more privileged side
+  of the line in any case. `probe_run_as` asks all three questions `validate` and the worker's
+  startup report before an issue is ever claimed: can the worker run a command as the account,
+  can it give a workspace to that account's group (`group_complaint`), and do the pool's
+  accounts have groups of their own (`pool_complaint`) — two sharing one would open every
+  workspace to both.
+
+- **A clone belongs to its account.** `_is_complete` requires `<workspace>/.git` to be owned by
+  the bound account as well as requiring the worker to own the state directories, so a binding
+  that moved — the pool shrank, the setting changed, a pool was turned on over an existing
+  `/workspaces` volume — re-clones rather than handing the session a tree git will refuse every
+  command in.
 
 - **The image.** `agent-1` .. `agent-N` (uids 1011 upwards, `ISSUEBOT_AGENT_POOL_SIZE`,
   default 3) beside `agent`, all in group `agents`, and the sudo rule becomes

@@ -195,14 +195,25 @@ floor, not the shipped version, and moves by hand.
   answers without binding, and `prune` (the terminal sweep) forgets a workspace that is gone
   while keeping every key with a session running or a retry pending. The binding is *never*
   derived from the directory: one computed from the workspace key would be a binding whoever
-  opens the issue chooses. `share_with` makes a workspace `1770`, owner the worker (sticky, as
-  #75 established) and group the bound account's own, which needs the worker to be a member of
-  that group -- `group_complaint` is the pure check `validate` reports, and the image arranges
-  it with `usermod --append`. `credential_complaint` is the pool's one extra rule: the accounts
+  opens the issue chooses. A workspace is open to exactly one account and only while that
+  account's session is running in it: `share_with` makes it `1770`, owner the worker (sticky,
+  as #75 established) and group the bound account's own, and `seal` puts it back to `0700`
+  when the run ends (`session.py`'s `finally`; `WorkspaceManager.seal_idle` at startup, for a
+  worker that was killed outright; `remove` opens it again, since the unlink is the account's).
+  Both halves are needed: a workspace outlives its run, accounts are fewer than workspaces, so
+  without the seal a hostile session would eventually be handed an account holding an honest,
+  idle workspace. `_is_complete` also requires `.git` to belong to the bound account, so a
+  binding that moved re-clones rather than handing the session a tree git refuses. The `1770`
+  needs the worker to be a member of that account's group -- `group_complaint` -- and the
+  pool's accounts to have groups of their own -- `pool_complaint`, since two sharing one would
+  open every workspace to both; `probe_run_as` asks all three and the image arranges them with
+  `usermod --append`. `credential_complaint` is the pool's one extra rule: the accounts
   share no login, so the credential has to be one `claude` needs no file for
   (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, both already through
   `agent_environment`'s `PASSTHROUGH_PREFIXES`), and a pool without one fails startup and
-  `validate` rather than failing every session's authentication.
+  `validate` rather than failing every session's authentication. The record's
+  read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
+  beside a live worker.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
@@ -366,7 +377,9 @@ floor, not the shipped version, and moves by hand.
   that session's account (#121): `_bind_account` runs *before* the claim, so an issue whose
   account is busy is left on the board rather than moved to `in-progress` to wait there, and
   `_workspaces_for` narrows a terminal removal to the account that owns the files.
-  `_prune_accounts` runs on the terminal sweep.
+  `_prune_accounts` runs on the terminal sweep, and a record that will not read holds
+  dispatch as a fourth `DispatchHold` kind, `accounts` (set by `_bind_account`, cleared at the
+  top of `_dispatch_candidates` so the hold is that tick's own answer).
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's
@@ -430,8 +443,9 @@ floor, not the shipped version, and moves by hand.
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
   Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
-  builds), `auth` (`claude authentication unavailable: <the probe's detail>`) or `github`
-  (#88, below), and `since`
+  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `accounts`
+  (#121: the account registry will not read, so no workspace can be bound to a session
+  account) or `github` (#88, below), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
   one restarts it. A held worker keeps ticking, so without it `issuebot status`,
   `/api/v1/repos/<owner>/<name>/state`,
@@ -645,9 +659,9 @@ floor, not the shipped version, and moves by hand.
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
-  the uid drop through `probe_run_as` for every account in the pool (#75, #121: fails when set
-  but unusable, when the worker is not in an account's group, or when a pool has no
-  environment credential; warns when unset since the session then shares the worker's uid,
+  the uid drop, the group membership and the pool's distinct groups through `probe_run_as`
+  (#75, #121: fails when set but unusable, when the worker is not in an account's group, when
+  two accounts share one, or when a pool has no environment credential; warns when unset since the session then shares the worker's uid,
   when one account serves more than one concurrent session, and when the pool is smaller than
   `agent.max_concurrent_agents`), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),

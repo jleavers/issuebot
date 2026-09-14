@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -3023,7 +3023,9 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
 # --- agent.run_as (#75) -----------------------------------------------------------------
 
 
-def _with_run_as(h: Harness, probe: Callable[[str, Mapping[str, str]], str | None]) -> Orchestrator:
+def _with_run_as(
+    h: Harness, probe: Callable[[Sequence[str], Mapping[str, str]], list[str]]
+) -> Orchestrator:
     """The harness's orchestrator over a workflow whose session runs as `agent`."""
     workflow = load_workflow(h.path, environ={**h.environ, "ISSUEBOT_AGENT_USER": "agent"})
     assert workflow.config.agent.run_as == ("agent",)
@@ -3049,7 +3051,10 @@ async def test_startup_fails_when_the_session_account_cannot_be_established(
 ) -> None:
     h = Harness(tmp_path)
     orchestrator = _with_run_as(
-        h, lambda user, environ: f"cannot run as {user!r}: sudo: a password is required"
+        h,
+        lambda accounts, environ: [
+            f"cannot run as {account!r}: sudo: a password is required" for account in accounts
+        ],
     )
     with pytest.raises(OrchestratorStartupError) as exc:
         await orchestrator.startup()
@@ -3063,7 +3068,7 @@ async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_prob
 ) -> None:
     h = Harness(tmp_path)
     probed: list[str] = []
-    orchestrator = _with_run_as(h, lambda user, environ: probed.append(user))
+    orchestrator = _with_run_as(h, lambda accounts, environ: probed.extend(accounts) or [])
     await orchestrator.startup()
     assert probed == ["agent"]
     assert h.claude_auth_calls, "the login was probed after the account"
@@ -3078,7 +3083,7 @@ def _with_pool(
     h: Harness,
     accounts: str = "agent-1,agent-2",
     *,
-    probe: Callable[[str, Mapping[str, str]], str | None] = lambda user, environ: None,
+    probe: Callable[[Sequence[str], Mapping[str, str]], list[str]] = lambda accounts, environ: [],
     environ: Mapping[str, str] | None = None,
 ) -> Orchestrator:
     """The harness driving an orchestrator whose sessions run as a pool of accounts."""
@@ -3111,7 +3116,7 @@ def _with_pool(
 async def test_startup_probes_every_account_in_the_pool(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     probed: list[str] = []
-    orchestrator = _with_pool(h, probe=lambda user, environ: probed.append(user))
+    orchestrator = _with_pool(h, probe=lambda accounts, environ: probed.extend(accounts) or [])
     await orchestrator.startup()
     assert probed == ["agent-1", "agent-2"]
 
@@ -3121,11 +3126,14 @@ async def test_startup_fails_when_one_account_in_the_pool_cannot_be_reached(
 ) -> None:
     h = Harness(tmp_path)
     orchestrator = _with_pool(
-        h, probe=lambda user, environ: None if user == "agent-1" else f"cannot run as {user!r}"
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a != "agent-1"
+        ],
     )
     with pytest.raises(OrchestratorStartupError) as exc:
         await orchestrator.startup()
-    assert exc.value.problems == ["agent.run_as: cannot run as 'agent-2'"]
+    assert exc.value.problems == ["agent.run_as: agent-2: cannot run as 'agent-2'"]
 
 
 async def test_a_pool_refuses_to_start_without_a_credential_in_the_environment(
@@ -3255,3 +3263,27 @@ async def test_a_retry_whose_account_is_busy_is_requeued_rather_than_dropped(
     assert [run.issue.number for run in h.sessions.runs] == [1, 2, 3], (
         "issue 1 was dispatched again while its own account was still running"
     )
+
+
+async def test_an_unreadable_account_record_holds_dispatch_rather_than_idling_quietly(
+    tmp_path: Path,
+) -> None:
+    """Without the hold, `issuebot status`, the dashboard and `/healthz` all read as a healthy
+    worker while the board stops moving -- which is what `DispatchHold` (#29) exists for."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    (h.root / ".issuebot").mkdir()
+    (h.root / ".issuebot" / "accounts.json").write_text("{not json")
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert not orchestrator.running
+    assert h.github.issue(1).state is StateLabel.TODO
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "unusable" in hold.reason
+    # And it lifts of its own accord once the record reads again.
+    (h.root / ".issuebot" / "accounts.json").unlink()
+    await h.tick()
+    assert orchestrator.snapshot().dispatch_hold is None
+    assert list(orchestrator.running) == ["1"]

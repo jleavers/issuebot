@@ -42,7 +42,6 @@ from issuebot.agent import (
 from issuebot.agent.accounts import (
     AccountRegistry,
     credential_complaint,
-    group_complaint,
     session_account,
     settings_with_run_as,
 )
@@ -119,7 +118,6 @@ def _claude_version_output(command: str) -> str | None:
 _claude_version = _claude_version_output
 _claude_auth = claude_auth_status
 _run_as_probe = probe_run_as
-_group_complaint = group_complaint
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
@@ -501,12 +499,7 @@ def _run_as_check(settings: Settings) -> Check:
         )
         return Check(subject, "warn", detail)
     named = ", ".join(accounts)
-    problems = [
-        f"{account}: {error}"
-        for account in accounts
-        for error in (_run_as_probe(account, os.environ) or _group_complaint(account),)
-        if error is not None
-    ]
+    problems = list(_run_as_probe(accounts, os.environ))
     complaint = credential_complaint(settings, os.environ)
     if complaint is not None:
         problems.append(complaint)

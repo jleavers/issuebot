@@ -161,11 +161,14 @@ jobs:
             set -eu
             python - <<'"'"'PY'"'"'
           from pathlib import Path
-          from issuebot.agent.accounts import share_with
+          from issuebot.agent.accounts import seal, share_with
           for key, account in (("one", "agent-1"), ("two", "agent-2")):
               path = Path("/workspaces") / key
               path.mkdir()
               share_with(path, account)
+          (Path("/workspaces") / "idle").mkdir()
+          share_with(Path("/workspaces") / "idle", "agent-1")
+          seal(Path("/workspaces") / "idle")
           PY
             test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 1011 1770"
             test "$(stat -c "%u %g %a" /workspaces/two)" = "1000 1012 1770"
@@ -182,6 +185,13 @@ jobs:
                 echo "$1 listed the other session workspace" >&2; exit 1
               fi
             done
+            # A workspace outlives its run, and accounts are fewer than workspaces, so an idle
+            # one eventually sits beside a session running as the same account: sealed, its own
+            # account cannot enter it either.
+            test "$(stat -c "%u %g %a" /workspaces/idle)" = "1000 1011 700"
+            if sudo -n -H -u agent-1 touch /workspaces/idle/theirs 2>/dev/null; then
+              echo "a session entered a sealed workspace bound to its own account" >&2; exit 1
+            fi
           '
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
