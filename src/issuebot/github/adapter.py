@@ -51,6 +51,15 @@ class GitHubAdapter(Protocol):
 
     async def find_workpad_comment(self, number: int) -> Comment | None: ...
 
+    async def count_own_label_additions(self, number: int, label: str) -> int:
+        """How many times the account the adapter acts as has added ``label`` to the issue.
+
+        Read from the issue's timeline, which only GitHub writes and which credits every event
+        to the account that made it: a bound issuebot keeps out of it cannot be edited away
+        by anyone, the session included, since an added event only tightens it (#104).
+        """
+        ...
+
     async def update_comment(self, comment_id: int, body: str) -> Comment: ...
 
     async def ensure_labels(

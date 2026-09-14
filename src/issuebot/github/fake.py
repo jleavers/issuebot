@@ -40,6 +40,8 @@ class _FakeIssue:
     updated_at: datetime
     closed_at: datetime | None = None
     comments: list[Comment] = field(default_factory=list)
+    # (actor, label) for every label added, oldest first: GitHub's timeline, in miniature.
+    label_events: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -139,6 +141,7 @@ class FakeGitHub:
             markers = {name.lower() for name in self.labels.markers()}
             record.labels = [name for name in record.labels if name.lower() not in markers]
         record.labels.append(target)
+        record.label_events.append((self.login, target))
         record.updated_at = self._now()
 
     async def clear_state(self, number: int) -> None:
@@ -171,6 +174,15 @@ class FakeGitHub:
             if is_workpad_body(comment.body) and comment.author.lower() == self.login.lower():
                 return comment
         return None
+
+    async def count_own_label_additions(self, number: int, label: str) -> int:
+        self._enter("count_own_label_additions", number, label)
+        record = self._require_issue(number)
+        return sum(
+            1
+            for actor, name in record.label_events
+            if actor.lower() == self.login.lower() and name.lower() == label.lower()
+        )
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._enter("update_comment", comment_id, body)
@@ -262,16 +274,20 @@ class FakeGitHub:
         self._issues[number] = record
         return self._snapshot(record)
 
-    def human_set_state(self, number: int, state: StateLabel) -> None:
+    def human_set_state(self, number: int, state: StateLabel, *, actor: str = "reporter") -> None:
+        """A state label set by someone else; ``actor`` is who the timeline credits."""
         record = self._require_issue(number)
         self._strip_state_labels(record)
-        record.labels.append(label_name(self.labels, state))
+        target = label_name(self.labels, state)
+        record.labels.append(target)
+        record.label_events.append((actor, target))
         record.updated_at = self._now()
 
-    def human_add_label(self, number: int, name: str) -> None:
+    def human_add_label(self, number: int, name: str, *, actor: str = "reporter") -> None:
         record = self._require_issue(number)
         if name.lower() not in {label.lower() for label in record.labels}:
             record.labels.append(name)
+            record.label_events.append((actor, name))
             record.updated_at = self._now()
 
     def human_remove_label(self, number: int, name: str) -> None:
