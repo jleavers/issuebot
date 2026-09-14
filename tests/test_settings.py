@@ -38,6 +38,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.agent.max_turns == 5
     assert s.agent.max_attempts == 3
     assert s.agent.max_retry_backoff_ms == 300_000
+    assert s.agent.run_timeout_ms == 14_400_000
     assert s.agent.max_conflict_reworks == 3
     assert s.claude.command == "claude"
     assert s.claude.model is None
@@ -119,6 +120,7 @@ def test_label_must_not_be_empty() -> None:
         ("agent", "max_turns", 0),
         ("agent", "max_attempts", 0),
         ("agent", "max_retry_backoff_ms", 999),
+        ("agent", "run_timeout_ms", 999),
         ("agent", "max_conflict_reworks", -1),
         ("claude", "command", ""),
         ("claude", "max_budget_usd", 0),

@@ -409,6 +409,7 @@ class TurnRunner(Protocol):
         log_dir: Path,
         observer: TurnObserver | None = None,
         cancel: asyncio.Event | None = None,
+        deadline: float | None = None,
     ) -> TurnResult: ...
 
 
@@ -655,6 +656,7 @@ class ClaudeRunner:
         self._root = settings.workspace.root.resolve()
         self._environ = dict(os.environ if environ is None else environ)
         self._timeout_s = settings.claude.turn_timeout_ms / 1000
+        self._run_timeout_s = settings.agent.run_timeout_ms / 1000
         # The runner is built from the settings that hold the token and under the environment
         # the scrubber reads, so it owns the scrubber and masks at the source (#91): every
         # ``TurnResult.error`` and ``result_text``, and every ``TurnEvent.detail``, rather than
@@ -714,8 +716,14 @@ class ClaudeRunner:
         log_dir: Path,
         observer: TurnObserver | None = None,
         cancel: asyncio.Event | None = None,
+        deadline: float | None = None,
     ) -> TurnResult:
-        """Run one turn; every failure is reported in the result, only cancellation propagates."""
+        """Run one turn; every failure is reported in the result, only cancellation propagates.
+
+        ``deadline`` is the run's, on the monotonic clock (#110): a turn still running then is
+        terminated whatever it is printing, where ``claude.turn_timeout_ms`` only ever
+        measures the silence since the last line.
+        """
         stdout_path = log_dir / f"turn-{turn_number}.jsonl"
         stderr_path = log_dir / f"turn-{turn_number}.stderr.log"
         parser = StreamParser(turn_number=turn_number, expected_session_id=session_id)
@@ -809,7 +817,9 @@ class ClaudeRunner:
                 return finish("claude_not_found", f"cannot run {argv[0]!r}: {exc}", None)
 
             writer = asyncio.create_task(_feed_stdin(process, prompt))
-            reader = asyncio.create_task(self._read_stream(process, parser, emit, stdout_path))
+            reader = asyncio.create_task(
+                self._read_stream(process, parser, emit, stdout_path, deadline)
+            )
             waiters: set[asyncio.Task[Any]] = {reader}
             cancel_waiter = asyncio.create_task(cancel.wait()) if cancel is not None else None
             if cancel_waiter is not None:
@@ -822,6 +832,13 @@ class ClaudeRunner:
                 elif reader.result() == "timeout":
                     category = "turn_timeout"
                     error = f"no output for {self._timeout_s:.0f}s"
+                    await self._terminate(process)
+                elif reader.result() == "deadline":
+                    category = "run_timeout"
+                    error = (
+                        f"run deadline reached: {self._run_timeout_s:.0f}s of wall clock "
+                        "(agent.run_timeout_ms)"
+                    )
                     await self._terminate(process)
             except Exception as exc:
                 await self._terminate(process)
@@ -853,7 +870,7 @@ class ClaudeRunner:
             )
         if category is None:
             emit(_event("turn_completed", parser, detail=parser.model))
-        elif category == "turn_timeout":
+        elif category in ("turn_timeout", "run_timeout"):
             emit(_event("turn_timeout", parser, detail=error))
         else:
             emit(_event("turn_failed", parser, detail=error))
@@ -868,16 +885,30 @@ class ClaudeRunner:
         parser: StreamParser,
         emit: _Emitter,
         stdout_path: Path,
+        deadline: float | None,
     ) -> str:
-        """Tee stdout to the log file and feed the parser; "timeout" on silence, else "eof"."""
+        """Tee stdout to the log file and feed the parser.
+
+        "eof" at the end of the stream, "timeout" after ``turn_timeout_ms`` of silence, and
+        "deadline" once the run's deadline has passed, which every line read is checked
+        against: the silence timer restarts with each line, the deadline never does.
+        """
         stdout = process.stdout
         if stdout is None:
             return "eof"
         with stdout_path.open("ab") as out:
             while True:
+                wait = self._timeout_s
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "deadline"
+                    wait = min(wait, remaining)
                 try:
-                    raw = await asyncio.wait_for(stdout.readline(), timeout=self._timeout_s)
+                    raw = await asyncio.wait_for(stdout.readline(), timeout=wait)
                 except TimeoutError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return "deadline"
                     return "timeout"
                 except ValueError:
                     self._log.warning(

@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -789,6 +790,7 @@ async def run(
     observer: Recorder | None = None,
     cancel: asyncio.Event | None = None,
     log_dir: Path | None = None,
+    deadline: float | None = None,
 ) -> TurnResult:
     return await runner.run_turn(
         prompt="Do the thing",
@@ -799,6 +801,7 @@ async def run(
         log_dir=log_dir or workspace / ".issuebot" / "runs" / "run-1",
         observer=observer,
         cancel=cancel,
+        deadline=deadline,
     )
 
 
@@ -1116,6 +1119,48 @@ async def test_silence_times_out_and_kills(workspace: Path, tmp_path: Path) -> N
 
 
 @posix
+async def test_the_runs_deadline_ends_a_turn_that_keeps_printing(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """The silence timer restarts with every line; the run's deadline does not (#110)."""
+    pidfile = tmp_path / "pid"
+    runner = runner_for(
+        workspace,
+        scenario="slow",  # a line every 200 ms, six lines
+        turn_timeout_ms=30_000,
+        extra_env={"CLAUDE_FAKE_PIDFILE": str(pidfile)},
+    )
+    recorder = Recorder()
+    started = time.monotonic()
+    turn = await run(runner, workspace, observer=recorder, deadline=started + 0.5)
+    assert time.monotonic() - started < 1.1
+    assert turn.error_category == "run_timeout"
+    assert turn.error == "run deadline reached: 14400s of wall clock (agent.run_timeout_ms)"
+    assert turn.exit_code == -signal.SIGTERM
+    await assert_gone(int(pidfile.read_text()))
+    assert recorder.kinds[-2:] == ["process_exit", "turn_timeout"]
+    assert recorder.events[-1].detail == turn.error
+
+
+@posix
+async def test_a_deadline_still_ahead_leaves_the_turn_alone(workspace: Path) -> None:
+    runner = runner_for(workspace, scenario="slow", turn_timeout_ms=30_000)
+    turn = await run(runner, workspace, deadline=time.monotonic() + 30)
+    assert turn.error_category is None
+    assert turn.exit_code == 0
+
+
+@posix
+async def test_a_deadline_already_passed_ends_the_turn_at_once(workspace: Path) -> None:
+    runner = runner_for(workspace, scenario="silent", turn_timeout_ms=30_000)
+    started = time.monotonic()
+    turn = await run(runner, workspace, deadline=started - 1)
+    assert turn.error_category == "run_timeout"
+    assert time.monotonic() - started < 5
+    assert turn.exit_code is not None  # terminated and reaped, not waited out
+
+
+@posix
 async def test_stubborn_child_is_killed_after_the_grace_period(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1200,6 +1245,7 @@ async def test_reader_failure_terminates_the_child(
         parser: object,
         emit: object,
         stdout_path: Path,
+        deadline: float | None,
     ) -> str:
         await asyncio.sleep(0.3)
         raise OSError("disk full")

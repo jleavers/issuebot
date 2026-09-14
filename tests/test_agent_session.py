@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,10 +69,12 @@ class ScriptedRunner:
         log_dir: Path,
         observer: TurnObserver | None = None,
         cancel: asyncio.Event | None = None,
+        deadline: float | None = None,
     ) -> TurnResult:
         self.calls.append(
             {
                 "prompt": prompt,
+                "deadline": deadline,
                 "workspace": workspace,
                 "session_id": session_id,
                 "resume": resume,
@@ -128,6 +131,7 @@ class Harness:
         template: str = TEMPLATE,
         hooks: dict[str, str] | None = None,
         token: str | None = None,
+        run_timeout_ms: int = 14_400_000,
     ) -> None:
         github: dict[str, object] = {"repo": "example/repo"}
         if token is not None:
@@ -136,7 +140,7 @@ class Harness:
             {
                 "github": github,
                 "workspace": {"root": str(tmp_path / "workspaces")},
-                "agent": {"max_turns": max_turns},
+                "agent": {"max_turns": max_turns, "run_timeout_ms": run_timeout_ms},
                 "hooks": hooks or {},
             }
         )
@@ -412,6 +416,43 @@ async def test_turn_categories_map_to_outcomes(
     assert result.outcome == outcome
     assert result.stop_reason == stop_reason
     assert result.error_category == category
+
+
+async def test_every_turn_is_handed_the_runs_deadline(tmp_path: Path) -> None:
+    """One deadline for the run, fixed at its start (#110), not one per turn."""
+    h = Harness(tmp_path, max_turns=2, run_timeout_ms=60_000)
+    runner = ScriptedRunner()
+    before = time.monotonic()
+    result = await h.run(runner)
+    after = time.monotonic()
+    assert result.stop_reason == "max_turns"
+    deadlines = {call["deadline"] for call in runner.calls}
+    assert len(deadlines) == 1
+    (deadline,) = deadlines
+    assert isinstance(deadline, float)
+    assert before + 60 <= deadline <= after + 60
+
+
+async def test_no_turn_starts_past_the_runs_deadline(tmp_path: Path) -> None:
+    """A run over its wall clock ends as timed out before the next turn, whatever the turn
+    budget still allows; the orchestrator retries a timed-out run like any failure."""
+    h = Harness(tmp_path, max_turns=3, run_timeout_ms=1000)
+
+    def linger(turn_number: int) -> None:
+        time.sleep(1.1)
+
+    runner = ScriptedRunner(on_turn=linger)
+    result = await h.run(runner)
+    assert result.turns == 1
+    assert result.outcome == "timed_out"
+    assert result.stop_reason == "failure"
+    assert result.error_category == "run_timeout"
+    assert result.error == (
+        "run deadline reached before turn 2: 1s of wall clock (agent.run_timeout_ms)"
+    )
+    assert h.github.issue(42).state is StateLabel.IN_PROGRESS
+    record = h.workspaces.read_session(h.workspace)
+    assert record is not None and record.last_outcome == "timed_out"
 
 
 async def test_budget_exhausted_turn_continues_on_the_next_turn(tmp_path: Path) -> None:
