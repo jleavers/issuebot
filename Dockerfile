@@ -212,11 +212,15 @@ ENV LANG=C.UTF-8 \
     ISSUEBOT_AGENT_USER=agent \
     PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
-# The flag assertion is the point of pinning: a release that drops --permission-prompts
-# breaks an unattended worker at runtime, so fail the build instead. The last line is the
-# delegation itself, as the worker will use it: sudo, the account, and claude under it.
+# The flag assertions are the point of pinning: a release that drops --permission-prompts
+# breaks an unattended worker at runtime, and one that drops --disallowedTools or
+# --strict-mcp-config silently widens the session's tool set (#109), so fail the build
+# instead. The last line is the delegation itself, as the worker will use it: sudo, the
+# account, and claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
+ && claude --help | grep -q -- '--disallowedTools' \
+ && claude --help | grep -q -- '--strict-mcp-config' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version
 

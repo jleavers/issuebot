@@ -50,3 +50,10 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
     assert CI.count("docker run --rm --user agent -v /tmp/") == 2
+
+
+def test_the_flags_the_sessions_authority_depends_on_are_asserted_at_build() -> None:
+    """#109: a claude release that dropped either flag would widen every session's tool set
+    without a word; the build fails instead."""
+    assert "claude --help | grep -q -- '--disallowedTools'" in DOCKERFILE
+    assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE

@@ -212,9 +212,19 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
-  environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
+  `.issuebot/runs/<run_id>/`). The session's authority -- its tools, its token, its account --
+  is fixed at spawn from the front matter and never by the prompt (#109, spec
+  `2026-09-14-session-authority-design.md`): `claude.disallowed_tools` ships
+  `DEFAULT_DISALLOWED_TOOLS` (`WebFetch`, `WebSearch`) and `build_argv` emits it, `[]` widens
+  it, and `--strict-mcp-config` is unconditional, so the clone's `.mcp.json` adds nothing; the
+  Dockerfile asserts both flags at build. The `<github-text>` envelope is therefore a hint to
+  the model, not the boundary: `_defang` neutralises a `<` (or the fullwidth and small forms
+  NFKC folds to it) that is followed, in the `tag_skeleton` of the next 64 characters (Unicode
+  format characters, category `Cf`, removed and compatibility forms folded), by the tag name,
+  and `check_envelopes` walks the whole render's skeleton, so a forged edge padded past the
+  window fails the render as `prompt_error` rather than reaching the model; `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -611,7 +621,10 @@ floor, not the shipped version, and moves by hand.
   `tests/test_web_theme.py`.
 - `issuebot.cli`: argparse; `validate` (fifteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
-  overrides)`), three network probes through the
+  overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
+  App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
+  the fine-grained alternative restricted to `github.repo` (#109), three network probes
+  through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
   the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
   probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the

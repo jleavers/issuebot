@@ -296,6 +296,49 @@ def test_validate_token_from_fallback_variable(
     assert "[ OK ] github.token: set (from GH_TOKEN)" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("token", "kind"),
+    [
+        ("ghp_0123456789abcdef", "a classic token"),
+        ("gho_0123456789abcdef", "an OAuth token"),
+        ("ghu_0123456789abcdef", "a GitHub App user token"),
+    ],
+)
+def test_validate_warns_when_the_token_reaches_beyond_the_repository(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    token: str,
+    kind: str,
+) -> None:
+    """#109: the session holds the token, so its reach is the session's."""
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    monkeypatch.setenv("GH_TOKEN", token)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.token: set (from GH_TOKEN); {kind}, which reaches every repository its "
+        "account can, and the session holds it: a fine-grained token restricted to o/r is the "
+        "least it needs" in out
+    )
+    assert token not in out
+
+
+@pytest.mark.parametrize("token", ["github_pat_0123456789abcdef", "ghs_0123456789abcdef"])
+def test_validate_accepts_a_token_restricted_to_what_it_names(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    token: str,
+) -> None:
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    monkeypatch.setenv("GH_TOKEN", token)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] github.token: set (from GH_TOKEN)\n" in capsys.readouterr().out
+
+
 def test_validate_missing_token_fails(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, executables: object
 ) -> None:

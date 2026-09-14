@@ -16,6 +16,7 @@ class _Model(BaseModel):
 RepoName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 PermissionMode = Literal["auto", "acceptEdits", "dontAsk", "bypassPermissions"]
+DEFAULT_DISALLOWED_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 SettingSource = Literal["user", "project", "local"]
 
 
@@ -121,7 +122,13 @@ class ClaudeSettings(_Model):
     turn_timeout_ms: int = Field(default=3_600_000, ge=1)
     stall_timeout_ms: int = 300_000
     allowed_tools: list[str] = Field(default_factory=list)
-    disallowed_tools: list[str] = Field(default_factory=list)
+    # The model's own network tools, denied unless the front matter says otherwise (#109). The
+    # workflow never needs them -- the session reads GitHub through `gh` and the repository
+    # through its clone -- and a session whose input is text somebody else wrote should not
+    # hold a purpose-built way to fetch the next page of it. A list replaces as a whole, so
+    # `disallowed_tools: []` widens it; that is a setting, outside the prompt, which is where
+    # the session's authority is fixed: neither the prose nor an issue can.
+    disallowed_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_DISALLOWED_TOOLS))
     append_system_prompt: str | None = None
     setting_sources: list[SettingSource] | None = None
     model_labels: dict[str, str] = Field(default_factory=dict)

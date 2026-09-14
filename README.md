@@ -177,7 +177,8 @@ ignored.
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
-| `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
+| `claude.allowed_tools`, `claude.disallowed_tools` | the session's tool set, passed to `claude` as `--allowedTools` and `--disallowedTools`. The deny list ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[]`; `[WebFetch, WebSearch]` |
+| `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL; unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
@@ -836,7 +837,13 @@ that matters on your host.
   in a hub checkout the dashboard password), its home and the state it keeps inside a
   workspace are all out of the session's reach, and the worker cannot become root or anything
   but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
-  pushes with it, which is why the token should be scoped to the repository. The session's
+  pushes with it, which is why the token should be scoped to the repository: `validate` warns
+  when it is a classic or an OAuth token, whose reach is the account's, and says so. The
+  session's tools are fixed the same way, by the front matter and the argv issuebot builds
+  from it (`claude.disallowed_tools`, which ships with `WebFetch` and `WebSearch` in it, and
+  `--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
+  describe what the session may do *within* that authority rather than granting it, and the
+  `<github-text>` envelope is a hint to the model, never the boundary (#109). The session's
   login is its own, in `/home/agent/.claude`. The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches

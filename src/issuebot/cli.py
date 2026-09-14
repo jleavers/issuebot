@@ -415,16 +415,49 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+# What a token of each kind reaches, by GitHub's own prefixes (#109). The session holds the
+# token, so its reach is the session's: a fine-grained token (`github_pat_`) is restricted to
+# the repositories it names, an installation token (`ghs_`) to its installation, while a classic
+# or an OAuth token is the account's whole reach. An unknown prefix says nothing either way.
+_TOKEN_REACH: tuple[tuple[str, str | None], ...] = (
+    ("github_pat_", None),
+    ("ghs_", None),
+    ("ghp_", "a classic token"),
+    ("gho_", "an OAuth token"),
+    ("ghu_", "a GitHub App user token"),
+)
+
+
+def _token_reach(secret: str) -> str | None:
+    """The kind of token that reaches beyond one repository, or ``None`` when it is fine."""
+    for prefix, kind in _TOKEN_REACH:
+        if secret.startswith(prefix):
+            return kind
+    return None
+
+
 def _token_check(workflow: Workflow) -> Check:
-    if workflow.config.github.token is None:
+    token = workflow.config.github.token
+    if token is None:
         return Check("github.token", "fail", "not set; export GH_TOKEN or set github.token: $VAR")
     raw_github = workflow.raw_config.get("github")
     raw_token = raw_github.get("token") if isinstance(raw_github, dict) else None
     if raw_token is None:
-        return Check("github.token", "ok", "set (from GH_TOKEN)")
-    if isinstance(raw_token, str) and ENV_REF.match(raw_token):
-        return Check("github.token", "ok", f"set (from {raw_token})")
-    return Check("github.token", "warn", "literal value in WORKFLOW.md; prefer $VAR")
+        source = "from GH_TOKEN"
+    elif isinstance(raw_token, str) and ENV_REF.match(raw_token):
+        source = f"from {raw_token}"
+    else:
+        return Check("github.token", "warn", "literal value in WORKFLOW.md; prefer $VAR")
+    reach = _token_reach(token.get_secret_value())
+    if reach is None:
+        return Check("github.token", "ok", f"set ({source})")
+    return Check(
+        "github.token",
+        "warn",
+        f"set ({source}); {reach}, which reaches every repository its account can, and the "
+        f"session holds it: a fine-grained token restricted to {workflow.config.github.repo} "
+        "is the least it needs",
+    )
 
 
 def _workspace_check(root: Path) -> Check:

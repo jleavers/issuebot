@@ -684,6 +684,11 @@ class ClaudeRunner:
             cfg.permission_mode,
             "--permission-prompts",
             "none",
+            # No MCP server from the clone's `.mcp.json` or any settings file (#109): the
+            # session's tool set is what this argv says, and a repository that ships a server
+            # configuration would otherwise add to it on the next session. Nothing passes
+            # `--mcp-config`, so this leaves the session with the built-in tools alone.
+            "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),
         ]

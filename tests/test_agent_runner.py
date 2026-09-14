@@ -70,11 +70,27 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "auto",
         "--permission-prompts",
         "none",
+        "--strict-mcp-config",
         "--max-budget-usd",
         "5.0",
         "--session-id",
         SESSION_ID,
+        "--disallowedTools",
+        "WebFetch",
+        "WebSearch",
     ]
+
+
+def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path) -> None:
+    """#109: the session's tools are fixed by the argv, from the front matter. The default
+    denies the model's own network tools and loads no MCP server; an operator widens the deny
+    list by emptying it, and even then the MCP flag stays."""
+    argv = ClaudeRunner(settings(tmp_path, disallowed_tools=[]), environ={}).build_argv(
+        session_id=SESSION_ID, resume=False
+    )
+    assert "--disallowedTools" not in argv
+    assert "--strict-mcp-config" in argv
+    assert "--mcp-config" not in argv
 
 
 def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
@@ -93,9 +109,10 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     )
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
-    assert argv[10] == "2.5"
-    assert argv[11:13] == ["--resume", SESSION_ID]
-    assert argv[13:] == [
+    assert argv[9] == "--strict-mcp-config"
+    assert argv[11] == "2.5"
+    assert argv[12:14] == ["--resume", SESSION_ID]
+    assert argv[14:] == [
         "--model",
         "opus",
         "--setting-sources",
@@ -146,7 +163,7 @@ def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
     base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
     resolved = settings_for_labels(base, ("issuebot/model/fable",))
     argv = ClaudeRunner(resolved, environ={}).build_argv(session_id=SESSION_ID, resume=False)
-    assert argv[-2:] == ["--model", "fable"]
+    assert argv[argv.index("--model") + 1] == "fable"
 
 
 def test_agent_environment_passes_only_the_allowed_names() -> None:
@@ -955,7 +972,10 @@ async def test_run_turn_success_parses_everything(workspace: Path, tmp_path: Pat
     assert recorded["stdin"] == "Do the thing"
     assert recorded["cwd"] == str(workspace.resolve())
     assert recorded["argv"][:2] == ["-p", "--output-format"]
-    assert recorded["argv"][-2:] == ["--session-id", SESSION_ID]
+    assert recorded["argv"][recorded["argv"].index("--session-id") + 1] == SESSION_ID
+    # The default tool policy reaches the process, not just the argv builder (#109).
+    assert recorded["argv"][-3:] == ["--disallowedTools", "WebFetch", "WebSearch"]
+    assert "--strict-mcp-config" in recorded["argv"]
     assert recorded["env"]["GH_TOKEN"] == "sekret"
     assert recorded["env"]["NO_COLOR"] == "1"
     assert recorded["env"]["DISABLE_AUTOUPDATER"] == "1"
@@ -986,7 +1006,7 @@ async def test_run_turn_resume_passes_the_resume_flag(workspace: Path, tmp_path:
     runner = runner_for(workspace, extra_env={"CLAUDE_FAKE_RECORD": str(record)})
     turn = await run(runner, workspace, turn_number=2, resume=True)
     argv = json.loads(record.read_text())["argv"]
-    assert argv[-2:] == ["--resume", SESSION_ID]
+    assert argv[argv.index("--resume") + 1] == SESSION_ID
     assert "--session-id" not in argv
     assert turn.stdout_path.name == "turn-2.jsonl"
 
