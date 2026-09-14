@@ -169,7 +169,8 @@ ignored.
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
-| `agent.max_attempts` | failed runs before the issue is escalated | `3` |
+| `agent.max_attempts` | failed runs for one issue before it is escalated; the count is the issue's, so no label change resets it | `3` |
+| `agent.max_issue_cost_usd` | what one issue may cost in total, across every label it wears and every time it is relabelled; `0` turns it off | `0` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
@@ -730,6 +731,21 @@ that matters on your host.
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
+
+  `agent.max_attempts` counts *the issue's* failed runs, not one unbroken chain of them: the
+  worker keeps the count itself, so a label move between a failure and the retry that follows
+  it — by the session, by a collaborator, or by the issue reaching `issuebot/review` a second
+  later — does not hand the issue a fresh budget. Two things clear the count, and only two: a
+  run that succeeded, and the escape above, which is what makes relabelling a blocked issue
+  work the way this bullet says it does. The count survives a restart, because the worker
+  reads it back out of the database on the way up.
+
+  What that leaves unbounded is an issue relabelled again and again, each cycle worth
+  `agent.max_attempts` runs. `agent.max_issue_cost_usd` is the ceiling for it: cumulative per
+  issue, never reset, `0` (the default) off. It is off by default because what a run is worth
+  depends on your plan — an agent on a subscription reports no cost at all, and there
+  `agent.max_attempts` is the ceiling that bites. A worker that refuses an issue on either
+  budget logs `dispatch_refused` once, naming the setting.
 - **GitHub itself.** The worker reads and writes its whole state machine through `gh`, so an
   outage stops the board. Three failed polls in a row hold dispatch: `issuebot status` prints
   `dispatch: held (github) since ...`, the dashboard's worker line reads `worker held`,
@@ -745,10 +761,12 @@ that matters on your host.
   that cannot read the board has no business claiming from it — and a due retry waits with it
   rather than spending an attempt on a claim that is going to fail.
 
-  Nothing checks the hold before claiming, and nothing needs to: the claim comes from the poll,
-  so a poll that failed offers nothing to claim, and the hold you see is always derived from a
-  poll that failed on this very tick rather than from a remembered verdict. What the hold does
-  change is the retry queue, which would otherwise write to the board without reading it first.
+  The poll is what makes this hold safe on its own: a poll that failed offers nothing to
+  claim, so the hold you see is always derived from a poll that failed on this very tick
+  rather than from a remembered verdict. What it changes is the retry queue, which would
+  otherwise write to the board without reading it first — and every claim, from the poll or
+  from the queue, goes through one admission gate that asks the holds, the free slots and the
+  issue's own budget in that order, so a hold the worker reports is a hold at every door.
 
   When the hold engages, the worker reads
   [githubstatus.com](https://www.githubstatus.com/) once and appends what it says to the
