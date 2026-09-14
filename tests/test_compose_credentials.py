@@ -101,6 +101,30 @@ def test_password_has_no_default_anywhere_in_compose() -> None:
     assert uses and all(REQUIRED.fullmatch(use) for use in uses), uses
 
 
+def test_web_password_is_passed_through_with_no_committed_value() -> None:
+    """The dashboard's password (#73) reaches ``web`` from ``.env`` and from nowhere else.
+
+    A pass-through rather than the ``:?`` form: compose interpolates before it applies a
+    profile, so a required substitution would make every worker-only checkout carry a secret
+    it never uses; the app refuses to start without it instead. What this pins is that the
+    default is empty, so no spelling of the variable ever carries a committed value.
+    """
+    value = _env(_services()["web"])["ISSUEBOT_WEB_PASSWORD"]
+    assert value == "${ISSUEBOT_WEB_PASSWORD:-}", value
+    text = COMPOSE.read_text()
+    uses = re.findall(r"\$\{ISSUEBOT_WEB_PASSWORD[^}]*\}", text)
+    assert uses == ["${ISSUEBOT_WEB_PASSWORD:-}"], uses
+    # Only the web service reads it: the worker never presents it and must not carry it.
+    assert "ISSUEBOT_WEB_PASSWORD" not in _env(_services()["worker"])
+
+
+def test_env_example_ships_the_web_password_empty() -> None:
+    lines = ENV_EXAMPLE.read_text().splitlines()
+    assignments = [line for line in lines if line.startswith("ISSUEBOT_WEB_PASSWORD=")]
+    assert assignments == ["ISSUEBOT_WEB_PASSWORD="], assignments
+    assert lines[lines.index("ISSUEBOT_WEB_PASSWORD=") - 1].startswith("#")
+
+
 def test_throwaway_test_db_carries_no_credential() -> None:
     env = _env(_services()["test-db"])
     assert "POSTGRES_PASSWORD" not in env

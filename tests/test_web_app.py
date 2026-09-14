@@ -10,6 +10,7 @@ from fakes.web import (
     API,
     BASE,
     NOW,
+    REFRESH_HEADERS,
     REPO,
     RUN_ID,
     Harness,
@@ -248,7 +249,7 @@ def test_stats_rejects_a_bad_window(h: Harness, window: str) -> None:
 
 
 def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None:
-    first = h.client.post(f"{API}/refresh")
+    first = h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS)
     assert first.status_code == 202
     assert first.json() == {
         "queued": True,
@@ -257,12 +258,12 @@ def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None
         "operations": ["poll", "reconcile"],
     }
     h.clock.mono += REFRESH_MIN_INTERVAL_S - 0.5
-    second = h.client.post(f"{API}/refresh")
+    second = h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS)
     assert second.status_code == 202
     assert (second.json()["queued"], second.json()["coalesced"]) == (False, True)
     assert h.database.notified == 1
     h.clock.mono += 0.5
-    third = h.client.post(f"{API}/refresh")
+    third = h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS)
     assert (third.json()["queued"], third.json()["coalesced"]) == (True, False)
     assert h.database.notified == 2
 
@@ -270,7 +271,7 @@ def test_refresh_notifies_then_coalesces_then_notifies_again(h: Harness) -> None
 def test_refresh_reports_a_database_failure(h: Harness) -> None:
     message = "cannot connect to postgresql://issuebot:***@db.example:5432/issuebot: refused"
     h.database.notify_error = StoreUnavailableError(message)
-    response = h.client.post(f"{API}/refresh")
+    response = h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS)
     assert response.status_code == 503
     assert response.json() == {"error": {"code": "database_unavailable", "message": message}}
     assert "s3cret" not in response.text
@@ -426,9 +427,14 @@ def test_healthz_maps_every_worker_and_reports_the_worst(h: Harness) -> None:
 
 def test_refresh_is_throttled_per_repository(h: Harness) -> None:
     h.register("acme/frontend")
-    assert h.client.post(f"{API}/refresh").json()["queued"] is True
-    assert h.client.post(f"{API}/refresh").json()["coalesced"] is True
-    assert h.client.post("/api/v1/repos/acme/frontend/refresh").json()["queued"] is True
+    assert h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS).json()["queued"] is True
+    assert h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS).json()["coalesced"] is True
+    assert (
+        h.client.post("/api/v1/repos/acme/frontend/refresh", headers=REFRESH_HEADERS).json()[
+            "queued"
+        ]
+        is True
+    )
     assert h.database.notified_repos == ["example/repo", "acme/frontend"]
 
 
@@ -467,7 +473,7 @@ def test_every_response_carries_the_security_headers(h: Harness) -> None:
         h.client.get(f"{API}/state"),
         h.client.get("/healthz"),
         h.client.get("/api/v1/nothing"),
-        h.client.post(f"{API}/refresh"),
+        h.client.post(f"{API}/refresh", headers=REFRESH_HEADERS),
     ):
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value, (response.url, name)

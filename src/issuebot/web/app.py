@@ -8,6 +8,13 @@ first registered one, and the header's dropdown is how a reader moves between th
 Every request that reads opens one connection through ``Database.queries()`` and closes it when
 the response is built. The app never writes to a table; its one write is ``NOTIFY``. Templates
 render with autoescape on and ``StrictUndefined``; every response carries the security headers.
+
+Every request but the static files carries the credential (#73, ``issuebot.web.auth``): one
+gate, ahead of routing, so the pages, the JSON API, the raw turn parts, the live partial and a
+path that matches nothing all answer 401 with the ``Basic`` challenge until it does. ``/healthz``
+is the one route with an anonymous answer, and it is liveness alone: the database up or not,
+no repository named, so compose's healthcheck and an uptime monitor need no secret. The refresh
+route asks for one thing more, a proof a cross-site page cannot produce.
 """
 
 import time
@@ -39,6 +46,7 @@ from issuebot.db import (
 )
 from issuebot.db.queries import IssueRow, RepoRow, RunRow, TurnRow, TurnSummaryRow
 from issuebot.log import get_logger
+from issuebot.web.auth import CHALLENGE, credential_matches, presented_password, refresh_refusal
 from issuebot.web.transcript import parse_transcript
 from issuebot.web.views import (
     CHART_POLL_S,
@@ -88,7 +96,15 @@ JSON_PREFIXES = ("/api/", "/healthz")
 CHART_DAYS = 30
 RAW_PART_PATTERN = r"^(prompt|stream|stderr)$"
 STATIC_ROOT = files("issuebot.web") / "static"
-_HTTP_CODES = {404: "not_found", 405: "method_not_allowed", 503: "unavailable"}
+_HTTP_CODES = {
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    503: "unavailable",
+}
+OPEN_PREFIXES = ("/static/",)
+LIVENESS_PATH = "/healthz"
 _RAW_EXTENSIONS = {"prompt": "md", "stream": "jsonl", "stderr": "log"}
 
 
@@ -171,10 +187,15 @@ async def load_scope(queries: Queries, owner: str, name: str) -> Scope:
 def create_app(
     database: Database,
     *,
+    password: str,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] = _utcnow,
 ) -> FastAPI:
-    """The dashboard app over ``database``; ``clock`` and ``now`` are seams for tests."""
+    """The dashboard app over ``database``, gated by ``password`` (HTTP Basic, any username);
+    ``clock`` and ``now`` are seams for tests. An empty password is refused here rather than
+    letting the gate compare against nothing."""
+    if not password:
+        raise ValueError("the dashboard needs a password: export ISSUEBOT_WEB_PASSWORD")
     app = FastAPI(title="issuebot", docs_url=None, redoc_url=None, openapi_url=None)
     log = get_logger(__name__)
     refreshes: dict[str, _Refresh] = {}
@@ -207,6 +228,39 @@ def create_app(
         if _wants_json(request):
             return envelope(status, code, message)
         return render("error.html", status=status, code=code, message=message, status_code=status)
+
+    def challenge(request: Request) -> Response:
+        response = error_response(request, 401, "unauthorized", "the dashboard needs its password")
+        response.headers["WWW-Authenticate"] = CHALLENGE
+        return response
+
+    # Starlette wraps the last-added middleware outermost, so the gate is added first and the
+    # security headers second: a 401 leaves with the same headers as every other response.
+    @app.middleware("http")
+    async def require_identity(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """The one gate, ahead of routing, so no path reaches a read without the credential.
+
+        A credential that is presented and wrong is a 401 everywhere, ``/healthz`` included:
+        the anonymous liveness answer is for a probe that carries nothing, never a cover for a
+        guess. A request without one is not logged, since a browser's first visit is one.
+        """
+        # ``url.path`` is root_path + path; nothing sets a root path here, and under one the
+        # two exemptions would stop matching and fail closed rather than open.
+        path = request.url.path
+        if path.startswith(OPEN_PREFIXES):
+            return await call_next(request)
+        presented = presented_password(request.headers.get("Authorization"))
+        authenticated = credential_matches(presented, password)
+        if not authenticated:
+            if presented is not None:
+                client = request.client.host if request.client is not None else None
+                log.warning("web_auth_rejected", path=path, client=client)
+            if path != LIVENESS_PATH or presented is not None:
+                return challenge(request)
+        request.state.authenticated = authenticated
+        return await call_next(request)
 
     @app.middleware("http")
     async def add_headers(
@@ -459,8 +513,16 @@ def create_app(
         return JSONResponse(stats_document(days, closed, runs, counts, series))
 
     @app.post("/api/v1/repos/{owner}/{name}/refresh")
-    async def api_refresh(owner: str, name: str) -> JSONResponse:
-        """NOTIFY this repository's worker; the throttle is per repository, not per process."""
+    async def api_refresh(request: Request, owner: str, name: str) -> JSONResponse:
+        """NOTIFY this repository's worker; the throttle is per repository, not per process.
+
+        The one write, so the credential is not enough: a browser replays it on a cross-site
+        form POST, and the proof is what such a form cannot send (``issuebot.web.auth``).
+        """
+        refusal = refresh_refusal(request.headers)
+        if refusal is not None:
+            log.warning("web_refresh_refused", repo=f"{owner}/{name}", reason=refusal)
+            return envelope(403, "forbidden", refusal)
         async with database.queries() as queries:
             scope = await load_scope(queries, owner, name)
         refresh = refreshes.setdefault(scope.repo.name, _Refresh(clock))
@@ -478,15 +540,25 @@ def create_app(
         return JSONResponse(body, status_code=202)
 
     @app.get("/healthz")
-    async def healthz() -> JSONResponse:
-        """The database, and one entry per registered worker; ``worker`` is the worst of them."""
+    async def healthz(request: Request) -> JSONResponse:
+        """The database, and one entry per registered worker; ``worker`` is the worst of them.
+
+        An anonymous probe gets liveness alone -- ``status`` and ``database`` -- and not the
+        workers, the repository names or the error text, which is what the credential is for.
+        """
+        authenticated = bool(getattr(request.state, "authenticated", False))
         try:
             async with database.queries() as queries:
-                repos = await queries.repos()
-                snapshots = await queries.snapshots()
+                # Opening the connection is the probe; the rows are for the credential.
+                repos = await queries.repos() if authenticated else []
+                snapshots = await queries.snapshots() if authenticated else {}
         except DatabaseError as exc:
-            body = {"status": "unavailable", "database": "unavailable", "error": exc.message}
+            body: dict[str, Any] = {"status": "unavailable", "database": "unavailable"}
+            if authenticated:
+                body["error"] = exc.message
             return JSONResponse(body, status_code=503)
+        if not authenticated:
+            return JSONResponse({"status": "ok", "database": "ok"})
         current = now()
         workers: dict[str, Any] = {}
         for row in repos:
