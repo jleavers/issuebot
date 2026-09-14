@@ -87,7 +87,8 @@ The read is total and bounded. `O_NOFOLLOW`: under `agent.run_as` (#75) the clon
 session's and this read is the worker's, so a symlink the clone ships must not put a file
 only the worker can read into a prompt the session sees; a link is skipped and logged. A
 directory or an unreadable file is skipped with a warning, a missing one silently, the text
-is cut at `INSTRUCTION_FILE_LIMIT` (64 KiB) and undecodable bytes are replaced. Nothing here
+is cut at `INSTRUCTION_FILE_LIMIT` (128 KiB, twice this repository's own `CLAUDE.md`) and
+undecodable bytes are replaced. Nothing here
 fails a run: the files are a convenience for the session, and a session without them reads
 the tree itself, as data, like any contributing guide.
 

@@ -208,7 +208,7 @@ fails the render, and `issue.body.text` is the raw value for a template that wan
 `CLAUDE.md` and `AGENTS.md` (`path`, `text`, `size`, `truncated`), read by issuebot from the
 root of the clone before the first turn and enveloped the same way, with the source naming the
 file and the author "whoever can merge to" the repository, since `claude` no longer loads them
-itself; a symlink is not followed and each file is cut at 64 KiB. `validate` renders
+itself; a symlink is not followed and each file is cut at 128 KiB. `validate` renders
 it against a sample issue; `run-once <number> --show-prompt` renders it against a real one
 without running anything.
 

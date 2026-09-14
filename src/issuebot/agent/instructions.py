@@ -21,8 +21,13 @@ REPOSITORY_INSTRUCTION_FILES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md")
 """The files at the clone's root the prompt carries, in this order. A declared list, not a
 search: whatever else the tree holds is data the session reads itself."""
 
-INSTRUCTION_FILE_LIMIT = 64 * 1024
-"""Bytes of each file the prompt carries; the rest is cut and the envelope's source says so."""
+INSTRUCTION_FILE_LIMIT = 128 * 1024
+"""Bytes of each file the prompt carries; the rest is cut and the envelope's source says so.
+
+Twice what this repository's own ``CLAUDE.md`` weighs: a cut loses the file's end, which is
+where a "how to open pull requests" section tends to sit, and two whole files still fit the
+turn log's 256 KiB prompt head.
+"""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

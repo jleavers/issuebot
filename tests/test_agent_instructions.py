@@ -15,7 +15,7 @@ from issuebot.agent.instructions import (
 
 def test_the_declared_list_is_the_two_root_files() -> None:
     assert REPOSITORY_INSTRUCTION_FILES == ("CLAUDE.md", "AGENTS.md")
-    assert INSTRUCTION_FILE_LIMIT == 64 * 1024
+    assert INSTRUCTION_FILE_LIMIT == 128 * 1024
 
 
 def test_reads_the_named_files_in_order(tmp_path: Path) -> None:

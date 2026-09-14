@@ -191,7 +191,7 @@ floor, not the shipped version, and moves by hand.
   clone's `CLAUDE.md` and `AGENTS.md` as `instructions.py` read them after `before_run`, once
   per run (`REPOSITORY_INSTRUCTION_FILES`, a declared list; `O_NOFOLLOW`, since under
   `agent.run_as` the read is the worker's and the clone the session's; cut at
-  `INSTRUCTION_FILE_LIMIT`, 64 KiB; never a failure), each a `GitHubText` whose source names
+  `INSTRUCTION_FILE_LIMIT`, 128 KiB; never a failure), each a `GitHubText` whose source names
   the file and the repository and whose author is "whoever can merge to" it. That is the
   declared half of the decision; the other half is that `claude.setting_sources` is always
   passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
