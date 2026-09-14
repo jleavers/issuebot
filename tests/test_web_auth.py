@@ -175,6 +175,52 @@ def test_a_wrong_credential_is_logged_without_its_value(h: Harness) -> None:
     assert "guess-1234567890" not in repr(rejected)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/static/..{RAW}/stream",
+        f"/static/..{API}/issues/7",
+        "/static/../healthz",
+        "/static/../../__init__.py",
+    ],
+)
+def test_a_dot_segment_under_static_reaches_nothing(path: str) -> None:
+    """The open prefix cannot be a way around the gate. httpx normalises ``..`` on the client,
+    so this drives the ASGI app with the raw path a hand-built request would carry: the mount
+    claims the whole prefix ahead of every route and ``StaticFiles`` refuses the traversal."""
+    import asyncio
+
+    harness = Harness()
+    harness.seed_issue()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    asyncio.run(harness.app(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    assert start["status"] == 404, (path, start["status"])
+    assert b"claude-opus-5" not in body and b"example/repo" not in body
+
+
 def test_static_files_are_open(h: Harness) -> None:
     assert h.anonymous.get("/static/app.css").status_code == 200
     assert h.anonymous.get("/static/vendor/htmx.min.js").status_code == 200
@@ -238,7 +284,10 @@ def test_refresh_refuses_a_cross_site_form_even_with_the_credential(h: Harness) 
     )
     assert forged.status_code == 403
     assert h.database.notified_repos == []
-    assert h.anonymous.options(f"{API}/refresh").status_code in (401, 405)
+    # The preflight a cross-site script would trigger is itself a challenge, never a CORS answer.
+    preflight = h.anonymous.options(f"{API}/refresh")
+    assert preflight.status_code == 401
+    assert "access-control-allow-origin" not in preflight.headers
 
 
 def test_refresh_accepts_the_button_and_a_shell(h: Harness) -> None:

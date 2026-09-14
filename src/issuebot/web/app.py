@@ -246,6 +246,8 @@ def create_app(
         the anonymous liveness answer is for a probe that carries nothing, never a cover for a
         guess. A request without one is not logged, since a browser's first visit is one.
         """
+        # ``url.path`` is root_path + path; nothing sets a root path here, and under one the
+        # two exemptions would stop matching and fail closed rather than open.
         path = request.url.path
         if path.startswith(OPEN_PREFIXES):
             return await call_next(request)

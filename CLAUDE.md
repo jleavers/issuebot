@@ -509,7 +509,7 @@ floor, not the shipped version, and moves by hand.
   one middleware added *before* `add_headers` (Starlette wraps the last-added outermost, so a
   401 leaves with the security headers too) and runs ahead of routing, so the pages, the JSON
   API, the raw turn parts, the live partial and a path that matches nothing all answer 401
-  with `WWW-Authenticate: Basic realm="issuebot"` (the JSON envelope under `/api/`, the error
+  with `WWW-Authenticate: Basic realm="issuebot", charset="UTF-8"` (the JSON envelope under `/api/`, the error
   page elsewhere) until the request presents `password` as HTTP Basic under any username
   (`presented_password` reads the header, `credential_matches` compares in constant time; a
   credential presented and wrong logs `web_auth_rejected` with the path and client, never the

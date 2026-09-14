@@ -820,8 +820,9 @@ that matters on your host.
 - **Safety.** The agent runs with no permission prompts and may run anything inside its
   workspace. Keep it in the container and give it a repository-scoped token. The dashboard
   asks for its password on every request, so placement hardens it rather than standing in
-  for it: keep it on loopback all the same, or put TLS in front of it, because HTTP Basic
-  sends the password with every request. The agent's environment is minimal: `PATH`, `HOME`, the
+  for it: keep it on loopback all the same, or put TLS and rate limiting in front of it,
+  because HTTP Basic sends the password with every request and the app itself limits no
+  attempts. The agent's environment is minimal: `PATH`, `HOME`, the
   `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and `GH_TOKEN`;
   nothing else from `.env` reaches it.
 
@@ -880,7 +881,7 @@ under any username (the browser prompts once and remembers it; `curl -u
 matches nothing challenges too, so nothing reaches the database anonymously. `POST
 .../refresh`, the one write, asks for one thing more: a browser replays a cached Basic
 credential on a form another site submits, so the route also requires a custom request
-header, `HX-Request` (any value; the Poll-now button sends it, a form cannot, and a
+header, `HX-Request` (any non-empty value; the Poll-now button sends it, a form cannot, and a
 cross-site script cannot add it without a CORS preflight the app never answers), and refuses
 a request whose `Sec-Fetch-Site` reads `cross-site` outright. Two things stay open:
 `/static/`, the vendored assets, and `/healthz` to a probe with no credential, which then
