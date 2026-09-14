@@ -7,16 +7,24 @@ first registered one, and the header's dropdown is how a reader moves between th
 
 Every request that reads opens one connection through ``Database.queries()`` and closes it when
 the response is built. The app never writes to a table; its one write is ``NOTIFY``. Templates
-render with autoescape on and ``StrictUndefined``; every response carries the security headers.
+render with autoescape on and ``StrictUndefined``; every response carries the security headers,
+the one an unhandled exception raises included (#106): the layer that adds them decorates the
+``send`` channel rather than the response the next layer returns, and answers the exception
+itself through that channel before re-raising it, so the next such exception is covered before
+anyone finds it.
 
 Every request but the static files carries the credential (#73, ``issuebot.web.auth``): one
 gate, ahead of routing, so the pages, the JSON API, the raw turn parts, the live partial and a
 path that matches nothing all answer 401 with the ``Basic`` challenge until it does. ``/healthz``
 is the one route with an anonymous answer, and it is liveness alone: the database up or not,
-no repository named, so compose's healthcheck and an uptime monitor need no secret. The refresh
-route asks for one thing more, a proof a cross-site page cannot produce.
+no repository named, so compose's healthcheck and an uptime monitor need no secret. That
+exemption inherits the gate's obligation (#106): the anonymous answer comes from the verdict the
+process already holds, refreshed by at most one probe per ``LIVENESS_CACHE_S``, so a caller with
+no credential cannot open a connection per request against the hub cluster's backends. The
+refresh route asks for one thing more, a proof a cross-site page cannot produce.
 """
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -31,7 +39,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, StrictUndefined
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Send
+from starlette.types import Scope as ASGIScope
 
 from issuebot.config import GitHubLabels
 from issuebot.db import (
@@ -101,10 +112,14 @@ _HTTP_CODES = {
     403: "forbidden",
     404: "not_found",
     405: "method_not_allowed",
+    500: "internal_error",
     503: "unavailable",
 }
 OPEN_PREFIXES = ("/static/",)
 LIVENESS_PATH = "/healthz"
+# How long the anonymous ``/healthz`` answer stands before a probe refreshes it: compose asks
+# every 30 s, so a verdict this old is still the one it would have got.
+LIVENESS_CACHE_S = 10.0
 _RAW_EXTENSIONS = {"prompt": "md", "stream": "jsonl", "stderr": "log"}
 
 
@@ -153,6 +168,94 @@ class _Refresh:
 
     def sent(self) -> None:
         self.last = self._clock()
+
+
+class _Liveness:
+    """The anonymous probe's verdict, held for ``LIVENESS_CACHE_S`` from the last probe (#106).
+
+    ``/healthz`` is the gate's one exemption, and a probe that opened a connection per request
+    handed the scarcest shared resource -- the hub cluster's backends, one fork and one
+    authentication each, since ``Database`` keeps no pool -- to any caller with no credential.
+    So the anonymous branch answers from the verdict the process already holds, probes only once
+    that has aged out, and while a probe is in flight every other anonymous caller waits for
+    that one rather than opening its own: at most one connection per interval, whatever the
+    flood. Both verdicts are held, since a failure repeated is a connection attempt repeated.
+    The authenticated branch keeps its live probe and records what it saw.
+    """
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._ok: bool | None = None
+        self._at: float | None = None
+
+    def held(self) -> bool | None:
+        """The verdict while it is fresh, else None."""
+        if self._at is None or self._clock() - self._at >= LIVENESS_CACHE_S:
+            return None
+        return self._ok
+
+    def record(self, ok: bool) -> None:
+        self._ok = ok
+        self._at = self._clock()
+
+    async def verdict(self, probe: Callable[[], Awaitable[bool]]) -> bool:
+        """The held verdict, or one ``probe`` shared by every caller that arrives during it."""
+        held = self.held()
+        if held is not None:
+            return held
+        async with self._lock:
+            held = self.held()
+            if held is not None:
+                return held
+            ok = await probe()
+            self.record(ok)
+            return ok
+
+
+class _SecureExit:
+    """ASGI middleware: the security headers on every response, the raised ones included (#106).
+
+    Starlette's ``ServerErrorMiddleware`` sits outside every user middleware and answers an
+    unhandled exception by itself, so a ``BaseHTTPMiddleware`` that decorated the response
+    ``call_next`` returned never saw that 500, and it left with no CSP, no ``nosniff``, no
+    ``Referrer-Policy`` and no ``X-Frame-Options``. This layer decorates the ``send`` channel
+    instead, so every ``http.response.start`` that passes it carries the headers, and when the
+    app raises before one has, it answers through the same channel with the envelope or page
+    the other errors get -- then re-raises, so the exception still reaches uvicorn's log and a
+    test client that expects it. ``on_error`` builds that response; should it raise too, a
+    plain 500 goes out with the headers rather than nothing at all.
+    """
+
+    def __init__(self, app: ASGIApp, *, on_error: Callable[[Request, Exception], Response]) -> None:
+        self.app = app
+        self.on_error = on_error
+
+    async def __call__(self, scope: ASGIScope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def send_with_headers(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+                headers = MutableHeaders(raw=message.setdefault("headers", []))
+                for name, value in SECURITY_HEADERS.items():
+                    headers[name] = value
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_headers)
+        except Exception as exc:
+            if not started:
+                try:
+                    response = self.on_error(Request(scope), exc)
+                except Exception:
+                    response = PlainTextResponse("internal server error", status_code=500)
+                await response(scope, receive, send_with_headers)
+            raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +338,8 @@ def create_app(
         return response
 
     # Starlette wraps the last-added middleware outermost, so the gate is added first and the
-    # security headers second: a 401 leaves with the same headers as every other response.
+    # security headers second: a 401 leaves with the same headers as every other response, and
+    # so does the 500 an exception raised inside the gate or past it becomes.
     @app.middleware("http")
     async def require_identity(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -262,14 +366,13 @@ def create_app(
         request.state.authenticated = authenticated
         return await call_next(request)
 
-    @app.middleware("http")
-    async def add_headers(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        response = await call_next(request)
-        for name, value in SECURITY_HEADERS.items():
-            response.headers[name] = value
-        return response
+    def unhandled(request: Request, exc: Exception) -> Response:
+        """The 500 for an exception no handler claimed: the type and the path, never the
+        message, which is uvicorn's to log with the traceback once the layer re-raises."""
+        log.error("web_unhandled_error", path=request.url.path, error=type(exc).__name__)
+        return error_response(request, 500, "internal_error", "internal server error")
+
+    app.add_middleware(_SecureExit, on_error=unhandled)
 
     @app.exception_handler(DatabaseError)
     async def database_error(request: Request, exc: DatabaseError) -> Response:
@@ -539,26 +642,42 @@ def create_app(
         }
         return JSONResponse(body, status_code=202)
 
+    liveness = _Liveness(clock)
+
+    async def probe() -> bool:
+        """Opening a connection is the probe; nothing is read."""
+        try:
+            async with database.queries():
+                return True
+        except DatabaseError:
+            return False
+
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:
         """The database, and one entry per registered worker; ``worker`` is the worst of them.
 
         An anonymous probe gets liveness alone -- ``status`` and ``database`` -- and not the
         workers, the repository names or the error text, which is what the credential is for.
+        It gets it from ``liveness``, the verdict this process already holds, so a flood of
+        anonymous probes costs one connection per ``LIVENESS_CACHE_S`` and no more (#106); the
+        credential's probe is live, and what it sees is the next anonymous answer.
         """
         authenticated = bool(getattr(request.state, "authenticated", False))
+        if not authenticated:
+            if await liveness.verdict(probe):
+                return JSONResponse({"status": "ok", "database": "ok"})
+            return JSONResponse(
+                {"status": "unavailable", "database": "unavailable"}, status_code=503
+            )
         try:
             async with database.queries() as queries:
-                # Opening the connection is the probe; the rows are for the credential.
-                repos = await queries.repos() if authenticated else []
-                snapshots = await queries.snapshots() if authenticated else {}
+                repos = await queries.repos()
+                snapshots = await queries.snapshots()
         except DatabaseError as exc:
-            body: dict[str, Any] = {"status": "unavailable", "database": "unavailable"}
-            if authenticated:
-                body["error"] = exc.message
+            liveness.record(False)
+            body = {"status": "unavailable", "database": "unavailable", "error": exc.message}
             return JSONResponse(body, status_code=503)
-        if not authenticated:
-            return JSONResponse({"status": "ok", "database": "ok"})
+        liveness.record(True)
         current = now()
         workers: dict[str, Any] = {}
         for row in repos:

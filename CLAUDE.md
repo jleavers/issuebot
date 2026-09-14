@@ -526,9 +526,20 @@ floor, not the shipped version, and moves by hand.
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
   byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
-  `unsafe-inline`). The gate (#73, `auth.py`, pure): authorisation is a property of the
+  `unsafe-inline`). The headers are added by `_SecureExit` (#106), a plain ASGI middleware
+  that decorates the `send` channel rather than the response `call_next` returns: Starlette's
+  `ServerErrorMiddleware` sits outside every user middleware and answers an unhandled
+  exception by itself, so a `BaseHTTPMiddleware` never saw that 500 and it left bare. The
+  layer answers the exception itself through the same channel (the `internal_error` envelope
+  under `/api/`, `error.html` elsewhere, both with the headers; a plain 500 with the headers
+  should even that raise), logs `web_unhandled_error` with the path and the exception's type,
+  never its message, and re-raises so uvicorn logs the traceback and a strict test client
+  still sees it. `window_days` is total (`_WINDOW` admits no more digits than
+  `MAX_WINDOW_DAYS` has, since `int` raises past `sys.get_int_max_str_digits()`), which is
+  now a detail: the next unhandled exception is covered before anyone finds it. The gate
+  (#73, `auth.py`, pure): authorisation is a property of the
   request the app checks itself, never of where the socket is bound. `require_identity` is
-  one middleware added *before* `add_headers` (Starlette wraps the last-added outermost, so a
+  one middleware added *before* `_SecureExit` (Starlette wraps the last-added outermost, so a
   401 leaves with the security headers too) and runs ahead of routing, so the pages, the JSON
   API, the raw turn parts, the live partial and a path that matches nothing all answer 401
   with `WWW-Authenticate: Basic realm="issuebot", charset="UTF-8"` (the JSON envelope under `/api/`, the error
@@ -539,7 +550,16 @@ floor, not the shipped version, and moves by hand.
   (`/static/`) skips the gate; `/healthz` (`LIVENESS_PATH`) lets an anonymous probe through
   with `request.state.authenticated` false and answers it liveness alone, `status` and
   `database` with no workers, repository names or error text, so compose's healthcheck needs
-  no secret; a wrong credential there is a 401 like everywhere. The one write,
+  no secret; a wrong credential there is a 401 like everywhere. The exemption inherits the
+  gate's obligation (#106): `Database` keeps no pool, so a probe that opened a connection per
+  request handed the hub cluster's backends to any caller with no credential, and a few
+  hundred concurrent probes would push it past `max_connections` and every worker's sink and
+  listener into backoff. The anonymous branch now answers from `_Liveness`, the verdict the
+  process already holds for `LIVENESS_CACHE_S` (10 s) since the last probe, both verdicts
+  held; a probe runs only once that has aged out, and callers arriving during one wait for it
+  under a lock rather than opening their own (`verdict(probe)`), so a flood costs one
+  connection per interval. The credential's branch keeps its live probe and `record`s what
+  it saw, which is the next anonymous answer. The one write,
   `POST .../refresh`, asks `refresh_refusal(headers)` for one thing more, since a browser
   replays a cached Basic credential on a cross-site form POST: a custom request header
   (`PROOF_HEADER`, `HX-Request`, which the Poll-now button already sends; a form cannot set
