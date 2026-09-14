@@ -36,6 +36,15 @@ def test_the_login_volume_is_the_sessions_home() -> None:
     assert "/home/issuebot/.claude" not in DOCKERFILE
 
 
+def test_the_session_may_run_git_in_the_workspace_the_worker_owns() -> None:
+    """The workspace directory is the worker's and the clone inside it the session's, so git's
+    ownership check needs an exception -- scoped to the workspace root, never a bare ``*``."""
+    assert "git config --system --add safe.directory '/workspaces/*'" in DOCKERFILE
+    assert "safe.directory '*'" not in DOCKERFILE
+    assert "config --system --get-all safe.directory" in CI
+    assert "git config --local --add issuebot.probe 1" in CI
+
+
 def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> None:
     assert "--user agent --entrypoint sudo issuebot:ci" in CI
     assert "/proc/$!/environ" in CI

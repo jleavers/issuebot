@@ -148,10 +148,22 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # `closefrom_override` is for the one descriptor the worker passes across the uid change, the
 # session's environment (issuebot.agent.runas); `!use_pty` keeps a turn's stream-json byte for
 # byte when `docker compose run` gives the worker a terminal.
+# The split needs one thing of git. A workspace directory is the worker's and sticky, so the
+# session cannot unlink the state kept there, while the clone inside it is the session's own --
+# and git refuses to work in a repository whose worktree belongs to another account (`detected
+# dubious ownership`, which `git config --local` reports downstream as the baffling "--local
+# can only be used inside a git repository"). Without the exception below every git command a
+# session runs fails, the post-clone setup first. It is scoped to the workspace root rather
+# than a bare `*`: it says that under /workspaces a repository owned by another account is
+# still ours, and the only other account that can own anything there is the worker, which is
+# the more privileged side of the line. The path is the image's own -- the `install -d` below,
+# the VOLUME further down and compose's mount -- so a `workspace.root` pointed elsewhere inside
+# the container would need its own entry.
 RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
  && useradd --create-home --uid 1001 --shell /bin/bash agent \
  && chmod 0750 /home/issuebot /home/agent \
  && install -d -m 0755 -o issuebot -g issuebot /workspaces \
+ && git config --system --add safe.directory '/workspaces/*' \
  && install -d -m 0700 -o agent -g agent /home/agent/.claude \
  && printf '%s\n' \
       'Defaults:issuebot !use_pty, !syslog, !lecture, closefrom_override' \
