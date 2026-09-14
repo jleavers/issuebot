@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from fakes.web import PASSWORD, REFRESH_HEADERS, basic_auth
 from issuebot.agent.turnlog import capture_turns
 from issuebot.config import GitHubLabels
 from issuebot.db import Database, migrate
@@ -122,7 +123,7 @@ async def seeded(db_url: str, make_issue: Callable[..., Issue]) -> AsyncIterator
 
 @pytest.fixture
 def client(seeded: Database) -> TestClient:
-    return TestClient(create_app(seeded))
+    return TestClient(create_app(seeded, password=PASSWORD), headers=basic_auth(PASSWORD))
 
 
 async def test_the_issue_api_lists_the_run_and_its_turns(client: TestClient) -> None:
@@ -192,7 +193,10 @@ async def test_state_and_healthz_read_the_snapshot(client: TestClient) -> None:
     assert state["counters"]["runs_ended"] == 1
     health = client.get("/healthz").json()
     assert (health["status"], health["database"], health["worker"]) == ("ok", "ok", "ok")
-    assert client.post(f"{API}/refresh").status_code == 202
+    assert client.post(f"{API}/refresh", headers=REFRESH_HEADERS).status_code == 202
+    # Anonymous, the health check is liveness alone (#73).
+    anonymous = TestClient(client.app).get("/healthz").json()
+    assert anonymous == {"status": "ok", "database": "ok"}
 
 
 async def test_unknown_issue_is_a_404_against_the_real_database(client: TestClient) -> None:

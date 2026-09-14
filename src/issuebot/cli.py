@@ -266,10 +266,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     web = subparsers.add_parser(
         "web",
-        help="serve the dashboard and the JSON API until SIGTERM or SIGINT (needs DATABASE_URL)",
+        help=(
+            "serve the dashboard and the JSON API until SIGTERM or SIGINT "
+            "(needs DATABASE_URL and ISSUEBOT_WEB_PASSWORD)"
+        ),
     )
     web.add_argument("--port", type=int, default=8080, help="listen port (default: 8080)")
-    web.add_argument("--bind", default="0.0.0.0", help="listen address (default: 0.0.0.0)")
+    web.add_argument(
+        "--bind",
+        default=WEB_DEFAULT_BIND,
+        help=f"listen address (default: {WEB_DEFAULT_BIND}; 0.0.0.0 to serve a network)",
+    )
     web.set_defaults(func=cmd_web)
     return parser
 
@@ -1209,6 +1216,11 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
 
 _WEB_NOT_CONFIGURED = "[FAIL] database: not configured; export DATABASE_URL"
+_WEB_NO_PASSWORD = "[FAIL] web: not configured; export ISSUEBOT_WEB_PASSWORD"
+# Loopback: the gate is the app's own, and placement hardens it rather than standing in for
+# it (#73). Compose passes 0.0.0.0 explicitly, behind a port it publishes on the host's
+# loopback, because a container's own loopback is reachable by nobody.
+WEB_DEFAULT_BIND = "127.0.0.1"
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -1216,10 +1228,15 @@ def cmd_web(args: argparse.Namespace) -> int:
     if not url:
         print(_WEB_NOT_CONFIGURED)
         return 1
-    return asyncio.run(_run_web(url, port=args.port, bind=args.bind))
+    # From the environment and nowhere else: a flag would show the credential in ``ps``.
+    password = os.environ.get("ISSUEBOT_WEB_PASSWORD")
+    if not password:
+        print(_WEB_NO_PASSWORD)
+        return 1
+    return asyncio.run(_run_web(url, password=password, port=args.port, bind=args.bind))
 
 
-async def _run_web(url: str, *, port: int, bind: str) -> int:
+async def _run_web(url: str, *, password: str, port: int, bind: str) -> int:
     """Migrate, build the app and serve it until a stop signal; a failed bind is uvicorn's
     error line and exit 1. The web reads no workflow: everything it shows is in the database."""
     if not 0 <= port <= 65535:
@@ -1232,7 +1249,7 @@ async def _run_web(url: str, *, port: int, bind: str) -> int:
         return 1
     get_logger(__name__).info("web_started", bind=bind, port=port, database=database.description)
     try:
-        await _serve(create_app(database), host=bind, port=port)
+        await _serve(create_app(database, password=password), host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
     return 0

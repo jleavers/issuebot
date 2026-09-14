@@ -117,9 +117,9 @@ cp .env.example .env
 ```
 
 Fill in `.env`: `GH_TOKEN`, `ANTHROPIC_API_KEY` (or leave it empty and log in once, step 2),
-`ISSUEBOT_DB_PASSWORD`, the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values, and optionally
-`SLACK_WEBHOOK_URL`. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is
-taken on your host.
+`ISSUEBOT_DB_PASSWORD`, `ISSUEBOT_WEB_PASSWORD`, the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+values, and optionally `SLACK_WEBHOOK_URL`. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only
+matter if 5432 or 8080 is taken on your host.
 
 `ISSUEBOT_DB_PASSWORD` is the password of the PostgreSQL store and the one credential it has,
 so it has no default: `docker compose up` (and `config`) refuse to run the database, the worker
@@ -319,8 +319,9 @@ docker compose up --build -d
 docker compose logs -f worker
 ```
 
-That starts PostgreSQL, the worker and the dashboard at http://127.0.0.1:8080 (loopback only;
-it has no authentication). At startup the worker applies the database migrations, checks the
+That starts PostgreSQL, the worker and the dashboard at http://127.0.0.1:8080 (the browser
+prompts: any username, `ISSUEBOT_WEB_PASSWORD`; see "The dashboard" under Development for the
+rest of its access rules). At startup the worker applies the database migrations, checks the
 `gh` login, the labels and the Claude login, and prints `[FAIL] startup:` lines and exits if
 anything is wrong. From then on it polls the repository every `polling.interval_ms`.
 
@@ -333,11 +334,13 @@ docker compose up -d db                       # optional: history and the dashbo
 export DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot   # optional
 uv run issuebot worker
 DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
-  uv run issuebot web                         # in a second terminal; it reads nothing else
+  uv run issuebot web                         # in a second terminal; it reads that and
+                                              # ISSUEBOT_WEB_PASSWORD (sourced above), nothing else
 ```
 
 The two DSNs are built from the `.env` you just sourced; there is no password to type and none
-written down here.
+written down here. The dashboard listens on loopback (`--bind 0.0.0.0` to serve a network) and
+asks for `ISSUEBOT_WEB_PASSWORD` on every request.
 
 On the host set `workspace.root` to a directory you can write, such as `~/issuebot-workspaces`;
 the worker creates it.
@@ -679,8 +682,9 @@ and Claude login. The checkouts meet on one Docker network.
    with it; compose refuses to start the worker while it is empty), and `docker compose up -d`.
    The worker reaches the hub's database as `db` over the shared network and registers itself;
    it appears in the dashboard's dropdown on its first start.
-4. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`). `/` opens the
-   repository you last chose; the header's dropdown switches.
+4. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`, and the hub's
+   `ISSUEBOT_WEB_PASSWORD` at the prompt). `/` opens the repository you last chose; the header's
+   dropdown switches.
 
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
@@ -814,8 +818,11 @@ that matters on your host.
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The agent runs with no permission prompts and may run anything inside its
-  workspace. Keep it in the container, give it a repository-scoped token, and keep the
-  dashboard on loopback. The agent's environment is minimal: `PATH`, `HOME`, the
+  workspace. Keep it in the container and give it a repository-scoped token. The dashboard
+  asks for its password on every request, so placement hardens it rather than standing in
+  for it: keep it on loopback all the same, or put TLS and rate limiting in front of it,
+  because HTTP Basic sends the password with every request and the app itself limits no
+  attempts. The agent's environment is minimal: `PATH`, `HOME`, the
   `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and `GH_TOKEN`;
   nothing else from `.env` reaches it.
 
@@ -836,8 +843,8 @@ uv run issuebot migrate           # apply the database migrations (worker does t
 uv run issuebot status            # what the worker was doing at its last tick
 uv run issuebot stats             # issues closed and agents run: last day, week, per day
 uv run issuebot refresh           # make a running worker poll GitHub now
-uv run issuebot web               # the dashboard and its JSON API (needs DATABASE_URL)
-cp .env.example .env              # then fill in GH_TOKEN, ISSUEBOT_DB_PASSWORD and Claude auth
+uv run issuebot web               # the dashboard and its JSON API (needs DATABASE_URL and ISSUEBOT_WEB_PASSWORD)
+cp .env.example .env              # then fill in GH_TOKEN, ISSUEBOT_DB_PASSWORD, ISSUEBOT_WEB_PASSWORD and Claude auth
 docker compose up --build         # postgres:18 + worker + web (http://127.0.0.1:8080)
 ```
 
@@ -863,10 +870,29 @@ like a credential, and the operator's home directory never reach the database). 
 one, and the header's dropdown switches. `/api/v1/repos` lists every registered worker;
 `/api/v1/repos/<owner>/<name>/state`, `/issues/<n>`, `/stats?window=7d` and
 `POST /refresh` serve one repository as JSON, and `/healthz` reports the database and,
-per repository, its worker's status. It needs `DATABASE_URL` and nothing else — no
-workflow — and has no authentication: keep it on loopback (`issuebot web --bind 127.0.0.1`
-outside Docker) or behind a reverse proxy. Turn logs are captured into the database when a
-run ends, so they outlive the workspace.
+per repository, its worker's status. It needs `DATABASE_URL`, `ISSUEBOT_WEB_PASSWORD` and
+nothing else — no workflow. Turn logs are captured into the database when a run ends, so they
+outlive the workspace.
+
+**Access.** Authorisation is a property of the request, never of where the socket is bound:
+every page, JSON route and raw turn part asks for `ISSUEBOT_WEB_PASSWORD` as HTTP Basic
+under any username (the browser prompts once and remembers it; `curl -u
+:"$ISSUEBOT_WEB_PASSWORD" http://127.0.0.1:8080/api/v1/repos` from a shell), and a path that
+matches nothing challenges too, so nothing reaches the database anonymously. `POST
+.../refresh`, the one write, asks for one thing more: a browser replays a cached Basic
+credential on a form another site submits, so the route also requires a custom request
+header, `HX-Request` (any non-empty value; the Poll-now button sends it, a form cannot, and a
+cross-site script cannot add it without a CORS preflight the app never answers), and refuses
+a request whose `Sec-Fetch-Site` reads `cross-site` outright. Two things stay open:
+`/static/`, the vendored assets, and `/healthz` to a probe with no credential, which then
+answers liveness alone (`status` and `database`; the workers and their repository names are
+for the credential), so compose's healthcheck needs no secret. A credential that is presented
+and wrong is a 401 everywhere and a `web_auth_rejected` log line naming the path and the
+client, never the value. `issuebot web` refuses to start without the password (`[FAIL]
+web: not configured; export ISSUEBOT_WEB_PASSWORD`; it reads the environment only, since a
+flag would show in `ps`) and binds `127.0.0.1` unless told `--bind 0.0.0.0`; the compose
+service says so explicitly behind a port it publishes on the host's loopback. Basic sends the
+password with every request, so a dashboard that leaves the host wants TLS in front of it.
 
 **The hero's six tiles.** Closed, agents run, cost, tokens, limits and activity, each showing
 two figures: 1 day and 7 days for the first four, the two usage windows for limits, and

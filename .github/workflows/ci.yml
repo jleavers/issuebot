@@ -76,6 +76,9 @@ jobs:
               esac
             done
             COMPOSE_PROFILES=$profiles ISSUEBOT_DB_PASSWORD=ci-only docker compose config --quiet
+            # The dashboard's password is a pass-through, not a requirement (#73): a
+            # worker-only checkout configures without it, and with it every profile does.
+            COMPOSE_PROFILES=$profiles ISSUEBOT_DB_PASSWORD=ci-only ISSUEBOT_WEB_PASSWORD=ci-only docker compose config --quiet
           done
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7

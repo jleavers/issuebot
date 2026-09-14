@@ -126,17 +126,27 @@ services:
     profiles: ["hub"]
     networks: [issuebot]
     # The dashboard and the JSON API for every repository on this database. Reads nothing but
-    # DATABASE_URL; no workflow, no GitHub, Claude or Slack credential.
+    # DATABASE_URL and its own password; no workflow, no GitHub, Claude or Slack credential.
+    # 0.0.0.0 is the container's every interface, which is the only way the published port
+    # below reaches it; the CLI's own default is loopback.
     command: ["web", "--bind", "0.0.0.0", "--port", "8080"]
     init: true
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}@db:5432/issuebot
+      # Every page and JSON route asks for this (HTTP Basic, any username; #73). Passed
+      # through rather than required here: compose interpolates the whole file before it
+      # applies a profile, so a required form would make every worker-only checkout carry a
+      # secret it never uses. The app refuses to start without it ([FAIL] web: not
+      # configured), and restart: unless-stopped shows that in `docker compose ps`.
+      ISSUEBOT_WEB_PASSWORD: ${ISSUEBOT_WEB_PASSWORD:-}
     ports:
-      # Loopback only: the dashboard has no authentication. Override the host port with
-      # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is the --port above.
+      # Published on loopback: the credential is the gate, and the host's loopback keeps the
+      # LAN from even asking. Override the host port with ISSUEBOT_WEB_PORT in the project
+      # dot-env file; the container side is the --port above.
       - "127.0.0.1:${ISSUEBOT_WEB_PORT:-8080}:8080"
     healthcheck:
+      # Anonymous on purpose: /healthz answers liveness alone to a probe with no credential.
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s

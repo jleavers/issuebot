@@ -221,6 +221,8 @@ class FakeDatabase:
         self.notified_repos: list[str | None] = []
         self.notify_error: DatabaseError | None = None
         self.opened = 0
+        # Raised on opening a connection, before any query: what an unreachable server does.
+        self.queries_error: DatabaseError | None = None
 
     def factory(self, url: str) -> FakeDatabase:
         self.urls.append(url)
@@ -244,6 +246,8 @@ class FakeDatabase:
     @asynccontextmanager
     async def queries(self) -> AsyncIterator[FakeQueries]:
         self.opened += 1
+        if self.queries_error is not None:
+            raise self.queries_error
         yield self.queries_obj
 
     async def register_repo(

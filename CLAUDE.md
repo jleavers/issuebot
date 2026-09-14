@@ -29,7 +29,8 @@ uv run issuebot migrate              # apply pending .sql migrations (worker and
 uv run issuebot status               # the worker's last runtime snapshot, read from the database
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
 uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
-uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL, reads no workflow)
+uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL and
+                                     #   ISSUEBOT_WEB_PASSWORD, reads no workflow; binds 127.0.0.1 by default)
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set)
@@ -482,7 +483,7 @@ floor, not the shipped version, and moves by hand.
   `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
   `FakeDatabase` the CLI and web tests share, with a separate `FakeRepoQueries`.
 - `issuebot.web`: the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
-  `log`. `app.py`: `create_app(database, *, clock=, now=)` (FastAPI; every page and JSON route
+  `log`. `app.py`: `create_app(database, *, password, clock=, now=)` (FastAPI; every page and JSON route
   lives under a repository prefix, since one database now holds every worker's rows —
   `/r/<owner>/<name>/` for the pages, `/api/v1/repos/<owner>/<name>/` for the JSON. Pages:
   `/r/<owner>/<name>/` (dashboard), `/issues[?state=<role>]`, `/issues/<n>`,
@@ -503,7 +504,27 @@ floor, not the shipped version, and moves by hand.
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
   byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
-  `unsafe-inline`). `views.py`: pure builders
+  `unsafe-inline`). The gate (#73, `auth.py`, pure): authorisation is a property of the
+  request the app checks itself, never of where the socket is bound. `require_identity` is
+  one middleware added *before* `add_headers` (Starlette wraps the last-added outermost, so a
+  401 leaves with the security headers too) and runs ahead of routing, so the pages, the JSON
+  API, the raw turn parts, the live partial and a path that matches nothing all answer 401
+  with `WWW-Authenticate: Basic realm="issuebot", charset="UTF-8"` (the JSON envelope under `/api/`, the error
+  page elsewhere) until the request presents `password` as HTTP Basic under any username
+  (`presented_password` reads the header, `credential_matches` compares in constant time; a
+  credential presented and wrong logs `web_auth_rejected` with the path and client, never the
+  value; one presented nowhere is a browser's first visit and is not logged). `OPEN_PREFIXES`
+  (`/static/`) skips the gate; `/healthz` (`LIVENESS_PATH`) lets an anonymous probe through
+  with `request.state.authenticated` false and answers it liveness alone, `status` and
+  `database` with no workers, repository names or error text, so compose's healthcheck needs
+  no secret; a wrong credential there is a 401 like everywhere. The one write,
+  `POST .../refresh`, asks `refresh_refusal(headers)` for one thing more, since a browser
+  replays a cached Basic credential on a cross-site form POST: a custom request header
+  (`PROOF_HEADER`, `HX-Request`, which the Poll-now button already sends; a form cannot set
+  one and a cross-site script cannot without a CORS preflight the app never answers), and a
+  `Sec-Fetch-Site: cross-site` request is refused whatever else it carries; refusal is a 403
+  `forbidden` envelope and `web_refresh_refused`. `create_app` raises `ValueError` on an
+  empty password rather than gating against nothing. `views.py`: pure builders
   and template filters (`RepoContext(name, base, api)` — a page's two prefixes, from which
   `base.html`'s links are built — `repo_context`, `repo_base`, `switch_target` (where the
   dropdown sends the browser: a dashboard stays a dashboard and an issue list keeps its filter,
@@ -594,10 +615,13 @@ floor, not the shipped version, and moves by hand.
   `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
   the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
   issuebot_refresh for <repo>`) and
-  `web [--bind HOST] [--port N]` (reads `DATABASE_URL` alone — no `--workflow`, no other
-  setting, and no workflow file to fail loading — `[FAIL] database: not configured; export
-  DATABASE_URL` without it, distinct from every other command's `... or set database.url:
-  $VAR`);
+  `web [--bind HOST] [--port N]` (reads `DATABASE_URL` and `ISSUEBOT_WEB_PASSWORD` — no
+  `--workflow`, no other setting, and no workflow file to fail loading — `[FAIL] database: not
+  configured; export DATABASE_URL` without the first, distinct from every other command's
+  `... or set database.url: $VAR`, and `[FAIL] web: not configured; export
+  ISSUEBOT_WEB_PASSWORD` without the second, which no flag supplies since a flag shows in
+  `ps`; `--bind` defaults to `WEB_DEFAULT_BIND`, `127.0.0.1`, and compose passes `0.0.0.0`
+  explicitly behind the port it publishes on the host's loopback (#73));
   `run-once` and `worker` migrate first when `database.url` is set and then register the
   workflow's repository (`Database.register_repo`: labels and workflow path, refreshed every
   start so a label rename reaches the dashboard) before starting the Slack and PostgreSQL

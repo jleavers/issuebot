@@ -236,8 +236,10 @@ actually close it; `WorkspaceManager`'s sanitised keys and containment; argument
 into `gh` through issue-derived values; whether `GhRunner` is in fact the only subprocess
 boundary; what a hostile branch name or PR title can do downstream.
 
-**`services` — the dashboard, the API and the database.** The web app has no authentication
-at all; what is exposed by that, given the pages render issue bodies, transcripts and costs.
+**`services` — the dashboard, the API and the database.** The web app gates every read
+with HTTP Basic (`ISSUEBOT_WEB_PASSWORD`), asks `POST /refresh` for a custom-header proof and
+binds loopback by default (#73); whether any path skips that gate, given the pages render
+issue bodies, transcripts and costs.
 `POST /refresh` and its throttle. The CSP, autoescape and `safe_href`. SQL construction in
 `queries.py` and `store.py`, including how `repo` and `state` reach a predicate. `import
 --from URL` accepting an arbitrary DSN. The `issuebot_refresh` payload handling in
