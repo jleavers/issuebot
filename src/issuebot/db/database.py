@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 from issuebot.config import GitHubLabels
 from issuebot.db.connection import Connector, classify, connect, describe, error_text, redact
 from issuebot.db.errors import StoreUnavailableError
-from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
+from issuebot.db.listen import RefreshListener, refresh_channel
 from issuebot.db.migrate import MigrationResult, discover_migrations, migrate, schema_version
 from issuebot.db.queries import Queries
 from issuebot.db.store import REGISTER_REPO, PostgresStore
@@ -88,10 +88,11 @@ class Database:
         return RefreshListener(self._url, on_notify, repo=repo, connect=self._connect)
 
     async def notify_refresh(self, repo: str | None = None) -> None:
-        """NOTIFY the refresh channel: with a repository, that worker ticks at once; without
-        one, every listening worker does."""
+        """NOTIFY the repository's refresh channel, so that worker ticks at once (#110: one
+        channel per repository, never every worker on the store). Without a repository the
+        bare channel is notified, which only a listener built without one hears."""
         async with self._open() as conn:
-            await conn.execute("SELECT pg_notify(%s, %s)", (REFRESH_CHANNEL, repo or ""))
+            await conn.execute("SELECT pg_notify(%s, %s)", (refresh_channel(repo), repo or ""))
 
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[AsyncConnection]:

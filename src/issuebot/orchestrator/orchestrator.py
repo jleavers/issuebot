@@ -98,6 +98,12 @@ GITHUB_STATUS_DEADLINE_S = 10.0
 # `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
 # the probe's verdict).
 GITHUB_HOLD_KEY = "github"
+# The least time between the end of one tick and the start of the next when a refresh asks
+# for it (#110). A NOTIFY is one row on the store away from any client with its DSN, and
+# every tick polls GitHub with this worker's token, so the NOTIFY rate must not set the tick
+# rate: a refresh inside the interval is admitted when the interval is up, one tick for
+# however many asked, and never dropped. The web throttles its own POST to the same figure.
+MIN_REFRESH_INTERVAL_S = 5.0
 # How much of `gh`'s complaint the hold's reason carries. Neither `gh`'s stderr nor GitHub's
 # GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
 MAX_HOLD_ERROR_CHARS = 300
@@ -1370,7 +1376,11 @@ class Orchestrator:
             await self.shutdown()
 
     async def _wait_for_next_tick(self) -> None:
-        deadline = self._clock() + self._workflow.config.polling.interval_ms / 1000
+        started = self._clock()
+        deadline = started + self._workflow.config.polling.interval_ms / 1000
+        # The earliest a refresh may start the next tick (#110): one asked for before then
+        # brings the deadline forward to it rather than returning at once.
+        admissible = started + MIN_REFRESH_INTERVAL_S
         while not self._stopping:
             await self.fire_due_retries()
             now = self._clock()
@@ -1385,7 +1395,13 @@ class Orchestrator:
                 continue
             if message is _REFRESH:
                 self._refresh_pending = False
-                return
+                now = self._clock()
+                if now >= admissible:
+                    return
+                if admissible < deadline:
+                    deadline = admissible
+                    self._log.debug("refresh_deferred", wait_s=round(admissible - now, 3))
+                continue
             if message is _STOP:
                 return
             if isinstance(message, _WorkerExited):

@@ -58,6 +58,7 @@ from issuebot.db import (
     PostgresSink,
     RefreshListener,
     is_postgres_url,
+    refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
@@ -1227,7 +1228,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
+    print(f"[ OK ] refresh: notified {refresh_channel(repo)} for {repo}")
     return 0
 
 

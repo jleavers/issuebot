@@ -8,7 +8,7 @@ import pytest
 from issuebot.config import GitHubLabels
 from issuebot.db import StoreUnavailableError
 from issuebot.db.database import Database, Probe
-from issuebot.db.listen import RefreshListener
+from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener, refresh_channel
 from issuebot.db.store import PostgresStore
 
 URL = "postgresql://issuebot:s3cret@db.example:5433/issuebot"
@@ -39,6 +39,35 @@ async def test_probe_reports_an_unreachable_server_without_the_url() -> None:
         await Database(URL, connect=refuse).probe()
     assert "s3cret" not in exc.value.message
     assert "<database url>" in exc.value.message
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+
+    async def execute(self, query: str, params: Any = None) -> None:
+        self.executed.append((query, params))
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_notify_refresh_targets_the_repositorys_channel() -> None:
+    """One channel per repository (#110); the bare channel only without one."""
+    connections: list[_RecordingConnection] = []
+
+    async def record(url: str) -> Any:
+        conn = _RecordingConnection()
+        connections.append(conn)
+        return conn
+
+    database = Database(URL, connect=record)
+    await database.notify_refresh("example/repo")
+    await database.notify_refresh()
+    assert [conn.executed for conn in connections] == [
+        [("SELECT pg_notify(%s, %s)", (refresh_channel("example/repo"), "example/repo"))],
+        [("SELECT pg_notify(%s, %s)", (REFRESH_CHANNEL, ""))],
+    ]
 
 
 async def test_queries_and_notify_report_an_unreachable_server() -> None:

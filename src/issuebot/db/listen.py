@@ -1,7 +1,9 @@
-"""LISTEN issuebot_refresh: one connection, one task, a callback per notification."""
+"""LISTEN on the repository's refresh channel: one connection, one task, a callback per
+notification."""
 
 import asyncio
 import contextlib
+import hashlib
 import re
 from collections.abc import Awaitable, Callable
 
@@ -13,6 +15,25 @@ from issuebot.log import get_logger
 
 REFRESH_CHANNEL = "issuebot_refresh"
 REPO_PAYLOAD = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")  # RepoName, settings.py
+_CHANNEL_DIGEST_CHARS = 16
+
+
+def refresh_channel(repo: str | None) -> str:
+    """The channel a repository's worker listens on: one per repository (#110).
+
+    A NOTIFY on it reaches the one worker it is for, so the fan-out is never
+    database-wide: a client that can NOTIFY can still wake that worker, at the rate the
+    orchestrator admits, but not every worker on the store at once. The name carries a
+    digest of the repository rather than the repository, since an identifier is 63 bytes
+    and ``owner/name`` can be longer. Without a repository it is the bare channel, which no
+    worker listens on.
+    """
+    if repo is None:
+        return REFRESH_CHANNEL
+    digest = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:_CHANNEL_DIGEST_CHARS]
+    return f"{REFRESH_CHANNEL}_{digest}"
+
+
 _LOST = (psycopg.OperationalError, psycopg.InterfaceError)
 
 
@@ -35,6 +56,7 @@ class RefreshListener:
         self._url = url
         self._on_notify = on_notify
         self._repo = repo
+        self.channel = refresh_channel(repo)
         self._connect = connect
         self._sleep = sleep
         self._conn: AsyncConnection | None = None
@@ -67,7 +89,7 @@ class RefreshListener:
             try:
                 conn = await self._connect(self._url)
                 self._conn = conn
-                await conn.execute(f"LISTEN {REFRESH_CHANNEL}")
+                await conn.execute(f"LISTEN {self.channel}")
             except _LOST as exc:
                 failures += 1
                 await self._lost(exc, failures)
@@ -80,7 +102,7 @@ class RefreshListener:
             if self._connected_once:
                 self.reconnects += 1
             self._connected_once = True
-            self._log.info("db_listen_started", channel=REFRESH_CHANNEL, reconnects=self.reconnects)
+            self._log.info("db_listen_started", channel=self.channel, reconnects=self.reconnects)
             try:
                 async for notification in conn.notifies():
                     self.notified += 1
@@ -102,8 +124,9 @@ class RefreshListener:
                 await self._crashed(exc, failures)
 
     def _accepts(self, payload: str) -> bool:
-        """An empty payload wakes every worker; a repository name wakes that one; anything
-        else is dropped with a warning (spec §5)."""
+        """An empty payload, or this repository's name, wakes the worker; another repository's
+        name is a NOTIFY on the wrong channel and is dropped at debug; anything else is
+        dropped with a warning (spec §5)."""
         if self._repo is None or not payload or payload == self._repo:
             return True
         if REPO_PAYLOAD.match(payload):

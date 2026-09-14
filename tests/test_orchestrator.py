@@ -2365,7 +2365,10 @@ async def wait_until(condition: Any, *, timeout: float = 10.0) -> None:
     raise AssertionError("condition not met in time")
 
 
-async def test_run_ticks_refreshes_and_stops(tmp_path: Path) -> None:
+async def test_run_ticks_refreshes_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.0)
     h = Harness(tmp_path, interval_ms=60_000)
     h.orchestrator._clock = __import__("time").monotonic
     task = asyncio.create_task(h.orchestrator.run())
@@ -2378,6 +2381,33 @@ async def test_run_ticks_refreshes_and_stops(tmp_path: Path) -> None:
     h.orchestrator.request_stop()
     await asyncio.wait_for(task, timeout=5)
     assert h.orchestrator.stopping is True
+
+
+async def test_refresh_driven_ticks_keep_a_minimum_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NOTIFY rate does not set the tick rate (#110): a burst inside the interval is one
+    tick when the interval is up, never dropped; one after it is admitted at once."""
+    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.6)
+    h = Harness(tmp_path, interval_ms=60_000)
+    clock = __import__("time").monotonic
+    h.orchestrator._clock = clock
+    task = asyncio.create_task(h.orchestrator.run())
+    await wait_until(lambda: len(h.snapshots) == 1)
+    ticked = clock()
+    for _ in range(5):
+        h.orchestrator.request_refresh()
+    await asyncio.sleep(0.25)
+    assert len(h.snapshots) == 1  # asked for inside the interval: not yet
+    await wait_until(lambda: len(h.snapshots) == 2, timeout=2.0)
+    assert clock() - ticked >= 0.55  # admitted when the interval was up
+    await asyncio.sleep(0.2)
+    assert len(h.snapshots) == 2  # the burst was one tick
+    await asyncio.sleep(0.5)  # past the interval since that tick
+    h.orchestrator.request_refresh()
+    await wait_until(lambda: len(h.snapshots) == 3, timeout=0.3)  # at once
+    h.orchestrator.request_stop()
+    await asyncio.wait_for(task, timeout=5)
 
 
 async def test_shutdown_cancels_workers_and_leaves_the_label(tmp_path: Path) -> None:
