@@ -435,7 +435,7 @@ async def test_every_turn_is_handed_the_runs_deadline(tmp_path: Path) -> None:
 
 async def test_no_turn_starts_past_the_runs_deadline(tmp_path: Path) -> None:
     """A run over its wall clock ends as timed out before the next turn, whatever the turn
-    budget still allows; the orchestrator retries a timed-out run like any failure."""
+    budget still allows; the orchestrator escapes it at once, as it does at max_turns."""
     h = Harness(tmp_path, max_turns=3, run_timeout_ms=1000)
 
     def linger(turn_number: int) -> None:

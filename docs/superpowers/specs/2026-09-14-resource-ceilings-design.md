@@ -25,7 +25,8 @@ if it covered the resource next to it:
 One cap per boundary, at the seam that already owns the operation, never at its callers.
 
 - **`GhRunner.run`** (`github/runner.py`): stdout and stderr are read incrementally; past
-  `MAX_OUTPUT_BYTES` (16 MiB, twice the largest legitimate page) the process is killed and a
+  `MAX_OUTPUT_BYTES` (32 MiB: GitHub's 65,536-character body ceiling is 256 KiB of UTF-8 at
+  four bytes a character, so a page of a hundred is about 26 MiB) the process is killed and a
   non-retryable `response` `GitHubError` is raised. The `gh_invocation` debug line carries
   `overrun=True`. `request_timeout_ms` keeps bounding the wall clock.
 - **`GhCliAdapter.find_workpad_comment`** (`github/ghcli.py`): the one caller that paginated,
@@ -40,7 +41,10 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   `before_run` hook, and handed to every `run_turn(deadline=)`. The reader waits for the
   shorter of the silence timer and the time left; a turn still running at the deadline is
   terminated with the new `run_timeout` category (outcome `timed_out`, the `turn_timeout` turn
-  event), and `_turn_loop` refuses to start a turn past it. `claude.turn_timeout_ms` keeps
+  event), and `_turn_loop` refuses to start a turn past it. The orchestrator escapes a
+  `run_timeout` while `in_progress` at once, as it does `max_turns`: a retry never resumes
+  the session, so retrying would spend the same clock again from cold, `max_attempts` times
+  over, and the issue's ceiling would be a multiple of the setting. `claude.turn_timeout_ms` keeps
   its name and its meaning; the README row now says it bounds silence.
 - **The orchestrator's wait loop** (`orchestrator/orchestrator.py`): `_wait_for_next_tick`
   records when it started and admits a refresh only `MIN_REFRESH_INTERVAL_S` (5 s, the web's
@@ -53,7 +57,9 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   10 s) and `SET statement_timeout` (`STATEMENT_TIMEOUT_S`, 60 s) after its time zone, as
   statements rather than a libpq `options` keyword, which would replace the `options` a URL
   carries of its own. A migration blocked on the advisory lock is a `MigrationError`, exit 1,
-  and the restart policy shows it.
+  and the restart policy shows it. The statement timeout bounds each statement of a migration
+  as well, so a future backfill over a large table sets `SET LOCAL statement_timeout` inside
+  its own transaction rather than inheriting sixty seconds.
 
 ## Not done here
 

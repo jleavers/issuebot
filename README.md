@@ -164,14 +164,14 @@ ignored.
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.todo|in_progress|review|rework|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
-| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 16 MiB per response, and the workpad is looked for in an issue's first 1,000 comments | `30000` |
+| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 32 MiB per response, and the workpad is looked for in an issue's first 1,000 comments | `30000` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
-| `agent.run_timeout_ms` | a run's wall clock, from the moment its session starts: a turn still running then is killed and no further turn starts. The one timer the session's own output cannot reset | 4 hours |
+| `agent.run_timeout_ms` | a run's wall clock, from the moment its session starts: a turn still running then is killed, no further turn starts, and the issue is escalated at once like one that reaches `agent.max_turns` (a retry never resumes a session, so it would spend the same clock again). The one timer the session's own output cannot reset | 4 hours |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
@@ -184,7 +184,7 @@ ignored.
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
 Every ceiling above names the layer it bounds, and a few more are fixed in the code rather
-than settable, one per boundary an outsider can grow: a `gh` response is capped at 16 MiB and
+than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
 the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
 first, and a longer thread with no workpad in it fails the run rather than reading as "none"; a
 running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,

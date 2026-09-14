@@ -1023,6 +1023,35 @@ async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> No
     assert h.recorder.of(StateChanged)[1].actor == "issuebot"
 
 
+async def test_run_timeout_while_in_progress_escapes_at_once(tmp_path: Path) -> None:
+    """A run over its wall clock is not retried (#110): a retry never resumes the session, so
+    it would spend the same clock again from cold, max_attempts times over."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.comment(1, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    await h.exit(
+        h.run_for(1),
+        outcome="timed_out",
+        stop_reason="failure",
+        error_category="run_timeout",
+        error="run deadline reached: 14400s of wall clock (agent.run_timeout_ms)",
+        final_state=StateLabel.IN_PROGRESS,
+        final_issue=h.github.issue(1),
+        turns=2,
+    )
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    comments = h.github.comments_for(1)
+    assert len(comments) == 1
+    assert (
+        "Wall clock exhausted: 2 turns in attempt 1 without reaching `issuebot/review` "
+        "(run deadline reached: 14400s of wall clock (agent.run_timeout_ms))."
+    ) in comments[0].body
+    assert h.recorder.kinds == ["state_changed", "state_changed", "blocked"]
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
 async def test_a_blocked_stop_while_in_progress_escapes_with_the_agents_reason(
     tmp_path: Path,
 ) -> None:
@@ -2383,31 +2412,28 @@ async def test_run_ticks_refreshes_and_stops(
     assert h.orchestrator.stopping is True
 
 
-async def test_refresh_driven_ticks_keep_a_minimum_interval(
+async def test_a_refresh_inside_the_interval_is_admitted_when_it_is_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The NOTIFY rate does not set the tick rate (#110): a burst inside the interval is one
     tick when the interval is up, never dropped; one after it is admitted at once."""
-    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.6)
+    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.3)
     h = Harness(tmp_path, interval_ms=60_000)
-    clock = __import__("time").monotonic
-    h.orchestrator._clock = clock
-    task = asyncio.create_task(h.orchestrator.run())
-    await wait_until(lambda: len(h.snapshots) == 1)
-    ticked = clock()
-    for _ in range(5):
-        h.orchestrator.request_refresh()
-    await asyncio.sleep(0.25)
-    assert len(h.snapshots) == 1  # asked for inside the interval: not yet
-    await wait_until(lambda: len(h.snapshots) == 2, timeout=2.0)
-    assert clock() - ticked >= 0.55  # admitted when the interval was up
-    await asyncio.sleep(0.2)
-    assert len(h.snapshots) == 2  # the burst was one tick
-    await asyncio.sleep(0.5)  # past the interval since that tick
-    h.orchestrator.request_refresh()
-    await wait_until(lambda: len(h.snapshots) == 3, timeout=0.3)  # at once
-    h.orchestrator.request_stop()
-    await asyncio.wait_for(task, timeout=5)
+    o = h.orchestrator
+    for _ in range(5):  # a burst, coalesced into one message by _refresh_pending
+        o.request_refresh()
+    waiter = asyncio.create_task(o._wait_for_next_tick())
+    await asyncio.sleep(0.1)
+    assert not waiter.done()  # inside the interval: deferred, not returned
+    h.clock.advance(0.3)  # the admissible moment; the loop is asleep until its deadline
+    await asyncio.wait_for(waiter, timeout=2.0)  # and returns then, with nothing else queued
+
+    waiter = asyncio.create_task(o._wait_for_next_tick())
+    await asyncio.sleep(0.1)
+    assert not waiter.done()  # the burst was one tick: nothing is left to admit
+    h.clock.advance(0.3)
+    o.request_refresh()  # past the interval: admitted at once
+    await asyncio.wait_for(waiter, timeout=0.5)
 
 
 async def test_shutdown_cancels_workers_and_leaves_the_label(tmp_path: Path) -> None:

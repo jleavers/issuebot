@@ -26,10 +26,12 @@ _LOGGED_ARG_LENGTH = 120
 # crosses, rather than at the callers: a page of issues, a pull request's fields, an issue's
 # comments are all GitHub-hosted text that any account can grow, and ``request_timeout_ms``
 # bounds only how long the process may run, not how much it may hand back inside that time.
-# The largest legitimate read (a page of a hundred comments at GitHub's 65,536-character
-# ceiling, with their user objects) is under 8 MiB, so the cap is twice that and no request
-# issuebot makes can reach it.
-MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+# Sized in bytes, since that is what the pipe carries: GitHub's ceiling on a comment or an
+# issue body is 65,536 *characters*, which is 256 KiB of UTF-8 at four bytes a character, so
+# the largest legitimate read (a page of a hundred of them, with their user objects) is about
+# 26 MiB, and the cap is the power of two above it. No request issuebot makes can reach it,
+# whatever the text is made of.
+MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 
 
@@ -106,7 +108,7 @@ class GhRunner:
             if overrun.is_set():
                 # The kill went out and the pipes still did not close in time: report the
                 # cause, not the symptom.
-                raise self._overrun_error(argv, started, summary) from None
+                raise self._overrun_error(argv, started, summary, process.returncode) from None
             self._log.debug(
                 "gh_invocation",
                 argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
@@ -126,7 +128,7 @@ class GhRunner:
             raise
 
         if overrun.is_set():
-            raise self._overrun_error(argv, started, summary)
+            raise self._overrun_error(argv, started, summary, process.returncode)
         result = GhResult(
             returncode=process.returncode if process.returncode is not None else -1,
             stdout=out.decode("utf-8", errors="replace"),
@@ -162,11 +164,15 @@ class GhRunner:
         await process.wait()
         return out, err
 
-    def _overrun_error(self, argv: list[str], started: float, summary: str) -> GitHubError:
+    def _overrun_error(
+        self, argv: list[str], started: float, summary: str, exit_code: int | None
+    ) -> GitHubError:
+        """The exit code is the kill's when the cap cut the process short, and the child's own
+        when it finished inside the pipe buffer before the reader caught up."""
         self._log.debug(
             "gh_invocation",
             argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
-            exit_code=None,
+            exit_code=exit_code,
             overrun=True,
             max_output_bytes=self._max_output_bytes,
             duration_ms=round((time.monotonic() - started) * 1000),

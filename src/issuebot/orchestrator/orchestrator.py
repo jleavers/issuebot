@@ -1121,6 +1121,18 @@ class Orchestrator:
         if result.error_category == "auth_failed":
             await self._auth_failed(entry, result)
             return
+        if result.error_category == "run_timeout" and result.final_state is StateLabel.IN_PROGRESS:
+            # The run's wall clock is spent (#110). A retry never resumes the session, so it
+            # would re-read the repository from cold and spend the same clock again, up to
+            # max_attempts times over: the case max_turns escapes for, and it escapes the same
+            # way. The issue's ceiling is therefore agent.run_timeout_ms, not a multiple of it.
+            review = self._workflow.config.github.labels.review
+            reason = (
+                f"Wall clock exhausted: {result.turns} turns in attempt {entry.attempt} "
+                f"without reaching `{review}` ({result.error})."
+            )
+            await self._escape(entry, reason, result)
+            return
         await self._after_failure(entry, f"{result.error_category}: {result.error}", result)
 
     async def _auth_failed(self, entry: RunningEntry, result: RunResult) -> None:

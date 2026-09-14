@@ -139,7 +139,8 @@ floor, not the shipped version, and moves by hand.
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary,
   and the one cap on a response's size (#110): it reads stdout and stderr incrementally and
-  kills `gh` past `MAX_OUTPUT_BYTES` (16 MiB) with a non-retryable `response` error, since
+  kills `gh` past `MAX_OUTPUT_BYTES` (32 MiB, sized in bytes: GitHub's 65,536-character body
+  ceiling is 256 KiB of UTF-8 at four bytes a character) with a non-retryable `response` error, since
   `github.request_timeout_ms` bounds only how long the process may run, not how much it may
   hand back inside that time;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
@@ -228,7 +229,9 @@ floor, not the shipped version, and moves by hand.
   `_turn_loop` fixes from `_State.started` and hands to every `run_turn(deadline=)`. The
   reader waits for the shorter of the two, a turn still running at the deadline is
   terminated with category `run_timeout` (outcome `timed_out`, the `turn_timeout` turn
-  event, a message naming the setting), and no turn starts past it; `workspace_environment` layers the
+  event, a message naming the setting), and no turn starts past it. The orchestrator escapes
+  a `run_timeout` while `in_progress` at once, as it does `max_turns`: a retry never resumes
+  the session, so the issue's ceiling is the setting and not `max_attempts` times it; `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -345,7 +348,9 @@ floor, not the shipped version, and moves by hand.
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is
   published before any release; `max_turns` or `blocked` while `in_progress`, or `max_attempts`
   failures → the blocked escape, a `blocked` stop's block carrying the agent's own `BLOCKED:`
-  line; no retry, since an external blocker does not clear by retrying). `_escape` scrubs
+  line; no retry, since an external blocker does not clear by retrying; and a `run_timeout`
+  failure while `in_progress`, #110, since a retry would spend the same wall clock again).
+  `_escape` scrubs
   the `BlockedContext`'s `reason` and `log_dir` through the orchestrator's `scrubber` (a
   constructor argument, `DEFAULT_SCRUBBER` unless `cli` passes the deployment's) before
   `blocked_escape` writes them on the public issue (#91): the reason quotes the run's error,
@@ -488,7 +493,9 @@ floor, not the shipped version, and moves by hand.
   `STATEMENT_TIMEOUT_S` (60 s), as `SET`s rather than a libpq `options` keyword, which would
   replace the `options` a URL carries of its own -- the connect timeout bounds the handshake
   alone, and without these a migration blocked on the advisory lock hung with no log line and
-  no exit (#110); now it is a `MigrationError`), `describe`/`redact`
+  no exit (#110); now it is a `MigrationError`. The statement timeout applies to each
+  statement of a migration too, so a future backfill over a large table should `SET LOCAL
+  statement_timeout` inside its own transaction), `describe`/`redact`
   (the URL's password never reaches a log or a line), `reconnect_delay` (1, 2, 4, 8, 16, then
   30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
   appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
@@ -508,9 +515,10 @@ floor, not the shipped version, and moves by hand.
   repository (#110), so a NOTIFY reaches the one worker it is for and never every worker on
   the store; the bare `issuebot_refresh` is a listener's without a repository, which no worker
   is. `RefreshListener` (`LISTEN` on that channel on its own connection,
-  callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload -- every worker
-  wakes -- or one matching its own repository, logs another repository's at debug
-  (`db_refresh_other_repo`) and drops anything else with a `refresh_payload_ignored` warning).
+  callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload or one naming its
+  own repository, logs another repository's at debug (`db_refresh_other_repo`, a NOTIFY on the
+  wrong channel) and drops anything else with a `refresh_payload_ignored` warning; nothing
+  issuebot ships wakes every worker at once any more).
   `queries.py`: `Queries` over one connection, repository-free (`repos` -- every registration,
   what the dropdown lists -- `repo`, `snapshots` -- every worker's latest snapshot, keyed by
   repository, for `/healthz` -- and `scoped(repo)`, which returns a `RepoQueries` with that

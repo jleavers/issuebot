@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -193,10 +194,11 @@ async def test_output_over_the_cap_kills_and_raises_response(tmp_path: Path, str
     invocation = next(r for r in records if r.get("event") == "gh_invocation")
     assert invocation["overrun"] is True
     assert invocation["max_output_bytes"] == 1 << 20
-    assert invocation["exit_code"] is None
+    assert invocation["exit_code"] == -signal.SIGKILL  # the cap's kill, not a natural exit
 
 
 def test_default_cap_covers_a_full_page_of_maximal_comments() -> None:
     # A page of PAGE_SIZE comments at GitHub's 65,536-character body ceiling, each carrying
-    # a user object and the rest of the record, is the largest read issuebot makes.
-    assert MAX_OUTPUT_BYTES >= 100 * (65_536 + 2_048)
+    # a user object and the rest of the record, is the largest read issuebot makes. The
+    # ceiling is in characters and the cap in bytes: four bytes a character is the worst case.
+    assert MAX_OUTPUT_BYTES >= 100 * (4 * 65_536 + 2_048)

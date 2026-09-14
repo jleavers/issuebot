@@ -899,17 +899,19 @@ class ClaudeRunner:
         with stdout_path.open("ab") as out:
             while True:
                 wait = self._timeout_s
+                by_deadline = False
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         return "deadline"
+                    by_deadline = remaining < wait
                     wait = min(wait, remaining)
                 try:
                     raw = await asyncio.wait_for(stdout.readline(), timeout=wait)
                 except TimeoutError:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return "deadline"
-                    return "timeout"
+                    # Whichever bound set the wait is the one that expired: re-reading the
+                    # clock could call a wait the deadline cut short "silence".
+                    return "deadline" if by_deadline else "timeout"
                 except ValueError:
                     self._log.warning(
                         "claude_stream_line_too_long",
