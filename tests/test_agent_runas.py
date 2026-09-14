@@ -58,7 +58,7 @@ def test_prepared_wraps_the_command_and_hands_the_environment_over_a_descriptor(
     assert call["n"] is True and call["u"] == ME
     fd = int(call["command"][call["command"].index("--env-fd") + 1])
     assert call["C"] == fd + 1
-    assert call["command"][:3] == [sys.executable, "-m", MODULE]
+    assert call["command"][:4] == [sys.executable, "-P", "-m", MODULE]
     assert call["command"][-3:] == ["--", "env", "-0"]
 
 
