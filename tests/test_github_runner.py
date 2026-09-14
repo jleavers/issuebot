@@ -11,7 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from issuebot.github.errors import GitHubError
-from issuebot.github.runner import GhResult, GhRunner
+from issuebot.github.runner import MAX_OUTPUT_BYTES, GhResult, GhRunner
 from issuebot.log import configure_logging
 
 pytestmark = pytest.mark.skipif(
@@ -152,3 +152,51 @@ async def test_external_cancellation_kills_and_reaps(tmp_path: Path) -> None:
     pid = int(pidfile.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+async def test_output_at_the_cap_is_returned_whole() -> None:
+    runner = _runner(
+        max_output_bytes=1 << 20,
+        extra_env={"FAKE_GH_SCENARIO": "flood", "FAKE_GH_FLOOD_BYTES": str(1 << 20)},
+    )
+    result = await runner.run(["api", "big"])
+    assert result.returncode == 0
+    assert len(result.stdout) == 1 << 20
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+async def test_output_over_the_cap_kills_and_raises_response(tmp_path: Path, stream: str) -> None:
+    pidfile = tmp_path / "pid"
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    runner = _runner(
+        max_output_bytes=1 << 20,
+        timeout_ms=30_000,
+        extra_env={
+            "FAKE_GH_SCENARIO": "flood",
+            "FAKE_GH_FLOOD_BYTES": str((1 << 20) + 1),
+            "FAKE_GH_FLOOD_STREAM": stream,
+            "FAKE_GH_FLOOD_LINGER": "1",
+            "FAKE_GH_PIDFILE": str(pidfile),
+        },
+    )
+    with pytest.raises(GitHubError) as exc:
+        await asyncio.wait_for(runner.run(["api", "repos/o/r/issues/7/comments"]), timeout=5)
+    assert exc.value.category == "response"
+    assert not exc.value.retryable
+    assert exc.value.message == (
+        f"gh output exceeded {1 << 20} bytes: api repos/o/r/issues/7/comments"
+    )
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    invocation = next(r for r in records if r.get("event") == "gh_invocation")
+    assert invocation["overrun"] is True
+    assert invocation["max_output_bytes"] == 1 << 20
+    assert invocation["exit_code"] is None
+
+
+def test_default_cap_covers_a_full_page_of_maximal_comments() -> None:
+    # A page of PAGE_SIZE comments at GitHub's 65,536-character body ceiling, each carrying
+    # a user object and the rest of the record, is the largest read issuebot makes.
+    assert MAX_OUTPUT_BYTES >= 100 * (65_536 + 2_048)

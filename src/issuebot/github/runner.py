@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -21,6 +21,17 @@ _FIXED_ENVIRONMENT = {
 }
 _LOGGED_ARG_LENGTH = 120
 
+# What one ``gh`` invocation may write to stdout, and separately to stderr, before it is
+# killed (#110). The bound on a response's size lives here, at the one seam every read
+# crosses, rather than at the callers: a page of issues, a pull request's fields, an issue's
+# comments are all GitHub-hosted text that any account can grow, and ``request_timeout_ms``
+# bounds only how long the process may run, not how much it may hand back inside that time.
+# The largest legitimate read (a page of a hundred comments at GitHub's 65,536-character
+# ceiling, with their user objects) is under 8 MiB, so the cap is twice that and no request
+# issuebot makes can reach it.
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class GhResult:
@@ -34,7 +45,8 @@ class GhRunnerLike(Protocol):
 
 
 class GhRunner:
-    """Runs ``gh`` as an asyncio subprocess with a controlled environment and a timeout."""
+    """Runs ``gh`` as an asyncio subprocess with a controlled environment, a wall-clock
+    timeout for the process and a size cap for what it writes back."""
 
     def __init__(
         self,
@@ -43,11 +55,13 @@ class GhRunner:
         token: SecretStr | None = None,
         timeout_ms: int = 30_000,
         environ: Mapping[str, str] | None = None,
+        max_output_bytes: int = MAX_OUTPUT_BYTES,
     ) -> None:
         self._command = command
         self._token = token
         self._timeout_s = timeout_ms / 1000
         self._environ = dict(os.environ if environ is None else environ)
+        self._max_output_bytes = max_output_bytes
         self._log = get_logger(__name__)
 
     def child_environment(self) -> dict[str, str]:
@@ -79,13 +93,20 @@ class GhRunner:
             raise GitHubError("config", f"cannot run {self._command!r}: {exc}") from exc
 
         payload = stdin.encode("utf-8") if stdin is not None else None
+        summary = " ".join(args[:3])
+        overrun = asyncio.Event()
         try:
-            out, err = await asyncio.wait_for(process.communicate(payload), timeout=self._timeout_s)
+            out, err = await asyncio.wait_for(
+                self._communicate(process, payload, overrun), timeout=self._timeout_s
+            )
         except TimeoutError:
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-            summary = " ".join(args[:3])
+            if overrun.is_set():
+                # The kill went out and the pipes still did not close in time: report the
+                # cause, not the symptom.
+                raise self._overrun_error(argv, started, summary) from None
             self._log.debug(
                 "gh_invocation",
                 argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
@@ -104,6 +125,8 @@ class GhRunner:
                     await process.wait()
             raise
 
+        if overrun.is_set():
+            raise self._overrun_error(argv, started, summary)
         result = GhResult(
             returncode=process.returncode if process.returncode is not None else -1,
             stdout=out.decode("utf-8", errors="replace"),
@@ -118,3 +141,74 @@ class GhRunner:
             stderr_bytes=len(err),
         )
         return result
+
+    async def _communicate(
+        self, process: asyncio.subprocess.Process, payload: bytes | None, overrun: asyncio.Event
+    ) -> tuple[bytes, bytes]:
+        """``process.communicate`` with a cap: past ``max_output_bytes`` on either stream the
+        process is killed, ``overrun`` is set, and the streams are drained to their end."""
+
+        def on_overrun() -> None:
+            overrun.set()
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+
+        out, err, _ = await asyncio.gather(
+            _read_capped(process.stdout, self._max_output_bytes, on_overrun),
+            _read_capped(process.stderr, self._max_output_bytes, on_overrun),
+            _feed(process, payload),
+        )
+        await process.wait()
+        return out, err
+
+    def _overrun_error(self, argv: list[str], started: float, summary: str) -> GitHubError:
+        self._log.debug(
+            "gh_invocation",
+            argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+            exit_code=None,
+            overrun=True,
+            max_output_bytes=self._max_output_bytes,
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+        return GitHubError(
+            "response", f"gh output exceeded {self._max_output_bytes} bytes: {summary}"
+        )
+
+
+async def _read_capped(
+    stream: asyncio.StreamReader | None, limit: int, on_overrun: Callable[[], None]
+) -> bytes:
+    """Read a stream to its end, keeping at most ``limit`` bytes; ``on_overrun`` fires once,
+    at the first byte past the cap, and the rest is read and dropped so the child can exit."""
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    size = 0
+    overrun = False
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            return b"".join(chunks)
+        if overrun:
+            continue
+        size += len(chunk)
+        if size > limit:
+            overrun = True
+            on_overrun()
+            continue
+        chunks.append(chunk)
+
+
+async def _feed(process: asyncio.subprocess.Process, payload: bytes | None) -> None:
+    stdin = process.stdin
+    if stdin is None:
+        return
+    try:
+        if payload:
+            stdin.write(payload)
+            await stdin.drain()
+    except BrokenPipeError, ConnectionResetError:
+        return
+    finally:
+        stdin.close()
