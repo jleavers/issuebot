@@ -80,7 +80,7 @@ from issuebot.notifications import (
     subscribed_kinds,
     urllib_post,
 )
-from issuebot.orchestrator import Orchestrator, OrchestratorStartupError
+from issuebot.orchestrator import Orchestrator, OrchestratorStartupError, probe_run_as
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
@@ -110,6 +110,7 @@ def _claude_version_output(command: str) -> str | None:
 
 _claude_version = _claude_version_output
 _claude_auth = claude_auth_status
+_run_as_probe = probe_run_as
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
@@ -340,7 +341,8 @@ def run_checks(
         _token_check(workflow),
         _workspace_check(cfg.workspace.root),
         _claude_check(cfg.claude.command),
-        _claude_auth_check(cfg.claude.command),
+        _claude_auth_check(cfg.claude.command, run_as=cfg.agent.run_as),
+        _run_as_check(cfg.agent.run_as),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -463,14 +465,31 @@ _AUTH_LEVELS: dict[ClaudeAuthVerdict, CheckStatus] = {
 }
 
 
-def _claude_auth_check(command: str) -> Check:
+def _claude_auth_check(command: str, *, run_as: str | None = None) -> Check:
     """The claude auth line: which credential the agent will use, or that it has none."""
     subject = "claude auth"
     found = _which(command)
     if not found:
         return Check(subject, "warn", f"skipped ({command} not found)")
-    auth: ClaudeAuth = describe_claude_auth(_claude_auth(found, os.environ))
+    auth: ClaudeAuth = describe_claude_auth(_claude_auth(found, os.environ, run_as=run_as))
     return Check(subject, _AUTH_LEVELS[auth.verdict], auth.detail)
+
+
+def _run_as_check(run_as: str | None) -> Check:
+    """The account the session runs as (#75), or a warning that it is this process."""
+    subject = "agent.run_as"
+    if run_as is None:
+        uid = os.getuid() if hasattr(os, "getuid") else "?"
+        detail = (
+            f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
+            "which shares its environment, code and state with them; the image sets "
+            "ISSUEBOT_AGENT_USER=agent"
+        )
+        return Check(subject, "warn", detail)
+    error = _run_as_probe(run_as, os.environ)
+    if error is not None:
+        return Check(subject, "fail", error)
+    return Check(subject, "ok", f"{run_as}; the session runs as a separate account")
 
 
 def _version_text(version: tuple[int, int, int]) -> str:
@@ -504,7 +523,7 @@ def _github_status_check() -> Check:
     except Exception as exc:
         # A third party cannot be allowed to end `validate` with a traceback in place of the
         # three checks after it -- or, since `run_checks` would raise before returning, in place
-        # of all fourteen printed lines.
+        # of every printed line.
         get_logger(__name__).debug(
             "github_status_check_failed", error=f"{type(exc).__name__}: {exc}"
         )

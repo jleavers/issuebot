@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol
 from pydantic import SecretStr
 
 from issuebot.agent.errors import AgentErrorCategory
+from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.config import Settings
 from issuebot.log import get_logger
@@ -182,21 +183,29 @@ def parse_claude_version(text: str | None) -> tuple[int, int, int] | None:
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
-def claude_auth_status(command: str, environ: Mapping[str, str]) -> str | None:
+def claude_auth_status(
+    command: str, environ: Mapping[str, str], *, run_as: str | None = None
+) -> str | None:
     """Run ``<command> auth status --json`` and return its stdout, or None when it cannot run.
 
-    The probe runs under the same filtered environment ``ClaudeRunner`` gives the agent, so it
-    answers "can the agent authenticate", not "can this shell".
+    The probe runs under the same filtered environment ``ClaudeRunner`` gives the agent, and
+    as the same account when ``agent.run_as`` is set (#75): the login lives in that account's
+    home, so it answers "can the agent authenticate", not "can this shell".
     """
+    argv = [command, "auth", "status", "--json"]
+    env = agent_environment(environ, token=None)
     try:
-        completed = subprocess.run(
-            [command, "auth", "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=CLAUDE_PROBE_TIMEOUT_S,
-            check=False,
-            env=agent_environment(environ, token=None),
-        )
+        if run_as is not None:
+            completed = RunAs(run_as).run(argv, env, timeout=CLAUDE_PROBE_TIMEOUT_S)
+        else:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_PROBE_TIMEOUT_S,
+                check=False,
+                env=env,
+            )
     except OSError, subprocess.TimeoutExpired:
         return None
     return completed.stdout or None
@@ -651,7 +660,17 @@ class ClaudeRunner:
         # ``TurnResult.error`` and ``result_text``, and every ``TurnEvent.detail``, rather than
         # each sink they reach.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
+        # The account every turn runs as (#75), or None for the worker's own uid.
+        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
         self._log = get_logger(__name__)
+
+    def _prepared(
+        self, argv: Sequence[str], env: Mapping[str, str]
+    ) -> contextlib.AbstractContextManager[Spawn]:
+        """The spawn for ``argv``: through the uid change when there is one, else as given."""
+        if self._runas is not None:
+            return self._runas.prepared(argv, env)
+        return contextlib.nullcontext(Spawn(argv=list(argv), env=dict(env), pass_fds=()))
 
     def build_argv(self, *, session_id: str, resume: bool) -> list[str]:
         cfg = self._claude
@@ -774,16 +793,18 @@ class ClaudeRunner:
         error: str | None = None
         with stderr_path.open("wb") as stderr_file:
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *argv,
-                    cwd=resolved,
-                    env=env,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=stderr_file,
-                    start_new_session=True,
-                    limit=STREAM_LINE_LIMIT,
-                )
+                with self._prepared(argv, env) as spawn:
+                    process = await asyncio.create_subprocess_exec(
+                        *spawn.argv,
+                        cwd=resolved,
+                        env=spawn.env,
+                        pass_fds=spawn.pass_fds,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=stderr_file,
+                        start_new_session=True,
+                        limit=STREAM_LINE_LIMIT,
+                    )
             except OSError as exc:
                 return finish("claude_not_found", f"cannot run {argv[0]!r}: {exc}", None)
 
@@ -877,13 +898,18 @@ class ClaudeRunner:
         """SIGTERM the leader, wait for the grace period, then SIGKILL the whole group.
 
         The group is killed even when the leader has already exited: a grandchild that
-        inherited stdout would otherwise outlive the turn and hold the pipe open.
+        inherited stdout would otherwise outlive the turn and hold the pipe open. Under
+        ``agent.run_as`` the leader is sudo, which relays the SIGTERM, but the group's other
+        members are the account's and the worker's uid may not signal them: the SIGKILL goes
+        through the same delegation first (#75), and the worker's own covers the leader.
         """
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
+        if self._runas is not None:
+            await asyncio.to_thread(self._runas.kill_group, process.pid)
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         await process.wait()

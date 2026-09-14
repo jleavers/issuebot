@@ -20,6 +20,8 @@ docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./configs/WORKFLOW.md and check the environment
+                                     #   (the container runs the session as uid 1001 `agent`, the
+                                     #    worker as uid 1000 `issuebot`; #75, agent.run_as)
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
 uv run issuebot labels ensure        # create/update the state labels and markers in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
@@ -159,7 +161,22 @@ floor, not the shipped version, and moves by hand.
   is total in both directions -- `http`/`https` only, a 5 s timeout, a bounded read, and
   anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
   `github` dispatch hold and `validate`'s `github.status` check.
-- `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
+- `issuebot.agent`: `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
+  session runs at a different uid from the worker. With `agent.run_as` set (the image sets
+  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`), `claude -p`, every
+  hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
+  `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
+  the session's environment crosses the uid change on a memfd rather than through sudo's
+  environment policy, `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run
+  by the worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
+  process group) and `remove` (the session's files under a workspace) are the worker's uid's
+  two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
+  orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
+  its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
+  reports it like a missing `claude`. Unset (the host route, the tests) runs everything as
+  the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
+  `created` marker file (the completion sentinel), and `session.json` trusted only when the
+  worker owns it. `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
@@ -587,7 +604,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (fourteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (fifteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
@@ -596,7 +613,9 @@ floor, not the shipped version, and moves by hand.
   agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
-  missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
+  missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
+  the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
+  since the session then shares the worker's uid), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a

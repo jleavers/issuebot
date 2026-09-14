@@ -26,7 +26,7 @@ ARG ISSUEBOT_VERSION=0.1.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git \
+ && apt-get install -y --no-install-recommends ca-certificates curl git sudo \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -134,10 +134,48 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
    && PATH="/opt/node/bin:${PATH}" /opt/node/bin/npm --version; \
     fi
 
+# Two accounts, one privilege each (#75). `issuebot` (uid 1000) is the worker: it holds
+# GH_TOKEN, the database URL and the Slack webhook, parses what the session writes and decides
+# every label move. `agent` (uid 1001) is the session: `claude -p`, every hook, the clone and
+# the post-clone setup run as it, and the login it authenticates with lives in its own home
+# (compose mounts `claude-home` at /home/agent/.claude). Nothing the session can read or
+# write at its own uid is an input to the worker: /app is root's and writable by neither,
+# /home/issuebot and /home/agent are closed to the other account, /proc/<worker>/environ is
+# unreadable across the uid line, and the worker's state inside a workspace sits in sticky
+# directories it owns. The worker stays unprivileged: sudo carries exactly one rule, issuebot
+# may become agent and nobody else, and the binary is executable by root and group issuebot
+# alone, so the session's uid cannot invoke sudo at all -- not even to be refused by it.
+# `closefrom_override` is for the one descriptor the worker passes across the uid change, the
+# session's environment (issuebot.agent.runas); `!use_pty` keeps a turn's stream-json byte for
+# byte when `docker compose run` gives the worker a terminal.
 RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
- && install -d -o issuebot -g issuebot /workspaces /home/issuebot/.claude /app
+ && useradd --create-home --uid 1001 --shell /bin/bash agent \
+ && chmod 0750 /home/issuebot /home/agent \
+ && install -d -m 0755 -o issuebot -g issuebot /workspaces \
+ && install -d -m 0700 -o agent -g agent /home/agent/.claude \
+ && printf '%s\n' \
+      'Defaults:issuebot !use_pty, !syslog, !lecture, closefrom_override' \
+      'issuebot ALL=(agent) NOPASSWD: ALL' \
+      > /etc/sudoers.d/issuebot \
+ && chmod 0440 /etc/sudoers.d/issuebot \
+ && visudo -cf /etc/sudoers.d/issuebot \
+ && chgrp issuebot /usr/bin/sudo \
+ && chmod 4750 /usr/bin/sudo
 
-COPY --from=builder --chown=issuebot:issuebot /app /app
+# The worker's code, venv and interpreter: root's, readable by both accounts and writable by
+# neither (the bytecode is compiled in the builder, so nothing needs to write here at runtime).
+COPY --from=builder /app /app
+
+# claude installed once, root-owned under /opt/claude, on PATH for both accounts through
+# /usr/local/bin. The installer puts everything under $HOME, so it is given one; a plain root
+# with no SUDO_USER is the case it allows. The install runs as `issuebot` below and as
+# `agent` through the delegation, so a binary either account could not run fails the build.
+ARG CLAUDE_INSTALL_HOME=/opt/claude
+RUN mkdir -p "${CLAUDE_INSTALL_HOME}" \
+ && curl -fsSL https://claude.ai/install.sh | HOME="${CLAUDE_INSTALL_HOME}" bash -s "${CLAUDE_CODE_VERSION}" \
+ && ln -s "${CLAUDE_INSTALL_HOME}/.local/bin/claude" /usr/local/bin/claude \
+ && rm -rf "${CLAUDE_INSTALL_HOME}/.claude" "${CLAUDE_INSTALL_HOME}/.claude.json" \
+ && chmod -R a+rX "${CLAUDE_INSTALL_HOME}"
 
 USER issuebot
 # initdb, pg_ctl and postgres live in the versioned directory alone -- /usr/bin holds only
@@ -154,22 +192,28 @@ USER issuebot
 # read it. C.UTF-8 (which `locale -a` spells C.utf8) is built into glibc on trixie, so there is
 # nothing to install for it. LANG and not LC_ALL: LC_ALL overrides every category, which would
 # stop a target repository's own LC_* settings from taking effect.
-ENV HOME=/home/issuebot \
-    LANG=C.UTF-8 \
-    PATH="/home/issuebot/.local/bin:/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
+# No HOME here: Docker sets it from /etc/passwd for whichever account runs, so `--user agent`
+# (the login recipe in the README) gets /home/agent and the worker /home/issuebot.
+# ISSUEBOT_AGENT_USER is `agent.run_as`'s fallback (resolve.py): the session runs as `agent`
+# in every container built from this image unless a WORKFLOW.md says otherwise.
+ENV LANG=C.UTF-8 \
+    ISSUEBOT_AGENT_USER=agent \
+    PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
 # The flag assertion is the point of pinning: a release that drops --permission-prompts
-# breaks an unattended worker at runtime, so fail the build instead.
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}" \
- && claude --version \
- && claude --help | grep -q -- '--permission-prompts'
+# breaks an unattended worker at runtime, so fail the build instead. The last line is the
+# delegation itself, as the worker will use it: sudo, the account, and claude under it.
+RUN claude --version \
+ && claude --help | grep -q -- '--permission-prompts' \
+ && test "$(sudo -n -u agent id -u)" = 1001 \
+ && sudo -n -H -u agent claude --version
 
 WORKDIR /app
 # Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind
 # mount pins the inode, so an atomic save on the host leaves the container reading the old
 # one (#46). compose.yaml mounts ./configs and sets this same value.
 ENV ISSUEBOT_WORKFLOW=/configs/WORKFLOW.md
-VOLUME ["/workspaces", "/home/issuebot/.claude"]
+VOLUME ["/workspaces", "/home/agent/.claude"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
       org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator" \

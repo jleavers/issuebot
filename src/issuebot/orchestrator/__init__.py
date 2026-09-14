@@ -20,6 +20,7 @@ from issuebot.orchestrator.orchestrator import (
     RunSessionFn,
     fetch_preflight,
     preflight,
+    probe_run_as,
 )
 from issuebot.orchestrator.state import (
     BACKOFF_BASE_MS,
@@ -81,6 +82,7 @@ __all__ = [
     "observe_transition",
     "pr_url",
     "preflight",
+    "probe_run_as",
     "remove_workspace",
     "sort_candidates",
     "state_label_name",

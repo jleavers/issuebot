@@ -270,8 +270,16 @@ columns; running-agents panel with last event, turn count, tokens, cost),
 
 Single-tenant, high-trust, intended for repositories the operator owns:
 
-- The container is the sandbox. `auto` permission mode inside it; the workspace
-  volume is the only writable path the agent needs.
+- The container is the sandbox, and inside it the uid: the session (`claude -p`, every
+  hook, the clone) runs as `agent` (uid 1001) through `issuebot.agent.runas`, a different
+  account from the worker (`issuebot`, uid 1000) that supervises and credentials it, so
+  nothing the session can read or write at its own uid is an input to the worker — not its
+  code (`/app`, root-owned), its environment, its home or the state it keeps inside a
+  workspace (#75). The worker stays unprivileged: `sudo` carries one rule, `issuebot` may
+  become `agent` and nobody else, and its binary is not executable by the session's uid.
+  `auto` permission mode inside that boundary; the workspace volume is the only writable
+  path the session needs, and the `agent_environment` allow-list and the `.issuebot/env`
+  protected-key list are conveniences behind the uid line, not the line itself.
 - GitHub token is a fine-grained PAT (or GitHub App installation token, later) scoped
   to the one repository with contents, issues and pull-requests write. Branch
   protection on `main` makes AGENTS.md's "never push to main" a server-side rule.
