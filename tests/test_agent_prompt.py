@@ -110,6 +110,7 @@ GITHUB_AUTHORED = {"title", "body", "author", "labels", "assignees"}
 ISSUEBOT_OR_GITHUB_OWN = {
     "id",
     "identifier",
+    "number",
     "github_state",
     "state",
     "state_label",  # matched the configured label case-insensitively: the configuration's value
@@ -117,8 +118,10 @@ ISSUEBOT_OR_GITHUB_OWN = {
     "created_at",
     "updated_at",
     "closed_at",
-    "pr",  # number, url, state, merged_at: GitHub's, none of them written by a person
+    "dispatchable",
+    "pr",  # PR_KEYS: GitHub's, none of them written by a person
 }
+PR_KEYS = {"number", "url", "state", "merged_at"}
 
 
 def test_every_github_authored_variable_is_github_text(make_issue: Callable[..., Issue]) -> None:
@@ -132,7 +135,8 @@ def test_every_github_authored_variable_is_github_text(make_issue: Callable[...,
         linked_pr=PR,
     )
     variables = issue_variables(issue)
-    assert set(variables) == GITHUB_AUTHORED | ISSUEBOT_OR_GITHUB_OWN | {"number", "dispatchable"}
+    assert set(variables) == GITHUB_AUTHORED | ISSUEBOT_OR_GITHUB_OWN
+    assert set(variables["pr"]) == PR_KEYS
     for key in GITHUB_AUTHORED:
         values = variables[key] if isinstance(variables[key], list) else [variables[key]]
         assert values, key

@@ -25,19 +25,18 @@ _KEYWORD_PASSWORD = re.compile(
 
 
 def parse_url(url: str) -> SplitResult | None:
-    """The parts of a well-formed ``postgresql://`` URL, or ``None`` for anything else.
+    """The parts of a ``postgresql://`` URL, or ``None`` for anything else.
 
-    Well-formed means what ``describe`` needs to take it apart safely: ``urlsplit`` accepts it,
-    the scheme is PostgreSQL's, the authority marker ``//`` follows it (``postgresql:host=db`` is
-    keyword/value text libpq would refuse, and ``urlsplit`` would read the rest as a path), and
-    the port is a number.
+    A URL here means what ``describe`` can take apart without its password: ``urlsplit``
+    accepts it, the scheme is PostgreSQL's, and the authority marker ``//`` follows it
+    (``postgresql:host=db`` is keyword/value text libpq would refuse, and ``urlsplit`` would
+    read the rest as a path). The host part is not judged: libpq's multi-host form
+    (``h1:5432,h2:5433``) is a URL, and a port that is not a number is libpq's error to make
+    at connect time, redacted like any other.
     """
     try:
         parts = urlsplit(url)
-        port = parts.port
     except ValueError:
-        return None
-    if port is not None and not 0 < port < 65536:
         return None
     if parts.scheme not in POSTGRES_SCHEMES:
         return None
@@ -57,14 +56,15 @@ def describe(url: str) -> str:
 
     The placeholder for anything ``parse_url`` rejects: a value this function cannot take apart
     is one it must not echo, since the keyword/value spelling carries its password in clear.
+    The host part is the authority after its userinfo, as written, so a multi-host list or an
+    IPv6 literal comes out as it went in.
     """
     parts = parse_url(url)
     if parts is None:
         return REDACTED
     user = f"{parts.username}@" if parts.username else ""
-    host = parts.hostname or ""
-    suffix = f":{parts.port}" if parts.port else ""
-    return f"{parts.scheme}://{user}{host}{suffix}{parts.path}"
+    hostport = parts.netloc.rpartition("@")[2]
+    return f"{parts.scheme}://{user}{hostport}{parts.path}"
 
 
 def dsn_secrets(url: str) -> tuple[str, ...]:
@@ -75,10 +75,14 @@ def dsn_secrets(url: str) -> tuple[str, ...]:
     percent-decoded, since an error message may quote either. A keyword/value DSN keeps it in a
     ``password=`` keyword, bare or single-quoted. Nothing here decides whether the DSN is
     accepted -- ``Database`` does -- so a spelling issuebot refuses is still masked wherever it
-    was quoted before the refusal.
+    was quoted before the refusal: the URL reading runs whatever the scheme, and the keyword
+    reading runs over anything that is not a URL issuebot takes.
     """
     found: list[str] = []
-    parts = parse_url(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        parts = None
     if parts is not None:
         if parts.password:
             found.append(parts.password)
@@ -88,7 +92,7 @@ def dsn_secrets(url: str) -> tuple[str, ...]:
                 found.append(value)
         # libpq percent-decodes both (and, unlike a form, never reads ``+`` as a space).
         found.extend(unquote(value) for value in list(found))
-    else:
+    if parse_url(url) is None:
         for quoted, bare in _KEYWORD_PASSWORD.findall(url):
             found.append(bare or quoted.replace("\\'", "'").replace("\\\\", "\\"))
     unique = [value for value in dict.fromkeys(found) if value]

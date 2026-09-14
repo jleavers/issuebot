@@ -178,7 +178,7 @@ ignored.
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
 | `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
-| `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user:password@host:port/db` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
+| `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
 Leave the prompt below the front matter as it is for your first runs. It tells the agent about

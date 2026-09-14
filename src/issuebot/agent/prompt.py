@@ -202,8 +202,8 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
         ),
         "github_state": issue.github_state,
         "state": issue.state.value if issue.state is not None else None,
-        # A label name, but one that matched the configured label case-insensitively, so it
-        # is the configuration's value in GitHub's case, not a triager's text.
+        # A label name, but one that equals the configured label lowercased, so it is the
+        # configuration's value, not a triager's text.
         "state_label": issue.state_labels[0] if len(issue.state_labels) == 1 else None,
         "labels": [
             GitHubText(name, source=f"issue #{number} label", author=None) for name in issue.labels

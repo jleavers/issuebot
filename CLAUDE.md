@@ -123,12 +123,15 @@ floor, not the shipped version, and moves by hand.
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports
   `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a well-formed
-  `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's,
-  `//` follows it -- `postgresql:host=db` is keyword/value text -- and the port is a number),
-  `is_postgres_url`, `describe` (`postgresql://user@host:port/db`, or the placeholder
-  `<database url>` for anything `parse_url` rejects, since the keyword/value spelling carries
-  its password in clear) and `dsn_secrets` (every spelling of the password a DSN carries:
-  userinfo and `?password=` raw and percent-decoded, or a `password=` keyword bare or quoted).
+  `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's
+  and `//` follows it -- `postgresql:host=db` is keyword/value text -- while the host part is
+  not judged, so libpq's multi-host list is accepted and a bad port is libpq's error at
+  connect time), `is_postgres_url`, `describe` (`postgresql://user@host:port/db`, the host
+  part as written, or the placeholder `<database url>` for anything `parse_url` rejects,
+  since the keyword/value spelling carries its password in clear) and `dsn_secrets` (every
+  spelling of the password a DSN carries: userinfo and `?password=` raw and percent-decoded
+  whatever the scheme, plus a `password=` keyword bare or quoted in anything that is not a
+  URL issuebot takes, so a refused spelling is still masked in the line that refuses it).
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
   (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
   carries the run's log directory.
@@ -212,7 +215,7 @@ floor, not the shipped version, and moves by hand.
   otherwise, so every substitution of GitHub-authored text inherits it and no template can
   hand the text over bare by forgetting a caveat; `issue_variables` is the one seam that
   wraps, and `tests/test_agent_prompt.py` classifies every key it returns as GitHub-authored
-  or issuebot's/GitHub's own (`state_label` is the configured label in GitHub's case, `pr` is
+  or issuebot's/GitHub's own (`state_label` is the configured label lowercased, `pr` is
   numbers and states), so a new string variable fails closed until it is named there;
   anything in the text a reader could take for the tag (`</github-text>`, `< github-text`)
   is defanged to `&lt;…` so the text cannot end its own envelope, truthiness is the text's

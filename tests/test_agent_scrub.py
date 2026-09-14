@@ -231,6 +231,8 @@ def test_for_deployment_ignores_an_unparseable_database_url() -> None:
     [
         "host=db port=5432 user=issuebot password=s3cretpassword dbname=issuebot",
         "postgresql://issuebot@db:5432/issuebot?password=s3cretpassword",
+        "postgresql://issuebot:s3cretpassword@db1:5432,db2:5433/issuebot",
+        "postgresql://issuebot:s3cretpassword@db:notaport/issuebot",
     ],
 )
 def test_for_deployment_knows_the_database_password_in_every_spelling(url: str) -> None:

@@ -16,9 +16,14 @@ KEYWORDS = "host=db port=5432 user=issuebot password=s3cretpassword dbname=issue
         "postgresql://db/issuebot",
         "postgresql://issuebot@/arrowbot_test?host=/var/run/postgresql",
         "POSTGRESQL://u@h/db",
+        # libpq's multi-host list, an IPv6 literal, and a port libpq will refuse at connect:
+        # all URLs, all describable without their password.
+        "postgresql://u:p@h1:5432,h2:5433/db",
+        "postgresql://u:p@[::1]:5432/db",
+        "postgresql://u@h:notaport/db",
     ],
 )
-def test_a_well_formed_postgres_url_parses(url: str) -> None:
+def test_a_postgres_url_parses(url: str) -> None:
     assert is_postgres_url(url)
     assert parse_url(url) is not None
 
@@ -32,8 +37,6 @@ def test_a_well_formed_postgres_url_parses(url: str) -> None:
         KEYWORDS,
         # libpq's keyword/value form again: no ``//``, so ``urlsplit`` reads a path, not a host.
         "postgresql:host=db password=s3cretpassword",
-        "postgresql://u@h:notaport/db",
-        "postgresql://u@h:70000/db",
         "postgresql://[::1/issuebot",
         "",
     ],
@@ -49,6 +52,11 @@ def test_describe_drops_the_password_and_keeps_the_rest() -> None:
     assert describe("postgresql://issuebot@db/issuebot?password=s3cret") == (
         "postgresql://issuebot@db/issuebot"
     )
+    assert (
+        describe("postgresql://u:s3cret@h1:5432,h2:5433/db") == "postgresql://u@h1:5432,h2:5433/db"
+    )
+    assert describe("postgresql://u:s3cret@[::1]:5432/db") == "postgresql://u@[::1]:5432/db"
+    assert describe("postgresql://u:p%40ss@h:notaport/db") == "postgresql://u@h:notaport/db"
 
 
 @pytest.mark.parametrize(
@@ -57,7 +65,6 @@ def test_describe_drops_the_password_and_keeps_the_rest() -> None:
         KEYWORDS,
         "postgresql:host=db password=s3cretpassword",
         "postgresql://[bad",
-        "postgresql://u@h:notaport/db",
         "s3cretpassword",
     ],
 )
@@ -77,6 +84,22 @@ def test_dsn_secrets_finds_the_url_password_in_the_userinfo_and_the_query() -> N
     )
     assert dsn_secrets("postgresql://u@h/db") == ()
     assert dsn_secrets("postgresql://u:@h/db?password=") == ()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://u:s3cretpassword@h1:5432,h2:5433/db",
+        "postgresql://u:s3cretpassword@h:notaport/db",
+        "postgresql://u:s3cretpassword@h:70000/db",
+        "mysql://u:s3cretpassword@h/db",
+        "postgresql:host=db password=s3cretpassword",
+    ],
+)
+def test_dsn_secrets_reads_the_url_password_whatever_else_is_wrong_with_the_url(url: str) -> None:
+    """The mask is carried by the value, not by whichever guard ran first: a URL issuebot
+    refuses, or one libpq will, still has its password known."""
+    assert dsn_secrets(url) == ("s3cretpassword",)
 
 
 def test_dsn_secrets_finds_the_keyword_password_bare_or_quoted() -> None:

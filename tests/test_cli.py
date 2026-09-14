@@ -2675,6 +2675,40 @@ def test_worker_without_a_database_passes_no_callbacks(
     assert fake_database.listeners == []
 
 
+def test_run_once_refuses_a_keyword_value_dsn_before_claiming(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert "s3cretpassword" not in out
+    assert stub_session.calls == [] and fake_database.urls == []
+    assert fake_github.issue(42).state is StateLabel.TODO
+
+
+def test_worker_refuses_a_keyword_value_dsn_before_the_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert "s3cretpassword" not in out
+    assert stub_orchestrator.instances == [] and fake_database.urls == []
+
+
 def test_worker_fails_before_the_orchestrator_when_migration_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

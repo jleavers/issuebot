@@ -31,14 +31,14 @@ def test_is_postgres_url_accepts_both_schemes_and_rejects_others() -> None:
     # #105: the spellings that parse as *something* under urlsplit but are not a URL.
     assert not is_postgres_url(KEYWORDS)
     assert not is_postgres_url("postgresql:host=db password=s3cretpassword")
-    assert not is_postgres_url("postgresql://u@h:notaport/db")
+    assert is_postgres_url("postgresql://u@h:notaport/db")  # libpq's error, at connect time
 
 
 def test_describe_drops_the_password_and_keeps_the_rest() -> None:
     assert describe(URL) == "postgresql://issuebot@db.example:5433/issuebot"
     assert describe("postgresql://db/issuebot") == "postgresql://db/issuebot"
     assert describe("postgresql://[bad") == REDACTED
-    assert describe("postgresql://u@h:notaport/db") == REDACTED
+    assert describe("postgresql://u:s3cret@h:notaport/db") == "postgresql://u@h:notaport/db"
     assert describe(KEYWORDS) == REDACTED
 
 

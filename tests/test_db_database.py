@@ -28,7 +28,6 @@ def test_description_hides_the_password() -> None:
         "host=db.example port=5433 user=issuebot password=s3cret dbname=issuebot",
         "postgresql:host=db.example password=s3cret",
         "mysql://issuebot:s3cret@db.example/issuebot",
-        "postgresql://issuebot:s3cret@db.example:notaport/issuebot",
     ],
 )
 def test_anything_but_a_postgres_url_is_refused_before_connecting(url: str) -> None:

@@ -11,6 +11,7 @@ from issuebot.dsn import POSTGRES_SCHEMES, REDACTED, describe, dsn_secrets, is_p
 __all__ = [
     "APPLICATION_NAME",
     "CONNECT_TIMEOUT_S",
+    "NOT_A_URL",
     "POSTGRES_SCHEMES",
     "RECONNECT_DELAYS_S",
     "REDACTED",
