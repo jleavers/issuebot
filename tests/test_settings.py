@@ -39,6 +39,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.agent.max_attempts == 3
     assert s.agent.max_retry_backoff_ms == 300_000
     assert s.agent.max_conflict_reworks == 3
+    assert s.agent.max_issue_cost_usd == 0.0
     assert s.claude.command == "claude"
     assert s.claude.model is None
     assert s.claude.permission_mode == "auto"
@@ -120,6 +121,7 @@ def test_label_must_not_be_empty() -> None:
         ("agent", "max_attempts", 0),
         ("agent", "max_retry_backoff_ms", 999),
         ("agent", "max_conflict_reworks", -1),
+        ("agent", "max_issue_cost_usd", -0.01),
         ("claude", "command", ""),
         ("claude", "max_budget_usd", 0),
         ("claude", "turn_timeout_ms", 0),
@@ -136,6 +138,12 @@ def test_constraints_reject_out_of_range_values(section: str, field: str, value:
 def test_zero_conflict_reworks_is_the_off_switch() -> None:
     s = Settings.model_validate({**MINIMAL, "agent": {"max_conflict_reworks": 0}})
     assert s.agent.max_conflict_reworks == 0
+
+
+def test_the_per_issue_spend_ceiling_is_a_float_and_zero_is_off() -> None:
+    s = Settings.model_validate({**MINIMAL, "agent": {"max_issue_cost_usd": 25}})
+    assert s.agent.max_issue_cost_usd == 25.0
+    assert Settings.model_validate({**MINIMAL}).agent.max_issue_cost_usd == 0.0
 
 
 @pytest.mark.parametrize("mode", ["auto", "acceptEdits", "dontAsk", "bypassPermissions"])

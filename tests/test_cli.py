@@ -39,7 +39,7 @@ from issuebot.db import (
     StoreError,
     StoreUnavailableError,
 )
-from issuebot.db.queries import DailyPoint, SnapshotRow
+from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
@@ -51,7 +51,7 @@ from issuebot.github import (
     model_label_style,
 )
 from issuebot.notifications import PostResult
-from issuebot.orchestrator import OrchestratorStartupError
+from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 
 SEED_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -2574,6 +2574,44 @@ def test_worker_without_a_database_seeds_nothing(
 ) -> None:
     assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert stub_orchestrator.instances[0].kwargs["initial_rate_limits"] is None
+    assert stub_orchestrator.instances[0].kwargs["initial_ledger"] == {}
+
+
+def test_worker_seeds_the_admission_ledger_from_the_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """#112: a budget a deployment resets is not a ceiling, and this worker deploys by restart."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.ledger_rows = [
+        LedgerRow(
+            identifier="repo-7",
+            failures=2,
+            runs=5,
+            turns=9,
+            cost_usd=3.25,
+            last_run_at=SEED_AT,
+        )
+    ]
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_ledger"] == {
+        "repo-7": IssueLedger(failures=2, runs=5, turns=9, cost_usd=3.25, last_run_at=SEED_AT)
+    }
+
+
+def test_worker_starts_when_the_ledger_seed_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """Like the limits tile: a budget read that fails costs history, never the start."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.error = DatabaseError("connection refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_ledger"] == {}
 
 
 def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:

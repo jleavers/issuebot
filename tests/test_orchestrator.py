@@ -34,6 +34,7 @@ from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, I
 from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
+from issuebot.orchestrator.admission import IssueLedger
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     MAX_FETCH_FAILURES,
@@ -46,7 +47,7 @@ from issuebot.orchestrator.orchestrator import (
     fetch_states,
     preflight,
 )
-from issuebot.orchestrator.state import RunningEntry
+from issuebot.orchestrator.state import RetryEntry, RunningEntry
 
 START = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 START_MONO = 1000.0
@@ -68,6 +69,7 @@ agent:
   max_attempts: {max_attempts}
   max_retry_backoff_ms: {max_retry_backoff_ms}
   max_conflict_reworks: {max_conflict_reworks}
+  max_issue_cost_usd: {max_issue_cost_usd}
 claude:
   command: {claude}
   turn_timeout_ms: 30000
@@ -204,6 +206,7 @@ class Harness:
         interval_ms: int = 30_000,
         max_retry_backoff_ms: int = 300_000,
         max_conflict_reworks: int = 3,
+        max_issue_cost_usd: float = 0.0,
         hooks: dict[str, str] | None = None,
         prompt: str = "Task {{ issue.identifier }}",
         claude: str = "claude",
@@ -212,6 +215,7 @@ class Harness:
         model: str | None = None,
         model_labels: dict[str, str] | None = None,
         initial_rate_limits: RateLimits | None = None,
+        initial_ledger: Mapping[str, IssueLedger] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
     ) -> None:
         self.tmp_path = tmp_path
@@ -234,6 +238,7 @@ class Harness:
             interval_ms=interval_ms,
             max_retry_backoff_ms=max_retry_backoff_ms,
             max_conflict_reworks=max_conflict_reworks,
+            max_issue_cost_usd=max_issue_cost_usd,
             hooks=hooks,
             prompt=prompt,
         )
@@ -268,6 +273,7 @@ class Harness:
             on_snapshot=self.snapshots.append,
             on_issues=self.record_polled if observe_issues else None,
             initial_rate_limits=initial_rate_limits,
+            initial_ledger=initial_ledger,
             scrubber=scrubber,
         )
 
@@ -311,6 +317,7 @@ class Harness:
         interval_ms: int = 30_000,
         max_retry_backoff_ms: int = 300_000,
         max_conflict_reworks: int = 3,
+        max_issue_cost_usd: float = 0.0,
         hooks: dict[str, str] | None = None,
         prompt: str = "Task {{ issue.identifier }}",
         text: str | None = None,
@@ -324,6 +331,7 @@ class Harness:
             max_attempts=max_attempts,
             max_retry_backoff_ms=max_retry_backoff_ms,
             max_conflict_reworks=max_conflict_reworks,
+            max_issue_cost_usd=max_issue_cost_usd,
             claude=self.claude,
             claude_extra=self.claude_extra(),
             stall_timeout_ms=stall_timeout_ms,
@@ -3067,3 +3075,225 @@ async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_prob
     await orchestrator.startup()
     assert probed == ["agent"]
     assert h.claude_auth_calls, "the login was probed after the account"
+
+
+# --- the admission gate (#112) ------------------------------------------------------------
+
+
+async def fail_once(h: Harness, number: int, error: str = "boom") -> None:
+    """One scripted session for ``number`` that ends as a process failure."""
+    await h.exit(h.run_for(number), outcome="failed", error_category="process_exit", error=error)
+
+
+def attempts_dispatched(h: Harness, number: int) -> list[int]:
+    return [run.kwargs["attempt"] for run in h.sessions.runs if run.issue.number == number]
+
+
+async def test_a_retry_does_not_claim_while_preflight_holds_dispatch(tmp_path: Path) -> None:
+    """The half of #112 the other two holds already had: `_fire` could not see this one."""
+    h = Harness(tmp_path)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    assert h.retry(1).kind == "failure"
+
+    h.which_missing = {"claude"}
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "preflight"
+
+    await h.fire(20)
+    assert h.orchestrator.running == {}
+    retry = h.retry(1)
+    # It waits under the hold's own name, with the hold's own words -- the same string the
+    # snapshot carries, because one function composes both.
+    assert retry.kind == "preflight"
+    assert retry.error == hold.reason
+    assert retry.attempt == 2
+
+
+async def test_the_retry_resumes_when_preflight_clears(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    h.which_missing = {"claude"}
+    await h.tick()
+    await h.fire(20)
+    assert h.orchestrator.running == {}
+
+    h.which_missing = set()
+    await h.tick()
+    await h.fire(30)
+    assert list(h.orchestrator.running) == ["1"]
+    assert attempts_dispatched(h, 1) == [1, 2]
+
+
+async def test_a_label_move_between_failures_does_not_reset_the_attempt_number(
+    tmp_path: Path,
+) -> None:
+    """The budget is the issue's, not the label's: the chain reaches the escape."""
+    h = Harness(tmp_path, max_attempts=3)
+    h.add_issue(1)
+    await h.tick()
+    for _ in range(3):
+        await fail_once(h, 1)
+        if "1" not in h.orchestrator.retries:
+            break
+        # A collaborator, the session itself, or the `issue_moved` success path.
+        h.github.human_set_state(1, StateLabel.REWORK)
+        await h.fire(600)
+    assert attempts_dispatched(h, 1) == [1, 2, 3]
+    assert h.orchestrator.snapshot().counters.blocked == 1
+    blocked = next(e for e in h.recorder.events if isinstance(e, Blocked))
+    assert blocked.reason.startswith("3 consecutive worker sessions failed")
+
+
+async def test_the_tick_takes_the_attempt_number_from_the_ledger_too(tmp_path: Path) -> None:
+    """The sweep over the candidates is the other door, and it reads the same ledger."""
+    h = Harness(tmp_path, max_attempts=3)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    # The retry is dropped and the issue relabelled, so only the tick's sweep can claim it.
+    h.orchestrator._retries.clear()
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.tick()
+    assert attempts_dispatched(h, 1) == [1, 2]
+
+
+async def test_a_run_that_succeeds_clears_the_chain(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=3)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    await h.fire(20)
+    assert attempts_dispatched(h, 1) == [1, 2]
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    assert h.retry(1).attempt == 1
+    await h.fire(1)  # the continuation releases: rework is claimable, so it dispatches
+    assert attempts_dispatched(h, 1) == [1, 2, 1]
+
+
+async def test_the_escape_ends_the_chain_so_the_documented_recovery_works(
+    tmp_path: Path,
+) -> None:
+    """README: fix the cause, then relabel. That is a label move, and it has to work."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    await h.fire(20)
+    await fail_once(h, 1)
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.tick()
+    assert attempts_dispatched(h, 1) == [1, 2, 1]
+
+
+async def test_a_spent_chain_refuses_the_claim_when_the_escape_never_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is the backstop: an escape that could not be written leaves the chain spent."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_issue(1)
+    await h.tick()
+    h.fail_on("find_workpad_comment", monkeypatch)
+    await fail_once(h, 1)
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    assert h.retry(1).kind == "escape"
+
+    # Drop the escape retry: the issue is now an ordinary in_progress candidate.
+    h.orchestrator._retries.clear()
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    assert attempts_dispatched(h, 1) == [1]
+    refusals = [line for line in logs if line["event"] == "dispatch_refused"]
+    assert len(refusals) == 1  # said once, not once a tick
+    assert refusals[0]["refusal"] == "attempts"
+    assert "agent.max_attempts is 1" in refusals[0]["reason"]
+
+
+async def test_the_cumulative_spend_ceiling_refuses_a_claim(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_issue_cost_usd=0.75)
+    h.add_issue(1)
+    await h.tick()
+    # The scripted result reports 0.5 USD; two runs put the issue over the ceiling.
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(1)
+    assert attempts_dispatched(h, 1) == [1, 1]
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    with capture_logs() as logs:
+        await h.fire(1)  # the retry timer's door
+        await h.tick()  # and the tick's, on the same issue
+    assert attempts_dispatched(h, 1) == [1, 1]
+    refusals = [line for line in logs if line["event"] == "dispatch_refused"]
+    assert len(refusals) == 1  # both doors, one refusal, said once
+    assert refusals[0]["refusal"] == "spend"
+    assert "$1.00 over 2 runs" in refusals[0]["reason"]
+    assert "agent.max_issue_cost_usd is $0.75" in refusals[0]["reason"]
+
+
+async def test_a_seeded_ledger_carries_the_budget_across_a_restart(tmp_path: Path) -> None:
+    h = Harness(
+        tmp_path,
+        max_attempts=3,
+        initial_ledger={"repo-1": IssueLedger(failures=2, runs=2, cost_usd=1.0)},
+    )
+    h.add_issue(1)
+    await h.tick()
+    assert attempts_dispatched(h, 1) == [3]
+    await fail_once(h, 1)
+    # The third failure is the last one the issue had: the escape fires now, not in three more.
+    assert h.github.issue(1).state is StateLabel.REVIEW
+
+
+async def test_a_retry_releases_an_issue_that_is_already_running(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1)
+    await h.tick()
+    entry = h.entry(1)
+    h.orchestrator._retries["1"] = RetryEntry(
+        issue_id="1",
+        identifier=entry.identifier,
+        issue_number=1,
+        issue_url=entry.issue.url,
+        title=entry.issue.title,
+        attempt=1,
+        kind="failure",
+        due_mono=h.clock.value,
+        due_at=h.now(),
+        error=None,
+    )
+    await h.fire(1)
+    assert h.orchestrator.retries == {}
+    assert len(h.sessions.runs) == 1  # no second worker for the same issue
+
+
+async def test_a_terminal_issue_is_forgotten_by_the_ledger(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1)
+    await h.tick()
+    await fail_once(h, 1)
+    assert h.orchestrator._ledger.get("repo-1").failures == 1
+    h.github.close_issue(1)
+    await h.fire(20)
+    assert h.orchestrator._ledger.get("repo-1") == IssueLedger()
+
+
+async def test_the_dispatch_line_carries_what_the_issue_has_cost(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1)
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    with capture_logs() as logs:
+        await h.fire(1)
+    line = next(entry for entry in logs if entry["event"] == "dispatched")
+    assert (line["issue_runs"], line["issue_cost_usd"]) == (2, 0.5)
