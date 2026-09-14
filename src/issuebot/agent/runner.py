@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import SecretStr
 
+from issuebot.agent.boundary import ENV_FILE, TURN_STDERR, Boundary, BoundaryError, split_parts
 from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
@@ -46,8 +47,9 @@ FIXED_ENVIRONMENT: dict[str, str] = {
 # is an allow-list, so a DSN a `before_run` shell exports dies with that shell.
 WORKSPACE_ENV_PATH = (".issuebot", "env")
 # Enough for any plausible set of variables, and a bound on a hook that redirects a log here
-# by accident: the file is re-read for every turn and every hook.
-WORKSPACE_ENV_LIMIT = 64 * 1024
+# by accident: the file is re-read for every turn and every hook. The bound is the boundary's,
+# applied to the bytes read, not to a string built after the whole file was read (#104).
+WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # What the file may not take out from under a running turn. A hook writes it, but it lives in
 # the agent's own workspace, so the session can write it too -- which is why the line is drawn
 # at the tooling issuebot launches rather than at "a hook would not do that". `PATH`, `HOME`,
@@ -133,33 +135,45 @@ def merge_workspace_env(
     return merged, refused
 
 
-def read_workspace_env(workspace: Path) -> tuple[dict[str, str], list[str]]:
-    """Read ``<workspace>/.issuebot/env``. No file is the normal case and costs nothing."""
-    path = workspace.joinpath(*WORKSPACE_ENV_PATH)
+def read_workspace_env(
+    workspace: Path, *, boundary: Boundary | None = None
+) -> tuple[dict[str, str], list[str]]:
+    """Read ``<workspace>/.issuebot/env``. No file is the normal case and costs nothing.
+
+    The read goes through the boundary (#104): the file sits in a directory the session can
+    write, so a FIFO, a device, a directory or a symbolic link at the name is refused before
+    a byte is read -- a FIFO would otherwise block the event loop for every session, and a
+    link would read whatever file the worker's uid can reach back into the session's
+    environment -- and at most ``WORKSPACE_ENV_LIMIT`` bytes are taken however large it is.
+    """
+    boundary = boundary or Boundary.current()
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        read = boundary.read(workspace, WORKSPACE_ENV_PATH, ENV_FILE)
     except FileNotFoundError:
         return {}, []
+    except BoundaryError as exc:
+        return {}, [f"refused {exc.filename}: {exc.reason}"]
     except OSError as exc:
         # A hook's problem, and the hook's own failure is what `before_run` already reports.
-        return {}, [f"cannot read {path}: {exc}"]
-    if len(text) <= WORKSPACE_ENV_LIMIT:
+        return {}, [f"cannot read {workspace.joinpath(*WORKSPACE_ENV_PATH)}: {exc}"]
+    text = read.data.decode("utf-8", errors="replace")
+    if not read.truncated:
         return parse_workspace_env(text)
     # Cut at a line boundary, so the last variable kept is one a hook finished writing.
-    head, _, _ = text[:WORKSPACE_ENV_LIMIT].rpartition("\n")
+    head, _, _ = text.rpartition("\n")
     env, warnings = parse_workspace_env(head)
-    return env, [f"longer than {WORKSPACE_ENV_LIMIT} characters: the rest was ignored", *warnings]
+    return env, [f"longer than {WORKSPACE_ENV_LIMIT} bytes: the rest was ignored", *warnings]
 
 
 def workspace_environment(
-    base: Mapping[str, str], workspace: Path
+    base: Mapping[str, str], workspace: Path, *, boundary: Boundary | None = None
 ) -> tuple[dict[str, str], list[str]]:
     """`base` with the workspace's env file layered over it, plus the keys that took effect.
 
     Everything it could not use is a warning, never a failure: the file is read fresh for every
     turn and every hook, so a bad line must not be the thing that ends a run.
     """
-    extra, warnings = read_workspace_env(workspace)
+    extra, warnings = read_workspace_env(workspace, boundary=boundary)
     merged, refused = merge_workspace_env(base, extra)
     log = get_logger(__name__)
     for reason in warnings:
@@ -662,6 +676,9 @@ class ClaudeRunner:
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
         # The account every turn runs as (#75), or None for the worker's own uid.
         self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
+        # The worker's side of the line the session writes across (#104): every read of the
+        # workspace's env file and of the turn files goes through it.
+        self._boundary = Boundary.current(settings.agent.run_as)
         self._log = get_logger(__name__)
 
     def _prepared(
@@ -774,12 +791,22 @@ class ClaudeRunner:
             return finish("invalid_workspace_cwd", message, None)
         if cancel is not None and cancel.is_set():
             return finish("cancelled", "cancelled before the turn started", None)
-        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # The worker's own directory, verified before a name in it is opened (#104): the
+            # turn files are what `capture_turns` reads back, and a directory the session had
+            # placed there first would have the worker writing through the session's names.
+            _own_log_dir(self._boundary, resolved, log_dir)
+        except OSError as exc:
+            return finish(
+                "invalid_workspace_cwd", f"cannot use log directory {log_dir}: {exc}", None
+            )
         (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
         argv = self.build_argv(session_id=session_id, resume=resume)
         # Read every turn: a `before_run` that ran once still feeds a session resumed after a
         # retry, and a hook is free to rewrite the file between turns.
-        env, workspace_env = workspace_environment(self.child_environment(), resolved)
+        env, workspace_env = workspace_environment(
+            self.child_environment(), resolved, boundary=self._boundary
+        )
         self._log.info(
             "claude_turn_started",
             turn_number=turn_number,
@@ -849,7 +876,10 @@ class ClaudeRunner:
         emit(_event("process_exit", parser, detail=str(exit_code)))
         if category is None:
             category, error = classify_result(
-                parser.result, exit_code, _stderr_tail(stderr_path), scrubber=self._scrubber
+                parser.result,
+                exit_code,
+                _stderr_tail(self._boundary, stderr_path),
+                scrubber=self._scrubber,
             )
         if category is None:
             emit(_event("turn_completed", parser, detail=parser.model))
@@ -967,21 +997,33 @@ async def _feed_stdin(process: asyncio.subprocess.Process, prompt: str) -> None:
         stdin.close()
 
 
-def _stderr_tail(path: Path) -> str:
+def _stderr_tail(boundary: Boundary, path: Path) -> str:
     """The end of a turn's stderr, bounded; the whole of it when the file is small.
 
     The whole tail is read, not just the last line, because claude prints its reason for
     stopping and then whatever the runtime says on the way out, so a credential problem is
-    rarely the last thing on the stream (see ``classify_result``).
+    rarely the last thing on the stream (see ``classify_result``). Read back through the
+    boundary like every other turn file (#104).
     """
     try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(handle.tell() - STDERR_TAIL_LIMIT, 0))
-            raw = handle.read()
+        read = boundary.read(
+            path.parent, (path.name,), TURN_STDERR, keep="tail", limit=STDERR_TAIL_LIMIT
+        )
     except OSError:
         return ""
-    return raw.decode("utf-8", errors="replace")
+    return read.data.decode("utf-8", errors="replace")
+
+
+def _own_log_dir(boundary: Boundary, workspace: Path, log_dir: Path) -> None:
+    """Create the run's log directory as the worker's own, inside the workspace as a rule."""
+    try:
+        parts = split_parts(workspace, log_dir)
+    except ValueError:
+        # Outside the workspace: the caller's choice, and still the worker's own directory.
+        log_dir.parent.mkdir(parents=True, exist_ok=True)
+        boundary.own_dir(log_dir.parent, (log_dir.name,))
+        return
+    boundary.own_dir(workspace, parts)
 
 
 def _last_line(text: str) -> str:

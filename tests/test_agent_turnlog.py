@@ -327,3 +327,51 @@ def test_the_sample_is_the_scrubbers_fixed_point() -> None:
     assert "/home/jleavers" not in (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")
     capture = only(capture_turns(SAMPLE, scrubber=scrubber))
     assert capture.stream == (SAMPLE / "turn-1.jsonl").read_text(encoding="utf-8")
+
+
+# --- the boundary (#104): the turn files are read back through it --------------------------
+
+
+def test_a_linked_turn_file_is_skipped_and_a_linked_part_is_empty(tmp_path: Path) -> None:
+    import os
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "stream.jsonl").write_text(f"{INIT}\n{RESULT}\n")
+    (elsewhere / "prompt.md").write_text("the operator's file")
+    log_dir = tmp_path / "run"
+    log_dir.mkdir()
+    os.symlink(elsewhere / "stream.jsonl", log_dir / "turn-1.jsonl")
+    write_turn(log_dir, 2, [INIT, RESULT])
+    os.symlink(elsewhere / "prompt.md", log_dir / "turn-2.prompt.md")
+    captures = capture_turns(log_dir)
+    assert [c.turn_number for c in captures] == [2]
+    assert (captures[0].prompt, captures[0].prompt_bytes) == ("", 0)
+
+
+def test_a_log_directory_that_is_not_the_workers_yields_nothing(tmp_path: Path) -> None:
+    import os
+
+    from issuebot.agent.boundary import Boundary
+
+    write_turn(tmp_path, 1, [INIT, RESULT])
+    stranger = Boundary(worker_uid=os.getuid() + 1)
+    assert capture_turns(tmp_path, boundary=stranger) == []
+
+
+def test_the_stream_read_is_bounded_and_the_stderr_read_keeps_its_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from issuebot.agent.boundary import TURN_STDERR, TURN_STREAM
+
+    monkeypatch.setattr(turnlog, "TURN_STREAM", replace(TURN_STREAM, limit=len(INIT) + 1))
+    monkeypatch.setattr(turnlog, "TURN_STDERR", replace(TURN_STDERR, limit=4))
+    write_turn(tmp_path, 1, [INIT, RESULT], **{"stderr.log": "head...tail"})
+    capture = only(capture_turns(tmp_path))
+    assert capture.truncated
+    assert capture.stream == f"{INIT}\n"
+    assert capture.stream_bytes == len(INIT) + len(RESULT) + 2
+    assert capture.subtype is None  # the result line lay past the bound
+    assert (capture.stderr, capture.stderr_bytes) == ("tail", 11)
