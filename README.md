@@ -917,6 +917,16 @@ flag would show in `ps`) and binds `127.0.0.1` unless told `--bind 0.0.0.0`; the
 service says so explicitly behind a port it publishes on the host's loopback. Basic sends the
 password with every request, so a dashboard that leaves the host wants TLS in front of it.
 
+**A browser that will not speak Basic.** Basic is the gate, so a browser configured not to use
+it cannot reach the dashboard at all: a managed Edge or Chrome whose `AuthSchemes` policy omits
+`basic` — `ntlm,negotiate` is a common fleet setting — has no handler for the challenge, so it
+renders the 401 page without ever prompting. The server's own log is the giveaway: the 401 is
+there and no `web_auth_rejected` beside it, because nothing was presented to reject. Check
+`edge://policy` or `chrome://policy` before suspecting the deployment. Neither TLS nor
+credentials in the URL get round it, since `AuthSchemes` lists schemes rather than restricting
+the transport (that is `BasicAuthOverHttpEnabled`, a separate policy); another browser, or
+cookie-based authentication in front of the dashboard, is the way in.
+
 **The hero's six tiles.** Closed, agents run, cost, tokens, limits and activity, each showing
 two figures: 1 day and 7 days for the first four, the two usage windows for limits, and
 running against retrying for activity.
