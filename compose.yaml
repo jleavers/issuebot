@@ -9,7 +9,13 @@ services:
     networks: [issuebot]
     environment:
       POSTGRES_USER: issuebot
-      POSTGRES_PASSWORD: issuebot
+      # The one credential of the shared store, and a superuser's: every repository's history
+      # and session transcripts sit behind it. No default, on purpose (#78): `:?` makes compose
+      # refuse to configure or start this service, the worker and the web until the checkout's
+      # .env holds a value, so nothing in this tree is a working credential. The image applies
+      # it at initdb only; a cluster that already exists keeps the password it was created
+      # with until ALTER ROLE (README, "Rotating the database password").
+      POSTGRES_PASSWORD: ${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}
       POSTGRES_DB: issuebot
     volumes:
       # PostgreSQL 18 moved PGDATA to /var/lib/postgresql/18/docker; mount the parent.
@@ -28,7 +34,7 @@ services:
   # plain `docker compose up` does not start it:
   #
   #   docker compose --profile test up -d --wait test-db
-  #   DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot \
+  #   DATABASE_URL=postgresql://issuebot@$(docker compose port test-db 5432)/issuebot \
   #     uv run pytest
   #   docker compose rm -sf test-db
   #
@@ -39,8 +45,13 @@ services:
     profiles: ["test"]
     environment:
       POSTGRES_USER: issuebot
-      POSTGRES_PASSWORD: issuebot
       POSTGRES_DB: issuebot
+      # No password at all rather than a committed one (#78): the cluster is a throwaway in RAM
+      # on a loopback port and holds a test schema, so there is no credential to manage -- the
+      # choice #62 made for the workspace-local cluster. The recipe's DSN names none. Compose
+      # still interpolates the whole file, so ISSUEBOT_DB_PASSWORD has to be *set* to start
+      # even this service; only its value is irrelevant here.
+      POSTGRES_HOST_AUTH_METHOD: trust
     # No named volume: the cluster lives in RAM and goes when the container does, which is
     # the point of a throwaway. tmpfs at the parent, as pgdata is mounted for `db`.
     tmpfs:
@@ -89,7 +100,10 @@ services:
       - path: .env
         required: false
     environment:
-      DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+      # The hub's database over the shared network, with the password from this checkout's
+      # .env: the hub's own value, copied into every worker checkout (README, "More than one
+      # repository"). Required, so a worker never starts against a store it cannot reach.
+      DATABASE_URL: postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}@db:5432/issuebot
       # The directory below is what is mounted; this names the file inside it. Keep the two
       # in step if you rename either.
       ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
@@ -117,7 +131,7 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://issuebot:issuebot@db:5432/issuebot
+      DATABASE_URL: postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}@db:5432/issuebot
     ports:
       # Loopback only: the dashboard has no authentication. Override the host port with
       # ISSUEBOT_WEB_PORT in the project dot-env file; the container side is the --port above.

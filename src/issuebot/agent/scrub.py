@@ -30,9 +30,10 @@ if TYPE_CHECKING:
 
 REDACTED = "***"
 # A known value shorter than this is not masked: masking a word in every transcript would
-# mangle prose to protect a value no real credential is as short as -- and the compose
-# default's database password is the eight letters of `issuebot`, which the DSN shape
-# masks in DSN form without needing every label name and repository in the stream to go.
+# mangle prose to protect a value no real credential is as short as -- and a database
+# password as short as the eight letters of `issuebot` (the compose default until #78 made
+# the password a required per-deployment value) is still masked in DSN form by the DSN
+# shape, without needing every label name and repository in the stream to go.
 MIN_SECRET_LENGTH = 12
 # A known value that is all digits is not masked either: a JSON number in the stream could
 # equal it, and `***` in its place would break the line for every reader after. The shapes

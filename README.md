@@ -53,9 +53,13 @@ issues that triage is most of the value.
   names the overlay and counts its overrides, and a running worker reports the one in force
   in `issuebot status`, on the dashboard's worker line and in
   `/api/v1/repos/<owner>/<name>/state`.
-- `.env` (copied from `.env.example`, git-ignored) holds the secrets and the identity the
-  agent commits with. Docker Compose loads it for the worker; on the host you export the
-  variables yourself.
+- `.env` (copied from `.env.example`, git-ignored) holds the secrets -- the GitHub token, the
+  Claude key, the Slack webhook and the database password -- and the identity the agent
+  commits with. Docker Compose loads it for the worker; on the host you export the variables
+  yourself. Nothing in the tree is a working credential: every one is filled in per
+  deployment. Compose refuses to start the database, the worker and the dashboard while the
+  database password is missing; an empty `GH_TOKEN` is caught by the worker's own preflight,
+  and an empty `ANTHROPIC_API_KEY` is the log-in-once path.
 - The agent follows the target repository's own `CLAUDE.md` and `AGENTS.md` for how to run
   tools, commit and open PRs, and with `claude.setting_sources: [project]` it also loads that
   repository's `.claude/settings.json`. So the target repository shapes the agent's behaviour;
@@ -113,8 +117,24 @@ cp .env.example .env
 ```
 
 Fill in `.env`: `GH_TOKEN`, `ANTHROPIC_API_KEY` (or leave it empty and log in once, step 2),
-the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values, and optionally `SLACK_WEBHOOK_URL`.
-`ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is taken on your host.
+`ISSUEBOT_DB_PASSWORD`, the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values, and optionally
+`SLACK_WEBHOOK_URL`. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is
+taken on your host.
+
+`ISSUEBOT_DB_PASSWORD` is the password of the PostgreSQL store and the one credential it has,
+so it has no default: `docker compose up` (and `config`) refuse to run the database, the worker
+or the dashboard until it is set, naming the variable. It guards more than one deployment's
+worth of data -- the role is a cluster superuser, and the store holds the history and the full
+session transcripts of every repository whose worker shares it -- so generate it rather than
+choose it:
+
+```bash
+openssl rand -hex 24      # or any string of letters, digits, `-`, `_` and `.`; it goes into a URL unencoded
+```
+
+Every other repository's worker checkout authenticates with the same value (see "More than one
+repository"). The postgres image applies it when the cluster is first created and never again;
+to change it on a cluster that already exists, see "Rotating the database password".
 Leave `COMPOSE_PROFILES=hub,worker` as it is: this checkout is the hub, running the database,
 the dashboard and its own worker (see "More than one repository" below for every other
 checkout, which runs `worker` alone).
@@ -310,11 +330,14 @@ To run on the host instead:
 uv sync
 set -a && . ./.env && set +a                  # the CLI reads the environment, not .env
 docker compose up -d db                       # optional: history and the dashboard
-export DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot   # optional
+export DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot   # optional
 uv run issuebot worker
-DATABASE_URL=postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
+DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
   uv run issuebot web                         # in a second terminal; it reads nothing else
 ```
+
+The two DSNs are built from the `.env` you just sourced; there is no password to type and none
+written down here.
 
 On the host set `workspace.root` to a directory you can write, such as `~/issuebot-workspaces`;
 the worker creates it.
@@ -651,14 +674,45 @@ and Claude login. The checkouts meet on one Docker network.
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
-   `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`,
-   and `docker compose up -d`. The worker reaches the hub's database as `db` over the shared
-   network and registers itself; it appears in the dashboard's dropdown on its first start.
+   `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`
+   and the **hub's** `ISSUEBOT_DB_PASSWORD` (the worker authenticates to the hub's database
+   with it; compose refuses to start the worker while it is empty), and `docker compose up -d`.
+   The worker reaches the hub's database as `db` over the shared network and registers itself;
+   it appears in the dashboard's dropdown on its first start.
 4. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`). `/` opens the
    repository you last chose; the header's dropdown switches.
 
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
+
+### Rotating the database password
+
+The postgres image reads `POSTGRES_PASSWORD` once, when it creates the cluster in the `pgdata`
+volume; after that the password lives in the cluster, and a new value in `.env` changes only
+what the worker and the web present, so they would be refused. Change the two together, on the
+hub, in this order -- compose will not load the file at all, `exec` included, until `.env`
+holds a value:
+
+```bash
+# 1. put the new value in ISSUEBOT_DB_PASSWORD in this checkout's .env, and in every other
+#    repository's worker checkout
+# 2. tell the running cluster (over the container's local socket, which asks no password):
+docker compose exec db psql -U issuebot -d issuebot -c "ALTER ROLE issuebot PASSWORD 'the-same-value'"
+# 3. recreate what reads it, here and in each of the other checkouts. db is recreated too:
+#    an existing cluster ignores POSTGRES_PASSWORD, so the data is safe, but the server
+#    restarts and every open connection drops.
+docker compose up -d
+```
+
+Pick a quiet moment: between steps 2 and 3 the running worker and dashboard are refused on
+every new connection, and step 3 recreates the worker, which stops any session in flight under
+`stop_grace_period`.
+
+A deployment that predates the variable -- one whose cluster was created with the shipped
+default that older versions carried -- is rotated the same way; until it is, that cluster
+answers to a password that was public. The `ALTER ROLE` line puts the value on your shell's
+command line and in its history; `psql`'s `\password issuebot` prompts for it instead, if
+that matters on your host.
 
 ### When things go wrong
 
@@ -783,13 +837,14 @@ uv run issuebot status            # what the worker was doing at its last tick
 uv run issuebot stats             # issues closed and agents run: last day, week, per day
 uv run issuebot refresh           # make a running worker poll GitHub now
 uv run issuebot web               # the dashboard and its JSON API (needs DATABASE_URL)
-cp .env.example .env              # then fill in GH_TOKEN and Claude auth
+cp .env.example .env              # then fill in GH_TOKEN, ISSUEBOT_DB_PASSWORD and Claude auth
 docker compose up --build         # postgres:18 + worker + web (http://127.0.0.1:8080)
 ```
 
-History is optional: with `DATABASE_URL` set (compose sets it for the worker; on the host
-export `postgresql://issuebot:issuebot@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot` after
-`docker compose up -d db`) the worker records every event, run and issue snapshot in
+History is optional: with `DATABASE_URL` set (compose builds it for the worker from
+`ISSUEBOT_DB_PASSWORD`; on the host export
+`postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot`
+after `docker compose up -d db`) the worker records every event, run and issue snapshot in
 PostgreSQL and `status`, `stats` and `refresh` work; without it the worker runs exactly as
 before. The worker applies pending migrations when it starts and fails fast if the database
 is configured but unreachable; `validate` reports the schema version. The tests that need a

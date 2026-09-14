@@ -33,8 +33,9 @@ jobs:
         image: postgres:18
         env:
           POSTGRES_USER: issuebot
-          POSTGRES_PASSWORD: issuebot
           POSTGRES_DB: issuebot
+          # A throwaway inside the runner, like compose's test-db: no credential to commit (#78).
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -43,7 +44,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql://issuebot:issuebot@localhost:5432/issuebot
+      DATABASE_URL: postgresql://issuebot@localhost:5432/issuebot
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1
@@ -61,7 +62,20 @@ jobs:
         run: |
           docker network create issuebot
           for profiles in hub worker hub,worker; do
-            COMPOSE_PROFILES=$profiles docker compose config --quiet
+            # Both directions (#78): without the store's password nothing configures -- the
+            # refusal is the invariant, so a default creeping back in fails the PR -- and with
+            # one every profile does.
+            for unset_or_empty in unset empty; do
+              if [ "$unset_or_empty" = empty ]; then export ISSUEBOT_DB_PASSWORD=; else unset ISSUEBOT_DB_PASSWORD; fi
+              if out=$(COMPOSE_PROFILES=$profiles docker compose config --quiet 2>&1); then
+                echo "profile '$profiles' configured with ISSUEBOT_DB_PASSWORD $unset_or_empty" >&2
+                exit 1
+              fi
+              case "$out" in *ISSUEBOT_DB_PASSWORD*) ;; *)
+                echo "the refusal did not name ISSUEBOT_DB_PASSWORD: $out" >&2; exit 1;;
+              esac
+            done
+            COMPOSE_PROFILES=$profiles ISSUEBOT_DB_PASSWORD=ci-only docker compose config --quiet
           done
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
