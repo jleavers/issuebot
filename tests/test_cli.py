@@ -2719,11 +2719,13 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
     probed: list[str] = []
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
+    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] agent.run_as: agent; the session runs as a separate account" in out
+    # One account and three concurrent sessions is the sharing #121 is about, so it warns.
+    assert "[WARN] agent.run_as: agent; the session runs as a separate account, but all 3" in out
     assert probed == ["agent"]
-    assert "15 checks: 0 failed, 1 warnings" in out
+    assert "15 checks: 0 failed, 2 warnings" in out
 
 
 def test_validate_fails_when_the_session_account_cannot_be_reached(
@@ -2735,7 +2737,8 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
         "issuebot.cli._run_as_probe",
         lambda user, environ: f"cannot run as {user!r}: sudo: a password is required",
     )
+    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
+    assert "[FAIL] agent.run_as: agent: cannot run as 'agent': sudo: a password is required" in out
     assert "15 checks: 1 failed, 1 warnings" in out

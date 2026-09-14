@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, get_args
 
+from issuebot.agent.accounts import REGISTRY_DIR, session_account, share_with
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
@@ -37,8 +38,9 @@ POST_CLONE_SCRIPT = (
 CREATED_MARKER = "created"
 # Under ``agent.run_as`` (#75) the workspace directory and ``.issuebot`` are the worker's, and
 # sticky: the agent creates what it likes inside them but can neither unlink nor rename the
-# worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own.
-SHARED_DIR_MODE = 0o1777
+# worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own. The
+# mode and the group come from ``share_with`` (#121): the bound account's group and nobody
+# else's, so a sibling session at another uid cannot enter the directory at all.
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
@@ -132,7 +134,10 @@ class WorkspaceManager:
         # the result is built, before the cut that keeps their end.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
         # The account the clone, the hooks and the post-clone setup run as (#75), or None.
-        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
+        # One account: the orchestrator narrows a pool to this workspace's bound member before
+        # it builds the manager (#121), so nothing below here has a pool to reason about.
+        self._account = session_account(settings)
+        self._runas = RunAs(self._account) if self._account else None
         self._log = get_logger(__name__)
 
     # --- paths --------------------------------------------------------------------
@@ -141,6 +146,11 @@ class WorkspaceManager:
         path = (self.root / workspace_key(identifier)).resolve()
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
+        if path.name == REGISTRY_DIR:
+            # The worker keeps its account bindings there (#121), and a workspace is removed
+            # wholesale. No real identifier sanitises to it -- every one carries a `/` and a
+            # `#`, so it is hashed -- but the record is not something to lose to a near miss.
+            raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
     def is_contained(self, path: Path) -> bool:
@@ -209,8 +219,8 @@ class WorkspaceManager:
         return all(_owned_by_me(p) for p in (path, state, state / "runs", state / CREATED_MARKER))
 
     def _share(self, path: Path) -> None:
-        if self._runas is not None:
-            os.chmod(path, SHARED_DIR_MODE)
+        if self._account is not None:
+            share_with(path, self._account)
 
     def _make_state_dir(self, path: Path) -> None:
         state = path / ".issuebot"

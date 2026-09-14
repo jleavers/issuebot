@@ -18,9 +18,10 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent.accounts import WORKSPACE_DIR_MODE
 from issuebot.agent.runas import MODULE, RunAs, RunAsError
 from issuebot.agent.runner import ClaudeRunner
-from issuebot.agent.workspace import SHARED_DIR_MODE, WorkspaceManager
+from issuebot.agent.workspace import WorkspaceManager
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
 from issuebot.github import Issue
@@ -125,8 +126,9 @@ def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> Non
 
 def test_run_as_setting_accepts_an_account_name_and_nothing_else() -> None:
     cfg = Settings.model_validate({"github": {"repo": "o/r"}, "agent": {"run_as": "agent"}})
-    assert cfg.agent.run_as == "agent"
-    assert Settings.model_validate({"github": {"repo": "o/r"}}).agent.run_as is None
+    assert cfg.agent.run_as == ("agent",)
+    assert not cfg.agent.run_as_pooled
+    assert Settings.model_validate({"github": {"repo": "o/r"}}).agent.run_as == ()
     with pytest.raises(ValueError, match="account name"):
         Settings.model_validate({"github": {"repo": "o/r"}, "agent": {"run_as": "-u root"}})
 
@@ -203,7 +205,7 @@ async def test_workspace_creation_and_removal_run_as_the_account(
     assert (state / "who").read_text().strip() == ME
     assert (state / "created").is_file() and (state / "runs").is_dir()
     for shared in (ws.path, state):
-        assert stat.S_IMODE(shared.stat().st_mode) == SHARED_DIR_MODE
+        assert stat.S_IMODE(shared.stat().st_mode) == WORKSPACE_DIR_MODE
     calls = [json.loads(line) for line in record.read_text().splitlines()]
     commands = [c["command"][c["command"].index("--") + 1 :] for c in calls]
     assert commands[0][:3] == ["gh", "repo", "clone"], commands

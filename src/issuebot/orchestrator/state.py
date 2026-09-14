@@ -125,6 +125,9 @@ class RunningEntry:
     started_mono: float
     started_at: datetime
     cancel: asyncio.Event
+    # The account this session runs as (#121): the pool member bound to its workspace, the one
+    # configured account, or None on the host route. What a sibling session may not be.
+    account: str | None = None
     task: asyncio.Task[RunResult] | None = None
     session_id: str | None = None
     last_activity_mono: float | None = None

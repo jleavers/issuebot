@@ -3026,7 +3026,7 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
 def _with_run_as(h: Harness, probe: Callable[[str, Mapping[str, str]], str | None]) -> Orchestrator:
     """The harness's orchestrator over a workflow whose session runs as `agent`."""
     workflow = load_workflow(h.path, environ={**h.environ, "ISSUEBOT_AGENT_USER": "agent"})
-    assert workflow.config.agent.run_as == "agent"
+    assert workflow.config.agent.run_as == ("agent",)
     return Orchestrator(
         workflow,
         bus=h.bus,
@@ -3067,3 +3067,158 @@ async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_prob
     await orchestrator.startup()
     assert probed == ["agent"]
     assert h.claude_auth_calls, "the login was probed after the account"
+
+
+# --- a pool of session accounts (#121) ----------------------------------------------------
+
+POOL_ENV = {"CLAUDE_CODE_OAUTH_TOKEN": "pool-credential"}
+
+
+def _with_pool(
+    h: Harness,
+    accounts: str = "agent-1,agent-2",
+    *,
+    probe: Callable[[str, Mapping[str, str]], str | None] = lambda user, environ: None,
+    environ: Mapping[str, str] | None = None,
+) -> Orchestrator:
+    """The harness driving an orchestrator whose sessions run as a pool of accounts."""
+    env = {
+        **h.environ,
+        "ISSUEBOT_AGENT_USER": accounts,
+        **(POOL_ENV if environ is None else environ),
+    }
+    workflow = load_workflow(h.path, environ=env)
+    assert workflow.config.agent.run_as_pooled
+    h.orchestrator = Orchestrator(
+        workflow,
+        bus=h.bus,
+        adapter_factory=lambda _settings: h.github,
+        workspaces_factory=h.make_workspaces,
+        runner_factory=h.make_runner,
+        run_session=h.sessions,
+        which=h.which,
+        claude_auth=h.claude_auth,
+        github_status=h.github_status,
+        run_as_probe=probe,
+        clock=h.clock,
+        now=h.now,
+        environ=env,
+        on_snapshot=h.snapshots.append,
+    )
+    return h.orchestrator
+
+
+async def test_startup_probes_every_account_in_the_pool(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    probed: list[str] = []
+    orchestrator = _with_pool(h, probe=lambda user, environ: probed.append(user))
+    await orchestrator.startup()
+    assert probed == ["agent-1", "agent-2"]
+
+
+async def test_startup_fails_when_one_account_in_the_pool_cannot_be_reached(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(
+        h, probe=lambda user, environ: None if user == "agent-1" else f"cannot run as {user!r}"
+    )
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await orchestrator.startup()
+    assert exc.value.problems == ["agent.run_as: cannot run as 'agent-2'"]
+
+
+async def test_a_pool_refuses_to_start_without_a_credential_in_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The accounts share no login on purpose (#121), so every session would fail to
+    authenticate: that is a startup failure, the way a definite logged-out is."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h, environ={})
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await orchestrator.startup()
+    assert exc.value.problems == [
+        "agent.run_as: a pool of session accounts needs a credential in the environment, "
+        "since each account has its own home and no login is shared between them: set one of "
+        "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, or name a single account"
+    ]
+
+
+async def test_two_concurrent_sessions_run_as_two_different_accounts(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert sorted(entry.account for entry in orchestrator.running.values()) == [
+        "agent-1",
+        "agent-2",
+    ]
+    # The narrowing reaches the runner, so nothing below the orchestrator sees a pool.
+    assert sorted(settings.agent.run_as for settings in h.runner_settings) == [
+        ("agent-1",),
+        ("agent-2",),
+    ]
+    assert not any(settings.agent.run_as_pooled for settings in h.runner_settings)
+
+
+async def test_a_workspace_is_dispatched_to_the_same_account_for_as_long_as_it_exists(
+    tmp_path: Path,
+) -> None:
+    """A rework lands back in the clone the first session made, so it needs the same uid."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    first = {entry.issue.number: entry.account for entry in orchestrator.running.values()}
+    assert set(first.values()) == {"agent-1", "agent-2"}
+    for number in (1, 2):
+        h.workspace_dir(h.github.issue(number).identifier)
+        h.github.human_set_state(number, StateLabel.REVIEW)
+        await h.exit(h.run_for(number), final_issue=h.github.issue(number))
+    await h.fire(2)  # the continuation retries release: the issues are with a reviewer
+    assert not orchestrator.running and not orchestrator.retries
+    for number in (1, 2):
+        h.github.human_set_state(number, StateLabel.REWORK)
+    await h.tick()
+    assert {entry.issue.number: entry.account for entry in orchestrator.running.values()} == first
+
+
+async def test_a_candidate_whose_account_is_busy_waits_rather_than_sharing_a_uid(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    orchestrator = _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    # Three slots, two accounts: the third candidate is left, and never claimed.
+    assert len(orchestrator.running) == 2
+    assert h.github.issue(3).state is StateLabel.TODO
+    assert sorted(entry.account for entry in orchestrator.running.values()) == [
+        "agent-1",
+        "agent-2",
+    ]
+
+
+async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    await h.tick()
+    identifier = h.github.issue(1).identifier
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(identifier) == "agent-1"
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(2)
+    # The workspace was never created and nothing holds the key, so the next terminal sweep --
+    # the tenth tick after the first -- forgets the binding rather than leaving it to skew the
+    # load for ever.
+    for _ in range(10):
+        await h.tick()
+    assert orchestrator._pool.bound(identifier) is None

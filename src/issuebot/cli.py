@@ -9,7 +9,7 @@ import signal
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -37,6 +37,14 @@ from issuebot.agent import (
     run_session,
     settings_for_labels,
     settings_with_model,
+    workspace_key,
+)
+from issuebot.agent.accounts import (
+    AccountRegistry,
+    credential_complaint,
+    group_complaint,
+    session_account,
+    settings_with_run_as,
 )
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
@@ -111,6 +119,7 @@ def _claude_version_output(command: str) -> str | None:
 _claude_version = _claude_version_output
 _claude_auth = claude_auth_status
 _run_as_probe = probe_run_as
+_group_complaint = group_complaint
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
@@ -341,8 +350,8 @@ def run_checks(
         _token_check(workflow),
         _workspace_check(cfg.workspace.root),
         _claude_check(cfg.claude.command),
-        _claude_auth_check(cfg.claude.command, run_as=cfg.agent.run_as),
-        _run_as_check(cfg.agent.run_as),
+        _claude_auth_check(cfg.claude.command, run_as=session_account(cfg)),
+        _run_as_check(cfg),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -475,10 +484,15 @@ def _claude_auth_check(command: str, *, run_as: str | None = None) -> Check:
     return Check(subject, _AUTH_LEVELS[auth.verdict], auth.detail)
 
 
-def _run_as_check(run_as: str | None) -> Check:
-    """The account the session runs as (#75), or a warning that it is this process."""
+def _run_as_check(settings: Settings) -> Check:
+    """The accounts the session runs as (#75, #121), or a warning that it is this process.
+
+    Every member of a pool is probed, and so is the one thing a pool needs that a single
+    account does not: a credential in the environment, since the accounts share no login.
+    """
     subject = "agent.run_as"
-    if run_as is None:
+    accounts = settings.agent.run_as
+    if not accounts:
         uid = os.getuid() if hasattr(os, "getuid") else "?"
         detail = (
             f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
@@ -486,10 +500,37 @@ def _run_as_check(run_as: str | None) -> Check:
             "ISSUEBOT_AGENT_USER=agent"
         )
         return Check(subject, "warn", detail)
-    error = _run_as_probe(run_as, os.environ)
-    if error is not None:
-        return Check(subject, "fail", error)
-    return Check(subject, "ok", f"{run_as}; the session runs as a separate account")
+    named = ", ".join(accounts)
+    problems = [
+        f"{account}: {error}"
+        for account in accounts
+        for error in (_run_as_probe(account, os.environ) or _group_complaint(account),)
+        if error is not None
+    ]
+    complaint = credential_complaint(settings, os.environ)
+    if complaint is not None:
+        problems.append(complaint)
+    if problems:
+        return Check(subject, "fail", "; ".join(problems))
+    if len(accounts) == 1:
+        return Check(
+            subject,
+            "warn" if settings.agent.max_concurrent_agents > 1 else "ok",
+            f"{named}; the session runs as a separate account"
+            + (
+                f", but all {settings.agent.max_concurrent_agents} concurrent sessions share it"
+                if settings.agent.max_concurrent_agents > 1
+                else ""
+            ),
+        )
+    status: CheckStatus = "warn" if len(accounts) < settings.agent.max_concurrent_agents else "ok"
+    detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
+    if status == "warn":
+        detail += (
+            f", which is fewer than agent.max_concurrent_agents "
+            f"({settings.agent.max_concurrent_agents}): dispatch is capped by the pool"
+        )
+    return Check(subject, status, detail)
 
 
 def _version_text(version: tuple[int, int, int]) -> str:
@@ -874,8 +915,12 @@ async def _run_once(
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
     rework = issue.state is StateLabel.REWORK
-    workspaces = WorkspaceManager(settings)
     try:
+        # One issue, so one account: under a pool this run takes the workspace's own bound
+        # member (#121), which is what a rework needs to be able to write the clone again.
+        workflow = _with_bound_account(workflow, issue)
+        settings = workflow.config
+        workspaces = WorkspaceManager(settings)
         attempt = _next_attempt(workspaces, issue)
     except AgentError as exc:
         print(f"[FAIL] workspace: {exc.message}")
@@ -1000,6 +1045,22 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
     if issue.state not in (StateLabel.TODO, StateLabel.REWORK, StateLabel.IN_PROGRESS):
         return f"is {issue.state.value}" + hint
     return None
+
+
+def _with_bound_account(workflow: Workflow, issue: Issue) -> Workflow:
+    """``workflow`` with ``agent.run_as`` narrowed to this issue's bound pool account.
+
+    Unchanged without a pool: one account, or none, binds nothing. With one, `run-once` goes
+    through the same worker-owned record the orchestrator does, so a workspace keeps the
+    account it was created under however it is dispatched.
+    """
+    settings = workflow.config
+    if not settings.agent.run_as_pooled:
+        return workflow
+    pool = AccountRegistry(settings.workspace.root, settings.agent.run_as)
+    key = workspace_key(issue.identifier)
+    account = pool.bound(key) or pool.allocate(key)
+    return replace(workflow, config=settings_with_run_as(settings, account))
 
 
 def _next_attempt(workspaces: WorkspaceManager, issue: Issue) -> int:

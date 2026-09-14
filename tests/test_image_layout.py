@@ -1,4 +1,5 @@
-"""The image draws the line between the session and the worker (#75), and CI proves it.
+"""The image draws the line between the session and the worker (#75), and between one
+session and the next (#121), and CI proves both.
 
 This session cannot build the image; the CI ``docker`` job runs the checks. This pins the
 shape those checks depend on, so a drift in the Dockerfile, the compose file or the job
@@ -15,11 +16,34 @@ CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 
 def test_two_accounts_and_one_delegation() -> None:
     assert "useradd --create-home --uid 1000 --shell /bin/bash issuebot" in DOCKERFILE
-    assert "useradd --create-home --uid 1001 --shell /bin/bash agent" in DOCKERFILE
-    assert "'issuebot ALL=(agent) NOPASSWD: ALL'" in DOCKERFILE
+    assert "useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent" in DOCKERFILE
+    assert "'issuebot ALL=(%agents) NOPASSWD: ALL'" in DOCKERFILE
     assert "closefrom_override" in DOCKERFILE
     assert "chmod 4750 /usr/bin/sudo" in DOCKERFILE and "chgrp issuebot /usr/bin/sudo" in DOCKERFILE
     assert "ISSUEBOT_AGENT_USER=agent" in DOCKERFILE
+
+
+def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() -> None:
+    """#121: N accounts in one group the sudo rule names, each with a home of its own, and the
+    worker a member of each account's own group -- the one thing `share_with` needs."""
+    assert "ARG ISSUEBOT_AGENT_POOL_SIZE=3" in DOCKERFILE
+    assert "groupadd --system agents" in DOCKERFILE
+    assert '--uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"' in DOCKERFILE
+    assert 'usermod --append --groups "${account}" issuebot' in DOCKERFILE
+    # Every session home is closed to the worker's group membership, which is why it is 0700.
+    assert 'chmod 0700 "/home/${account}"' in DOCKERFILE
+    assert 'install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"' in (
+        DOCKERFILE
+    )
+    assert 'test "$(sudo -n -u agent-1 id -u)" = 1011' in DOCKERFILE
+
+
+def test_ci_proves_one_session_cannot_enter_another_sessions_workspace() -> None:
+    assert "from issuebot.agent.accounts import share_with" in CI
+    assert 'test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 1011 1770"' in CI
+    assert "wrote into the other session workspace" in CI
+    assert "listed the other session workspace" in CI
+    assert "a pool account can invoke sudo" in CI
 
 
 def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:

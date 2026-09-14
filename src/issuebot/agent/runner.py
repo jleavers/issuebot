@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import SecretStr
 
+from issuebot.agent.accounts import session_account
 from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
@@ -660,8 +661,10 @@ class ClaudeRunner:
         # ``TurnResult.error`` and ``result_text``, and every ``TurnEvent.detail``, rather than
         # each sink they reach.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
-        # The account every turn runs as (#75), or None for the worker's own uid.
-        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
+        # The account every turn runs as (#75), or None for the worker's own uid. One
+        # account: a pool has been narrowed to this workspace's bound member above (#121).
+        account = session_account(settings)
+        self._runas = RunAs(account) if account else None
         self._log = get_logger(__name__)
 
     def _prepared(
