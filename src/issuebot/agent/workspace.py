@@ -185,7 +185,11 @@ class WorkspaceManager:
                 raise AgentError("workspace_error", f"after_create hook failed: {hook.summary}")
             # Written last: its presence marks a workspace whose creation completed.
             try:
-                (path / ".issuebot" / CREATED_MARKER).touch()
+                # Exclusive: under agent.run_as `.issuebot` is shared, and a hostile hook that
+                # pre-created the sentinel would otherwise leave the worker `utime`-ing an
+                # agent-owned file (#75). O_EXCL fails cleanly instead.
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                os.close(os.open(path / ".issuebot" / CREATED_MARKER, flags, 0o644))
             except OSError as exc:
                 raise AgentError("workspace_error", f"cannot mark {path} created: {exc}") from exc
         except AgentError:
@@ -270,9 +274,11 @@ class WorkspaceManager:
             await asyncio.to_thread(self._runas.remove_tree, path)
         _remove_path(path, what)
 
-    def _kill_group(self, process: asyncio.subprocess.Process) -> None:
+    async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
+        # Off the event loop: the delegated kill is a sudo subprocess with its own timeout,
+        # and this is the single orchestrator task supervising every concurrent session (#75).
         if self._runas is not None:
-            self._runas.kill_group(process.pid)
+            await asyncio.to_thread(self._runas.kill_group, process.pid)
         _kill_group(process)
 
     async def _run_script(self, name: str, script: str, workspace: Path) -> HookResult:
@@ -312,7 +318,7 @@ class WorkspaceManager:
         try:
             out, err = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
-            self._kill_group(process)
+            await self._kill_group(process)
             await process.wait()
             result = HookResult(
                 name=name,
@@ -331,7 +337,7 @@ class WorkspaceManager:
             )
             return result
         except BaseException:
-            self._kill_group(process)
+            await self._kill_group(process)
             with contextlib.suppress(Exception):
                 await process.wait()
             raise

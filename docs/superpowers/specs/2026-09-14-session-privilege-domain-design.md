@@ -47,7 +47,8 @@ image's uid layout and the compose mounts.
   `.issuebot/env`) crosses the uid change on an anonymous memory file, not through sudo's
   environment policy, so what the session sees is exactly what the worker built, with
   `HOME`/`USER`/`LOGNAME` the account's own. The `exec` verb — run by the worker's own
-  interpreter under `/app`, root-owned — installs that environment whole and execs. `kill`
+  root-owned interpreter, `-P` so the agent's workspace cwd cannot shadow the package —
+  installs that environment whole and execs. `kill`
   (the session's process group, which the worker's uid may not signal) and `remove` (the
   session's files under a workspace, which the worker's uid may not unlink) are the other two
   verbs; a `probe` reports whether the delegation works at all.

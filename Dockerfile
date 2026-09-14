@@ -213,7 +213,7 @@ WORKDIR /app
 # mount pins the inode, so an atomic save on the host leaves the container reading the old
 # one (#46). compose.yaml mounts ./configs and sets this same value.
 ENV ISSUEBOT_WORKFLOW=/configs/WORKFLOW.md
-VOLUME ["/workspaces", "/home/issuebot/.claude"]
+VOLUME ["/workspaces", "/home/agent/.claude"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
       org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator" \

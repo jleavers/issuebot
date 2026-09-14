@@ -33,6 +33,7 @@ def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:
 def test_the_login_volume_is_the_sessions_home() -> None:
     assert "claude-home:/home/agent/.claude" in COMPOSE
     assert "/home/issuebot/.claude" not in COMPOSE
+    assert "/home/issuebot/.claude" not in DOCKERFILE
 
 
 def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> None:

@@ -2644,3 +2644,35 @@ def test_status_and_stats_read_their_own_repository(
     assert main(["status", "--workflow", str(path)]) == 0
     assert main(["stats", "--workflow", str(path)]) == 0
     assert fake_database.queries_obj.scoped_repos == ["example/repo", "example/repo"]
+
+
+# --- agent.run_as (#75) -----------------------------------------------------------------
+
+
+def test_validate_reports_the_session_account_when_the_delegation_works(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
+    probed: list[str] = []
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] agent.run_as: agent; the session runs as a separate account" in out
+    assert probed == ["agent"]
+    assert "15 checks: 0 failed, 1 warnings" in out
+
+
+def test_validate_fails_when_the_session_account_cannot_be_reached(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe",
+        lambda user, environ: f"cannot run as {user!r}: sudo: a password is required",
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
+    assert "15 checks: 1 failed, 1 warnings" in out

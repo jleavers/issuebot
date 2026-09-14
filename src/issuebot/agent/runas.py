@@ -158,7 +158,11 @@ class RunAs:
 
     @staticmethod
     def _helper(*args: str) -> list[str]:
-        return [sys.executable, "-m", MODULE, *args]
+        # ``-P`` keeps the process's cwd off ``sys.path``: the exec verb runs with the agent's
+        # workspace as cwd, and without it a planted ``issuebot/agent/runas.py`` there would
+        # shadow the real module (#75). No escalation -- the helper is already the agent -- but
+        # the interpreter should resolve to the root-owned package under /app regardless.
+        return [sys.executable, "-P", "-m", MODULE, *args]
 
 
 def _last_line(text: str) -> str:

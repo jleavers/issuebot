@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -3018,3 +3018,52 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
         "reason": "GitHub is not answering this worker: transport: http 502: Bad Gateway",
         "since": h.now().isoformat(),
     }
+
+
+# --- agent.run_as (#75) -----------------------------------------------------------------
+
+
+def _with_run_as(h: Harness, probe: Callable[[str, Mapping[str, str]], str | None]) -> Orchestrator:
+    """The harness's orchestrator over a workflow whose session runs as `agent`."""
+    workflow = load_workflow(h.path, environ={**h.environ, "ISSUEBOT_AGENT_USER": "agent"})
+    assert workflow.config.agent.run_as == "agent"
+    return Orchestrator(
+        workflow,
+        bus=h.bus,
+        adapter_factory=lambda _settings: h.github,
+        workspaces_factory=h.make_workspaces,
+        runner_factory=h.make_runner,
+        run_session=h.sessions,
+        which=h.which,
+        claude_auth=h.claude_auth,
+        github_status=h.github_status,
+        run_as_probe=probe,
+        clock=h.clock,
+        now=h.now,
+        environ=h.environ,
+    )
+
+
+async def test_startup_fails_when_the_session_account_cannot_be_established(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    orchestrator = _with_run_as(
+        h, lambda user, environ: f"cannot run as {user!r}: sudo: a password is required"
+    )
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await orchestrator.startup()
+    assert exc.value.problems == [
+        "agent.run_as: cannot run as 'agent': sudo: a password is required"
+    ]
+
+
+async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_probe(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    probed: list[str] = []
+    orchestrator = _with_run_as(h, lambda user, environ: probed.append(user))
+    await orchestrator.startup()
+    assert probed == ["agent"]
+    assert h.claude_auth_calls, "the login was probed after the account"
