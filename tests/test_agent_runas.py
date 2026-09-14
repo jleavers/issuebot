@@ -6,6 +6,7 @@ does, and execs the command as the same account. What that proves is the plumbin
 the descriptor, the environment that comes out the far side, the kill and the removal.
 """
 
+import contextlib
 import errno
 import json
 import os
@@ -92,13 +93,14 @@ def test_anonymous_fd_hands_back_an_unnamed_descriptor_on_either_branch(
         assert os.fstat(fd).st_nlink == 0
         # And it is the branch the fixture asked for, not whichever one this interpreter
         # would have taken anyway: a memfd's link is /memfd:<label>, the fallback's the
-        # path it was unlinked from.
-        target = os.readlink(f"/proc/self/fd/{fd}")
-        if descriptor_branch == "memfd":
-            assert target.startswith("/memfd:"), target
-        else:
-            assert target.endswith(" (deleted)"), target
-            assert target.startswith((runas_module.SHM_DIR, tempfile.gettempdir())), target
+        # path it was unlinked from. Only Linux has the /proc to read that from, and only
+        # Linux has memfd_create for the fallback to be a fallback from.
+        if sys.platform.startswith("linux"):
+            target = os.readlink(f"/proc/self/fd/{fd}")
+            if descriptor_branch == "memfd":
+                assert target.startswith("/memfd:"), target
+            else:
+                assert target.endswith(" (deleted)"), target
     finally:
         os.close(fd)
 
@@ -139,6 +141,36 @@ def test_anonymous_fd_falls_back_when_the_call_is_there_but_the_kernel_refuses(
         os.close(fd)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc/self/fd")
+def test_the_fallback_prefers_a_tmpfs_and_falls_through_when_there_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the file lands, which is the whole point of preferring one (#115).
+
+    The descriptor carries the session's environment -- GH_TOKEN, the Anthropic credential,
+    a DSN a ``before_run`` hook wrote -- so a fallback that quietly stopped preferring a
+    tmpfs would put all of it on a disk-backed filesystem's freed blocks.
+    """
+    monkeypatch.delattr(os, "memfd_create", raising=False)
+    shm = tmp_path / "shm"
+    shm.mkdir()
+    monkeypatch.setattr(runas_module, "SHM_DIR", str(shm))
+    fd = anonymous_fd("issuebot-test-env")
+    try:
+        assert os.readlink(f"/proc/self/fd/{fd}").startswith(f"{shm}/")
+    finally:
+        os.close(fd)
+
+    monkeypatch.setattr(runas_module, "SHM_DIR", str(tmp_path / "no-such-tmpfs"))
+    fd = anonymous_fd("issuebot-test-env")
+    try:
+        target = os.readlink(f"/proc/self/fd/{fd}")
+        assert target.startswith(f"{tempfile.gettempdir()}/"), target
+        assert os.fstat(fd).st_nlink == 0
+    finally:
+        os.close(fd)
+
+
 def test_anonymous_fd_reports_a_failed_fallback_as_an_oserror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -147,21 +179,25 @@ def test_anonymous_fd_reports_a_failed_fallback_as_an_oserror(
     monkeypatch.setattr(runas_module, "SHM_DIR", str(tmp_path / "no-such-tmpfs"))
     # ``tempfile.tempdir``, not ``TMPDIR``: ``gettempdir`` caches its answer in that global.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-such-directory"))
-    with pytest.raises(OSError):
+    with pytest.raises(FileNotFoundError):  # an OSError, which is the contract
         anonymous_fd("issuebot-test-env")
 
 
 def test_anonymous_fd_closes_the_descriptor_when_the_unlink_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The one path that could leak a descriptor holding the session's whole environment."""
     monkeypatch.delattr(os, "memfd_create", raising=False)
-    opened: list[int] = []
+    shm = tmp_path / "shm"
+    shm.mkdir()
+    monkeypatch.setattr(runas_module, "SHM_DIR", str(shm))
+    opened: list[tuple[int, str]] = []
     real_mkstemp = tempfile.mkstemp
+    real_unlink = os.unlink
 
     def record(*args: object, **kwargs: object) -> tuple[int, str]:
         fd, path = real_mkstemp(*args, **kwargs)  # type: ignore[arg-type]
-        opened.append(fd)
+        opened.append((fd, path))
         return fd, path
 
     def deny(*_: object) -> None:
@@ -169,13 +205,40 @@ def test_anonymous_fd_closes_the_descriptor_when_the_unlink_fails(
 
     monkeypatch.setattr(tempfile, "mkstemp", record)
     monkeypatch.setattr(os, "unlink", deny)
-    with pytest.raises(OSError):
-        anonymous_fd("issuebot-test-env")
-    # One attempt per candidate directory, and not one of them still holds a descriptor.
-    assert opened
-    for fd in opened:
+    try:
         with pytest.raises(OSError):
-            os.fstat(fd)
+            anonymous_fd("issuebot-test-env")
+        # One attempt per candidate directory, and not one of them still holds a descriptor.
+        assert [path for _, path in opened] == [
+            path for _, path in opened if path.startswith((str(shm), tempfile.gettempdir()))
+        ]
+        assert len(opened) == 2
+        for fd, _ in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        # The unlink this test denied is the one that would have cleaned up after it.
+        for _, path in opened:
+            with contextlib.suppress(OSError):
+                real_unlink(path)
+
+
+def test_the_environment_arrives_whole_when_the_descriptor_takes_it_a_piece_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A memfd never wrote short; a file on a filesystem that fills mid-write can, and a
+    truncated environment would reach the helper as unparseable JSON."""
+    real_write = os.write
+
+    def one_byte(fd: int, data: object) -> int:
+        return real_write(fd, bytes(memoryview(data)[:1]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "write", one_byte)
+    completed = RunAs(ME, sudo=FAKE_SUDO).run(["env", "-0"], base_env(GH_TOKEN="t"), timeout=10)
+    monkeypatch.undo()
+    assert completed.returncode == 0, completed.stderr
+    seen = dict(item.split("=", 1) for item in completed.stdout.split("\0") if item)
+    assert seen["GH_TOKEN"] == "t" and seen["USER"] == ME
 
 
 def test_probe_answers_none_when_the_account_answers_and_names_the_refusal_otherwise() -> None:

@@ -21,6 +21,7 @@ issuebot.agent.runas`` is the module's other face, and it has three verbs: ``exe
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import pwd
@@ -45,8 +46,10 @@ REMOVE_TIMEOUT_S = 120
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
 # it carries -- GH_TOKEN, the Anthropic credential, any DSN a ``before_run`` hook wrote --
 # stays in memory as the memfd's bytes do, rather than in a disk-backed filesystem's freed
-# blocks. A preference only: an absent, unwritable or full ``/dev/shm`` falls through to
-# whatever ``tempfile`` chooses.
+# blocks. A preference only: where there is no writable ``/dev/shm`` the file goes wherever
+# ``tempfile`` puts it, which may well be a disk. The fall-through covers opening the file,
+# not filling it: a tmpfs that runs out mid-write fails the spawn with the ``OSError`` every
+# site catches rather than starting again somewhere else.
 SHM_DIR = "/dev/shm"
 
 
@@ -58,7 +61,9 @@ def anonymous_fd(name: str) -> int:
     the right choice in the first place: the descriptor is inherited through ``pass_fds`` and
     survives sudo's ``-C``, and with no directory entry nothing else can open the environment
     it holds. A pipe would not do; the writer would block on the buffer if the environment
-    ever outgrew it.
+    ever outgrew it. What the fallback cannot promise is the memfd's other property, that the
+    bytes never reach a filesystem: it prefers ``SHM_DIR`` for that and settles for whatever
+    ``tempfile`` picks, which may be disk-backed.
 
     The fallback is not theoretical (#115): ``python-build-standalone``, which is what ``uv``
     installs, configures against a glibc older than the call, so the interpreter a developer
@@ -228,7 +233,10 @@ def _write_all(fd: int, payload: bytes) -> None:
     mid-write need not, and a truncated environment reaches the helper as unparseable JSON."""
     view = memoryview(payload)
     while view:
-        view = view[os.write(fd, view) :]
+        written = os.write(fd, view)
+        if not written:
+            raise OSError(errno.EIO, "wrote no bytes of the session environment")
+        view = view[written:]
 
 
 def _last_line(text: str) -> str:
