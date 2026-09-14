@@ -68,8 +68,9 @@ issues that triage is most of the value.
   `.mcp.json` are what anyone who can merge to the repository can change, and a hook or an
   MCP server in them is shell run at launch with the agent's token. Naming `project` there
   hands them to every session, and `validate` says so. `WORKFLOW.md` owns the labels and the
-  process. In this repository, `.github/CODEOWNERS` routes a change to those files to a human
-  for the same reason.
+  process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
+  those files (and to `.github/` itself) for the same reason; it only blocks a merge under
+  branch protection's "Require review from Code Owners".
 
 ### Prerequisites
 

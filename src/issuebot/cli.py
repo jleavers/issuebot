@@ -667,6 +667,7 @@ def _sample_context(settings: Settings) -> PromptContext:
                 path="CLAUDE.md",
                 text="Sample project instructions.\n",
                 size=29,
+                carried=29,
                 truncated=False,
             ),
         ),

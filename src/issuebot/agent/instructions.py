@@ -35,6 +35,8 @@ class RepositoryFile:
     path: str
     text: str
     size: int
+    carried: int
+    """Bytes of the file ``text`` was decoded from: ``size`` unless ``truncated``."""
     truncated: bool
 
 
@@ -48,9 +50,12 @@ def read_repository_instructions(
 
     A symlink is skipped without being followed (``O_NOFOLLOW``): under ``agent.run_as`` the
     clone is the session's and this read is the worker's, so a link the clone ships could
-    otherwise put a file only the worker can read into a prompt the session sees. A
-    directory, an unreadable file or a name that is not there is skipped too, the first two
-    with a warning; a missing file is the normal case and says nothing. The text is cut at
+    otherwise put a file only the worker can read into a prompt the session sees. The open
+    is ``O_NONBLOCK`` because it happens before the kind of file is known: a FIFO by that
+    name (the session can make one in its own clone) would otherwise block the open until
+    a writer came, and this read sits on the worker's session task. A directory, a FIFO, an
+    unreadable file or a name that is not there is skipped too, all but the last with a
+    warning; a missing file is the normal case and says nothing. The text is cut at
     ``limit`` bytes before decoding, and undecodable bytes are replaced rather than refused.
     """
     log = get_logger(__name__)
@@ -58,7 +63,7 @@ def read_repository_instructions(
     for name in names:
         path = workspace / name
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -79,8 +84,16 @@ def read_repository_instructions(
         finally:
             os.close(fd)
         truncated = len(raw) > limit
-        text = raw[:limit].decode("utf-8", errors="replace")
-        found.append(RepositoryFile(path=name, text=text, size=info.st_size, truncated=truncated))
+        carried = raw[:limit]
+        found.append(
+            RepositoryFile(
+                path=name,
+                text=carried.decode("utf-8", errors="replace"),
+                size=info.st_size,
+                carried=len(carried),
+                truncated=truncated,
+            )
+        )
     return tuple(found)
 
 

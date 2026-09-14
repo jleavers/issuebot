@@ -23,8 +23,8 @@ def test_reads_the_named_files_in_order(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text("claude\n", encoding="utf-8")
     (tmp_path / "CONTRIBUTING.md").write_text("not on the list\n", encoding="utf-8")
     assert read_repository_instructions(tmp_path) == (
-        RepositoryFile(path="CLAUDE.md", text="claude\n", size=7, truncated=False),
-        RepositoryFile(path="AGENTS.md", text="agents\n", size=7, truncated=False),
+        RepositoryFile(path="CLAUDE.md", text="claude\n", size=7, carried=7, truncated=False),
+        RepositoryFile(path="AGENTS.md", text="agents\n", size=7, carried=7, truncated=False),
     )
 
 
@@ -53,6 +53,13 @@ def test_a_directory_by_that_name_is_skipped(tmp_path: Path) -> None:
     assert read_repository_instructions(tmp_path) == ()
 
 
+def test_a_fifo_by_that_name_is_skipped_without_blocking(tmp_path: Path) -> None:
+    """The open runs before the kind of file is known; a FIFO with no writer would otherwise
+    hold the worker's session task forever."""
+    os.mkfifo(tmp_path / "CLAUDE.md")
+    assert read_repository_instructions(tmp_path) == ()
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads anything")
 def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
     path = tmp_path / "CLAUDE.md"
@@ -69,9 +76,18 @@ def test_a_large_file_is_cut_and_says_so(tmp_path: Path) -> None:
     (file,) = read_repository_instructions(tmp_path, limit=100)
     assert file.text == "x" * 100
     assert file.size == 104
+    assert file.carried == 100
     assert file.truncated is True
     (file,) = read_repository_instructions(tmp_path, limit=104)
     assert file.truncated is False
+    assert file.carried == 104
+
+
+def test_a_cut_through_a_multibyte_character_reports_the_bytes_carried(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_bytes("aé".encode() + b"b")
+    (file,) = read_repository_instructions(tmp_path, limit=2)
+    assert file.text == "a\ufffd"
+    assert (file.carried, file.size, file.truncated) == (2, 4, True)
 
 
 def test_undecodable_bytes_are_replaced_not_refused(tmp_path: Path) -> None:

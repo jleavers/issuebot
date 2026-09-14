@@ -6,3 +6,6 @@
 /AGENTS.md     @jleavers
 /.claude/      @jleavers
 /configs/      @jleavers
+# And the file that says so, plus the workflows that run on every pull request: a change to
+# either is the first step of editing the rest unrouted.
+/.github/      @jleavers

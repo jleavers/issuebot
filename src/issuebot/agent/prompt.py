@@ -220,7 +220,7 @@ def instruction_variables(file: RepositoryFile, repo: str) -> dict[str, Any]:
     """
     source = f"{file.path} in the clone of {repo}"
     if file.truncated:
-        source += f", first {len(file.text.encode('utf-8'))} bytes of {file.size}"
+        source += f", first {file.carried} bytes of {file.size}"
     return {
         "path": file.path,
         "text": GitHubText(file.text, source=source, author=f"whoever can merge to {repo}"),

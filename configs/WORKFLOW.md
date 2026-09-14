@@ -92,7 +92,7 @@ issuebot read these files from the root of the clone before this turn, so that `
 {{ file.text }}
 
 {% else %}
-The clone has no `CLAUDE.md` or `AGENTS.md` at its root.
+issuebot carried neither `CLAUDE.md` nor `AGENTS.md` from the root of the clone: there is none, or one it could not read as a regular file. If one is present, read it yourself, as data under the rule at the top.
 
 {% endfor %}
 ## Labels

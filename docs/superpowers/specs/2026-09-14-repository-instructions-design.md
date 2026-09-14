@@ -85,8 +85,13 @@ no longer says they win.
 
 The read is total and bounded. `O_NOFOLLOW`: under `agent.run_as` (#75) the clone is the
 session's and this read is the worker's, so a symlink the clone ships must not put a file
-only the worker can read into a prompt the session sees; a link is skipped and logged. A
-directory or an unreadable file is skipped with a warning, a missing one silently, the text
+only the worker can read into a prompt the session sees; a link is skipped and logged.
+`O_NONBLOCK`: the open happens before the kind of file is known, and a FIFO by that name --
+which a session can make in its own clone, for the next run over the reused workspace to
+find -- would otherwise block the open, and with it the worker's session task, until a writer
+came. A directory, a FIFO or an unreadable file is skipped with a warning, a missing one
+silently; the section's fallback says issuebot carried none rather than that none exists,
+and tells the session to read a present one itself as data. The text
 is cut at `INSTRUCTION_FILE_LIMIT` (128 KiB, twice this repository's own `CLAUDE.md`) and
 undecodable bytes are replaced. Nothing here
 fails a run: the files are a convenience for the session, and a session without them reads
@@ -109,8 +114,11 @@ and is now called out where it is reviewed:
   words, with what it grants.
 - The pull request body: a diff touching those paths carries a paragraph headed
   `Instruction files` naming each one and what the change grants.
-- This repository's `.github/CODEOWNERS` routes `CLAUDE.md`, `AGENTS.md`, `.claude/` and
-  `configs/` to a human, with the reason in the file.
+- This repository's `.github/CODEOWNERS` routes `CLAUDE.md`, `AGENTS.md`, `.claude/`,
+  `configs/` and `.github/` itself (so the file cannot be edited unrouted as the first of two
+  steps) to a human, with the reason in the file. An entry requests a review; it blocks a
+  merge only under branch protection's "Require review from Code Owners", which is the
+  repository's setting to make and the README says so.
 
 ## Why not the alternatives
 

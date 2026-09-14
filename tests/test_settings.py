@@ -212,11 +212,12 @@ def test_setting_sources_accepts_known_sources() -> None:
     ("value", "needle"),
     [
         ([], "at least one source"),
+        (None, "omit it for \\[user\\]"),
         (["project", "project"], "repeat"),
         (["global"], "user"),
     ],
 )
-def test_setting_sources_rejects_bad_values(value: list[str], needle: str) -> None:
+def test_setting_sources_rejects_bad_values(value: object, needle: str) -> None:
     with pytest.raises(ValidationError, match=needle) as exc:
         Settings.model_validate({**MINIMAL, "claude": {"setting_sources": value}})
     assert any(loc.startswith("claude.setting_sources") for loc in _locs(exc.value))

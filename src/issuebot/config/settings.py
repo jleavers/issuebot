@@ -144,6 +144,16 @@ class ClaudeSettings(_Model):
             raise ValueError("label names must be distinct (compared case-insensitively)")
         return {name.strip(): model.strip() for name, model in value.items()}
 
+    @field_validator("setting_sources", mode="before")
+    @classmethod
+    def _setting_sources_are_given(cls, value: object) -> object:
+        if value is None:
+            raise ValueError(
+                "claude.setting_sources can no longer be null (claude's own default loads the "
+                "clone's files as configuration); omit it for [user], or name the sources"
+            )
+        return value
+
     @field_validator("setting_sources")
     @classmethod
     def _setting_sources_are_usable(cls, value: list[SettingSource]) -> list[SettingSource]:
