@@ -123,7 +123,13 @@ class ClaudeSettings(_Model):
     allowed_tools: list[str] = Field(default_factory=list)
     disallowed_tools: list[str] = Field(default_factory=list)
     append_system_prompt: str | None = None
-    setting_sources: list[SettingSource] | None = None
+    # Which of Claude Code's settings sources the session loads (#107). Always passed, never
+    # claude's own default: with ``project`` or ``local`` in the list the clone's ``CLAUDE.md``,
+    # ``.claude/`` (settings, hooks, skills, commands) and ``.mcp.json`` are configuration in
+    # force for every session, and anyone who can merge to the watched repository can change
+    # them. ``user`` alone is the deployment's own home and nothing from the clone; the clone's
+    # ``CLAUDE.md`` and ``AGENTS.md`` reach the prompt as enveloped data instead.
+    setting_sources: list[SettingSource] = Field(default_factory=lambda: ["user"])
     model_labels: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("model_labels")
@@ -140,16 +146,17 @@ class ClaudeSettings(_Model):
 
     @field_validator("setting_sources")
     @classmethod
-    def _setting_sources_are_usable(
-        cls, value: list[SettingSource] | None
-    ) -> list[SettingSource] | None:
-        if value is None:
-            return None
+    def _setting_sources_are_usable(cls, value: list[SettingSource]) -> list[SettingSource]:
         if not value:
-            raise ValueError("claude.setting_sources must name at least one source or be omitted")
+            raise ValueError("claude.setting_sources must name at least one source")
         if len(set(value)) != len(value):
             raise ValueError("claude.setting_sources must not repeat a source")
         return value
+
+    @property
+    def loads_clone_settings(self) -> bool:
+        """True when a source names the clone: its files are then claude's configuration."""
+        return any(source != "user" for source in self.setting_sources)
 
 
 class DatabaseSettings(_Model):

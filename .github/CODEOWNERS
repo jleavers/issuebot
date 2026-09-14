@@ -1,0 +1,8 @@
+# A change to these paths is a change to what every unattended issuebot session inherits (#107):
+# the instruction files a session is handed, the workflow that governs it, and the skills and
+# workflows a developer's own claude loads from this checkout. Review one as a change to the
+# agent's privileges, not as documentation.
+/CLAUDE.md     @jleavers
+/AGENTS.md     @jleavers
+/.claude/      @jleavers
+/configs/      @jleavers

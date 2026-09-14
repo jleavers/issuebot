@@ -185,7 +185,9 @@ def test_settings_are_frozen() -> None:
 def test_phase_three_defaults() -> None:
     s = Settings.model_validate(MINIMAL)
     assert s.agent.self_review is True
-    assert s.claude.setting_sources is None
+    # The deployment's own settings and nothing from the clone (#107).
+    assert s.claude.setting_sources == ["user"]
+    assert s.claude.loads_clone_settings is False
 
 
 def test_self_review_can_be_disabled() -> None:
@@ -196,6 +198,14 @@ def test_self_review_can_be_disabled() -> None:
 def test_setting_sources_accepts_known_sources() -> None:
     s = Settings.model_validate({**MINIMAL, "claude": {"setting_sources": ["project", "local"]}})
     assert s.claude.setting_sources == ["project", "local"]
+    # Naming the clone is the opt-in `validate` warns about (#107).
+    assert s.claude.loads_clone_settings is True
+    assert (
+        Settings.model_validate(
+            {**MINIMAL, "claude": {"setting_sources": ["user"]}}
+        ).claude.loads_clone_settings
+        is False
+    )
 
 
 @pytest.mark.parametrize(
