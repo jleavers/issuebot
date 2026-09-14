@@ -32,7 +32,7 @@ ISSUE_FIELDS = """fragment IssueFields on Issue {
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }
   closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
-    nodes { number url state mergedAt mergeable }
+    nodes { number url state mergedAt mergeable isCrossRepository author { login } }
   }
 }"""
 
@@ -79,12 +79,30 @@ _ERROR_RULES: tuple[tuple[ErrorCategory, re.Pattern[str]], ...] = (
 
 
 class GhCliAdapter:
-    def __init__(self, settings: GitHubSettings, *, runner: GhRunnerLike | None = None) -> None:
+    """The gh-backed adapter.
+
+    ``login`` is the account the token belongs to, for a caller that already knows it; left
+    ``None``, the adapter asks ``gh api user`` once, the first time it needs it, and keeps the
+    answer for its lifetime (``auth_status`` fills the same cache, so the worker's startup
+    probe pays for it). It is what the two records issuebot treats as its own state are
+    resolved by (#77): the issue's pull request and the workpad comment are the ones *this
+    account* wrote, never the ones whose text says so.
+    """
+
+    def __init__(
+        self,
+        settings: GitHubSettings,
+        *,
+        runner: GhRunnerLike | None = None,
+        login: str | None = None,
+    ) -> None:
         self._settings = settings
         self._runner: GhRunnerLike = runner or GhRunner(
             token=settings.token, timeout_ms=settings.request_timeout_ms
         )
         self._owner, self._name = settings.repo.split("/", 1)
+        self._login = login
+        self._ignored_workpads: set[tuple[int, int]] = set()
         self._log = get_logger(__name__)
 
     @property
@@ -113,6 +131,9 @@ class GhCliAdapter:
             {int(value) for value in ids if str(value).isascii() and str(value).isdigit()}
         )
         self._log.debug("fetch_issues_by_ids", ids=numbers)
+        if not numbers:
+            return []
+        login = await self.own_login()
         issues: list[Issue] = []
         for start in range(0, len(numbers), ID_BATCH_SIZE):
             batch = numbers[start : start + ID_BATCH_SIZE]
@@ -130,8 +151,17 @@ class GhCliAdapter:
                     continue
                 if not isinstance(node, Mapping):
                     raise GitHubError("response", f"malformed issue record for alias i{number}")
-                issues.append(issue_from_node(node, repo=self.repo, labels=self.labels))
+                issues.append(self._issue(node, login))
         return issues
+
+    def _issue(self, node: Mapping[str, Any], login: str) -> Issue:
+        return issue_from_node(node, repo=self.repo, labels=self.labels, login=login)
+
+    async def own_login(self) -> str:
+        """The login of the account the adapter acts as; probed once and then remembered."""
+        if self._login is None:
+            self._login = (await self.auth_status()).login
+        return self._login
 
     # --- writes ------------------------------------------------------------------
 
@@ -181,7 +211,15 @@ class GhCliAdapter:
         return _comment_from(_parse_json(result.stdout))
 
     async def find_workpad_comment(self, number: int) -> Comment | None:
+        """The account's own comment whose first line is the marker, lowest id first.
+
+        The marker is public and anyone can open a comment with it, so a match on the text
+        alone would let any commenter hand the agent its "prior state" (#77). A marker comment
+        by anyone else is passed over, and logged once per adapter: the session asks every
+        turn, and one impostor is one finding, not a warning per turn for as long as it stays.
+        """
         self._log.debug("find_workpad_comment", issue_number=number)
+        login = await self.own_login()
         result = await self._gh(
             [
                 "api",
@@ -197,8 +235,20 @@ class GhCliAdapter:
             if not isinstance(page, list):
                 raise GitHubError("response", "comments page is not a list")
             for item in page:
-                if isinstance(item, Mapping) and is_workpad_body(item.get("body")):
-                    return _comment_from(item)
+                if not isinstance(item, Mapping) or not is_workpad_body(item.get("body")):
+                    continue
+                comment = _comment_from(item)
+                if comment.author.lower() == login.lower():
+                    return comment
+                if (number, comment.id) not in self._ignored_workpads:
+                    self._ignored_workpads.add((number, comment.id))
+                    self._log.warning(
+                        "workpad_comment_ignored",
+                        issue_number=number,
+                        comment_id=comment.id,
+                        author=comment.author,
+                        reason=f"not written by {login}",
+                    )
         return None
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
@@ -289,6 +339,8 @@ class GhCliAdapter:
         login = result.stdout.strip()
         if not login or login in ("null", "{}", "[1]") or login.startswith(("{", "[")):
             raise GitHubError("response", "user response has no login")
+        if self._login is None:
+            self._login = login
         return AuthStatus(login=login)
 
     async def repo_info(self) -> RepoInfo:
@@ -307,13 +359,15 @@ class GhCliAdapter:
             raise GitHubError("response", "unexpected repository response") from exc
 
     async def _collect(self, roles: Sequence[StateLabel], query: str) -> list[Issue]:
+        login = await self.own_login()
         found: dict[int, Issue] = {}
         for role in roles:
-            for issue in await self._issues_with_label(label_name(self.labels, role), query):
+            label = label_name(self.labels, role)
+            for issue in await self._issues_with_label(label, query, login):
                 found.setdefault(issue.number, issue)
         return sorted(found.values(), key=lambda issue: (issue.created_at, issue.number))
 
-    async def _issues_with_label(self, label: str, query: str) -> list[Issue]:
+    async def _issues_with_label(self, label: str, query: str, login: str) -> list[Issue]:
         issues: list[Issue] = []
         cursor: str | None = None
         while True:
@@ -331,7 +385,7 @@ class GhCliAdapter:
                     )
                     continue
                 try:
-                    issues.append(issue_from_node(node, repo=self.repo, labels=self.labels))
+                    issues.append(self._issue(node, login))
                 except GitHubError as exc:
                     number = node.get("number")
                     self._log.warning(

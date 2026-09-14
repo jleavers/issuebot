@@ -855,6 +855,12 @@ async def _run_once(
         print(f"[FAIL] workspace: {exc.message}")
         return 1
     if show_prompt:
+        # The preview shows what the session's first turn would get, workpad included (#77).
+        try:
+            workpad = await adapter.find_workpad_comment(number)
+        except GitHubError as exc:
+            print(f"[FAIL] workpad: {exc}")
+            return 1
         context = PromptContext(
             issue=issue,
             repo=settings.github.repo,
@@ -864,6 +870,7 @@ async def _run_once(
             max_turns=settings.agent.max_turns,
             rework=rework,
             self_review=settings.agent.self_review,
+            workpad=workpad,
         )
         try:
             print(PromptRenderer(workflow.prompt_template).render(context).rstrip("\n"))

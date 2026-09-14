@@ -92,6 +92,10 @@ class SessionRecord:
     turn_number: int
     last_outcome: RunOutcome | None
     updated_at: datetime
+    # The workpad comment the session last resolved for the agent (#77): the account's own
+    # marker comment, found by author; ``None`` until one exists. Written by issuebot, so it
+    # is a record of what the agent was pointed at, not what a commenter said.
+    workpad_comment_id: int | None = None
     version: int = SESSION_FILE_VERSION
 
 
@@ -333,7 +337,12 @@ def _record_from(data: object) -> SessionRecord:
         turn_number=_as_int(data["turn_number"]),
         last_outcome=outcome,
         updated_at=datetime.fromisoformat(str(data["updated_at"])),
+        workpad_comment_id=_optional_int(data.get("workpad_comment_id")),
     )
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else _as_int(value)
 
 
 def _as_int(value: object) -> int:

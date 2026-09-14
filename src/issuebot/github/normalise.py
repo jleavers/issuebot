@@ -35,8 +35,16 @@ def repo_short_name(repo: str) -> str:
     return repo.split("/", 1)[1]
 
 
-def issue_from_node(node: Mapping[str, Any], *, repo: str, labels: GitHubLabels) -> Issue:
-    """Normalise one ``IssueFields`` node. Raises ``GitHubError("response")`` when malformed."""
+def issue_from_node(
+    node: Mapping[str, Any], *, repo: str, labels: GitHubLabels, login: str
+) -> Issue:
+    """Normalise one ``IssueFields`` node. Raises ``GitHubError("response")`` when malformed.
+
+    ``login`` is the account issuebot runs as, which is what ``linked_pr`` is resolved by (#77):
+    a pull request is the issue's only when that account opened it from a branch of the
+    repository itself. It is required rather than defaulted because a default that accepted
+    every reference would put the choice back in the hands of whoever writes ``Closes #N``.
+    """
     number = node.get("number")
     if not isinstance(number, int) or isinstance(number, bool):
         raise GitHubError("response", "malformed issue record: missing number")
@@ -80,7 +88,7 @@ def issue_from_node(node: Mapping[str, Any], *, repo: str, labels: GitHubLabels)
         created_at=created_at,
         updated_at=updated_at,
         closed_at=closed_at,
-        linked_pr=_select_pr(node.get("closedByPullRequestsReferences")),
+        linked_pr=_select_pr(node.get("closedByPullRequestsReferences"), login=login),
         dispatchable=github_state == "open" and state is not None,
     )
 
@@ -134,10 +142,25 @@ def _logins(connection: Any) -> tuple[str, ...]:
     return tuple(logins)
 
 
-def _select_pr(connection: Any) -> LinkedPr | None:
+def is_own_pr(item: Mapping[str, Any], login: str) -> bool:
+    """True when the account ``login`` opened the pull request from the repository itself.
+
+    ``closedByPullRequestsReferences`` lists every pull request whose body says ``Closes #N``,
+    which anyone with a fork can write; the author is the one thing about it a third party
+    cannot. A pull request issuebot opens comes from ``issuebot/<n>-<slug>`` in the repository,
+    never from a fork, so a cross-repository one is not issuebot's even under its own login.
+    A reference missing either answer (an older response, a deleted account) is nobody's.
+    """
+    author = _login(item.get("author"))
+    if author is None or author.lower() != login.lower():
+        return False
+    return item.get("isCrossRepository") is False
+
+
+def _select_pr(connection: Any, *, login: str) -> LinkedPr | None:
     candidates: list[LinkedPr] = []
     for item in _nodes(connection):
-        if not isinstance(item, Mapping):
+        if not isinstance(item, Mapping) or not is_own_pr(item, login):
             continue
         number = item.get("number")
         url = item.get("url")

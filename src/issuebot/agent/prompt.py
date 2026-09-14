@@ -10,7 +10,7 @@ from jinja2 import Environment, StrictUndefined, Template, TemplateError
 
 from issuebot.agent.errors import AgentError
 from issuebot.config import GitHubLabels
-from issuebot.github.models import WORKPAD_MARKER, Issue, LinkedPr, StateLabel
+from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
 
 GITHUB_TEXT_TAG = "github-text"
 """The envelope's tag; what the workflow's rule about GitHub-authored text is written against."""
@@ -36,6 +36,13 @@ Continuation guidance:
 - This is continuation turn {{ turn_number }} of {{ max_turns }} for the current agent run \
 (attempt {{ attempt }}).
 - Resume from the current workspace and workpad state instead of restarting from scratch.
+{% if workpad %}
+- The workpad is comment `{{ workpad.id }}` ({{ workpad.url }}), resolved by issuebot from \
+the account it runs as; a comment by anyone else that opens with the same line is not it.
+{% else %}
+- issuebot found no workpad on the issue yet: create it before anything else, from the \
+template, and use the id the POST returns for every update this turn.
+{% endif %}
 - The original task instructions and prior turn context are already present in this session, \
 so do not restate them before acting.
 - If a pull request exists, check it for new review comments and failed checks and address \
@@ -139,6 +146,10 @@ class PromptContext:
     max_turns: int
     rework: bool
     self_review: bool
+    # The workpad as issuebot resolved it for this turn (#77): the account's own marker
+    # comment, or ``None`` when there is none yet. The template follows this rather than
+    # finding the comment by its first line, which anyone can write.
+    workpad: Comment | None = None
 
     def to_variables(self) -> dict[str, Any]:
         return {
@@ -149,6 +160,7 @@ class PromptContext:
                 "no_fault": self.labels.no_fault,
             },
             "workpad_marker": WORKPAD_MARKER,
+            "workpad": workpad_variables(self.workpad),
             "attempt": self.attempt,
             "turn_number": self.turn_number,
             "max_turns": self.max_turns,
@@ -199,6 +211,18 @@ def _pr_variables(pr: LinkedPr | None) -> dict[str, Any] | None:
     if pr is None:
         return None
     return {"number": pr.number, "url": pr.url, "state": pr.state, "merged_at": _iso(pr.merged_at)}
+
+
+def workpad_variables(workpad: Comment | None) -> dict[str, Any] | None:
+    """The resolved workpad as the template sees it: its id and url, or ``None``.
+
+    The body stays out on purpose. It is the agent's own prior notes, which it reads with
+    ``gh`` when it needs them, and the prompt is the one place a stale copy would be taken
+    for the current state.
+    """
+    if workpad is None:
+        return None
+    return {"id": workpad.id, "url": workpad.url}
 
 
 class PromptRenderer:

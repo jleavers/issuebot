@@ -46,13 +46,20 @@ class _FakeIssue:
 class _FakePr:
     number: int
     closes: int
+    author: str
     state: PrState = "open"
     merged_at: datetime | None = None
     mergeable: Mergeable = "mergeable"
+    cross_repository: bool = False
 
 
 class FakeGitHub:
-    """Implements GitHubAdapter in memory; produces Issue records through the same normaliser."""
+    """Implements GitHubAdapter in memory; produces Issue records through the same normaliser.
+
+    ``login`` is the account the fake acts as: what ``auth_status`` reports, who ``comment``
+    writes as, whose pull requests ``open_pr`` opens by default, and the provenance the
+    normaliser resolves ``linked_pr`` and ``find_workpad_comment`` by (#77).
+    """
 
     def __init__(
         self,
@@ -60,9 +67,11 @@ class FakeGitHub:
         *,
         preseed_labels: bool = True,
         now: Callable[[], datetime] | None = None,
+        login: str = "issuebot",
     ) -> None:
         self._settings = settings
         self._now = now or (lambda: datetime.now(UTC))
+        self.login = login
         self.repo_labels: dict[str, LabelStyle] = {}
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._issues: dict[int, _FakeIssue] = {}
@@ -147,7 +156,7 @@ class FakeGitHub:
             id=self._next_comment_id,
             body=body,
             url=f"{self._issue_url(number)}#issuecomment-{self._next_comment_id}",
-            author="issuebot",
+            author=self.login,
             created_at=stamp,
             updated_at=stamp,
         )
@@ -159,7 +168,7 @@ class FakeGitHub:
         self._enter("find_workpad_comment", number)
         record = self._require_issue(number)
         for comment in record.comments:
-            if is_workpad_body(comment.body):
+            if is_workpad_body(comment.body) and comment.author.lower() == self.login.lower():
                 return comment
         return None
 
@@ -215,7 +224,7 @@ class FakeGitHub:
 
     async def auth_status(self) -> AuthStatus:
         self._enter("auth_status")
-        return AuthStatus(login="fake-user")
+        return AuthStatus(login=self.login)
 
     async def repo_info(self) -> RepoInfo:
         self._enter("repo_info")
@@ -270,14 +279,48 @@ class FakeGitHub:
         record.labels = [label for label in record.labels if label.lower() != name.lower()]
         record.updated_at = self._now()
 
-    def open_pr(self, issue_number: int, *, pr_number: int | None = None) -> LinkedPr:
+    def add_comment(self, number: int, body: str, *, author: str) -> Comment:
+        """A comment by someone else (a human, another bot): what ``comment`` cannot write."""
+        record = self._require_issue(number)
+        stamp = self._now()
+        comment = Comment(
+            id=self._next_comment_id,
+            body=body,
+            url=f"{self._issue_url(number)}#issuecomment-{self._next_comment_id}",
+            author=author,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        self._next_comment_id += 1
+        record.comments.append(comment)
+        return comment
+
+    def open_pr(
+        self,
+        issue_number: int,
+        *,
+        pr_number: int | None = None,
+        author: str | None = None,
+        cross_repository: bool = False,
+    ) -> LinkedPr:
+        """A pull request whose body closes ``issue_number``; issuebot's own unless said otherwise.
+
+        Returns the record as the normaliser would build it, which is not the same as saying
+        the issue now links to it: one by another ``author``, or from a fork, closes the issue
+        on GitHub and is still nobody's as far as ``Issue.linked_pr`` is concerned.
+        """
         self._require_issue(issue_number)
         if pr_number is None:
             pr_number = self._next_number
         elif pr_number in self._issues or pr_number in self._prs:
             raise ValueError(f"number {pr_number} already exists")
         self._next_number = max(self._next_number, pr_number + 1)
-        self._prs[pr_number] = _FakePr(number=pr_number, closes=issue_number)
+        self._prs[pr_number] = _FakePr(
+            number=pr_number,
+            closes=issue_number,
+            author=self.login if author is None else author,
+            cross_repository=cross_repository,
+        )
         return self._linked_pr(self._prs[pr_number])
 
     def merge_pr(self, pr_number: int) -> None:
@@ -380,6 +423,8 @@ class FakeGitHub:
                         "state": _PR_STATE_UPPER[pr.state],
                         "mergedAt": pr.merged_at.isoformat() if pr.merged_at else None,
                         "mergeable": pr.mergeable.upper(),
+                        "isCrossRepository": pr.cross_repository,
+                        "author": {"login": pr.author},
                     }
                     for pr in self._prs.values()
                     if pr.closes == record.number
@@ -389,7 +434,7 @@ class FakeGitHub:
 
     def _snapshot(self, record: _FakeIssue) -> Issue:
         return issue_from_node(
-            copy.deepcopy(self._node(record)), repo=self.repo, labels=self.labels
+            copy.deepcopy(self._node(record)), repo=self.repo, labels=self.labels, login=self.login
         )
 
     def _snapshots(self, records: Iterable[_FakeIssue]) -> list[Issue]:
