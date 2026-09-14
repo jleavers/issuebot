@@ -33,7 +33,9 @@
                   "number": 51,
                   "url": "https://github.com/example/repo/pull/51",
                   "state": "OPEN",
-                  "mergedAt": null
+                  "mergedAt": null,
+                  "isCrossRepository": false,
+                  "author": {"login": "issuebot-agent"}
                 }
               ]
             }

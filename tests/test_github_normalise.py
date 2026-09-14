@@ -7,11 +7,12 @@ import pytest
 
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
-from issuebot.github.models import WORKPAD_MARKER, StateLabel, is_workpad_body
+from issuebot.github.models import WORKPAD_MARKER, Issue, StateLabel, is_workpad_body
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
 
 LABELS = GitHubLabels()
 REPO = "example/repo"
+LOGIN = "issuebot-agent"
 
 
 def node(**overrides: Any) -> dict[str, Any]:
@@ -34,17 +35,30 @@ def node(**overrides: Any) -> dict[str, Any]:
 
 
 def pr(
-    number: int, state: str, merged_at: str | None = None, mergeable: str | None = "MERGEABLE"
+    number: int,
+    state: str,
+    merged_at: str | None = None,
+    mergeable: str | None = "MERGEABLE",
+    author: str | None = LOGIN,
+    cross_repository: bool = False,
 ) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "number": number,
         "url": f"https://github.com/example/repo/pull/{number}",
         "state": state,
         "mergedAt": merged_at,
+        "isCrossRepository": cross_repository,
+        "author": {"login": author} if author is not None else None,
     }
     if mergeable is not None:
         fields["mergeable"] = mergeable
     return fields
+
+
+def linked(refs: dict[str, Any], login: str = LOGIN) -> Issue:
+    return issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=login
+    )
 
 
 # --- errors ----------------------------------------------------------------------
@@ -84,7 +98,7 @@ def test_repo_short_name() -> None:
 
 
 def test_full_record() -> None:
-    issue = issue_from_node(node(), repo=REPO, labels=LABELS)
+    issue = issue_from_node(node(), repo=REPO, labels=LABELS, login=LOGIN)
     assert issue.id == "42"
     assert issue.identifier == "repo-42"
     assert issue.number == 42
@@ -115,6 +129,7 @@ def test_minimal_closed_record() -> None:
         ),
         repo=REPO,
         labels=LABELS,
+        login=LOGIN,
     )
     assert issue.body is None
     assert issue.github_state == "closed"
@@ -127,13 +142,15 @@ def test_minimal_closed_record() -> None:
 
 
 def test_empty_body_is_none() -> None:
-    assert issue_from_node(node(body=""), repo=REPO, labels=LABELS).body is None
+    assert issue_from_node(node(body=""), repo=REPO, labels=LABELS, login=LOGIN).body is None
 
 
 @pytest.mark.parametrize("author", [None, {}, {"login": ""}, {"login": 7}, "ghost"])
 def test_deleted_or_unusable_author_is_none(author: Any) -> None:
     """GitHub sends ``author: null`` once the account is gone; the envelope then says so."""
-    assert issue_from_node(node(author=author), repo=REPO, labels=LABELS).author is None
+    assert (
+        issue_from_node(node(author=author), repo=REPO, labels=LABELS, login=LOGIN).author is None
+    )
 
 
 def test_two_state_labels_is_a_conflict() -> None:
@@ -141,6 +158,7 @@ def test_two_state_labels_is_a_conflict() -> None:
         node(labels={"nodes": [{"name": "issuebot/review"}, {"name": "issuebot/todo"}]}),
         repo=REPO,
         labels=LABELS,
+        login=LOGIN,
     )
     assert issue.state is None
     assert issue.state_labels == ("issuebot/todo", "issuebot/review")  # role order
@@ -148,14 +166,16 @@ def test_two_state_labels_is_a_conflict() -> None:
 
 
 def test_closed_issue_with_state_label_is_not_dispatchable() -> None:
-    issue = issue_from_node(node(state="CLOSED"), repo=REPO, labels=LABELS)
+    issue = issue_from_node(node(state="CLOSED"), repo=REPO, labels=LABELS, login=LOGIN)
     assert issue.state is StateLabel.IN_PROGRESS
     assert not issue.dispatchable
 
 
 def test_custom_label_names_are_recognised() -> None:
     custom = GitHubLabels(in_progress="wip")
-    issue = issue_from_node(node(labels={"nodes": [{"name": "WIP"}]}), repo=REPO, labels=custom)
+    issue = issue_from_node(
+        node(labels={"nodes": [{"name": "WIP"}]}), repo=REPO, labels=custom, login=LOGIN
+    )
     assert issue.state is StateLabel.IN_PROGRESS
     assert issue.state_labels == ("wip",)
 
@@ -169,25 +189,56 @@ def test_linked_pr_prefers_merged_then_open_then_closed() -> None:
             pr(48, "MERGED", "2026-09-01T12:00:00Z"),
         ]
     }
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None
     assert issue.linked_pr.number == 51
     assert issue.linked_pr.state == "merged"
     assert issue.linked_pr.merged_at == datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
     refs = {"nodes": [pr(50, "CLOSED"), pr(53, "OPEN"), pr(52, "OPEN")]}
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None and issue.linked_pr.number == 53
     assert issue.linked_pr.state == "open" and issue.linked_pr.merged_at is None
 
     refs = {"nodes": [pr(50, "CLOSED"), pr(49, "CLOSED")]}
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None and issue.linked_pr.number == 50
+
+
+def test_a_pull_request_by_anyone_else_is_not_linked() -> None:
+    """``Closes #N`` is text anyone can write; the author is the provenance (#77)."""
+    issue = linked({"nodes": [pr(52, "OPEN", author="mallory"), pr(51, "OPEN")]})
+    assert issue.linked_pr is not None and issue.linked_pr.number == 51
+
+    merged = pr(52, "MERGED", "2026-09-02T12:00:00Z", author="mallory")
+    assert linked({"nodes": [merged]}).linked_pr is None
+
+    assert linked({"nodes": [pr(52, "OPEN", author=None)]}).linked_pr is None, (
+        "a deleted account, or an older response without the field, is nobody's"
+    )
+
+
+def test_a_pull_request_from_a_fork_is_not_linked_even_under_the_login() -> None:
+    issue = linked({"nodes": [pr(52, "OPEN", cross_repository=True), pr(50, "CLOSED")]})
+    assert issue.linked_pr is not None and issue.linked_pr.number == 50
+
+
+def test_the_login_is_matched_case_insensitively() -> None:
+    issue = linked({"nodes": [pr(52, "OPEN", author="Issuebot-Agent")]}, login="ISSUEBOT-agent")
+    assert issue.linked_pr is not None and issue.linked_pr.number == 52
 
 
 def test_unusable_pr_reference_is_skipped() -> None:
     refs = {"nodes": [{"number": "x"}, None, pr(52, "OPEN")]}
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None and issue.linked_pr.number == 52
 
 
@@ -197,7 +248,9 @@ def test_unusable_pr_reference_is_skipped() -> None:
 )
 def test_linked_pr_carries_mergeability(raw: str, expected: str) -> None:
     refs = {"nodes": [pr(52, "OPEN", mergeable=raw)]}
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None
     assert issue.linked_pr.mergeable == expected
 
@@ -209,7 +262,9 @@ def test_absent_or_unrecognised_mergeability_reads_unknown(raw: object) -> None:
     if raw is not None:
         reference["mergeable"] = raw
     refs = {"nodes": [reference]}
-    issue = issue_from_node(node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS)
+    issue = issue_from_node(
+        node(closedByPullRequestsReferences=refs), repo=REPO, labels=LABELS, login=LOGIN
+    )
     assert issue.linked_pr is not None
     assert issue.linked_pr.mergeable == "unknown"
 
@@ -229,7 +284,7 @@ def test_absent_or_unrecognised_mergeability_reads_unknown(raw: object) -> None:
 )
 def test_malformed_record_raises_response_error(field: str, value: Any) -> None:
     with pytest.raises(GitHubError) as exc:
-        issue_from_node(node(**{field: value}), repo=REPO, labels=LABELS)
+        issue_from_node(node(**{field: value}), repo=REPO, labels=LABELS, login=LOGIN)
     assert exc.value.category == "response"
     assert field in exc.value.message
 
@@ -239,6 +294,7 @@ def test_unusable_optional_metadata_normalises_quietly() -> None:
         node(labels="nope", assignees={"nodes": [None, {"login": ""}]}, closedAt="garbage"),
         repo=REPO,
         labels=LABELS,
+        login=LOGIN,
     )
     assert issue.labels == ()
     assert issue.assignees == ()

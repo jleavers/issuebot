@@ -18,7 +18,9 @@
               "number": 8,
               "url": "https://github.com/example/repo/pull/8",
               "state": "MERGED",
-              "mergedAt": "2026-08-02T00:00:00Z"
+              "mergedAt": "2026-08-02T00:00:00Z",
+              "isCrossRepository": false,
+              "author": {"login": "issuebot-agent"}
             }
           ]
         }

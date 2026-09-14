@@ -227,7 +227,7 @@ def test_validate_good_workflow_exits_zero(
         "blocked, state_changed, or set notifications.slack.events: [] to silence this" in out
     )
     assert "[ OK ] prompt: 44 characters, renders" in out
-    assert "[ OK ] gh auth: logged in as fake-user" in out
+    assert "[ OK ] gh auth: logged in as issuebot" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
     assert "[ OK ] github.labels: 5 state labels and 1 marker label present" in out
     assert (
@@ -1015,7 +1015,7 @@ def test_validate_reports_repo_access_failure(
     monkeypatch.setattr(fake_github, "repo_info", failing_repo_info)
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[ OK ] gh auth: logged in as fake-user" in out
+    assert "[ OK ] gh auth: logged in as issuebot" in out
     assert "[FAIL] github.repo access: not_found: injected not_found failure" in out
     assert "[ OK ] github.labels: 5 state labels and 1 marker label present" in out
 
@@ -1034,7 +1034,7 @@ def test_validate_reports_labels_failure(
     monkeypatch.setattr(fake_github, "missing_labels", failing_missing_labels)
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[ OK ] gh auth: logged in as fake-user" in out
+    assert "[ OK ] gh auth: logged in as issuebot" in out
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
     assert "[FAIL] github.labels: transport: injected transport failure" in out
 
