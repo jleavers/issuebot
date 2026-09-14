@@ -114,7 +114,10 @@ def test_web_password_is_passed_through_with_no_committed_value() -> None:
     text = COMPOSE.read_text()
     uses = re.findall(r"\$\{ISSUEBOT_WEB_PASSWORD[^}]*\}", text)
     assert uses == ["${ISSUEBOT_WEB_PASSWORD:-}"], uses
-    # Only the web service reads it: the worker never presents it and must not carry it.
+    # Only the web service names it in its `environment:` map. The worker's `env_file: .env`
+    # does carry it into the worker process in a hub checkout, which is contained by #75's uid
+    # split (the session cannot read /proc/<worker>/environ) and by `agent_environment`'s
+    # allow-list, and it is masked by the scrubber wherever the worker holds it.
     assert "ISSUEBOT_WEB_PASSWORD" not in _env(_services()["worker"])
 
 

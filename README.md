@@ -98,7 +98,8 @@ issues that triage is most of the value.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
    things a hook cannot install are a database server and a language runtime, because the
-   container's session runs as uid 1001 with no Docker — so if the target repository's
+   session runs as `agent` (uid 1001) with no Docker and no way to invoke `sudo` — so if the
+   target repository's
    tests need a PostgreSQL server, set `ISSUEBOT_POSTGRES_VERSION` in `.env` before building
    (see "A PostgreSQL server for the target repository's tests" below), and if they execute
    the repository's own client-side JavaScript, set `ISSUEBOT_NODE_VERSION` too (see "Node for
@@ -445,8 +446,9 @@ both the label and the default.
 ### A PostgreSQL server for the target repository's tests
 
 Some repositories cannot run their suite without a real PostgreSQL: the fixtures fail rather
-than skip, and most of the tests never get to run. The worker container has no Docker, no
-`sudo` and no root, so no hook can install a server and no compose sidecar helps — a service
+than skip, and most of the tests never get to run. The container has no Docker, and the
+session runs as `agent` (uid 1001), which cannot invoke `sudo`, so no hook can install a
+server and no compose sidecar helps — a service
 on the compose network is reachable by name, not on loopback, and one server shared by every
 concurrent session is one session's `DROP DATABASE` away from wrecking another's run.
 
@@ -817,7 +819,9 @@ that matters on your host.
   once, so the worker picks up the new mount (the web no longer mounts `configs`). Upgrading
   across the session/worker split (#75) moves the login volume from the worker's home to the
   session account's: run `docker run --rm -v issuebot_claude-home:/v alpine:3 chown -R 1001:1001
-  /v` once so `agent` owns its own login, then `docker compose up -d --force-recreate worker`.
+  /v` once so `agent` owns its own login (the volume's name follows your checkout directory,
+  see `docker volume ls` under "Checking that the login took"), then
+  `docker compose up -d --force-recreate worker`.
   Check that your edits followed the rename
   (`git status`) before starting, and note that `workspace.root` now resolves against
   `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
@@ -828,16 +832,18 @@ that matters on your host.
   (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
   worker (`issuebot`, uid 1000) that supervises and credentials it (#75). So the session runs
   with no permission prompts and may do as it likes at its own uid, but the worker's code
-  (`/app`, root-owned), its environment (`GH_TOKEN`, the database URL, the Slack webhook), its
-  home and the state it keeps inside a workspace are all out of the session's reach, and the
-  worker cannot become root or anything but `agent`. The session's login is its own, in
-  `/home/agent/.claude`. The agent's environment is otherwise minimal — `PATH`, the
-  `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and `GH_TOKEN`, with
-  `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches it — but that
-  allow-list, the workspace and the protected-key list are conveniences, not the sandbox: the
-  container and the uid are. On the host route (`agent.run_as` unset, `validate` warns) the
-  session runs as your own user with none of this, which is why the container is the supported
-  deployment. Keep it in the container and give it a repository-scoped token. The dashboard
+  (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
+  in a hub checkout the dashboard password), its home and the state it keeps inside a
+  workspace are all out of the session's reach, and the worker cannot become root or anything
+  but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
+  pushes with it, which is why the token should be scoped to the repository. The session's
+  login is its own, in `/home/agent/.claude`. The agent's environment is otherwise minimal —
+  `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
+  `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
+  it — but that allow-list, the workspace and the protected-key list are conveniences, not the
+  sandbox: the container and the uid are. On the host route (`agent.run_as` unset, `validate`
+  warns) the session runs as your own user with none of this, which is why the container is
+  the supported deployment. Keep it in the container and give it a repository-scoped token. The dashboard
   asks for its password on every request, so placement hardens it rather than standing in
   for it: keep it on loopback all the same, or put TLS and rate limiting in front of it,
   because HTTP Basic sends the password with every request and the app itself limits no

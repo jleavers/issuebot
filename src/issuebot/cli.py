@@ -523,7 +523,7 @@ def _github_status_check() -> Check:
     except Exception as exc:
         # A third party cannot be allowed to end `validate` with a traceback in place of the
         # three checks after it -- or, since `run_checks` would raise before returning, in place
-        # of all fourteen printed lines.
+        # of every printed line.
         get_logger(__name__).debug(
             "github_status_check_failed", error=f"{type(exc).__name__}: {exc}"
         )
