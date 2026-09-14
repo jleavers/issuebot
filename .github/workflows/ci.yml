@@ -142,6 +142,30 @@ jobs:
             fi
           '
           docker run --rm --user agent --entrypoint claude issuebot:ci --version
+      # git's ownership check is part of the boundary rather than a detail of it: a workspace
+      # directory is the worker's and the clone inside it is the session's, so without the
+      # image's `safe.directory` entry every git command a session runs dies as `dubious
+      # ownership` -- which is how it reached a live board instead of CI. The shape below is a
+      # workspace exactly: the worker's sticky directory, the session's repository inside it.
+      # `git init` stands in for the clone, since what git weighs is who owns what rather than
+      # where the repository came from, and `git config --local` is the command that failed.
+      # The scope is asserted too, so the entry can never be widened to a bare `*` quietly.
+      - name: the session can run git in a workspace the worker owns
+        run: |
+          test "$(docker run --rm --entrypoint git issuebot:ci config --system --get-all safe.directory)" = '/workspaces/*'
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            set -eu
+            mkdir -m 1777 /workspaces/probe
+            sudo -n -H -u agent git -C /workspaces/probe init -q
+            test "$(stat -c %u /workspaces/probe)" = 1000
+            test "$(stat -c %u /workspaces/probe/.git)" = 1001
+            sudo -n -H -u agent bash -c "
+              set -eu
+              cd /workspaces/probe
+              test \"\$(git rev-parse --show-toplevel)\" = /workspaces/probe
+              git config --local --add issuebot.probe 1
+            "
+          '
       # The wrapper is what the worker actually runs (issuebot.agent.runas): the environment
       # crosses the uid change on a descriptor, so what the session sees is the mapping the
       # worker built with the account's own HOME, USER and LOGNAME, and nothing sudo adds or

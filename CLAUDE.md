@@ -173,7 +173,12 @@ floor, not the shipped version, and moves by hand.
   two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
-  reports it like a missing `claude`. Unset (the host route, the tests) runs everything as
+  reports it like a missing `claude`. The image declares `/workspaces/*` a git
+  `safe.directory` because of this split: the workspace directory is the worker's and the
+  clone inside it the session's, and git refuses a worktree owned by another account
+  (`dubious ownership`, which `git config --local` reports as "--local can only be used inside
+  a git repository"), which fails every git command a session runs, the post-clone setup
+  first. The CI `docker` job builds that exact shape and runs git in it. Unset (the host route, the tests) runs everything as
   the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
   `created` marker file (the completion sentinel), and `session.json` trusted only when the
   worker owns it. `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,

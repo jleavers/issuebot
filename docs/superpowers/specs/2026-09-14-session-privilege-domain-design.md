@@ -61,6 +61,17 @@ image's uid layout and the compose mounts.
   its own `.issuebot` is refused rather than have worker state kept in a session-owned
   directory.
 
+- **git's ownership check.** Splitting the uid puts the worktree and the account that works in
+  it on opposite sides of a check git makes for itself: a repository whose worktree belongs to
+  another account is one git refuses to touch (`detected dubious ownership`, which `git config
+  --local` reports downstream as "--local can only be used inside a git repository"). The
+  workspace directory is deliberately the worker's, so the image declares the workspace root
+  safe system-wide, `safe.directory = /workspaces/*`. Scoped to that root rather than a bare
+  `*`: the only other account that can own anything under it is the worker, the more privileged
+  side. Without it every git command a session runs fails, the post-clone setup first — which
+  is how this reached a live board rather than CI, where the uid layout was proved but no
+  repository was ever cloned into a directory the worker owned.
+
 - **Startup and validation.** The worker probes the delegation at startup and refuses to start
   when `agent.run_as` is set but cannot be established, the same shape as the `claude auth`
   probe: a boundary that does not work would otherwise fail every run. `validate` reports the
