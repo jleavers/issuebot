@@ -7,6 +7,7 @@ from issuebot.agent import AgentError, WorkspaceManager
 from issuebot.config import GitHubLabels
 from issuebot.events import Blocked, EventBus, IssueCancelled, IssueCompleted, StateChanged
 from issuebot.github import (
+    ACTIVE_STATES,
     WORKPAD_MARKER,
     Comment,
     GitHubAdapter,
@@ -183,6 +184,88 @@ async def blocked_escape(
         issue_identifier=issue.identifier,
         run_id=context.run_id,
         reason=context.reason,
+    )
+    return "applied"
+
+
+# The heading of the block a budget escape writes, and its own idempotence: one per issue,
+# ever. The reason names the counts, so a second one would only repeat what the first said.
+BUDGET_HEADING = "### Issuebot budget limit ("
+
+
+def budget_block(reason: str, now: datetime, labels: GitHubLabels) -> str:
+    """The block the budget escape appends to the workpad."""
+    return (
+        f"{BUDGET_HEADING}{_stamp(now)})\n\n"
+        f"issuebot will not claim this issue again: {reason}.\n"
+        f"Moved to `{labels.review}` for a human to look at. Raising the setting, or closing "
+        f"the issue, is the way out; relabelling on its own is not, which is the point of the "
+        f"ceiling."
+    )
+
+
+async def budget_escape(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue_id: str,
+    reason: str,
+    *,
+    now: datetime,
+) -> EscapeOutcome:
+    """Hand an issue that has spent its per-issue budget to a human (#112).
+
+    The blocked escape above is something a *run* does, and this is the one escalation with no
+    run behind it: the admission gate refused the claim before there was one. Without it a
+    refused issue would sit on the board with nothing said about it anywhere a human looks,
+    which is worse than having no ceiling at all.
+
+    Unlike ``blocked_escape`` it accepts the issue in any state this worker claims, because
+    that is exactly where a refused issue sits -- ``todo`` or ``rework``, never
+    ``in_progress``, since the gate runs before the claim.
+    """
+    log = get_logger(__name__)
+    try:
+        issues = await adapter.fetch_issues_by_ids([issue_id])
+        if not issues:
+            log.info("budget_escape_skipped", issue_id=issue_id, reason="issue missing")
+            return "skipped"
+        issue = issues[0]
+        if issue.github_state == "closed" or issue.state not in ACTIVE_STATES:
+            state = "closed" if issue.github_state == "closed" else (issue.state or "unlabelled")
+            log.info(
+                "budget_escape_skipped",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                reason=f"issue is {state}",
+            )
+            return "skipped"
+        workpad = await adapter.find_workpad_comment(issue.number)
+        if workpad is None or BUDGET_HEADING not in workpad.body:
+            await _append_workpad(
+                adapter, issue.number, workpad, budget_block(reason, now, adapter.labels)
+            )
+        await adapter.set_state(issue.number, StateLabel.REVIEW)
+    except GitHubError as exc:
+        log.warning("budget_escape_failed", issue_id=issue_id, error=str(exc))
+        return "failed"
+    bus.publish(
+        StateChanged(
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            from_label=state_label_name(issue),
+            to_label=adapter.labels.review,
+            actor="issuebot",
+            pr_url=pr_url(issue),
+        )
+    )
+    bus.publish(
+        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
+    )
+    log.warning(
+        "budget_escape_applied",
+        issue_number=issue.number,
+        issue_identifier=issue.identifier,
+        reason=reason,
     )
     return "applied"
 

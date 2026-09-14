@@ -18,11 +18,14 @@ from issuebot.events import (
 )
 from issuebot.github import WORKPAD_MARKER, FakeGitHub, GitHubError, StateLabel
 from issuebot.orchestrator.actions import (
+    BUDGET_HEADING,
     CANCEL_REASON,
     CONFLICT_HEADING,
     CONFLICT_LIMIT_HEADING,
     blocked_block,
     blocked_escape,
+    budget_block,
+    budget_escape,
     claim,
     conflict_block,
     conflict_limit_block,
@@ -627,3 +630,79 @@ async def test_remove_workspace_contains_agent_errors(
 
     monkeypatch.setattr(h.workspaces, "remove", refuse)
     assert await remove_workspace(h.workspaces, "repo-42") is False
+
+
+# --- the budget escape (#112) ---------------------------------------------------------------
+
+BUDGET_REASON = "this issue has cost $12.50 over 4 runs and agent.max_issue_cost_usd is $10.00"
+
+
+def test_budget_block_names_the_reason_and_the_way_out() -> None:
+    block = budget_block(BUDGET_REASON, NOW, LABELS)
+    assert block.startswith("### Issuebot budget limit (2026-09-03T14:02:11Z)\n\n")
+    assert f"issuebot will not claim this issue again: {BUDGET_REASON}." in block
+    assert "Moved to `issuebot/review` for a human to look at." in block
+    assert "relabelling on its own is not" in block
+
+
+@pytest.mark.parametrize("state", ["todo", "rework", "in-progress"])
+async def test_budget_escape_hands_over_an_issue_in_any_claimable_state(
+    tmp_path: Path, state: str
+) -> None:
+    """The gate refuses before the claim, so the issue is rarely the one `blocked_escape` takes."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=(f"issuebot/{state}",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n\n- [ ] 1. Do it\n")
+    h.github.calls.clear()
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert BUDGET_HEADING in body
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.recorder.events[1].reason == BUDGET_REASON  # type: ignore[attr-defined]
+
+
+async def test_budget_escape_creates_the_workpad_when_there_is_none(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert body.startswith(f"{WORKPAD_MARKER}\n\n{BUDGET_HEADING}")
+
+
+async def test_budget_escape_writes_its_block_once(tmp_path: Path) -> None:
+    """The reason names the counts, which cannot change: a second block would only repeat it."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "applied"
+    h.github.human_set_state(42, StateLabel.REWORK)
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "applied"
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+@pytest.mark.parametrize("state", ["review", "complete"])
+async def test_budget_escape_skips_an_issue_it_does_not_claim(tmp_path: Path, state: str) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=(f"issuebot/{state}",), number=42)
+    h.github.calls.clear()
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "skipped"
+    assert h.calls("set_state") == []
+    assert h.recorder.kinds == []
+
+
+async def test_budget_escape_skips_a_closed_or_missing_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    h.github.close_issue(42)
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "skipped"
+    assert await budget_escape(h.github, h.bus, "99", BUDGET_REASON, now=NOW) == "skipped"
+
+
+async def test_budget_escape_reports_a_github_failure(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    h.github.fail_next("transport")
+    assert await budget_escape(h.github, h.bus, "42", BUDGET_REASON, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.recorder.kinds == []

@@ -58,6 +58,7 @@ from issuebot.orchestrator.admission import (
     RefusalKind,
     Refused,
     admit,
+    seeded_chain,
 )
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
@@ -288,12 +289,16 @@ class Orchestrator:
         self._workspaces = workspaces_factory(workflow.config)
         self._running: dict[str, RunningEntry] = {}
         self._retries: dict[str, RetryEntry] = {}
+        self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
         # keyed by identifier and outliving every label it wears. Seeded from the store by the
         # caller that has one, the way `initial_rate_limits` is, because restarting is how
         # this worker is deployed and a budget that a deployment resets is not a ceiling.
-        self._ledger = Ledger(initial_ledger, on_evict=self._note_ledger_eviction)
+        self._ledger = Ledger(
+            _seeded(initial_ledger, workflow.config.agent.max_attempts),
+            on_evict=self._note_ledger_eviction,
+        )
         self._counters = Counters()
         self._tick_count = 0
         self._last_tick_at: datetime | None = None
@@ -326,7 +331,6 @@ class Orchestrator:
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
-        self._log = get_logger(__name__)
 
     # --- views ------------------------------------------------------------------------
 
@@ -873,23 +877,33 @@ class Orchestrator:
             )
         )
 
-    def _note_refusal(self, identifier: str, number: int, verdict: Refused) -> None:
-        """Log a refusal the operator needs to see, once per issue per reason.
+    async def _handle_refusal(self, issue: Issue, verdict: Refused) -> None:
+        """What a refusal about *this issue* costs it: a log line, and for a budget, the escape.
 
         ``busy`` and ``inactive`` are the loop passing over an issue it has already claimed or
-        does not want, which is every tick's normal business; a budget refusal is an issue
-        that has stopped moving, which is not.
+        does not want, which is every tick's normal business and says nothing. A budget refusal
+        is the board having stopped moving for that issue, and a refusal nobody can see would
+        be worse than having no ceiling at all -- so it is written on the issue and the issue
+        is handed to a human, which is also what stops it being refused again every tick.
         """
         if verdict.kind not in ("attempts", "spend"):
             return
-        if self._ledger.refused(identifier, verdict.reason):
+        if self._ledger.refused(issue.identifier, verdict.reason):
             self._log.warning(
                 "dispatch_refused",
-                issue_number=number,
-                issue_identifier=identifier,
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
                 refusal=verdict.kind,
                 reason=verdict.reason,
             )
+        outcome = await actions.budget_escape(
+            self._adapter, self._bus, issue.id, verdict.reason, now=self._now()
+        )
+        if outcome == "applied":
+            self._counters = self._counters.bump(blocked=1)
+        # `applied` and `skipped` both end the chain: the issue is a human's now. A `failed`
+        # one leaves it, so the next tick tries again -- the issue is still a candidate.
+        self._record_escape(issue.identifier, outcome)
 
     async def _dispatch_candidates(self) -> int:
         issues = await self._fetch_issues()
@@ -899,9 +913,10 @@ class Orchestrator:
         for issue in sort_candidates(issues):
             verdict = self._admit(issue.identifier, issue.id, issue)
             if isinstance(verdict, Refused):
-                if verdict.kind == "slots":
+                if verdict.kind in ("slots", "hold", "stopping"):
+                    # Nothing about this issue; the next candidate would be told the same.
                     break
-                self._note_refusal(issue.identifier, issue.number, verdict)
+                await self._handle_refusal(issue, verdict)
                 continue
             resume_session_id = None
             if issue.state is StateLabel.IN_PROGRESS:
@@ -914,10 +929,14 @@ class Orchestrator:
                     # a worker without a store has. Fold it in and ask the gate again rather
                     # than taking the attempt number from it here: that is how the two call
                     # sites came to disagree in the first place.
-                    self._ledger.observed(issue.identifier, attempt=recorded)
+                    self._ledger.observed(
+                        issue.identifier,
+                        attempt=recorded,
+                        max_attempts=self._workflow.config.agent.max_attempts,
+                    )
                     verdict = self._admit(issue.identifier, issue.id, issue)
                     if isinstance(verdict, Refused):
-                        self._note_refusal(issue.identifier, issue.number, verdict)
+                        await self._handle_refusal(issue, verdict)
                         continue
             if await self._dispatch(
                 issue, attempt=verdict.attempt, resume_session_id=resume_session_id
@@ -1444,7 +1463,7 @@ class Orchestrator:
         # above still goes first: it is the one retry whose whole job is to leave a note.
         verdict = self._admit(entry.identifier, entry.issue_id, None)
         if isinstance(verdict, Refused):
-            self._wait_or_release(entry, verdict)
+            await self._wait_or_release(entry, verdict)
             return
         try:
             issues = await self._adapter.fetch_issues_by_ids([entry.issue_id])
@@ -1465,27 +1484,35 @@ class Orchestrator:
             await self._finish(issue)
             return
         # Asked again with the issue in hand: the fetch was awaited, so a slot can have gone
-        # while it was in flight, and the issue's own state is only knowable now. The attempt
-        # number comes back from the ledger, never from the label the fetch just read.
+        # while it was in flight, and the issue's own state and budget are only answerable
+        # now. The attempt number comes back from the ledger, never from the label just read.
         verdict = self._admit(issue.identifier, issue.id, issue)
         if isinstance(verdict, Refused):
-            self._wait_or_release(entry, verdict)
+            await self._wait_or_release(entry, verdict, issue)
             return
         await self._dispatch(issue, attempt=verdict.attempt, resume_session_id=None)
 
-    def _wait_or_release(self, entry: RetryEntry, verdict: Refused) -> None:
+    async def _wait_or_release(
+        self, entry: RetryEntry, verdict: Refused, issue: Issue | None = None
+    ) -> None:
         """Do what the gate said: wait with the hold, wait for a slot, or let the entry go.
 
         A refusal with no ``wait`` names something waiting will not change. Shutdown is the
         exception: the entry goes back where ``fire_due_retries`` found it, since a worker on
-        its way out is not a verdict about the issue.
+        its way out is not a verdict about the issue. A budget refusal takes the escape, the
+        same one the tick's sweep takes, so the issue is handed over rather than dropped.
+
+        A refusal before the refresh costs the entry its poll: while the worker is at capacity
+        a retry for an issue that has since closed waits for a slot rather than being finished
+        here. The terminal sweep is what finishes it, on the first tick and every tenth.
         """
         if verdict.kind == "stopping":
             self._retries[entry.issue_id] = entry
             return
         if verdict.wait is None:
-            self._release(entry, _RELEASE_REASONS[verdict.kind])
-            self._note_refusal(entry.identifier, entry.issue_number, verdict)
+            self._release(entry, _RELEASE_REASONS.get(verdict.kind, verdict.kind))
+            if issue is not None:
+                await self._handle_refusal(issue, verdict)
             return
         self._requeue(
             entry,
@@ -1576,6 +1603,18 @@ class Orchestrator:
             cost_usd=self._totals.cost_usd,
         )
         self._publish_snapshot()
+
+
+def _seeded(entries: Mapping[str, IssueLedger] | None, max_attempts: int) -> dict[str, IssueLedger]:
+    """The stored ledger as this process will trust it: every chain capped one short (#112).
+
+    ``seeded_chain`` says why. The cumulative figures are carried whole; only the chain, which
+    is the one figure that can refuse an issue without escalating it, is held back.
+    """
+    return {
+        identifier: replace(entry, failures=seeded_chain(entry.failures, max_attempts))
+        for identifier, entry in (entries or {}).items()
+    }
 
 
 def _identity(source: os.stat_result) -> tuple[int, int, int]:

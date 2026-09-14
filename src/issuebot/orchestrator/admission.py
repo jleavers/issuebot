@@ -74,6 +74,22 @@ class IssueLedger:
 
 EMPTY_LEDGER = IssueLedger()
 
+
+def seeded_chain(failures: int, max_attempts: int) -> int:
+    """What a chain read from before this process may contribute: one short of the ceiling.
+
+    The escape that escalates a spent chain is something a *run* does, so a chain seeded at
+    the ceiling would refuse the issue without ever escalating it -- and the readings this
+    process did not take are approximations. The store infers the chain from run rows and
+    ``blocked`` events, either of which a dropped write, a ``run-once`` session, or a worker
+    killed before its escape retry fired can leave it without; ``session.json`` predates any
+    change to ``agent.max_attempts``. Capping one short guarantees every issue gets a run that
+    either succeeds or escalates it where a human can see it, which is the only safe direction
+    for a reading this process cannot check.
+    """
+    return min(failures, max(max_attempts - 1, 0))
+
+
 EvictionCallback = Callable[[str, IssueLedger], None]
 
 
@@ -144,31 +160,34 @@ class Ledger:
         chain is the *label move on its own*, which is why this is the only thing that does.
         """
         current = self.get(identifier)
-        if current.failures == 0:
+        if current.failures == 0 and current.reported_refusal is None:
             return current
-        return self._put(identifier, replace(current, failures=0))
+        return self._put(identifier, replace(current, failures=0, reported_refusal=None))
 
-    def observed(self, identifier: str, *, attempt: int) -> IssueLedger:
+    def observed(self, identifier: str, *, attempt: int, max_attempts: int) -> IssueLedger:
         """A floor from before this process: a session record says the issue was on ``attempt``.
 
         The workspace's ``session.json`` is durable per-issue history too, and the only kind a
-        worker without a database has. It can only raise the chain, never lower it.
+        worker without a database has. It can only raise the chain, never lower it, and only
+        as far as ``seeded_chain`` allows.
         """
         current = self.get(identifier)
-        failures = max(attempt - 1, 0)
+        failures = seeded_chain(max(attempt - 1, 0), max_attempts)
         if failures <= current.failures:
             return current
         return self._put(identifier, replace(current, failures=failures))
 
     def refused(self, identifier: str, reason: str) -> bool:
-        """Record that the gate turned this issue away; True when that is news."""
-        current = self.get(identifier)
+        """Record that the gate turned this issue away; True when that is news.
+
+        An issue with no history is not remembered and not reported: a refusal there is
+        ``busy`` or ``inactive``, which is every tick's normal business.
+        """
+        if identifier not in self._entries:
+            return False
+        current = self._entries[identifier]
         if current.reported_refusal == reason:
             return False
-        # Never inserts on an issue with no history: a refusal on an unknown issue is
-        # `busy` or `inactive`, which is routine and says nothing worth remembering.
-        if identifier not in self._entries:
-            return True
         self._entries[identifier] = replace(current, reported_refusal=reason)
         return True
 
@@ -201,7 +220,7 @@ class AdmissionRequest:
     first without one -- a worker that may not claim at all should not spend a request finding
     out which issue it may not claim -- and again with the issue in hand, which is also the
     second chance the awaited fetch makes necessary: a slot can go while it is in flight.
-    Every check that does not need the issue answers either way.
+    Without an issue the answer covers the worker's own preconditions and stops there.
     """
 
     identifier: str
@@ -246,7 +265,8 @@ def admit(request: AdmissionRequest) -> Admission:
     because a held worker claims nothing whichever door the claim arrives at; slots before
     the issue's own budget, because a full worker is a "later", not a "no"; and the budget
     last, because it is the only answer that ends the issue's turn in the queue rather than
-    postponing it.
+    postponing it -- and because acting on it means handing the issue to a human, which needs
+    the issue.
     """
     ledger = request.ledger
     if request.stopping:
@@ -259,7 +279,12 @@ def admit(request: AdmissionRequest) -> Admission:
     if request.busy:
         return Refused(kind="busy", reason="the issue is already running or waiting to retry")
     issue = request.issue
-    if issue is not None and not (issue.dispatchable and issue.state in ACTIVE_STATES):
+    if issue is None:
+        # Everything above is about the worker and answers without one. The budget below is
+        # about the issue, and a refusal on it is not something a caller that cannot see the
+        # issue could act on -- it hands the issue over to a human, and that needs the issue.
+        return Admitted(attempt=ledger.attempt, ledger=ledger)
+    if not (issue.dispatchable and issue.state in ACTIVE_STATES):
         return Refused(kind="inactive", reason="the issue is not in a state this worker claims")
     if ledger.failures >= request.max_attempts:
         return Refused(

@@ -737,15 +737,20 @@ that matters on your host.
   it — by the session, by a collaborator, or by the issue reaching `issuebot/review` a second
   later — does not hand the issue a fresh budget. Two things clear the count, and only two: a
   run that succeeded, and the escape above, which is what makes relabelling a blocked issue
-  work the way this bullet says it does. The count survives a restart, because the worker
-  reads it back out of the database on the way up.
+  work the way this bullet says it does. The count survives a restart: the worker reads it
+  back out of the database on the way up, from the last 90 days and the 500 most recently run
+  issues, one short of the ceiling at most — a reading it did not take itself never refuses an
+  issue outright, so every issue always gets a run that can either succeed or escalate it.
 
   What that leaves unbounded is an issue relabelled again and again, each cycle worth
   `agent.max_attempts` runs. `agent.max_issue_cost_usd` is the ceiling for it: cumulative per
   issue, never reset, `0` (the default) off. It is off by default because what a run is worth
   depends on your plan — an agent on a subscription reports no cost at all, and there
-  `agent.max_attempts` is the ceiling that bites. A worker that refuses an issue on either
-  budget logs `dispatch_refused` once, naming the setting.
+  `agent.max_attempts` is the ceiling that bites. Like the seed, it is read from the last 90
+  days. A worker that refuses an issue on either budget logs `dispatch_refused`, writes an
+  `### Issuebot budget limit` block on the workpad naming the setting, and moves the issue to
+  `issuebot/review`: a ceiling nobody can see would be worse than no ceiling, so the board
+  never just stops for an issue without saying so on it.
 - **GitHub itself.** The worker reads and writes its whole state machine through `gh`, so an
   outage stops the board. Three failed polls in a row hold dispatch: `issuebot status` prints
   `dispatch: held (github) since ...`, the dashboard's worker line reads `worker held`,

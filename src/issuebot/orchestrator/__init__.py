@@ -1,11 +1,14 @@
 """Coordination: the poll loop, claims, dispatch, retries, reconciliation and recovery."""
 
 from issuebot.orchestrator.actions import (
+    BUDGET_HEADING,
     CANCEL_REASON,
     EscapeOutcome,
     FinishOutcome,
     blocked_block,
     blocked_escape,
+    budget_block,
+    budget_escape,
     claim,
     finish_terminal,
     remove_workspace,
@@ -21,6 +24,7 @@ from issuebot.orchestrator.admission import (
     RefusalKind,
     Refused,
     admit,
+    seeded_chain,
 )
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
@@ -60,6 +64,7 @@ from issuebot.orchestrator.state import (
 
 __all__ = [
     "BACKOFF_BASE_MS",
+    "BUDGET_HEADING",
     "CANCEL_REASON",
     "CANDIDATE_STATES",
     "CONTINUATION_DELAY_MS",
@@ -97,6 +102,8 @@ __all__ = [
     "backoff_ms",
     "blocked_block",
     "blocked_escape",
+    "budget_block",
+    "budget_escape",
     "claim",
     "claimed_snapshot",
     "fetch_preflight",
@@ -106,6 +113,7 @@ __all__ = [
     "preflight",
     "probe_run_as",
     "remove_workspace",
+    "seeded_chain",
     "sort_candidates",
     "state_label_name",
 ]

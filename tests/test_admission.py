@@ -3,6 +3,8 @@
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from issuebot.github import Issue, StateLabel
 from issuebot.orchestrator.admission import (
     AdmissionRequest,
@@ -12,6 +14,7 @@ from issuebot.orchestrator.admission import (
     Ledger,
     Refused,
     admit,
+    seeded_chain,
 )
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
@@ -64,10 +67,28 @@ def test_a_cleared_chain_that_is_already_clear_inserts_nothing() -> None:
 
 def test_a_session_record_can_only_raise_the_chain() -> None:
     ledger = Ledger()
-    assert ledger.observed("repo-42", attempt=3).failures == 2
-    assert ledger.observed("repo-42", attempt=2).failures == 2
-    assert ledger.observed("repo-42", attempt=1).failures == 2
-    assert ledger.observed("repo-42", attempt=0).failures == 2
+    assert ledger.observed("repo-42", attempt=3, max_attempts=5).failures == 2
+    assert ledger.observed("repo-42", attempt=2, max_attempts=5).failures == 2
+    assert ledger.observed("repo-42", attempt=1, max_attempts=5).failures == 2
+    assert ledger.observed("repo-42", attempt=0, max_attempts=5).failures == 2
+
+
+def test_a_session_record_is_capped_one_short_of_the_ceiling() -> None:
+    """A record written before `agent.max_attempts` was lowered must not strand the issue."""
+    ledger = Ledger()
+    assert ledger.observed("repo-42", attempt=9, max_attempts=3).failures == 2
+    assert ledger.observed("repo-42", attempt=9, max_attempts=1).failures == 2
+
+
+@pytest.mark.parametrize(
+    ("failures", "max_attempts", "expected"),
+    [(0, 3, 0), (1, 3, 1), (2, 3, 2), (3, 3, 2), (99, 3, 2), (0, 1, 0), (5, 1, 0)],
+)
+def test_a_seeded_chain_stops_one_short_of_the_ceiling(
+    failures: int, max_attempts: int, expected: int
+) -> None:
+    """History this process did not take must leave room for a run that can escalate."""
+    assert seeded_chain(failures, max_attempts) == expected
 
 
 def test_negative_spend_and_turns_are_ignored() -> None:
@@ -112,6 +133,14 @@ def test_a_seeded_ledger_over_the_cap_is_trimmed_at_construction() -> None:
     assert len(ledger) == 2
 
 
+def test_a_cleared_chain_makes_a_refusal_news_again() -> None:
+    ledger = Ledger()
+    ledger.failed("repo-42")
+    assert ledger.refused("repo-42", "spent") is True
+    ledger.cleared("repo-42")
+    assert ledger.refused("repo-42", "spent") is True
+
+
 def test_a_refusal_is_news_once_and_a_dispatch_makes_it_news_again() -> None:
     ledger = Ledger()
     ledger.failed("repo-42")
@@ -122,9 +151,9 @@ def test_a_refusal_is_news_once_and_a_dispatch_makes_it_news_again() -> None:
     assert ledger.refused("repo-42", "something else") is True
 
 
-def test_a_refusal_on_an_issue_with_no_history_is_not_remembered() -> None:
+def test_a_refusal_on_an_issue_with_no_history_is_neither_kept_nor_reported() -> None:
     ledger = Ledger()
-    assert ledger.refused("repo-42", "busy") is True
+    assert ledger.refused("repo-42", "busy") is False
     assert len(ledger) == 0
 
 
@@ -205,41 +234,62 @@ def test_an_issue_the_worker_does_not_claim_is_refused(
         assert verdict.kind == "inactive"
 
 
-def test_the_issue_is_not_needed_for_the_checks_that_do_not_need_it() -> None:
-    """The retry timer asks before it refreshes; every earlier check still answers."""
+def test_without_an_issue_the_answer_covers_the_worker_and_stops_there() -> None:
+    """The retry timer asks before it refreshes; the worker's own checks still answer."""
     assert isinstance(admit(request(hold=Hold("github", "down"))), Refused)
     assert isinstance(admit(request(slots=0)), Refused)
-    # Nothing about the issue refuses an issue nobody has handed over yet.
-    assert isinstance(admit(request()), Admitted)
+    assert isinstance(admit(request(busy=True)), Refused)
+    # The budget is about the issue, and a refusal on it hands the issue to a human, which
+    # the caller cannot do without one. It asks again after the refresh.
+    assert isinstance(admit(request(ledger=IssueLedger(failures=9))), Admitted)
+    assert isinstance(
+        admit(request(ledger=IssueLedger(cost_usd=99.0), max_issue_cost_usd=1.0)), Admitted
+    )
 
 
-def test_a_spent_attempt_budget_refuses_and_names_the_setting() -> None:
-    verdict = admit(request(ledger=IssueLedger(failures=3), max_attempts=3))
+def test_a_spent_attempt_budget_refuses_and_names_the_setting(
+    make_issue: Callable[..., Issue],
+) -> None:
+    verdict = admit(request(issue=make_issue(), ledger=IssueLedger(failures=3), max_attempts=3))
     assert isinstance(verdict, Refused)
     assert (verdict.kind, verdict.wait) == ("attempts", None)
     assert "agent.max_attempts is 3" in verdict.reason
 
 
-def test_a_seeded_chain_over_the_ceiling_still_refuses() -> None:
-    verdict = admit(request(ledger=IssueLedger(failures=7), max_attempts=3))
+def test_a_chain_over_the_ceiling_still_refuses(make_issue: Callable[..., Issue]) -> None:
+    verdict = admit(request(issue=make_issue(), ledger=IssueLedger(failures=7), max_attempts=3))
     assert isinstance(verdict, Refused)
     assert "7 worker sessions have failed" in verdict.reason
 
 
-def test_the_spend_ceiling_is_off_by_default() -> None:
-    verdict = admit(request(ledger=IssueLedger(cost_usd=10_000.0)))
+def test_the_spend_ceiling_is_off_by_default(make_issue: Callable[..., Issue]) -> None:
+    verdict = admit(request(issue=make_issue(), ledger=IssueLedger(cost_usd=10_000.0)))
     assert isinstance(verdict, Admitted)
 
 
-def test_a_spent_cost_budget_refuses_and_names_the_setting() -> None:
-    verdict = admit(request(ledger=IssueLedger(cost_usd=12.5, runs=4), max_issue_cost_usd=10.0))
+def test_a_spent_cost_budget_refuses_and_names_the_setting(
+    make_issue: Callable[..., Issue],
+) -> None:
+    verdict = admit(
+        request(
+            issue=make_issue(), ledger=IssueLedger(cost_usd=12.5, runs=4), max_issue_cost_usd=10.0
+        )
+    )
     assert isinstance(verdict, Refused)
     assert (verdict.kind, verdict.wait) == ("spend", None)
     assert "$12.50 over 4 runs" in verdict.reason
     assert "agent.max_issue_cost_usd is $10.00" in verdict.reason
 
 
-def test_the_attempt_budget_is_asked_before_the_spend_one() -> None:
-    verdict = admit(request(ledger=IssueLedger(failures=3, cost_usd=99.0), max_issue_cost_usd=1.0))
+def test_the_attempt_budget_is_asked_before_the_spend_one(
+    make_issue: Callable[..., Issue],
+) -> None:
+    verdict = admit(
+        request(
+            issue=make_issue(),
+            ledger=IssueLedger(failures=3, cost_usd=99.0),
+            max_issue_cost_usd=1.0,
+        )
+    )
     assert isinstance(verdict, Refused)
     assert verdict.kind == "attempts"

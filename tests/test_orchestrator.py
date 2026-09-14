@@ -3206,8 +3206,10 @@ async def test_a_spent_chain_refuses_the_claim_when_the_escape_never_landed(
     assert h.github.issue(1).state is StateLabel.IN_PROGRESS
     assert h.retry(1).kind == "escape"
 
-    # Drop the escape retry: the issue is now an ordinary in_progress candidate.
+    # Drop the escape retry, and let GitHub answer again: the issue is now an ordinary
+    # in_progress candidate whose chain is spent and whose escape was never written.
     h.orchestrator._retries.clear()
+    monkeypatch.undo()
     with capture_logs() as logs:
         await h.tick()
         await h.tick()
@@ -3216,6 +3218,9 @@ async def test_a_spent_chain_refuses_the_claim_when_the_escape_never_landed(
     assert len(refusals) == 1  # said once, not once a tick
     assert refusals[0]["refusal"] == "attempts"
     assert "agent.max_attempts is 1" in refusals[0]["reason"]
+    # And the refusal is not silent: the issue is handed to a human where they can see it.
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert "### Issuebot budget limit (" in h.github.comments_for(1)[0].body
 
 
 async def test_the_cumulative_spend_ceiling_refuses_a_claim(tmp_path: Path) -> None:
@@ -3238,6 +3243,61 @@ async def test_the_cumulative_spend_ceiling_refuses_a_claim(tmp_path: Path) -> N
     assert refusals[0]["refusal"] == "spend"
     assert "$1.00 over 2 runs" in refusals[0]["reason"]
     assert "agent.max_issue_cost_usd is $0.75" in refusals[0]["reason"]
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    body = h.github.comments_for(1)[0].body
+    assert "### Issuebot budget limit (" in body
+    assert "agent.max_issue_cost_usd is $0.75" in body
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
+async def test_the_spend_ceiling_keeps_saying_no_without_repeating_itself(
+    tmp_path: Path,
+) -> None:
+    """A relabelled issue over the ceiling goes back to review, and the block is written once."""
+    h = Harness(tmp_path, max_issue_cost_usd=0.4)
+    h.add_issue(1)
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(1)
+    assert h.github.issue(1).state is StateLabel.REVIEW
+
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert attempts_dispatched(h, 1) == [1]
+    assert h.github.comments_for(1)[0].body.count("### Issuebot budget limit (") == 1
+
+
+async def test_a_seeded_chain_at_the_ceiling_still_gets_a_run_that_can_escalate(
+    tmp_path: Path,
+) -> None:
+    """History this process did not take is capped one short, so no issue is stranded."""
+    h = Harness(
+        tmp_path,
+        max_attempts=3,
+        initial_ledger={"repo-1": IssueLedger(failures=9, runs=9, cost_usd=4.0)},
+    )
+    h.add_issue(1)
+    await h.tick()
+    assert attempts_dispatched(h, 1) == [3]
+    await fail_once(h, 1)
+    # That run failed, so the chain is spent -- through the escape, where a human sees it.
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert "### Issuebot blocked (" in h.github.comments_for(1)[0].body
+
+
+async def test_a_session_record_above_a_lowered_ceiling_is_capped_too(tmp_path: Path) -> None:
+    """A record written before `agent.max_attempts` was lowered must not strand the orphan."""
+    h = Harness(tmp_path, max_attempts=2)
+    issue = h.add_issue(1, "in_progress")
+    h.write_session(issue.identifier, issue_number=1, attempt=9, last_outcome=None)
+    await h.tick()
+    # Nine would refuse it for ever; capped at `max_attempts - 1`, it resumes on its last one.
+    assert attempts_dispatched(h, 1) == [2]
+    assert h.run_for(1).kwargs["resume_session_id"] == "sess-1"
+    await fail_once(h, 1)
+    assert h.github.issue(1).state is StateLabel.REVIEW
 
 
 async def test_a_seeded_ledger_carries_the_budget_across_a_restart(tmp_path: Path) -> None:

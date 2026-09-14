@@ -321,11 +321,24 @@ floor, not the shipped version, and moves by hand.
   human (`_record_escape`, on `applied` or `skipped`), clears it; that second one is what makes
   the README's documented recovery -- fix the cause, then relabel -- still work. `agent.max_issue_cost_usd`
   (default `0`, off) is the gate's cumulative spend ceiling, the bound on an issue relabelled
-  again and again. `Ledger` is keyed by `Issue.identifier` (the column the store records runs
+  again and again. A budget refusal is never silent, because a board that stops moving for an
+  issue with nothing said about it anywhere a human looks is worse than no ceiling at all:
+  `_handle_refusal` logs `dispatch_refused` and takes `actions.budget_escape`, the one
+  escalation with no run behind it (`BUDGET_HEADING`, written once per issue; it accepts the
+  issue in any of `ACTIVE_STATES`, since the gate refuses before the claim and the issue is
+  therefore `todo` or `rework`, never `in_progress`), which also stops the refusal repeating:
+  the issue lands in `review`, where the gate refuses it as `inactive` instead. `Ledger` is
+  keyed by `Issue.identifier` (the column the store records runs
   under), bounded at `LEDGER_LIMIT` with the least recently run entry evicted and logged, and
   seeded at construction (`initial_ledger=`, `cli._initial_ledger` over
   `RepoQueries.issue_ledgers`) the way `initial_rate_limits` is, since restarting is how this
-  worker is deployed and a budget a deployment resets is not a ceiling. `reported_refusal`
+  worker is deployed and a budget a deployment resets is not a ceiling. Every chain that comes
+  from outside this process -- the store's seed, and the workspace `session.json` that
+  `_resume_plan` folds in for an orphan -- goes through `seeded_chain`, which caps it one short
+  of `max_attempts`: the escape is something a *run* does, so a chain seeded *at* the ceiling
+  would refuse an issue for ever without ever escalating it, and a dropped `Blocked` write, a
+  `run-once` session, a worker killed before its escape retry fired, or a lowered
+  `max_attempts` can all produce one. `reported_refusal`
   lives on the entry so `dispatch_refused` is logged once per issue per reason and is forgotten
   with the rest of it. `state.py` (pure): `RunningEntry`,
   `RetryEntry`, `DispatchHold`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
