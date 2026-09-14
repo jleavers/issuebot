@@ -164,22 +164,33 @@ ignored.
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.todo|in_progress|review|rework|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
+| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 16 MiB per response, and the workpad is looked for in an issue's first 1,000 comments | `30000` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
+| `agent.run_timeout_ms` | a run's wall clock, from the moment its session starts: a turn still running then is killed and no further turn starts. The one timer the session's own output cannot reset | 4 hours |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
-| `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
+| `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | both bound *silence*, not time: a turn is killed after this long without a line of output on its stream, or after this long without a turn event reaching the worker. A session that keeps printing resets both, so a run's length is `agent.run_timeout_ms`'s to bound | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
 | `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL; unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
+
+Every ceiling above names the layer it bounds, and a few more are fixed in the code rather
+than settable, one per boundary an outsider can grow: a `gh` response is capped at 16 MiB and
+the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
+first, and a longer thread with no workpad in it fails the run rather than reading as "none"; a
+running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,
+and each repository's worker listens on its own channel; and every database connection waits at
+most 10 s for a lock and 60 s for a statement, so a migration blocked on the advisory lock exits
+with `[FAIL] database:` instead of hanging inside the restart policy.
 
 Leave the prompt below the front matter as it is for your first runs. It tells the agent about
 the labels, the single "workpad" comment it keeps on the issue, the `issuebot/<number>-<slug>`
@@ -359,7 +370,7 @@ the worker creates it.
 2. Add the `issuebot/todo` label. Within one poll interval the worker labels the issue
    `issuebot/in-progress`, clones the repository into the workspace and starts a session.
    `docker compose exec worker issuebot refresh` (host: `uv run issuebot refresh`) makes it
-   poll right away.
+   poll right away (at most once every 5 s, however often it is asked).
 3. Watch it work: the dashboard shows the Kanban, the running agents and, per issue, every
    turn's transcript; `docker compose logs -f worker` shows the events; on GitHub the agent
    keeps one workpad comment on the issue with its plan, checklist and notes, edited in

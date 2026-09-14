@@ -30,7 +30,8 @@ uv run issuebot worker               # the long-running orchestrator; SIGTERM or
 uv run issuebot migrate              # apply pending .sql migrations (worker and run-once do it too)
 uv run issuebot status               # the worker's last runtime snapshot, read from the database
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
-uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
+uv run issuebot refresh              # NOTIFY the repository's channel: its worker polls at once
+                                     #   (at most one refresh-driven tick every 5 s)
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL and
                                      #   ISSUEBOT_WEB_PASSWORD, reads no workflow; binds 127.0.0.1 by default)
 docker compose build                 # image: git, gh, claude, app venv
@@ -136,7 +137,11 @@ floor, not the shipped version, and moves by hand.
   login, `None` for a deleted account; `LinkedPr.mergeable` is GitHub's `MergeableState`
   lowercased, `unknown` when absent); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
-  `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
+  `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary,
+  and the one cap on a response's size (#110): it reads stdout and stderr incrementally and
+  kills `gh` past `MAX_OUTPUT_BYTES` (16 MiB) with a non-retryable `response` error, since
+  `github.request_timeout_ms` bounds only how long the process may run, not how much it may
+  hand back inside that time;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
@@ -154,7 +159,10 @@ floor, not the shipped version, and moves by hand.
   issuebot's pull request. `find_workpad_comment` returns the account's own marker comment,
   lowest id first, and logs `workpad_comment_ignored` (id, author) for anyone else's, so the
   blocked escape's run-marker idempotence and the conflict bounce's count only ever read a
-  comment that account wrote;
+  comment that account wrote; it asks for the pages one at a time (`per_page=100&page=N`),
+  returns at the first match, and gives up after `MAX_COMMENT_PAGES` (10) with a `response`
+  error rather than `None` (#110): the thread's length past the workpad is anyone's to grow,
+  and "no workpad" would have the session open a second one;
   `status.py` (`fetch_status_summary`, `parse_status_summary` → `GitHubStatus`), the
   githubstatus.com Statuspage summary read as annotation and never as a gate (#88). The one
   place in the package that is not `gh`: it is not the GitHub API, it decides nothing, and it
@@ -214,7 +222,13 @@ floor, not the shipped version, and moves by hand.
   written; `ClaudeRunner` (`claude -p
   --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
   environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  `.issuebot/runs/<run_id>/`). Two timers, and they bound different things (#110):
+  `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
+  output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`
+  `_turn_loop` fixes from `_State.started` and hands to every `run_turn(deadline=)`. The
+  reader waits for the shorter of the two, a turn still running at the deadline is
+  terminated with category `run_timeout` (outcome `timed_out`, the `turn_timeout` turn
+  event, a message naming the setting), and no turn starts past it; `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -375,7 +389,10 @@ floor, not the shipped version, and moves by hand.
   how `issuebot status`, `/api/v1/repos/<owner>/<name>/state` and the dashboard answer "is the
   worker running my overrides?".
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
-  and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
+  and publishes a final snapshot. `_wait_for_next_tick` admits a refresh only
+  `MIN_REFRESH_INTERVAL_S` (5 s) after the last tick ended (#110): one asked for inside the
+  interval brings the wait's deadline forward to it and the loop keeps waiting, so a burst
+  is one tick, never dropped, and the NOTIFY rate cannot set the tick rate. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
   orchestrator importing `db`.
   Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
@@ -466,7 +483,12 @@ floor, not the shipped version, and moves by hand.
   `runs` or `events` rows -- a migration cannot know which repository they belong to -- naming
   the import command as the remedy; it also drops and recreates `runtime_snapshot` keyed by
   `repo` instead of as a single row.
-  `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session), `describe`/`redact`
+  `connection.py`: `connect` (autocommit, 5 s connect timeout, then `session_statements()`: the
+  UTC session, `lock_timeout` `LOCK_TIMEOUT_S` (10 s) and `statement_timeout`
+  `STATEMENT_TIMEOUT_S` (60 s), as `SET`s rather than a libpq `options` keyword, which would
+  replace the `options` a URL carries of its own -- the connect timeout bounds the handshake
+  alone, and without these a migration blocked on the advisory lock hung with no log line and
+  no exit (#110); now it is a `MigrationError`), `describe`/`redact`
   (the URL's password never reaches a log or a line), `reconnect_delay` (1, 2, 4, 8, 16, then
   30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
   appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
@@ -482,7 +504,10 @@ floor, not the shipped version, and moves by hand.
   deployment's from `cli`) so `runs.log_dir` and the event's payload, which the dashboard's
   issue page renders, carry the home directory as `~` while the capture read the real path
   (#91); statement failures are dropped and counted; `close()` drains for
-  up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
+  up to 10 s). `listen.py`: `refresh_channel(repo)`, `issuebot_refresh_<sha256(repo)[:16]>`: one channel per
+  repository (#110), so a NOTIFY reaches the one worker it is for and never every worker on
+  the store; the bare `issuebot_refresh` is a listener's without a repository, which no worker
+  is. `RefreshListener` (`LISTEN` on that channel on its own connection,
   callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload -- every worker
   wakes -- or one matching its own repository, logs another repository's at debug
   (`db_refresh_other_repo`) and drops anything else with a `refresh_payload_ignored` warning).
@@ -636,9 +661,8 @@ floor, not the shipped version, and moves by hand.
   `status` (through `queries.scoped(repo)`: the snapshot as text, its `workflow:` line reading
   `<base> + <overlay>` when one is in force, with a `dispatch: held (<kind>) since ...` line
   while dispatch is held), `stats [--days N]` (also `scoped(repo)`; `by_state` from
-  `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
-  the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
-  issuebot_refresh for <repo>`) and
+  `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs the repository's channel, `refresh_channel(github.repo)`, with the
+  repository as the payload; `[ OK ] refresh: notified issuebot_refresh_<digest> for <repo>`) and
   `web [--bind HOST] [--port N]` (reads `DATABASE_URL` and `ISSUEBOT_WEB_PASSWORD` — no
   `--workflow`, no other setting, and no workflow file to fail loading — `[FAIL] database: not
   configured; export DATABASE_URL` without the first, distinct from every other command's
