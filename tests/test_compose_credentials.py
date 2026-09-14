@@ -10,6 +10,7 @@ files is a placeholder over it. This session cannot run ``docker compose config`
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,8 +26,20 @@ ENV_EXAMPLE = ROOT / ".env.example"
 REQUIRED = re.compile(r"\$\{ISSUEBOT_DB_PASSWORD:\?[^}]*ISSUEBOT_DB_PASSWORD[^}]*\}")
 HUB_DSN = re.compile(rf"^postgresql://issuebot:{REQUIRED.pattern}@db:5432/issuebot$")
 
-# The files an operator or a developer copies a DSN from. ``tests/`` is excluded on purpose:
-# the scrubber's tests hold ``issuebot:issuebot`` as a *sample* of the DSN shape they mask.
+# The credential this issue retired, in its two spellings. It may appear in three places and
+# nowhere else in the tracked tree: the design documents, which are dated records of what was
+# decided and would be falsified by an edit; the scrubber's tests, which hold the DSN as a
+# *sample* of the shape they mask; and this file.
+RETIRED = re.compile(r"issuebot:issuebot@|POSTGRES_PASSWORD\s*[:=]\s*['\"]?issuebot\b")
+RETIRED_ALLOWED = (
+    "docs/superpowers/",
+    "tests/test_agent_scrub.py",
+    "tests/test_compose_credentials.py",
+)
+
+# The files an operator or a developer copies a DSN from: here the rule is the invariant, not
+# the incident. A DSN may carry the placeholder as its password or none at all, and a
+# ``POSTGRES_PASSWORD`` may only ever be the required substitution.
 OPERATOR_FACING = [
     "compose.yaml",
     ".env.example",
@@ -35,6 +48,8 @@ OPERATOR_FACING = [
     "Dockerfile",
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / ".github" / "workflows").glob("*.yml")),
 ]
+DSN_WITH_PASSWORD = re.compile(r"postgres(?:ql)?://[^:/@\s]+:(?!\$\{ISSUEBOT_DB_PASSWORD)[^@\s]+@")
+PASSWORD_ASSIGNMENT = re.compile(r"POSTGRES_PASSWORD\s*[:=]\s*(.+?)\s*$")
 
 
 def _services() -> dict[str, dict]:
@@ -45,6 +60,16 @@ def _env(service: dict) -> dict[str, str]:
     environment = service.get("environment", {})
     assert isinstance(environment, dict), "a mapping, so a key can be asserted on by name"
     return environment
+
+
+def _tracked_files() -> list[str]:
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"not a git checkout, or no git: {error}")
+    return [name for name in listed.stdout.split("\0") if name]
 
 
 def test_db_password_is_a_required_substitution_with_no_default() -> None:
@@ -84,11 +109,12 @@ def test_env_example_ships_the_key_empty() -> None:
 
 
 def _is_working_credential(line: str) -> bool:
-    """A DSN with the old password, or a ``POSTGRES_PASSWORD`` set to anything but the
-    required substitution."""
-    if "issuebot:issuebot@" in line:
+    """A DSN whose password is anything but the placeholder, or a ``POSTGRES_PASSWORD`` set
+    to anything but the required substitution."""
+    if DSN_WITH_PASSWORD.search(line):
         return True
-    return bool(re.search(r"POSTGRES_PASSWORD:\s*\S", line)) and not REQUIRED.search(line)
+    assignment = PASSWORD_ASSIGNMENT.search(line)
+    return assignment is not None and not REQUIRED.fullmatch(assignment.group(1))
 
 
 @pytest.mark.parametrize("relative", OPERATOR_FACING)
@@ -99,4 +125,18 @@ def test_no_operator_facing_file_holds_a_working_database_credential(relative: s
         for number, line in enumerate(text.splitlines(), start=1)
         if _is_working_credential(line)
     ]
+    assert hits == [], "\n".join(hits)
+
+
+def test_retired_credential_appears_nowhere_else_in_the_tracked_tree() -> None:
+    hits = []
+    for name in _tracked_files():
+        if name.startswith(RETIRED_ALLOWED):
+            continue
+        text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+        hits.extend(
+            f"{name}:{number}: {line.strip()}"
+            for number, line in enumerate(text.splitlines(), start=1)
+            if RETIRED.search(line)
+        )
     assert hits == [], "\n".join(hits)

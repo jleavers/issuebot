@@ -57,7 +57,9 @@ issues that triage is most of the value.
   Claude key, the Slack webhook and the database password -- and the identity the agent
   commits with. Docker Compose loads it for the worker; on the host you export the variables
   yourself. Nothing in the tree is a working credential: every one is filled in per
-  deployment, and compose refuses to start a service whose credential is missing.
+  deployment. Compose refuses to start the database, the worker and the dashboard while the
+  database password is missing; an empty `GH_TOKEN` is caught by the worker's own preflight,
+  and an empty `ANTHROPIC_API_KEY` is the log-in-once path.
 - The agent follows the target repository's own `CLAUDE.md` and `AGENTS.md` for how to run
   tools, commit and open PRs, and with `claude.setting_sources: [project]` it also loads that
   repository's `.claude/settings.json`. So the target repository shapes the agent's behaviour;
@@ -692,6 +694,10 @@ docker compose exec db psql -U issuebot -d issuebot -c "ALTER ROLE issuebot PASS
 docker compose up -d
 ```
 
+Pick a quiet moment: between steps 2 and 3 the running worker and dashboard are refused on
+every new connection, and step 3 recreates the worker, which stops any session in flight under
+`stop_grace_period`.
+
 A deployment that predates the variable -- one whose cluster was created with the shipped
 default that older versions carried -- is rotated the same way; until it is, that cluster
 answers to a password that was public. The `ALTER ROLE` line puts the value on your shell's
@@ -821,7 +827,7 @@ uv run issuebot status            # what the worker was doing at its last tick
 uv run issuebot stats             # issues closed and agents run: last day, week, per day
 uv run issuebot refresh           # make a running worker poll GitHub now
 uv run issuebot web               # the dashboard and its JSON API (needs DATABASE_URL)
-cp .env.example .env              # then fill in GH_TOKEN and Claude auth
+cp .env.example .env              # then fill in GH_TOKEN, ISSUEBOT_DB_PASSWORD and Claude auth
 docker compose up --build         # postgres:18 + worker + web (http://127.0.0.1:8080)
 ```
 

@@ -13,6 +13,7 @@ uv run pytest                        # tests (hermetic; no network, no Docker; D
                                      #   colourises help and the shell would otherwise decide)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 docker compose --profile test up -d --wait test-db   # a throwaway postgres:18 on an ephemeral port
+                                     #   (needs ISSUEBOT_DB_PASSWORD set in .env, any value: see below)
 DATABASE_URL=postgresql://issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
 docker compose rm -sf test-db        # throw it away (not `compose down`: that is project-wide)
 docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB_PORT (5434 here)
