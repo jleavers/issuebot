@@ -2728,6 +2728,70 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     assert "15 checks: 0 failed, 2 warnings" in out
 
 
+def test_validate_reports_a_pool_of_session_accounts(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    probed: list[str] = []
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
+    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] agent.run_as: agent-1, agent-2, agent-3; a pool of 3, "
+        "one account per concurrent session" in out
+    )
+    assert probed == ["agent-1", "agent-2", "agent-3"]
+    assert "15 checks: 0 failed, 1 warnings" in out
+
+
+def test_validate_fails_a_pool_with_no_credential_in_the_environment(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The pool's accounts share no login on purpose (#121), so the credential has to be one
+    `claude` needs no file for."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] agent.run_as: a pool of session accounts needs a credential" in out
+    assert "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY" in out
+
+
+def test_validate_fails_when_the_worker_cannot_give_a_workspace_to_the_account(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr(
+        "issuebot.cli._group_complaint",
+        lambda account: f"this process is not a member of {account}'s group (gid 1001)",
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] agent.run_as: agent: this process is not a member of agent's group" in out
+
+
+def test_validate_warns_when_a_pool_is_smaller_than_the_concurrency(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._group_complaint", lambda account: None)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "fewer than agent.max_concurrent_agents (3): dispatch is capped by the pool" in out
+
+
 def test_validate_fails_when_the_session_account_cannot_be_reached(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
 ) -> None:

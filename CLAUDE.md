@@ -163,7 +163,8 @@ floor, not the shipped version, and moves by hand.
   `github` dispatch hold and `validate`'s `github.status` check.
 - `issuebot.agent`: `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
   session runs at a different uid from the worker. With `agent.run_as` set (the image sets
-  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`), `claude -p`, every
+  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`; a comma-separated
+  value or a YAML list is a *pool*, `accounts.py` below), `claude -p`, every
   hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
   `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
   the session's environment crosses the uid change on a memfd rather than through sudo's
@@ -171,8 +172,8 @@ floor, not the shipped version, and moves by hand.
   by the worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
   two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
-  orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
-  its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
+  orchestrator checks at startup for *every* account (refusing to start when it cannot) and
+  `validate` reports as its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
   `safe.directory` because of this split: the workspace directory is the worker's and the
   clone inside it the session's, and git refuses a worktree owned by another account
@@ -181,7 +182,28 @@ floor, not the shipped version, and moves by hand.
   first. The CI `docker` job builds that exact shape and runs git in it. Unset (the host route, the tests) runs everything as
   the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
   `created` marker file (the completion sentinel), and `session.json` trusted only when the
-  worker owns it. `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
+  worker owns it.
+  `accounts.py` (#121, spec `2026-09-14-session-account-pool-design.md`) is the line between
+  one session and the next: `agent.run_as` normalises to a tuple (`()` is the host route,
+  `run_as_pooled` is more than one), and everything below the orchestrator sees exactly one
+  account -- `settings_with_run_as` narrows the settings to the workspace's bound member before
+  the runner and the workspace manager are built, and `session_account` is the single reader.
+  `AccountRegistry` is the worker's own record of which account each workspace belongs to
+  (`<workspace.root>/.issuebot/accounts.json`, `0600` in a `0700` directory, re-read on every
+  call so a restart sees it): `allocate` binds the least-loaded account no session is running
+  as (`None` when every one is busy, so the candidate waits rather than sharing a uid), `bound`
+  answers without binding, and `prune` (the terminal sweep) forgets a workspace that is gone
+  while keeping every key with a session running or a retry pending. The binding is *never*
+  derived from the directory: one computed from the workspace key would be a binding whoever
+  opens the issue chooses. `share_with` makes a workspace `1770`, owner the worker (sticky, as
+  #75 established) and group the bound account's own, which needs the worker to be a member of
+  that group -- `group_complaint` is the pure check `validate` reports, and the image arranges
+  it with `usermod --append`. `credential_complaint` is the pool's one extra rule: the accounts
+  share no login, so the credential has to be one `claude` needs no file for
+  (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, both already through
+  `agent_environment`'s `PASSTHROUGH_PREFIXES`), and a pool without one fails startup and
+  `validate` rather than failing every session's authentication.
+  `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
@@ -340,7 +362,11 @@ floor, not the shipped version, and moves by hand.
   for the same reason: a `worker crashed: <exc>` names whatever the exception did, and the
   retry it schedules carries the message into the snapshot's `retrying` rows.
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
-  that session's model.
+  that session's model, and then from `settings_with_run_as`, so a pooled `agent.run_as` picks
+  that session's account (#121): `_bind_account` runs *before* the claim, so an issue whose
+  account is busy is left on the board rather than moved to `in-progress` to wait there, and
+  `_workspaces_for` narrows a terminal removal to the account that owns the files.
+  `_prune_accounts` runs on the terminal sweep.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's
@@ -619,8 +645,11 @@ floor, not the shipped version, and moves by hand.
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
-  the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
-  since the session then shares the worker's uid), a `database.url` check that connects and
+  the uid drop through `probe_run_as` for every account in the pool (#75, #121: fails when set
+  but unusable, when the worker is not in an account's group, or when a pool has no
+  environment credential; warns when unset since the session then shares the worker's uid,
+  when one account serves more than one concurrent session, and when the pool is smaller than
+  `agent.max_concurrent_agents`), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a

@@ -218,7 +218,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
-[ OK ] agent.run_as: agent; the session runs as a separate account
+[WARN] agent.run_as: agent; the session runs as a separate account, but all 3 concurrent sessions share it
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -227,12 +227,44 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-15 checks: 0 failed, 2 warnings
+15 checks: 0 failed, 3 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
 the target repository; run it once per repository, and again after an upgrade that adds a label.
 The labels warning disappears on the next `validate`.
+
+#### One account per concurrent session
+
+`agent.run_as` above names one account, which is what the image defaults to
+(`ISSUEBOT_AGENT_USER=agent`). One account for the deployment is one account for *every*
+concurrent session, so with `agent.max_concurrent_agents` above 1 a session working one issue
+can write the workspace of a session working another -- which is why `validate` warns about it.
+Anyone may open an issue, so that is a boundary worth having (#121).
+
+Name a pool instead, and the worker binds one account to each running slot:
+
+```bash
+# in this checkout's .env
+ISSUEBOT_AGENT_USER=agent-1,agent-2,agent-3
+CLAUDE_CODE_OAUTH_TOKEN=...        # or ANTHROPIC_API_KEY
+```
+
+or, in `WORKFLOW.md`, `agent: {run_as: [agent-1, agent-2, agent-3]}`. The image builds three
+such accounts by default (`ISSUEBOT_AGENT_POOL_SIZE` at build time); each workspace directory
+then belongs to the worker and to its bound account's group alone (`1770`), so a sibling
+session cannot enter it, and a workspace keeps its account for as long as it exists, which is
+what lets a rework session write the clone the first one made. Dispatch is capped by the pool
+as well as by `agent.max_concurrent_agents`, and `validate` says so when the pool is smaller.
+
+**A pool needs a credential in the environment.** Each account has a home of its own, and
+`claude` reads its login from there, so a pool shares no login between its accounts -- on
+purpose: two accounts refreshing one OAuth credential is a race nobody has established is safe
+(`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`). Set
+`CLAUDE_CODE_OAUTH_TOKEN` (mint one with `claude setup-token`) or `ANTHROPIC_API_KEY`; the
+worker refuses to start without one rather than claim issues every session would fail to
+authenticate, and `validate` says the same. A single account is unaffected and keeps using the
+`claude-home` login below.
 
 To use a Claude Code login instead of an API key, log in once inside the container **as the
 session's account**: run `docker compose run --rm --user agent --entrypoint claude worker`,
@@ -830,7 +862,9 @@ that matters on your host.
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
   (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
-  worker (`issuebot`, uid 1000) that supervises and credentials it (#75). So the session runs
+  worker (`issuebot`, uid 1000) that supervises and credentials it (#75), and -- with a pool
+  configured, see "One account per concurrent session" below -- at a different uid from every
+  other session running beside it (#121). So the session runs
   with no permission prompts and may do as it likes at its own uid, but the worker's code
   (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
   in a hub checkout the dashboard password), its home and the state it keeps inside a

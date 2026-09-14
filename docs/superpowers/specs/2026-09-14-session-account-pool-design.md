@@ -1,0 +1,145 @@
+# One account per concurrent session, and the credential that makes it possible
+
+Date: 2026-09-14
+Status: implemented
+Issue: #121 (security sweep findings `hostile-issue-2`, `copycat-3`, point 3 of #104)
+Successor to: `2026-09-14-session-privilege-domain-design.md` (#75)
+
+## Problem
+
+#75 drew the line between the worker and the session: two accounts, one sudo rule, the
+session's environment across a descriptor. It drew no line *between* sessions. `agent.run_as`
+named one account for the whole deployment, so with `agent.max_concurrent_agents` at its
+default of 3 every concurrent session ran at the same uid. The workspaces are siblings under a
+traversable root (`/workspaces`, `0755`), each per-issue directory was `1777` for that account,
+and the clone inside it was that account's to write. A hostile issue's session could therefore
+edit an unrelated, honest issue's working tree before that session committed and pushed — the
+same class of finding as #75's, one level in.
+
+Reproduced live from a session in this deployment, before the change:
+
+```text
+$ id
+uid=1001(agent) gid=1001(agent) groups=1001(agent)
+$ ls -ld /workspaces/issuebot-119
+drwxrwxrwt 10 issuebot issuebot 4096 Sep 14 21:24 /workspaces/issuebot-119
+$ touch /workspaces/issuebot-119/.hostile-probe-121 && ls -l /workspaces/issuebot-119/.hostile-probe-121
+-rw-rw-r-- 1 agent agent 0 Sep 14 21:28 /workspaces/issuebot-119/.hostile-probe-121
+$ stat -c '%U %a' /workspaces/issuebot-119/.git
+agent 775
+```
+
+**Invariant.** Two sessions running at the same time are as separate from each other as each is
+from the worker: neither can read, write or enter the other's workspace, and the uid is what
+says so.
+
+This was not shipped with #104's other two points because a per-slot account is not a code
+change alone. `claude` authenticates itself from `$HOME` (or `CLAUDE_CONFIG_DIR`), and N
+accounts means N homes. The credential had to be decided first, and a session cannot test a
+credential against a real login.
+
+## The decision: the pool takes its credential from the environment
+
+The four options #121 set out were N logins (correct, expensive to operate), one credential
+copied into each home, one shared config directory, and an environment-borne credential.
+
+**Chosen: the environment.** A pool of session accounts requires `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` to be set. `credential_complaint` (`issuebot/agent/accounts.py`) is the one
+rule, and both the worker's startup and `validate` refuse a pool without one, naming the
+variables. A single account is untouched: it keeps its own login in its own home, which is
+where compose mounts `claude-home`.
+
+**Why this rules the failure mode out by design rather than by test.** Options 2 and 3 both
+end with more than one account refreshing *one* OAuth credential. If refresh tokens rotate,
+the second account to refresh presents a stale one and fails with exactly the error this
+deployment logged during #104's own runs — `Failed to authenticate: OAuth session expired and
+could not be refreshed`. Nobody has established whether they rotate, and establishing it needs
+a real login, several hours and two accounts racing: not something a session can do, and not
+something to ship on a guess. The environment-borne credential removes the question instead of
+answering it. There is no credential file to share, so there is no refresh for two accounts to
+race over: `CLAUDE_CODE_OAUTH_TOKEN` (what `claude setup-token` mints from a subscription) and
+`ANTHROPIC_API_KEY` are both long-lived values the deployment supplies, and `claude` reads them
+from the environment rather than from `$HOME`.
+
+It costs nothing to wire: `agent_environment`'s `PASSTHROUGH_PREFIXES` already carries
+`ANTHROPIC_` and `CLAUDE_`, so the value reaches every session account with no allow-list
+change, and `PROTECTED_ENV_PREFIXES` already stops a workspace's `.issuebot/env` from
+re-pointing it. Each pool account still gets a `~/.claude` of its own for whatever `claude`
+caches there, and no volume: nothing in it is a credential, so nothing in it needs to persist.
+
+It costs the operator one step: `claude setup-token` once, into this checkout's `.env`. That
+is the price of the boundary, and it is stated rather than hidden — `validate` says so, and
+the worker refuses to start rather than claim issues every session would fail to authenticate.
+
+**#101** (the session account's `~/.claude` persisting between sessions) is the same question
+in sequential form, and this answers it too: under a pool there is nothing to persist, because
+the credential never lands in a home.
+
+## Design
+
+- **The pool.** `agent.run_as` accepts a list as well as a name, normalised to a tuple either
+  way (`()` is the host route); `ISSUEBOT_AGENT_USER` may be comma-separated, since an
+  environment variable is a string. `run_as_pooled` — more than one name — is what the pool's
+  extra rules hang off. Below the orchestrator nothing has a pool to reason about:
+  `settings_with_run_as` narrows the settings to the one bound account before the runner and
+  the workspace manager are built, and `session_account` is the single reader.
+
+- **The binding is to a workspace, not to a run.** A reworked issue is dispatched again into
+  the same clone, and a different uid could not write it. `AccountRegistry` is the worker's own
+  record — `<workspace.root>/.issuebot/accounts.json`, `0600` in a `0700` directory, read fresh
+  on every call so a restart sees it. `allocate` binds the least-loaded account that no session
+  is currently running as, `bound` answers without binding, and `prune` (on the terminal sweep)
+  forgets a workspace that is gone. Beside the workspaces rather than inside one, because the
+  account has to be known before the clone and a clone needs an empty directory.
+
+  **Never derived from the directory.** A binding computed from the workspace key would be a
+  binding whoever opens the issue chooses, which is exactly the account a hostile session would
+  want to be handed. Only its *expiry* is derived from the directory, and a key with a session
+  running or a retry pending is kept whether its clone exists yet or not.
+
+- **Dispatch waits rather than sharing.** `_bind_account` runs before the claim, so a candidate
+  whose account is busy is left on the board instead of being moved to `in-progress` to sit
+  there. Effective concurrency is therefore `min(max_concurrent_agents, pool size)`, and
+  `validate` warns when the pool is the smaller of the two.
+
+- **The wall.** `share_with` makes a workspace directory `1770`, owner the worker (sticky, so
+  `session.json` and `runs/` stay the worker's, as #75 established) and group the bound
+  account's own. A sibling session's uid is in neither, so it cannot enter, list or write. The
+  root above stays `0755`. POSIX lets the owner of a file change its group only to one it
+  belongs to, so the worker is a supplementary member of every session account's group; that
+  membership buys the worker nothing else, since every session home is `0700`, and the worker
+  is the more privileged side of the line in any case. `group_complaint` is the pure check
+  `validate` reports before a worker ever claims an issue.
+
+- **The image.** `agent-1` .. `agent-N` (uids 1011 upwards, `ISSUEBOT_AGENT_POOL_SIZE`,
+  default 3) beside `agent`, all in group `agents`, and the sudo rule becomes
+  `issuebot ALL=(%agents) NOPASSWD: ALL`: the worker may become any session account and
+  nothing else. The worker is not in `agents`, and `sudo` is still `4750 root:issuebot`, so no
+  session account can invoke it. The pool is opt-in — `ISSUEBOT_AGENT_USER` still defaults to
+  `agent` — because turning it on is a credential decision the image cannot make for the
+  operator.
+
+- **`remove`, `kill` and the probes run per account.** They already ran through `RunAs`; what
+  changed is which account the orchestrator hands them. A terminal removal goes through a
+  manager narrowed to *that* workspace's bound account, not the pool's first member. Startup
+  probes every member, and `validate` reports the pool as its fifteenth check.
+
+## What this does not do
+
+The worker is still one process at one uid supervising all of them; the boundary added here is
+between sessions, not around the worker. The pid namespace is still shared (#75). A single
+account remains supported and remains what the image defaults to, so a deployment that has not
+set an environment credential is exactly as it was — including the sharing, which `validate`
+now warns about rather than leaving implicit.
+
+## Tests
+
+`tests/test_agent_accounts.py` drives the setting, the registry, the credential rule and
+`share_with` (against the running account's own group, since a unit test cannot create one);
+`tests/test_orchestrator.py` proves two concurrent sessions take two accounts, that a workspace
+keeps its account across a rework, that a candidate whose account is busy is not claimed, and
+that a pool without an environment credential fails startup; `tests/test_cli.py` covers what
+`validate` reports; `tests/test_image_layout.py` pins the Dockerfile and CI shapes. The uid
+boundary itself — two accounts, a workspace each, `EACCES` both ways round — is proved by the
+CI `docker` job, calling the shipped `share_with` rather than a hand-written `chmod`, because
+`EACCES` across two uids is exactly what a unit test cannot see.

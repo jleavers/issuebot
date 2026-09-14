@@ -37,7 +37,8 @@ image's uid layout and the compose mounts.
 
 - **The worker stays unprivileged.** It does not run as root and drop; the process that parses
   the session's output is never the most privileged one in the container. Instead `sudo`
-  carries exactly one rule — `issuebot ALL=(agent) NOPASSWD: ALL` — and its binary is
+  carries exactly one rule — `issuebot ALL=(agent) NOPASSWD: ALL`, widened by #121 to the
+  group of session accounts, `(%agents)` — and its binary is
   `4750 root:issuebot`, so the session's uid cannot invoke `sudo` at all, not even to be
   refused. The worker can become `agent` and nothing else; it cannot become root.
 
@@ -54,7 +55,8 @@ image's uid layout and the compose mounts.
   verbs; a `probe` reports whether the delegation works at all.
 
 - **Workspace state is the worker's.** Under `agent.run_as` the workspace directory and its
-  `.issuebot` are created by the worker and made sticky (`1777`): the session writes what it
+  `.issuebot` are created by the worker and made sticky (`1777`; `1770` and the bound
+  account's group since #121): the session writes what it
   likes inside them but can neither unlink nor rename the worker's entries, so `session.json`
   and `runs/` stay the worker's. `session.json` is trusted only when the worker owns it, and is
   written under a freshly created name the session could not pre-place. A repository that ships
@@ -85,6 +87,12 @@ image's uid layout and the compose mounts.
   the setting's fallback, so every container splits the privilege without a workflow change.
 
 ## What this does not do
+
+One account for the whole deployment is one account for every concurrent session, so this
+draws no line *between* sessions: that is #121, whose spec
+(`2026-09-14-session-account-pool-design.md`) succeeds this one and records the credential
+decision a pool needs. `agent.run_as` now accepts a pool as well as a name, and everything
+below the orchestrator sees the one account bound to the workspace it is working in.
 
 The Anthropic credential is necessarily the session's own — `claude` authenticates itself — so
 the split moves it into the session's home rather than hiding it from the session. The pid
