@@ -13,7 +13,7 @@ uv run pytest                        # tests (hermetic; no network, no Docker; D
                                      #   colourises help and the shell would otherwise decide)
 uv run pytest tests/test_cli.py -k validate   # one file / one pattern
 docker compose --profile test up -d --wait test-db   # a throwaway postgres:18 on an ephemeral port
-DATABASE_URL=postgresql://issuebot:issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
+DATABASE_URL=postgresql://issuebot@$(docker compose port test-db 5432)/issuebot uv run pytest
 docker compose rm -sf test-db        # throw it away (not `compose down`: that is project-wide)
 docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB_PORT (5434 here)
 uv run ruff check . && uv run ruff format --check .
@@ -44,6 +44,19 @@ collide with `db` or with the other projects on this host. `docker compose port 
 where postgres listens whatever the host publishes. Throw it away with `docker compose rm
 -sf test-db`, **not** `docker compose down`: `down` is project-wide and would stop the live
 `db`, `worker` and `web` too.
+
+**The store's password is `ISSUEBOT_DB_PASSWORD` in `.env`, and nothing in the tree is a
+working credential (#78).** `db`'s `POSTGRES_PASSWORD` and the `DATABASE_URL` of `worker` and
+`web` are `${ISSUEBOT_DB_PASSWORD:?...}`, a required substitution with no default, so compose
+refuses all three, by name, while it is unset or empty; `.env.example` ships the key empty. The
+`docker` CI job proves both directions under every profile, and
+`tests/test_compose_credentials.py` pins the shape without Docker. Compose interpolates the
+whole file before it filters by profile, so even `--profile test` needs the variable *set*,
+though `test-db` never reads it: that cluster is a throwaway on tmpfs behind a loopback port and
+authenticates with `trust` (#62's choice for the workspace cluster), which is why its DSN above
+names no password, as does the CI `test` job's service. Every DSN in the README is a placeholder
+over the variable for the same reason. The image applies the password at initdb only; a cluster
+that already exists is rotated with `ALTER ROLE` (README, "Rotating the database password").
 
 **Do not pass `ISSUEBOT_DB_PORT=...` inline to `docker compose`.** That is the long-lived
 `db`'s port, and it belongs to the project's env file (5432 in `.env.example`, 5434 on this
@@ -201,9 +214,10 @@ floor, not the shipped version, and moves by hand.
   the committed fixture are all this function's output and never the file (a failed turn's
   `error`, built from claude's words too, takes another exit to `runs`, Slack and the
   workpad: #91). `scrub.py`: `Scrubber(secrets=, home=)` masks known values as whole words
-  (`***`; a floor of `MIN_SECRET_LENGTH`, 12, since the compose default's database password
-  is the eight letters of `issuebot` and the DSN shape masks it in DSN form without every
-  label and repository in the stream going too; an all-digit value is skipped, since a JSON
+  (`***`; a floor of `MIN_SECRET_LENGTH`, 12, since a database password as short as the
+  eight letters of `issuebot`, the compose default until #78, is masked in DSN form by the DSN
+  shape without every label and repository in the stream going too; an all-digit value is
+  skipped, since a JSON
   number could equal it and the mask would break the line; the JSON-escaped spelling is
   matched as well), credential shapes whatever their source (GitHub `ghp_`/`github_pat_`
   tokens, `sk-ant-` keys, `hooks.slack.com` webhooks, a URL's userinfo password with a
