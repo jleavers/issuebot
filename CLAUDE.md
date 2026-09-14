@@ -604,7 +604,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (fourteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (fifteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
@@ -613,7 +613,9 @@ floor, not the shipped version, and moves by hand.
   agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
-  missing so an older-but-permitted `claude` stays green, a `database.url` check that connects and
+  missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
+  the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
+  since the session then shares the worker's uid), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a
