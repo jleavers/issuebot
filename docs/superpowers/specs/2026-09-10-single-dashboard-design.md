@@ -130,7 +130,9 @@ CREATE TABLE repos (
 - `events` gains `repo text NOT NULL`; both indexes get `repo` as their leading column.
 - `runtime_snapshot` drops its one-row `id` column and check and is keyed by `repo`, one
   row per worker.
-- `run_turns` is unchanged.
+- `run_turns` is unchanged. *Amended 2026-09-14 (#111): `0004_run_turns_repo` gives it a
+  `repo` column, keyed `(repo, run_id, turn_number)` with a foreign key to `runs (repo,
+  run_id)`, and re-keys `runs` the same way; the join is no longer what scopes it.*
 
 Model labels are not stored: the web never needs them.
 

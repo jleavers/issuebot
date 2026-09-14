@@ -2,7 +2,8 @@
 
 Date: 2026-09-14
 Status: implemented
-Issue: #77 (security sweep findings `hostile-issue-3`, `hostile-issue-5`)
+Issue: #77 (security sweep findings `hostile-issue-3`, `hostile-issue-5`); generalised by #111
+(findings `runas-1`, `supply-chain-1`, `supply-chain-3`, `store-tenancy-3`)
 
 ## Problem
 
@@ -32,7 +33,33 @@ Any GitHub object issuebot treats as its own state is resolved by provenance it 
 the authoring account, or an id issuebot itself recorded -- never by matching text a third
 party can write.
 
-## Decision
+## The rule, generalised (#111)
+
+The invariant above was written for GitHub objects and implemented for two of them. #111's
+sweep found the same shape everywhere else the tree establishes that something is what it
+claims to be, and each instance had accepted a stand-in for the referent. The rule is
+therefore the artefact, and it reads:
+
+> Nothing is accepted as its own -- a separated uid, this repository's pull request, this
+> repository's row, this repository's chosen build of third-party code -- unless the decision
+> compares an authoritative value the checked party cannot choose: the invoking uid, the
+> author and head repository, a `repo` column written with the row, a commit digest.
+
+Its instances live at the point of each decision, not in a shared helper, and the next one is
+decided by the rule rather than rediscovered by a later sweep:
+
+| Decision | Stand-in it accepted | Referent it compares now |
+|---|---|---|
+| `RunAs.probe` (`agent/runas.py`): does the delegation separate the session? | The delegated `id -u` equals the target account's uid -- true with no uid change at all when the target *is* the invoker | The delegated uid equals the target's **and** differs from `os.getuid()`; an account that is the invoker's is refused before sudo is asked, and an answer that is the invoker's reads `no separation` |
+| The bump jobs (`claude-code-version.yml`, `pre-commit-version.yml`): is there already a pull request for this move? | A branch *name*, `gh pr list --head`, which any fork's branch matches | REST `pulls?head=<owner>:<branch>`, kept only when `head.repo.full_name` is this repository and `user.login` is `github-actions[bot]` |
+| `PostgresStore` (`db/store.py`): which repository does this row belong to? | `_stamp` merged the store's `repo` *under* the row's, and `INSERT_TURN` bypassed it, so `run_turns` had no repository and rested on `run_id` being unique across workers, checked by the read's join | `_stamp` forces the store's `repo` over anything a row carries and is the only way a row is built; `run_turns` carries its own, keyed `(repo, run_id, turn_number)` with a foreign key to `runs (repo, run_id)` (`0004_run_turns_repo`), so the check is the write's |
+| CI and pre-commit: which build of a third-party action or hook runs here? | A tag (`@v7`, `rev: v6.0.0`), a name its owner can repoint | A commit digest with the tag beside it, moved by Dependabot (actions) and `pre-commit-version.yml` (hooks), pinned by `tests/test_pins.py` |
+
+The four are instances, not the rule's extent. A check that compares a name, a label, a
+first line, a branch, a tag or a merged-in default is a check of the same kind and gets the
+same answer.
+
+## Decision (#77)
 
 The provenance is **the account the adapter runs as**, read once from `gh api user`. It is
 the one thing about a comment or a pull request that a third party cannot write, and it is

@@ -51,7 +51,8 @@ image's uid layout and the compose mounts.
   installs that environment whole and execs. `kill`
   (the session's process group, which the worker's uid may not signal) and `remove` (the
   session's files under a workspace, which the worker's uid may not unlink) are the other two
-  verbs; a `probe` reports whether the delegation works at all.
+  verbs; a `probe` reports whether the delegation works at all -- and, since #111, whether it
+  *separates*: the delegated uid is compared with the invoking one, not only the target's.
 
 - **Workspace state is the worker's.** Under `agent.run_as` the workspace directory and its
   `.issuebot` are created by the worker and made sticky (`1777`): the session writes what it
