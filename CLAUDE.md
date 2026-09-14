@@ -168,10 +168,11 @@ floor, not the shipped version, and moves by hand.
   `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
   the session's environment crosses the uid change on the descriptor `anonymous_fd` opens
   rather than through sudo's environment policy (`memfd_create` where the interpreter has
-  it, an immediately unlinked temporary file where it does not: `uv` installs a CPython
-  configured against a glibc older than the call, so the suite's interpreter regularly lacks
-  what the image's has — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec`
-  verb (run by the worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
+  it and the kernel answers, an immediately unlinked file on a tmpfs where it does not:
+  `uv` installs a CPython configured against a glibc older than the call, so the suite's
+  interpreter regularly lacks what the image's has — #115), `HOME`/`USER`/`LOGNAME` become
+  the account's, and the `exec` verb (run by the worker's root-owned interpreter) installs
+  it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
   two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as

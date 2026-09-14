@@ -6,6 +6,7 @@ does, and execs the command as the same account. What that proves is the plumbin
 the descriptor, the environment that comes out the far side, the kill and the removal.
 """
 
+import errno
 import json
 import os
 import pwd
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent import runas as runas_module
 from issuebot.agent.runas import MODULE, RunAs, RunAsError, anonymous_fd
 from issuebot.agent.runner import ClaudeRunner
 from issuebot.agent.workspace import SHARED_DIR_MODE, WorkspaceManager
@@ -86,13 +88,53 @@ def test_anonymous_fd_hands_back_an_unnamed_descriptor_on_either_branch(
         assert os.write(fd, b"payload") == 7
         assert os.lseek(fd, 0, os.SEEK_SET) == 0
         assert os.read(fd, 16) == b"payload"
-        # No directory entry names it, so nothing else can open what it holds. A memfd's
-        # link is /memfd:..., the fallback's the deleted path; neither resolves to a file.
-        if Path("/proc/self/fd").is_dir():
-            target = os.readlink(f"/proc/self/fd/{fd}")
-            assert not Path(target).exists(), target
-            if descriptor_branch == "unlinked-file":
-                assert target.endswith(" (deleted)"), target
+        # No directory entry names it, so nothing else can open what it holds.
+        assert os.fstat(fd).st_nlink == 0
+        # And it is the branch the fixture asked for, not whichever one this interpreter
+        # would have taken anyway: a memfd's link is /memfd:<label>, the fallback's the
+        # path it was unlinked from.
+        target = os.readlink(f"/proc/self/fd/{fd}")
+        if descriptor_branch == "memfd":
+            assert target.startswith("/memfd:"), target
+        else:
+            assert target.endswith(" (deleted)"), target
+            assert target.startswith((runas_module.SHM_DIR, tempfile.gettempdir())), target
+    finally:
+        os.close(fd)
+
+
+def test_anonymous_fd_prefers_memfd_create_wherever_the_interpreter_has_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatch itself, on an interpreter of either kind.
+
+    CI installs the ``uv`` CPython, which has no ``memfd_create``, so the branch production
+    takes would otherwise be proved only by hand on the image's Python (#115).
+    """
+    calls: list[str] = []
+
+    def spy(name: str) -> int:
+        calls.append(name)
+        return os.open(os.devnull, os.O_RDWR)
+
+    monkeypatch.setattr(os, "memfd_create", spy, raising=False)
+    fd = anonymous_fd("issuebot-test-env")
+    os.close(fd)
+    assert calls == ["issuebot-test-env"]
+
+
+def test_anonymous_fd_falls_back_when_the_call_is_there_but_the_kernel_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seccomp profile or an old kernel answers ``ENOSYS``; the fallback needs neither."""
+
+    def refuse(name: str) -> int:
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr(os, "memfd_create", refuse, raising=False)
+    fd = anonymous_fd("issuebot-test-env")
+    try:
+        assert os.fstat(fd).st_nlink == 0
     finally:
         os.close(fd)
 
@@ -102,10 +144,38 @@ def test_anonymous_fd_reports_a_failed_fallback_as_an_oserror(
 ) -> None:
     """The spawn sites catch ``OSError``; the fallback must not invent another failure."""
     monkeypatch.delattr(os, "memfd_create", raising=False)
+    monkeypatch.setattr(runas_module, "SHM_DIR", str(tmp_path / "no-such-tmpfs"))
     # ``tempfile.tempdir``, not ``TMPDIR``: ``gettempdir`` caches its answer in that global.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-such-directory"))
     with pytest.raises(OSError):
         anonymous_fd("issuebot-test-env")
+
+
+def test_anonymous_fd_closes_the_descriptor_when_the_unlink_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one path that could leak a descriptor holding the session's whole environment."""
+    monkeypatch.delattr(os, "memfd_create", raising=False)
+    opened: list[int] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def record(*args: object, **kwargs: object) -> tuple[int, str]:
+        fd, path = real_mkstemp(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(fd)
+        return fd, path
+
+    def deny(*_: object) -> None:
+        raise OSError("denied")
+
+    monkeypatch.setattr(tempfile, "mkstemp", record)
+    monkeypatch.setattr(os, "unlink", deny)
+    with pytest.raises(OSError):
+        anonymous_fd("issuebot-test-env")
+    # One attempt per candidate directory, and not one of them still holds a descriptor.
+    assert opened
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
 def test_probe_answers_none_when_the_account_answers_and_names_the_refusal_otherwise() -> None:

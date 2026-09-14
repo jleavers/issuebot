@@ -44,7 +44,9 @@ image's uid layout and the compose mounts.
 - **`issuebot.agent.runas`.** The delegation wrapper. `RunAs.prepared` builds the argv
   `sudo -n -u agent -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`. The
   session's environment (the `agent_environment` allow-list plus the workspace's
-  `.issuebot/env`) crosses the uid change on an anonymous memory file, not through sudo's
+  `.issuebot/env`) crosses the uid change on an anonymous file (`anonymous_fd`: a memfd
+  where the interpreter has `os.memfd_create`, an immediately unlinked file on a tmpfs where
+  it does not, which `uv`'s CPython regularly does not — #115), not through sudo's
   environment policy, so what the session sees is exactly what the worker built, with
   `HOME`/`USER`/`LOGNAME` the account's own. The `exec` verb — run by the worker's own
   root-owned interpreter, `-P` so the agent's workspace cwd cannot shadow the package —

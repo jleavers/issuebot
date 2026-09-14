@@ -42,30 +42,56 @@ SUDO_TIMEOUT_S = 10
 REMOVE_TIMEOUT_S = 120
 
 
+# The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
+# it carries -- GH_TOKEN, the Anthropic credential, any DSN a ``before_run`` hook wrote --
+# stays in memory as the memfd's bytes do, rather than in a disk-backed filesystem's freed
+# blocks. A preference only: an absent, unwritable or full ``/dev/shm`` falls through to
+# whatever ``tempfile`` chooses.
+SHM_DIR = "/dev/shm"
+
+
 def anonymous_fd(name: str) -> int:
     """A read-write descriptor on a file no path names, positioned at its start.
 
-    ``memfd_create`` where the interpreter has it, and where it does not an immediately
-    unlinked temporary file, which is what made the memfd the right choice in the first
-    place: the descriptor is inherited through ``pass_fds`` and survives sudo's ``-C``, and
-    once there is no directory entry nothing else can open the environment it holds. A pipe
-    would not do -- the writer would block on the buffer if the environment ever outgrew it.
+    ``memfd_create`` where the interpreter has it and the kernel answers, and otherwise a
+    temporary file unlinked before anything is written to it -- which is what made the memfd
+    the right choice in the first place: the descriptor is inherited through ``pass_fds`` and
+    survives sudo's ``-C``, and with no directory entry nothing else can open the environment
+    it holds. A pipe would not do; the writer would block on the buffer if the environment
+    ever outgrew it.
 
     The fallback is not theoretical (#115): ``python-build-standalone``, which is what ``uv``
     installs, configures against a glibc older than the call, so the interpreter a developer
     runs the suite under is regularly one without it while the image's Debian Python has it.
-    ``sysconfig``'s ``HAVE_MEMFD_CREATE`` reads ``0`` on those builds even when the attribute
-    is there, so the attribute is what to ask.
+    The attribute is what to ask for, not ``sysconfig``'s ``HAVE_MEMFD_CREATE``: that
+    describes the build rather than the runtime, and reads ``0`` on a ``uv`` CPython 3.14.7
+    that does define ``os.memfd_create``.
 
-    Raises ``OSError``, like ``memfd_create`` itself, so every spawn site reports it.
+    ``name`` is a label, not a path: it reaches the fallback as a filename prefix, so pass a
+    bare identifier. Raises ``OSError``, like ``memfd_create`` itself, so every spawn site
+    reports it the way it reports a missing ``claude``.
     """
     create = getattr(os, "memfd_create", None)
     if create is not None:
-        return create(name)
-    fd, path = tempfile.mkstemp(prefix=f"{name}-")
+        # A present call can still fail: an old kernel, a seccomp profile, a sandbox. The
+        # fallback needs none of those, so try it rather than failing the spawn.
+        with contextlib.suppress(OSError):
+            return create(name)
+    if os.path.isdir(SHM_DIR) and os.access(SHM_DIR, os.W_OK):
+        with contextlib.suppress(OSError):
+            return _unlinked_fd(name, SHM_DIR)
+    return _unlinked_fd(name, None)
+
+
+def _unlinked_fd(name: str, directory: str | None) -> int:
+    """A descriptor on a temporary file in ``directory``, unlinked before it is written to.
+
+    ``mkstemp`` opens it ``0600`` to this uid, and the unlink follows immediately, so the
+    window in which the file has a name is one in which it is empty and unreadable to the
+    account the session runs as.
+    """
+    fd, path = tempfile.mkstemp(prefix=f"{name}-", dir=directory)
     try:
-        # mkstemp opens 0600 to this uid, so the window before the unlink is not one the
-        # session -- a different uid, and not root -- could read the environment through.
         os.unlink(path)
     except OSError:
         os.close(fd)
@@ -124,7 +150,7 @@ class RunAs:
         payload = json.dumps(self.environment(env)).encode("utf-8")
         fd = anonymous_fd("issuebot-agent-env")
         try:
-            os.write(fd, payload)
+            _write_all(fd, payload)
             os.lseek(fd, 0, os.SEEK_SET)
             yield Spawn(
                 argv=[
@@ -195,6 +221,14 @@ class RunAs:
         # shadow the real module (#75). No escalation -- the helper is already the agent -- but
         # the interpreter should resolve to the root-owned package under /app regardless.
         return [sys.executable, "-P", "-m", MODULE, *args]
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write every byte. A memfd took the lot in one call; a file on a filesystem that fills
+    mid-write need not, and a truncated environment reaches the helper as unparseable JSON."""
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(fd, view) :]
 
 
 def _last_line(text: str) -> str:
