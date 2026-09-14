@@ -1,7 +1,7 @@
 # The session's authority is fixed outside the prompt
 
 Date: 2026-09-14
-Status: implemented (tools, credentials, the envelope); egress filed as a follow-up
+Status: implemented (tools, credentials, the envelope); egress filed as #126, `--restricted` as #127
 Issue: #109 (security sweep findings `hostile-issue-1`, `hostile-issue-3`)
 
 ## Problem
@@ -50,8 +50,10 @@ what the session may do within them.
   purpose-built way to fetch the next page of it. `build_argv` emits the list, so a default
   argv now carries `--disallowedTools WebFetch WebSearch`, and always emits
   `--strict-mcp-config`, so no MCP server from the clone's `.mcp.json`, the project's settings
-  or the account's home joins the set; issuebot passes no `--mcp-config`, which leaves the
-  built-in tools alone. A deny list rather than an allow list, on purpose: an allow list would
+  or the account's home joins the set; `claude.mcp_config`, a list of what `--mcp-config`
+  takes and empty by default, is the one route in, so a deployment that used a server from
+  its home names it in the front matter and gets it back. That is a change on upgrade: a
+  server a session found for itself is gone until the front matter names it. A deny list rather than an allow list, on purpose: an allow list would
   have to name every tool the workflow needs, and tool names move between `claude` releases
   (`Task` became `Agent`), so a hard-coded one would break sessions silently on the weekly
   version bump, while the deny list names two tools that are not going anywhere and fails
@@ -76,24 +78,29 @@ what the session may do within them.
   token is the only kind that reads check runs (README, "Prerequisites").
 
 - **The envelope is demoted from boundary to hint, and the hint is fixed.** `_defang` replaces
-  the literal regex. For every `<` in the text -- and the fullwidth and small forms NFKC folds
-  to it -- it takes the *skeleton* of the next 64 characters (`tag_skeleton`: Unicode format
-  characters, general category `Cf`, removed; compatibility forms folded by NFKC) and
-  neutralises the `<` when one spelling, `\s*/?\s*github-text\b`, matches. So
-  `<​github-text`, `<﻿/github-text`, `</git​hub-text`, `＜github-text` and
-  `<ｇithub-text` are all the tag. The window bounds the cost (a body of nothing but `<` is
-  linear) and what a run of invisible padding longer than it buys is not a widened session but
-  a refused render: `check_envelopes` walks the *whole* render's skeleton, so a forged edge
-  that survived the defang is a nested or stray edge there and the turn fails as
-  `prompt_error` -- the same exit as a template that cut a tag, which `validate` reports and a
-  worker never crashes on. The `Cf` class is written as ranges, since a table walk at import
-  is 1.1 M code points, and a test pins it against `unicodedata`, so a Unicode update that
-  adds a format character fails a test rather than a sweep.
+  the literal regex, and reads the text through its *skeleton* (`tag_skeleton`: Unicode
+  format characters, general category `Cf`, removed; compatibility forms folded by NFKC). The
+  format characters are stripped once, each kept character's raw index remembered; for every
+  `<` -- and the fullwidth and small forms NFKC folds to it -- the gap that may follow it
+  (`\s*/?\s*`, unbounded as the literal regex's was, and linear since a run of whitespace
+  follows one `<` and no other) is matched on the stripped text, and the dozen characters
+  where the name would be are NFKC-folded and matched against `github-text\b`. So a `<`
+  split from the name by U+200B, a BOM before a `/`, a name with a U+200B inside it, a
+  fullwidth less-than or a fullwidth `g`, and a `<` with any length of spaces or invisible
+  characters before the name are all the tag, and the `<` is replaced in the raw text with the
+  padding left as data. It is total over the same skeleton `check_envelopes` walks, so text
+  inside an envelope can never fail the render however its tag is spelled -- a deterministic
+  failure would be retried `max_attempts` times and escalated blaming the template -- while a
+  template that cut a tag, or a value no envelope wraps (#105), still does. The `Cf` class is
+  written as ranges, since a table walk at import is 1.1 M code points, and a test pins it
+  against `unicodedata`, so a Unicode update that adds a format character fails a test rather
+  than a sweep.
 
-  What this normalisation misses -- a `<` lookalike NFKC does not fold, a mathematical-script
-  letter in the name -- reaches the model as text the prompt's rule may or may not cover, and
-  widens nothing. That is the demotion: the regex is no longer the thing the next sweep has
-  to get past to reach a token.
+  What this normalisation misses -- a `<` lookalike NFKC does not fold, a combining mark
+  between the `<` and the name (`<` U+0338 composes to a single negated less-than), a
+  mathematical-script letter in the name -- reaches the model as text the prompt's rule may or
+  may not cover, and widens nothing. That is the demotion: the regex is no longer the thing
+  the next sweep has to get past to reach a token.
 
 - **The prose describes the authority; it does not grant one.** `configs/WORKFLOW.md` states,
   once, after the rule about GitHub text and before the first envelope, that what the session
@@ -113,14 +120,14 @@ what the session may do within them.
   worker on an `internal` network, the proxy on that and the default one, `HTTP_PROXY` and
   `HTTPS_PROXY` in `agent_environment`'s allow-list, `api.anthropic.com`, GitHub and the
   registries the hooks need on the list -- which is a deployment change too large to make
-  unattended here. Filed as a follow-up with that sketch; until it lands, the tool policy
-  removes the model's own egress and the container's remains.
+  unattended here. Filed as #126 with that sketch; until it lands, the tool policy removes
+  the model's own egress and the container's remains.
 - **`--restricted`.** `claude` 2.1.263 has a mode that removes the code-running tools unless
   named, confines the file tools to the working directories, refuses `bypassPermissions` and
   lets only a person or the permission handler approve writes to settings, git and
   tool-configuration files. Whether `MIN_CLAUDE_VERSION` has it is not known from here, and it
   ignores the project settings `setting_sources: [project]` promises to load, so it is a
-  decision rather than a default; filed as a follow-up.
+  decision rather than a default; filed as #127.
 - **The Claude credential.** It is the session's own and stays so (#75, "What this does not
   do").
 - **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare) and
@@ -133,7 +140,7 @@ what the session may do within them.
 default session, the list emptied by a setting with the MCP flag staying, and both reaching
 the recorded process); `tests/test_settings.py` the default and its widening;
 `tests/test_agent_prompt.py` the defang across format characters, compatibility spellings and
-padding past the window, the `Cf` class against `unicodedata`, and the structure check on the
-skeleton; `tests/test_workflow_default.py` the authority paragraph's place and wording and the
+padding of any length, that no spelling inside an envelope fails a render, the `Cf` class
+against `unicodedata`, and the structure check on the skeleton; `tests/test_workflow_default.py` the authority paragraph's place and wording and the
 shipped front matter's tool policy; `tests/test_cli.py` the token-reach verdicts;
 `tests/test_image_layout.py` the Dockerfile's flag assertions.

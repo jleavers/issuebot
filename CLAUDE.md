@@ -218,13 +218,15 @@ floor, not the shipped version, and moves by hand.
   is fixed at spawn from the front matter and never by the prompt (#109, spec
   `2026-09-14-session-authority-design.md`): `claude.disallowed_tools` ships
   `DEFAULT_DISALLOWED_TOOLS` (`WebFetch`, `WebSearch`) and `build_argv` emits it, `[]` widens
-  it, and `--strict-mcp-config` is unconditional, so the clone's `.mcp.json` adds nothing; the
-  Dockerfile asserts both flags at build. The `<github-text>` envelope is therefore a hint to
+  it, `--strict-mcp-config` is unconditional, so the clone's `.mcp.json` adds nothing, and
+  `claude.mcp_config` (`--mcp-config`, paths or JSON strings, default none) is the one route
+  in; the Dockerfile asserts both flags at build. The `<github-text>` envelope is therefore a hint to
   the model, not the boundary: `_defang` neutralises a `<` (or the fullwidth and small forms
-  NFKC folds to it) that is followed, in the `tag_skeleton` of the next 64 characters (Unicode
-  format characters, category `Cf`, removed and compatibility forms folded), by the tag name,
-  and `check_envelopes` walks the whole render's skeleton, so a forged edge padded past the
-  window fails the render as `prompt_error` rather than reaching the model; `workspace_environment` layers the
+  NFKC folds to it) that is followed, on the text's skeleton (`tag_skeleton`: Unicode format
+  characters, category `Cf`, removed and compatibility forms folded), by any run of
+  whitespace and an optional `/` and then the tag name; it is total over that skeleton, which
+  `check_envelopes` also walks, so text inside an envelope can never fail the render however
+  its tag is spelled, while a template or an unwrapped value that forges an edge still does; `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN

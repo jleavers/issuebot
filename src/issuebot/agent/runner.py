@@ -686,8 +686,8 @@ class ClaudeRunner:
             "none",
             # No MCP server from the clone's `.mcp.json` or any settings file (#109): the
             # session's tool set is what this argv says, and a repository that ships a server
-            # configuration would otherwise add to it on the next session. Nothing passes
-            # `--mcp-config`, so this leaves the session with the built-in tools alone.
+            # configuration would otherwise add to it on the next session. `claude.mcp_config`
+            # below is the one route in, and without it the built-in tools are the set.
             "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),
@@ -703,6 +703,8 @@ class ClaudeRunner:
             argv += ["--allowedTools", *cfg.allowed_tools]
         if cfg.disallowed_tools:
             argv += ["--disallowedTools", *cfg.disallowed_tools]
+        if cfg.mcp_config:
+            argv += ["--mcp-config", *cfg.mcp_config]
         return argv
 
     def child_environment(self) -> dict[str, str]:

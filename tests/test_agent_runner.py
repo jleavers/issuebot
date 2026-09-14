@@ -91,6 +91,13 @@ def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path)
     assert "--disallowedTools" not in argv
     assert "--strict-mcp-config" in argv
     assert "--mcp-config" not in argv
+    # The MCP half is widened the same way, by naming the servers in the front matter, and
+    # the strict flag stays so nothing else joins them.
+    argv = ClaudeRunner(settings(tmp_path, mcp_config=["a.json", "b.json"]), environ={}).build_argv(
+        session_id=SESSION_ID, resume=False
+    )
+    assert argv[-3:] == ["--mcp-config", "a.json", "b.json"]
+    assert "--strict-mcp-config" in argv
 
 
 def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
@@ -104,6 +111,7 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
             append_system_prompt="Be terse.",
             allowed_tools=["Read", "Bash(git *)"],
             disallowed_tools=["WebFetch"],
+            mcp_config=["/etc/issuebot/mcp.json"],
         ),
         environ={},
     )
@@ -124,6 +132,8 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         "Bash(git *)",
         "--disallowedTools",
         "WebFetch",
+        "--mcp-config",
+        "/etc/issuebot/mcp.json",
     ]
     assert "--session-id" not in argv
 

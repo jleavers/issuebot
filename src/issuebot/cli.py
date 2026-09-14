@@ -447,6 +447,8 @@ def _token_check(workflow: Workflow) -> Check:
     elif isinstance(raw_token, str) and ENV_REF.match(raw_token):
         source = f"from {raw_token}"
     else:
+        # One warning per check, and this one comes first: a literal is the more urgent
+        # complaint, and the reach is read once the token has moved into a variable.
         return Check("github.token", "warn", "literal value in WORKFLOW.md; prefer $VAR")
     reach = _token_reach(token.get_secret_value())
     if reach is None:

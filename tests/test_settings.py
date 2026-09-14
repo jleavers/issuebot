@@ -274,3 +274,6 @@ def test_the_tool_policy_ships_restrictive_and_is_widened_by_a_setting() -> None
         {"github": {"repo": "o/r"}, "claude": {"disallowed_tools": ["WebFetch", "Bash(curl *)"]}}
     )
     assert tightened.claude.disallowed_tools == ["WebFetch", "Bash(curl *)"]
+    assert default.claude.mcp_config == []
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"github": {"repo": "o/r"}, "claude": {"mcp_config": [""]}})

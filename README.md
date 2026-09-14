@@ -85,8 +85,9 @@ issues that triage is most of the value.
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
    without it any push touching those files is rejected. A classic token with the `repo` scope
    works too; it needs `workflow` adding for the same reason, and it reads check runs where a
-   fine-grained token cannot. The account needs permission to push branches and open PRs in the
-   target repository.
+   fine-grained token cannot -- and `validate` warns on it, because the session holds the
+   token and a classic token's reach is the whole account's, not one repository's (#109).
+   The account needs permission to push branches and open PRs in the target repository.
 2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
    (see step 2 below for the container).
 3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
@@ -178,6 +179,7 @@ ignored.
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
 | `claude.allowed_tools`, `claude.disallowed_tools` | the session's tool set, passed to `claude` as `--allowedTools` and `--disallowedTools`. The deny list ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[]`; `[WebFetch, WebSearch]` |
+| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, readable by the session's account, or JSON strings); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL; unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |

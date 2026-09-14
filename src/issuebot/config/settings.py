@@ -129,6 +129,11 @@ class ClaudeSettings(_Model):
     # `disallowed_tools: []` widens it; that is a setting, outside the prompt, which is where
     # the session's authority is fixed: neither the prose nor an issue can.
     disallowed_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_DISALLOWED_TOOLS))
+    # The MCP servers a session may use, as `claude --mcp-config` takes them: paths to JSON
+    # files, or JSON strings. Every session runs with `--strict-mcp-config`, so this list is
+    # the whole set; empty -- the default -- is no server at all, whatever the clone's
+    # `.mcp.json` or a settings file says. A path is read by the session's account.
+    mcp_config: list[NonEmptyStr] = Field(default_factory=list)
     append_system_prompt: str | None = None
     setting_sources: list[SettingSource] | None = None
     model_labels: dict[str, str] = Field(default_factory=dict)
