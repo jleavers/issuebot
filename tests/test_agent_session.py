@@ -24,7 +24,7 @@ from issuebot.agent.session import (
 from issuebot.agent.workspace import WorkspaceManager
 from issuebot.config import Settings, Workflow
 from issuebot.events import Event, EventBus, RunEnded, RunStarted
-from issuebot.github import FakeGitHub, GhResult, GitHubError, StateLabel
+from issuebot.github import WORKPAD_MARKER, Comment, FakeGitHub, GhResult, GitHubError, StateLabel
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="workspaces need bash and git")
 
@@ -127,10 +127,14 @@ class Harness:
         max_turns: int = 3,
         template: str = TEMPLATE,
         hooks: dict[str, str] | None = None,
+        token: str | None = None,
     ) -> None:
+        github: dict[str, object] = {"repo": "example/repo"}
+        if token is not None:
+            github["token"] = token
         self.settings = Settings.model_validate(
             {
-                "github": {"repo": "example/repo"},
+                "github": github,
                 "workspace": {"root": str(tmp_path / "workspaces")},
                 "agent": {"max_turns": max_turns},
                 "hooks": hooks or {},
@@ -440,13 +444,82 @@ async def test_every_turn_over_budget_ends_at_max_turns(tmp_path: Path) -> None:
 
 async def test_refresh_failure_is_github_error(tmp_path: Path) -> None:
     h = Harness(tmp_path)
+    find_workpad = h.github.find_workpad_comment
+
+    async def then_fail_the_refresh(number: int) -> Comment | None:
+        comment = await find_workpad(number)
+        h.github.fail_next("transport")
+        return comment
+
+    h.github.find_workpad_comment = then_fail_the_refresh  # type: ignore[method-assign]
+    result = await h.run(ScriptedRunner())
+    assert result.outcome == "failed"
+    assert result.error_category == "github_error"
+    assert result.error is not None
+    assert "could not refresh the issue" in result.error
+    assert "transport" in result.error
+    assert result.turns == 1
+
+
+async def test_workpad_lookup_failure_is_github_error(tmp_path: Path) -> None:
+    """The prompt is not rendered without the workpad: the agent would open a second one."""
+    h = Harness(tmp_path)
     h.github.fail_next("transport")
     result = await h.run(ScriptedRunner())
     assert result.outcome == "failed"
     assert result.error_category == "github_error"
     assert result.error is not None
-    assert "transport" in result.error
-    assert result.turns == 1
+    assert "could not find the workpad" in result.error
+    assert result.turns == 0
+
+
+WORKPAD_TEMPLATE = (
+    "{% if workpad %}pad {{ workpad.id }} {{ workpad.url }}{% else %}no pad{% endif %}"
+)
+
+
+async def test_the_prompt_carries_the_workpad_issuebot_resolved(tmp_path: Path) -> None:
+    """The agent follows the id issuebot resolved by author, never a first line (#77)."""
+    h = Harness(tmp_path, template=WORKPAD_TEMPLATE)
+    impostor = h.github.add_comment(42, f"{WORKPAD_MARKER}\n\nnot yours", author="mallory")
+    own = await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    runner = ScriptedRunner()
+    await h.run(runner)
+    first = str(runner.calls[0]["prompt"])
+    assert first == f"pad {own.id} {own.url}"
+    assert str(impostor.id) not in first
+    # The continuation prompt names it too, for a resumed session whose context predates it.
+    assert f"comment `{own.id}`" in str(runner.calls[1]["prompt"])
+    record = h.workspaces.read_session(h.workspace)
+    assert record is not None and record.workpad_comment_id == own.id
+
+
+async def test_a_session_without_a_workpad_is_told_to_create_one(tmp_path: Path) -> None:
+    h = Harness(tmp_path, template=WORKPAD_TEMPLATE, max_turns=2)
+    runner = ScriptedRunner()
+    await h.run(runner)
+    assert str(runner.calls[0]["prompt"]) == "no pad"
+    assert "found no workpad on the issue yet" in str(runner.calls[1]["prompt"])
+    record = h.workspaces.read_session(h.workspace)
+    assert record is not None and record.workpad_comment_id is None
+
+
+async def test_a_workpad_created_in_turn_one_reaches_turn_two(tmp_path: Path) -> None:
+    """Resolved every turn: the agent creates it in turn 1 and the next turn is told the id."""
+    h = Harness(tmp_path, template=WORKPAD_TEMPLATE, max_turns=2)
+    created: list[Comment] = []
+
+    def create_the_workpad(turn: int) -> None:
+        if turn == 1:
+            body = f"{WORKPAD_MARKER}\n\nplan"
+            created.append(h.github.add_comment(42, body, author=h.github.login))
+
+    runner = ScriptedRunner(on_turn=create_the_workpad)
+    await h.run(runner)
+    assert str(runner.calls[0]["prompt"]) == "no pad"
+    assert f"comment `{created[0].id}`" in str(runner.calls[1]["prompt"])
+    record = h.workspaces.read_session(h.workspace)
+    assert record is not None and record.workpad_comment_id == created[0].id
 
 
 async def test_prompt_error_fails_before_any_turn(tmp_path: Path) -> None:
@@ -467,6 +540,19 @@ async def test_before_run_failure_is_hook_error(tmp_path: Path) -> None:
     assert result.error is not None
     assert "exit status 4" in result.error
     assert runner.calls == []
+
+
+async def test_a_hooks_stderr_is_scrubbed_before_it_becomes_the_runs_error(tmp_path: Path) -> None:
+    """A hook runs with the token in its environment (#91): what it prints on the way out is
+    masked where the HookResult is built, so RunEnded.error never carries it."""
+    hook = 'echo "token $GH_TOKEN at $HOME/ws" >&2; exit 4'
+    h = Harness(tmp_path, hooks={"before_run": hook}, token="literal-token-value")
+    result = await h.run(ScriptedRunner())
+    assert result.error_category == "hook_error"
+    assert result.error == "before_run hook failed: exit status 4: token *** at ~/ws"
+    ended = h.recorder.events[-1]
+    assert isinstance(ended, RunEnded)
+    assert ended.error == "hook_error: before_run hook failed: exit status 4: token *** at ~/ws"
 
 
 async def test_workspace_failure_fails_before_any_turn(tmp_path: Path) -> None:

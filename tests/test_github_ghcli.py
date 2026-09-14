@@ -64,9 +64,15 @@ class StubRunner:
         return self.calls[index][0]
 
 
-def make_adapter(runner: StubRunner, **overrides: object) -> GhCliAdapter:
+LOGIN = "issuebot-agent"
+"""The account the fixtures' workpad and pull requests were written by."""
+
+
+def make_adapter(
+    runner: StubRunner, *, login: str | None = LOGIN, **overrides: object
+) -> GhCliAdapter:
     settings = GitHubSettings(repo="example/repo", **overrides)  # type: ignore[arg-type]
-    return GhCliAdapter(settings, runner=runner)
+    return GhCliAdapter(settings, runner=runner, login=login)
 
 
 def query_of(argv: list[str]) -> str:
@@ -486,6 +492,10 @@ async def test_find_workpad_comment_paginates_and_returns_marker_comment_or_none
     runner.on(has("issues/42/comments?per_page=100"), stdout=fixture("comments_paged.json"))
     runner.on(has("issues/43/comments?per_page=100"), stdout="[[]]")
     adapter = make_adapter(runner)
+    # An earlier comment by someone else opens with the marker; it is not the workpad (#77).
+    found = await adapter.find_workpad_comment(42)
+    assert found is not None and found.author == LOGIN
+    runner.calls.clear()
     found = await adapter.find_workpad_comment(42)
     assert found is not None
     assert found.id == 1002
@@ -506,6 +516,39 @@ async def test_find_workpad_comment_accepts_a_single_wrapped_page() -> None:
     found = await make_adapter(runner).find_workpad_comment(42)
     assert found is not None
     assert found.id == 1002
+
+
+async def test_find_workpad_comment_skips_a_marker_comment_by_anyone_else() -> None:
+    """The marker is public; the author is the provenance (#77). Logged, and passed over."""
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", stream=stream)
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout=fixture("comments_impostor.json"))
+    adapter = make_adapter(runner)
+    found = await adapter.find_workpad_comment(42)
+    assert found is not None
+    assert found.id == 1002 and found.author == LOGIN
+    ignored = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"workpad_comment_ignored"' in line
+    ]
+    assert [(r["comment_id"], r["author"]) for r in ignored] == [(1000, "mallory")]
+    assert ignored[0]["reason"] == f"not written by {LOGIN}"
+    # The session asks every turn; one impostor is logged once per adapter, not per call.
+    assert (await adapter.find_workpad_comment(42)) is not None
+    assert stream.getvalue().count('"workpad_comment_ignored"') == 1
+
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout=fixture("comments_impostor_only.json"))
+    assert await make_adapter(runner).find_workpad_comment(42) is None
+
+
+async def test_find_workpad_comment_matches_the_login_case_insensitively() -> None:
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    found = await make_adapter(runner, login="Issuebot-Agent").find_workpad_comment(42)
+    assert found is not None and found.id == 1002
 
 
 async def test_find_workpad_comment_rejects_unwrapped_pages() -> None:
@@ -680,3 +723,64 @@ async def test_probe_responses_are_validated(stdout: str) -> None:
 def test_issue_fields_fetch_the_author() -> None:
     """The prompt's envelope names the author, so the fragment has to ask for one (#76)."""
     assert "author { login }" in ISSUE_FIELDS
+
+
+def test_fragment_asks_who_opened_each_pull_request_and_from_where() -> None:
+    """``_select_pr`` resolves the linked PR by author and head repository (#77)."""
+    pr_nodes = ISSUE_FIELDS.split("closedByPullRequestsReferences", 1)[1]
+    assert "author { login }" in pr_nodes
+    assert "isCrossRepository" in pr_nodes
+
+
+async def test_own_login_is_probed_once_and_remembered() -> None:
+    """Without a login the adapter asks ``gh api user`` before its first read, then never again."""
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="Issuebot-Agent\n")
+    runner.on(has("graphql"), stdout=fixture("by_ids.json"))
+    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    adapter = make_adapter(runner, login=None)
+    issues = await adapter.fetch_issues_by_ids(["7"])
+    assert runner.argv(0) == ["api", "user", "--jq", ".login"]
+    assert issues[0].linked_pr is not None, "the login is matched case-insensitively"
+    await adapter.fetch_issues_by_ids(["7"])
+    assert await adapter.find_workpad_comment(42) is not None
+    assert await adapter.own_login() == "Issuebot-Agent"
+    assert sum(argv[:2] == ["api", "user"] for argv, _ in runner.calls) == 1
+
+
+async def test_an_explicit_login_is_not_overwritten_by_the_probe() -> None:
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="jleavers\n")
+    adapter = make_adapter(runner, login=LOGIN)
+    assert (await adapter.auth_status()).login == "jleavers"
+    assert await adapter.own_login() == LOGIN
+
+
+async def test_auth_status_fills_the_login_cache() -> None:
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="jleavers\n")
+    runner.on(has("graphql"), stdout=fixture("by_ids.json"))
+    adapter = make_adapter(runner, login=None)
+    assert (await adapter.auth_status()).login == "jleavers"
+    issues = await adapter.fetch_issues_by_ids(["7"])
+    assert issues[0].linked_pr is None, "the fixture's PR was opened by issuebot-agent"
+    assert sum(argv[:2] == ["api", "user"] for argv, _ in runner.calls) == 1
+
+
+async def test_a_failed_login_probe_fails_the_read() -> None:
+    """No provenance, no board: a read that cannot tell its own PRs apart must not answer."""
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="", stderr="HTTP 401: Bad credentials", returncode=1)
+    adapter = make_adapter(runner, login=None)
+    with pytest.raises(GitHubError) as exc:
+        await adapter.fetch_issues_by_states([StateLabel.TODO])
+    assert exc.value.category == "auth"
+    assert not any("graphql" in arg for argv, _ in runner.calls for arg in argv)
+
+
+async def test_empty_reads_do_not_probe_the_login() -> None:
+    runner = StubRunner()
+    adapter = make_adapter(runner, login=None)
+    assert await adapter.fetch_issues_by_states([]) == []
+    assert await adapter.fetch_issues_by_ids([]) == []
+    assert runner.calls == []

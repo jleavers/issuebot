@@ -90,6 +90,31 @@ async def test_merge_pr_closes_issue_and_terminal_fetch_sees_it(fake: FakeGitHub
     assert await fake.fetch_issues_by_states([StateLabel.REVIEW]) == []
 
 
+async def test_a_pull_request_by_anyone_else_closes_nothing_for_issuebot(fake: FakeGitHub) -> None:
+    """``open_pr`` by another author, or from a fork, is a reference the normaliser drops (#77)."""
+    issue = fake.add_issue("A", labels=("issuebot/review",))
+    theirs = fake.open_pr(issue.number, author="mallory")
+    assert fake.issue(issue.number).linked_pr is None
+    fake.merge_pr(theirs.number)
+    snapshot = fake.issue(issue.number)
+    assert snapshot.github_state == "closed" and snapshot.linked_pr is None
+    fake.reopen_issue(issue.number)
+    forked = fake.open_pr(issue.number, cross_repository=True)
+    assert forked.number != theirs.number
+    assert fake.issue(issue.number).linked_pr is None
+    ours = fake.open_pr(issue.number)
+    linked = fake.issue(issue.number).linked_pr
+    assert linked is not None and linked.number == ours.number
+
+
+def test_the_fake_acts_as_one_login(fake: FakeGitHub) -> None:
+    other = FakeGitHub(SETTINGS, login="Robot")
+    issue = other.add_issue("A")
+    other.open_pr(issue.number, author="robot")
+    assert other.issue(issue.number).linked_pr is not None, "matched case-insensitively"
+    assert fake.login == "issuebot"
+
+
 def test_close_pr_does_not_close_issue(fake: FakeGitHub) -> None:
     issue = fake.add_issue("A", labels=("issuebot/review",))
     pr = fake.open_pr(issue.number)
@@ -192,6 +217,19 @@ async def test_comments_and_workpad(fake: FakeGitHub) -> None:
     assert exc.value.category == "not_found"
 
 
+async def test_a_marker_comment_by_anyone_else_is_not_the_workpad(fake: FakeGitHub) -> None:
+    """The first line is public; the author is what the workpad is resolved by (#77)."""
+    issue = fake.add_issue("A")
+    impostor = fake.add_comment(issue.number, f"{WORKPAD_MARKER}\n\nmine now", author="mallory")
+    assert impostor.author == "mallory"
+    assert await fake.find_workpad_comment(issue.number) is None
+    pad = await fake.comment(issue.number, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    found = await fake.find_workpad_comment(issue.number)
+    assert found is not None and found.id == pad.id
+    assert [c.id for c in fake.comments_for(issue.number)] == [impostor.id, pad.id]
+    assert not any(name == "add_comment" for name, _ in fake.calls)
+
+
 async def test_ensure_and_missing_labels(fake: FakeGitHub) -> None:
     assert await fake.missing_labels() == []
     assert [r.outcome for r in await fake.ensure_labels()] == ["unchanged"] * 6
@@ -246,7 +284,7 @@ def test_preseed_labels_can_be_disabled() -> None:
 
 
 async def test_probes(fake: FakeGitHub) -> None:
-    assert (await fake.auth_status()).login == "fake-user"
+    assert (await fake.auth_status()).login == "issuebot"
     info = await fake.repo_info()
     assert (info.full_name, info.default_branch, info.private) == ("example/repo", "main", False)
     limit = await fake.rate_limit()
@@ -259,7 +297,7 @@ async def test_fail_next_injects_errors_in_order(fake: FakeGitHub) -> None:
         with pytest.raises(GitHubError) as exc:
             await fake.auth_status()
         assert exc.value.category == "transport"
-    assert (await fake.auth_status()).login == "fake-user"
+    assert (await fake.auth_status()).login == "issuebot"
     assert [name for name, _ in fake.calls] == ["auth_status"] * 3
 
 

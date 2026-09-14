@@ -346,6 +346,55 @@ async def test_escape_creates_the_workpad_when_missing(tmp_path: Path) -> None:
     assert h.github.issue(42).state is StateLabel.REVIEW
 
 
+async def test_escape_writes_past_an_impostor_workpad(tmp_path: Path) -> None:
+    """A marker comment by someone else is not where issuebot keeps its record (#77).
+
+    Without the author check the block, and the run marker the escape's idempotence reads,
+    would land in a comment its author can edit.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    impostor = h.github.add_comment(42, f"{WORKPAD_MARKER}\n\nyours truly", author="mallory")
+    assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    comments = h.github.comments_for(42)
+    assert [c.author for c in comments] == ["mallory", "issuebot"]
+    assert comments[0].body == impostor.body
+    assert comments[1].body.startswith(f"{WORKPAD_MARKER}\n\n### Issuebot blocked (")
+    assert h.calls("update_comment") == []
+    # And the impostor cannot pre-empt the record by quoting the run id.
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=43)
+    h.github.add_comment(43, f"{WORKPAD_MARKER}\n\nRun `{CONTEXT.run_id}` done", author="mallory")
+    assert await blocked_escape(h.github, h.bus, "43", CONTEXT, now=NOW) == "applied"
+    assert [c.author for c in h.github.comments_for(43)] == ["mallory", "issuebot"]
+
+
+async def test_conflict_rework_counts_only_issuebots_own_workpad(tmp_path: Path) -> None:
+    """Three bounce headings in someone else's comment do not use up the limit (#77)."""
+    h = Harness(tmp_path)
+    await seed(h)
+    body = "\n\n".join(
+        [WORKPAD_MARKER, *(conflict_block(51, n, 3, NOW, LABELS) for n in (1, 2, 3))]
+    )
+    h.github.add_comment(42, body, author="mallory")
+    issue = h.github.issue(42)
+    assert await conflict_rework(h.github, h.bus, issue, limit=3, now=NOW) == "reworked"
+    assert h.github.issue(42).state is StateLabel.REWORK
+    assert [c.author for c in h.github.comments_for(42)] == ["mallory", "issuebot"]
+    assert "(bounce 1 of 3)" in h.github.comments_for(42)[1].body
+
+
+async def test_conflict_rework_ignores_a_pull_request_that_is_not_issuebots(tmp_path: Path) -> None:
+    """A contributor's conflicting PR that says ``Closes #42`` is not the issue's (#77)."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review",), number=42)
+    h.github.open_pr(42, pr_number=51, author="mallory")
+    h.github.set_pr_mergeable(51, "conflicting")
+    issue = h.github.issue(42)
+    assert issue.linked_pr is None
+    assert await conflict_rework(h.github, h.bus, issue, limit=3, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
 @pytest.mark.parametrize("state", [StateLabel.REVIEW, StateLabel.TODO])
 async def test_escape_is_a_no_op_when_the_issue_moved(tmp_path: Path, state: StateLabel) -> None:
     h = Harness(tmp_path)
@@ -437,6 +486,25 @@ async def test_finish_terminal_completes_a_merged_issue(tmp_path: Path) -> None:
     assert isinstance(completed, IssueCompleted)
     assert completed.pr_url == "https://github.com/example/repo/pull/43"
     assert not workspace.exists()
+
+
+async def test_finish_terminal_cancels_an_issue_closed_by_someone_elses_pull_request(
+    tmp_path: Path,
+) -> None:
+    """issuebot's completion is issuebot's pull request (#77): a human's merged PR that closes
+    the issue is a human's decision, recorded as a cancellation, not as issuebot's delivery."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review",), number=42)
+    h.github.open_pr(42, pr_number=43, author="mallory")
+    h.github.merge_pr(43)
+    issue = h.github.issue(42)
+    assert issue.github_state == "closed" and issue.linked_pr is None
+    assert await finish_terminal(h.github, h.bus, h.workspaces, issue) == "cancelled"
+    assert h.github.issue(42).state is None
+    assert h.recorder.kinds == ["state_changed", "issue_cancelled"]
+    cancelled = h.recorder.events[1]
+    assert isinstance(cancelled, IssueCancelled)
+    assert cancelled.reason == CANCEL_REASON
 
 
 async def test_finish_terminal_cancels_an_unmerged_issue(tmp_path: Path) -> None:

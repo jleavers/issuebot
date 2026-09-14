@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -383,7 +384,19 @@ def test_session_record_round_trip(tmp_path: Path) -> None:
     data = json.loads(session_path(ws).read_text())
     assert data["version"] == 1
     assert data["updated_at"] == "2026-09-03T08:00:00+00:00"
+    assert data["workpad_comment_id"] is None
     assert manager.read_session(ws) == record
+    pinned = replace(record, workpad_comment_id=5662693296)
+    manager.write_session(ws, pinned)
+    assert json.loads(session_path(ws).read_text())["workpad_comment_id"] == 5662693296
+    assert manager.read_session(ws) == pinned
+    # A file written before the field existed still reads, without it.
+    del data["workpad_comment_id"]
+    session_path(ws).write_text(json.dumps(data))
+    assert manager.read_session(ws) == record
+    data["workpad_comment_id"] = "not an id"
+    session_path(ws).write_text(json.dumps(data))
+    assert manager.read_session(ws) is None
 
 
 def test_read_session_returns_none_for_missing_or_bad_files(tmp_path: Path) -> None:

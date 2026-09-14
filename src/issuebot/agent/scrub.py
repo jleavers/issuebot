@@ -2,8 +2,9 @@
 
 A run's turn files leave the workspace through ``capture_turns`` alone, and everything it
 returns has been through a ``Scrubber`` first: the ``run_turns`` rows, the dashboard's raw
-views and the committed fixture all see the scrubbed text and never the file. (A failed
-turn's ``error`` is built from claude's words too and takes another exit; that is #91.) The
+views and the committed fixture all see the scrubbed text and never the file. A failed
+turn's ``error`` is built from claude's words too and takes another exit, to ``runs``, Slack
+and the blocked-escape workpad block, so ``ClaudeRunner`` scrubs it at the source (#91). The
 scrubber knows three things. The *values* issuebot holds -- ``github.token``, the
 ``database.url`` password, the Slack webhook, whatever secret-named variable the worker's
 environment carries -- and masks each wherever it appears, since issuebot put ``GH_TOKEN``
@@ -141,6 +142,12 @@ class Scrubber:
         for pattern in self._home:
             text = pattern.sub("~", text)
         return text
+
+
+# The scrubber a reader gets without a deployment: the credential shapes alone. It is what
+# `capture_turns`, `classify_result`, the sink and the orchestrator default to, so no caller can
+# get raw text back; the worker replaces it with `for_deployment`, which knows the values too.
+DEFAULT_SCRUBBER = Scrubber()
 
 
 def _url_password(url: str) -> list[str]:

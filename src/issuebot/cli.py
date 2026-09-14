@@ -754,7 +754,7 @@ async def _open_database(settings: Settings) -> Database | None:
     return await _migrate_database(settings.database.url.get_secret_value())
 
 
-async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
+async def _build_sinks(settings: Settings, *, workflow_path: str, scrubber: Scrubber) -> _Sinks:
     """The log sink, plus Slack and PostgreSQL when configured; raises DatabaseError.
 
     With a database the worker registers its repository first (spec §5): the row the
@@ -769,7 +769,8 @@ async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
         PostgresSink(
             database.store(settings.github.labels, settings.github.repo),
             description=database.description,
-            capture=_turn_capture(settings, os.environ),
+            capture=_turn_capture(scrubber),
+            scrubber=scrubber,
         )
         if database
         else None
@@ -782,17 +783,23 @@ async def _build_sinks(settings: Settings, *, workflow_path: str) -> _Sinks:
     return _Sinks(EventBus(sinks), slack, postgres, database)
 
 
-def _turn_capture(
-    settings: Settings, environ: Mapping[str, str]
-) -> Callable[[Path], list[TurnCapture]]:
-    """The sink's capture, bound to this deployment's scrubber (#79).
+def _deployment_scrubber(settings: Settings, environ: Mapping[str, str]) -> Scrubber:
+    """This deployment's scrubber, built once per command and shared by every exit (#79, #91).
 
-    ``capture_turns`` scrubs credential shapes on its own; what only the worker can add
-    are the values it holds -- the token it put in the agent's environment, the database
-    password, the webhook -- and the home directory every path it prints names.
+    The shapes alone are what ``capture_turns`` and ``ClaudeRunner`` scrub with on their own;
+    what only the worker can add are the values it holds -- the token it put in the agent's
+    environment, the database password, the webhook -- and the home directory every path it
+    prints names. The sink's capture, the sink's ``log_dir`` and the orchestrator's blocked
+    escape all get this one; each session's ``ClaudeRunner`` builds its own from the same
+    settings and environment.
     """
     scrubber = Scrubber.for_deployment(settings, environ)
     get_logger(__name__).info("turn_scrubber", secrets=scrubber.secrets, home=scrubber.home)
+    return scrubber
+
+
+def _turn_capture(scrubber: Scrubber) -> Callable[[Path], list[TurnCapture]]:
+    """The sink's capture, bound to this deployment's scrubber (#79)."""
 
     def capture(log_dir: Path) -> list[TurnCapture]:
         return capture_turns(log_dir, scrubber=scrubber)
@@ -848,6 +855,12 @@ async def _run_once(
         print(f"[FAIL] workspace: {exc.message}")
         return 1
     if show_prompt:
+        # The preview shows what the session's first turn would get, workpad included (#77).
+        try:
+            workpad = await adapter.find_workpad_comment(number)
+        except GitHubError as exc:
+            print(f"[FAIL] workpad: {exc}")
+            return 1
         context = PromptContext(
             issue=issue,
             repo=settings.github.repo,
@@ -857,6 +870,7 @@ async def _run_once(
             max_turns=settings.agent.max_turns,
             rework=rework,
             self_review=settings.agent.self_review,
+            workpad=workpad,
         )
         try:
             print(PromptRenderer(workflow.prompt_template).render(context).rstrip("\n"))
@@ -865,7 +879,11 @@ async def _run_once(
             return 1
         return 0
     try:
-        sinks = await _build_sinks(settings, workflow_path=str(workflow.path))
+        sinks = await _build_sinks(
+            settings,
+            workflow_path=str(workflow.path),
+            scrubber=_deployment_scrubber(settings, os.environ),
+        )
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -1027,8 +1045,11 @@ async def _last_rate_limits(database: Database | None, repo: str) -> RateLimits 
 
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
+    scrubber = _deployment_scrubber(workflow.config, os.environ)
     try:
-        sinks = await _build_sinks(workflow.config, workflow_path=str(workflow.path))
+        sinks = await _build_sinks(
+            workflow.config, workflow_path=str(workflow.path), scrubber=scrubber
+        )
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
@@ -1044,6 +1065,7 @@ async def _run_worker(workflow: Workflow) -> int:
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,
+        scrubber=scrubber,
     )
     listener: RefreshListener | None = None
     if sinks.database is not None:
