@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 from importlib.resources import files
 from pathlib import Path
 
@@ -26,8 +27,10 @@ TABLE_ROW = re.compile(
     r"^\|\s*`(?P<file>[^`]+)`\s*\|\s*(?P<library>[^|]+?)\s*\|\s*(?P<version>[^|]+?)\s*\|"
 )
 # The digest block is the shape ``sha256sum`` prints and ``sha256sum -c`` reads: a 64-digit
-# hex digest, two spaces, the file name. Anchored to a line so prose never matches.
-DIGEST_LINE = re.compile(r"^(?P<digest>[0-9a-f]{64})  (?P<file>\S+)$", re.MULTILINE)
+# hex digest, two spaces, the file name (``sha256sum -b``'s ``*`` marker included). Anchored
+# to a line so prose never matches.
+DIGEST_SHAPE = "'<64 hex digits>  <file>' (two spaces, at the start of a line)"
+DIGEST_LINE = re.compile(r"^(?P<digest>[0-9a-f]{64})  \*?(?P<file>\S+)$", re.MULTILINE)
 # The licence files the table names in its last column, as ``(`htmx.LICENSE`)``.
 LICENCE_REF = re.compile(r"\(`(?P<file>[^`]+\.LICENSE)`\)")
 
@@ -50,11 +53,38 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _tracked(directory: Path) -> set[str]:
+    """The names git tracks directly under ``directory``: what a checkout, and so a build, has."""
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", "."],
+            cwd=directory,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"not a git checkout, or no git: {error}")
+    return {name for name in listed.stdout.split("\0") if name and "/" not in name}
+
+
 def test_readme_records_the_two_libraries() -> None:
-    """The parsers found the record; without this, an unparseable README would skip the rest."""
-    assert set(TABLE) == {"htmx.min.js", "chart.umd.js"}
-    assert set(DIGESTS) == set(TABLE), "the digest block and the table name the same files"
-    assert len(LICENCES) == len(TABLE), "one licence file per library"
+    """The parsers found the record.
+
+    Without this, a README reformatted past the parsers would leave the parametrized tests
+    with nothing to check (``empty_parameter_set_mark`` fails that too) and the digest and
+    table sets vacuously equal.
+    """
+    assert set(TABLE) == {"htmx.min.js", "chart.umd.js"}, (
+        f"table parsed {sorted(TABLE)}; a row is '| `<file>` | <library> | <version> | ...'"
+    )
+    assert set(DIGESTS) == set(TABLE), (
+        f"digest block parsed {sorted(DIGESTS)}, table parsed {sorted(TABLE)}; "
+        f"a digest line is {DIGEST_SHAPE}"
+    )
+    assert len(LICENCES) == len(TABLE), (
+        f"licences parsed {sorted(LICENCES)}: one '(`<file>.LICENSE`)' per table row"
+    )
 
 
 @pytest.mark.parametrize("name", sorted(DIGESTS), ids=sorted(DIGESTS))
@@ -72,16 +102,20 @@ def test_vendored_file_is_the_recorded_bytes(name: str) -> None:
 def test_vendored_file_carries_the_recorded_version(name: str) -> None:
     """The bytes name their own version, so the table's claim is checked against them too."""
     version = TABLE[name]["version"]
-    assert version in (VENDOR / name).read_text(encoding="utf-8"), (
+    assert version.encode("utf-8") in (VENDOR / name).read_bytes(), (
         f"{name} does not contain the version {version} that vendor/README.md records"
     )
 
 
 def test_every_vendored_file_is_recorded() -> None:
-    """Nothing is served from ``vendor/`` that the README does not account for."""
-    on_disk = {path.name for path in VENDOR.iterdir() if path.name != "README.md"}
+    """Nothing is served from ``vendor/`` that the README does not account for.
+
+    Tracked files, not directory entries: an editor's swap file or a ``.DS_Store`` is not
+    served, and a red here should always mean a change to the repository.
+    """
+    tracked = _tracked(VENDOR) - {"README.md"}
     recorded = set(DIGESTS) | LICENCES
-    assert on_disk == recorded, (
-        f"unrecorded in vendor/README.md: {sorted(on_disk - recorded)}; "
-        f"recorded but missing: {sorted(recorded - on_disk)}"
+    assert tracked == recorded, (
+        f"unrecorded in vendor/README.md: {sorted(tracked - recorded)}; "
+        f"recorded but not tracked: {sorted(recorded - tracked)}"
     )
