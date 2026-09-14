@@ -222,12 +222,15 @@ floor, not the shipped version, and moves by hand.
   names what survives rather than what is removed (only `--mcp-config` servers, and issuebot
   passes none), so it covers a target repository's `.mcp.json` and any MCP location a later
   `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
-  format. `claude.setting_sources` suppresses the same entry when it is set -- `configs/WORKFLOW.md`
-  sets `[project]` -- but it defaults to `None`, and it is an operator's setting rather than a
-  boundary, so it is not what the confinement rests on. The CI `docker` job proves both
+  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
+  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
+  operator's setting is not what the confinement rests on. Both flags are asserted against
+  `claude --help` in the image build, so a release that drops either fails the build rather
+  than a session. The CI `docker` job proves both
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
-  that line precedes the login check. `workspace_environment` layers the
+  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN

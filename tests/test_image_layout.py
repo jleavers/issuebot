@@ -62,6 +62,10 @@ def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -
     would be testing nothing while still going green.
     """
     assert "--strict-mcp-config" in CI
+    # Beside `--permission-prompts`: both are passed on every turn and neither is a setting,
+    # so a release that drops either must fail the build rather than a session.
+    assert "claude --help | grep -q -- '--permission-prompts'" in DOCKERFILE
+    assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE
     assert '"mcpServers":{"planted"' in CI
     assert "*'\"planted\"'*) ;;" in CI
     assert "claude did not load the planted server, so this proves nothing" in CI
