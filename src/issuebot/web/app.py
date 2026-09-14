@@ -185,6 +185,8 @@ class _Liveness:
 
     def __init__(self, clock: Callable[[], float]) -> None:
         self._clock = clock
+        # Binds to a loop only when contended; the app is served by one loop, and a second
+        # (a test client's own portal) may only ever take it uncontended.
         self._lock = asyncio.Lock()
         self._ok: bool | None = None
         self._at: float | None = None
@@ -224,12 +226,20 @@ class _SecureExit:
     app raises before one has, it answers through the same channel with the envelope or page
     the other errors get -- then re-raises, so the exception still reaches uvicorn's log and a
     test client that expects it. ``on_error`` builds that response; should it raise too, a
-    plain 500 goes out with the headers rather than nothing at all.
+    plain 500 goes out with the headers rather than nothing at all, and ``on_failure`` hears
+    about it, since the original exception is what is re-raised.
     """
 
-    def __init__(self, app: ASGIApp, *, on_error: Callable[[Request, Exception], Response]) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        on_error: Callable[[Request, Exception], Response],
+        on_failure: Callable[[Request, Exception], None],
+    ) -> None:
         self.app = app
         self.on_error = on_error
+        self.on_failure = on_failure
 
     async def __call__(self, scope: ASGIScope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -250,9 +260,11 @@ class _SecureExit:
             await self.app(scope, receive, send_with_headers)
         except Exception as exc:
             if not started:
+                request = Request(scope)
                 try:
-                    response = self.on_error(Request(scope), exc)
-                except Exception:
+                    response = self.on_error(request, exc)
+                except Exception as failure:
+                    self.on_failure(request, failure)
                     response = PlainTextResponse("internal server error", status_code=500)
                 await response(scope, receive, send_with_headers)
             raise
@@ -372,7 +384,16 @@ def create_app(
         log.error("web_unhandled_error", path=request.url.path, error=type(exc).__name__)
         return error_response(request, 500, "internal_error", "internal server error")
 
-    app.add_middleware(_SecureExit, on_error=unhandled)
+    def error_response_failed(request: Request, exc: Exception) -> None:
+        """The error renderer itself raised: the one exception uvicorn will not see."""
+        log.error(
+            "web_error_response_failed",
+            path=request.url.path,
+            error=type(exc).__name__,
+            exc_info=exc,
+        )
+
+    app.add_middleware(_SecureExit, on_error=unhandled, on_failure=error_response_failed)
 
     @app.exception_handler(DatabaseError)
     async def database_error(request: Request, exc: DatabaseError) -> Response:

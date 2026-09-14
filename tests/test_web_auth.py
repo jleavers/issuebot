@@ -297,6 +297,7 @@ def test_healthz_credential_probes_live_and_refreshes_the_anonymous_answer(h: Ha
     assert h.database.opened == 1
     for _ in range(3):
         assert h.client.get("/healthz").status_code == 200
+    # One anonymous probe, then three live ones.
     assert h.database.opened == 4
     h.database.queries_error = StoreUnavailableError("cannot connect: db.internal refused")
     assert h.client.get("/healthz").status_code == 503

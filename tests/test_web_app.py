@@ -530,13 +530,61 @@ def test_an_unhandled_exception_is_still_raised_after_it_is_answered(h: Harness)
         strict.get("/api/v1/boom")
 
 
-def test_an_unhandled_exception_in_the_gate_leaves_with_the_headers(h: Harness) -> None:
+def test_an_unhandled_exception_in_the_gate_leaves_with_the_headers(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The header layer wraps the gate, so an exception raised before routing is covered too."""
-    _raising_routes(h)
-    anonymous = h.anonymous.get("/api/v1/boom")
-    assert anonymous.status_code == 401
+
+    def broken(_header: str | None) -> str | None:
+        raise RuntimeError("detail-only-uvicorn-logs")
+
+    monkeypatch.setattr("issuebot.web.app.presented_password", broken)
+    with structlog.testing.capture_logs() as logs:
+        response = h.anonymous.get(f"{API}/state")
+    assert response.status_code == 500
     for name, value in SECURITY_HEADERS.items():
-        assert anonymous.headers[name] == value
+        assert response.headers[name] == value
+    assert response.json()["error"]["code"] == "internal_error"
+    assert [entry["path"] for entry in logs if entry["event"] == "web_unhandled_error"] == [
+        f"{API}/state"
+    ]
+
+
+async def test_a_failing_error_renderer_still_leaves_with_the_headers() -> None:
+    """Should ``on_error`` raise too, a plain 500 goes out with the headers, ``on_failure``
+    hears about the renderer's exception, and the original one is what propagates."""
+    from issuebot.web.app import _SecureExit
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        raise RuntimeError("original")
+
+    def on_error(request: Any, exc: Exception) -> Any:
+        raise ValueError("renderer")
+
+    failures: list[tuple[str, str]] = []
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    layer = _SecureExit(
+        app,
+        on_error=on_error,
+        on_failure=lambda request, exc: failures.append((request.url.path, str(exc))),
+    )
+    scope = {"type": "http", "method": "GET", "path": "/r/x", "headers": [], "query_string": b""}
+    with pytest.raises(RuntimeError, match="original"):
+        await layer(scope, receive, send)
+    assert failures == [("/r/x", "renderer")]
+    start = sent[0]
+    assert start["type"] == "http.response.start" and start["status"] == 500
+    headers = {name.decode(): value.decode() for name, value in start["headers"]}
+    for name, value in SECURITY_HEADERS.items():
+        assert headers[name.lower()] == value
+    assert b"".join(message.get("body", b"") for message in sent[1:]) == b"internal server error"
 
 
 def test_an_oversized_window_is_a_400_not_a_500(h: Harness) -> None:

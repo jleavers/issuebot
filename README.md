@@ -911,9 +911,11 @@ a request whose `Sec-Fetch-Site` reads `cross-site` outright. Two things stay op
 answers liveness alone (`status` and `database`; the workers and their repository names are
 for the credential), so compose's healthcheck needs no secret. That anonymous answer is the
 verdict the process already holds, refreshed by at most one connection every ten seconds
-however many probes arrive (the credential's own probe is live, and refreshes it too), so a
-flood of anonymous probes cannot use up the hub cluster's connections, which every worker's
-sink and refresh listener share (#106). Every response carries the same four security
+however many probes arrive (a failure is held for the same ten seconds, so the healthcheck
+can read 503 that long after the database is back; the credential's own probe is live, and
+refreshes it too), so a flood of anonymous probes cannot use up the hub cluster's
+connections, which every worker's sink and refresh listener share (#106). Every response
+carries the same four security
 headers, the 500 an unhandled exception becomes included. A credential that is presented
 and wrong is a 401 everywhere and a `web_auth_rejected` log line naming the path and the
 client, never the value. `issuebot web` refuses to start without the password (`[FAIL]
