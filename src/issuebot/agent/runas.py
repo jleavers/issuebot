@@ -135,8 +135,6 @@ class RunAs:
         target must differ from the invoker before sudo is asked anything, and an answer
         that is the invoker's is reported as no separation, apart from a refusal.
         """
-        if not hasattr(os, "getuid"):
-            return "agent.run_as: this platform has no uid to separate the session from"
         me = os.getuid()
         try:
             account = self.account()
@@ -160,6 +158,12 @@ class RunAs:
             return (
                 f"{self.sudo} ran the command as this process (uid {me}), not as "
                 f"{self.user!r} (uid {account.pw_uid}): no separation"
+            )
+        if completed.returncode == 0 and answer.isdigit():
+            # Separated, but not as asked: a rule that maps the account elsewhere.
+            return (
+                f"{self.sudo} ran the command as uid {answer}, not as {self.user!r} "
+                f"(uid {account.pw_uid})"
             )
         detail = _last_line(completed.stderr) or _last_line(completed.stdout)
         return f"cannot run as {self.user!r}: {detail or f'exit status {completed.returncode}'}"

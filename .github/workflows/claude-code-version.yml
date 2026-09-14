@@ -61,7 +61,9 @@ jobs:
             # "This job's pull request" is decided by provenance, not by the branch name
             # (#111): the REST head filter is owner-qualified, and what survives it is kept
             # only when its head is this repository and its author is the bot this job runs
-            # as. A fork's branch of the same name, from any account, is not this job's and
+            # as (github-actions[bot] is GITHUB_TOKEN's login: a switch to a PAT or an App
+          # changes it, and the POST below then fails loudly with 422, not silently).
+          # A fork's branch of the same name, from any account, is not this job's and
             # cannot stand in for it.
             pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100&head=${GITHUB_REPOSITORY_OWNER}:${branch}" \
               --jq "[.[] | select(.head.repo.full_name == \"${GITHUB_REPOSITORY}\" and .user.login == \"github-actions[bot]\")] | .[0].number // \"\"")"

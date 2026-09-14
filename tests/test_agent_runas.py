@@ -78,6 +78,13 @@ def test_probe_is_affirmative_only_when_the_delegated_uid_is_the_target_s_and_no
         f"{FAKE_SUDO} ran the command as this process (uid {me}), not as "
         f"{other.pw_name!r} (uid {other.pw_uid}): no separation"
     )
+    # A third uid is separated but not as asked, and says so rather than reading as a refusal.
+    elsewhere = RunAs(other.pw_name, sudo=FAKE_SUDO).probe(
+        base_env(CLAUDE_SUDO_PRETEND_UID="65534")
+    )
+    assert elsewhere == (
+        f"{FAKE_SUDO} ran the command as uid 65534, not as {other.pw_name!r} (uid {other.pw_uid})"
+    )
     # Only an answer that is the target's uid, and not this process's, is separation.
     separated = RunAs(other.pw_name, sudo=FAKE_SUDO).probe(
         base_env(CLAUDE_SUDO_PRETEND_UID=str(other.pw_uid))

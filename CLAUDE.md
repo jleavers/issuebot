@@ -489,7 +489,8 @@ floor, not the shipped version, and moves by hand.
   (the URL's password never reaches a log or a line), `reconnect_delay` (1, 2, 4, 8, 16, then
   30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
   appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
-  turns into `run_turns` in the `run_ended` transaction (idempotent per `(run_id, turn_number)`),
+  turns into `run_turns` in the `run_ended` transaction (idempotent per `(repo, run_id,
+  turn_number)`),
   or updates `issues` on `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`;
   `write_snapshot`), every write stamped with its `repo` by `_stamp`, which *forces* the
   store's over anything a row carries and is the only way a row is built, `INSERT_TURN`
