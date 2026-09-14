@@ -201,9 +201,10 @@ def test_for_deployment_with_nothing_configured_still_masks_shapes() -> None:
     assert scrubber.scrub(f"{TOKEN} /home/alice") == f"{REDACTED} /home/alice"
 
 
-def test_the_compose_default_password_does_not_eat_the_transcript() -> None:
-    """`issuebot` is the compose default's database password; masking it as a known value
-    would take every label and repository name with it. The DSN shape covers the DSN."""
+def test_a_short_password_does_not_eat_the_transcript() -> None:
+    """`issuebot`, the compose default's database password until #78, is shorter than
+    `MIN_SECRET_LENGTH`; masking it as a known value would take every label and repository
+    name with it. The DSN shape covers the DSN."""
     config = settings(database={"url": "postgresql://issuebot:issuebot@db:5432/issuebot"})
     scrubber = Scrubber.for_deployment(config, {"HOME": "/home/jleavers"})
     assert scrubber.secrets == 0

@@ -258,14 +258,13 @@ floor, not the shipped version, and moves by hand.
   (`***`; a floor of `MIN_SECRET_LENGTH`, 12, since a database password as short as the
   eight letters of `issuebot`, the compose default until #78, is masked in DSN form by the DSN
   shape without every label and repository in the stream going too; an all-digit value is
-  skipped, since a JSON
-  number could equal it and the mask would break the line; the JSON-escaped spelling is
-  matched as well), credential shapes whatever their source (GitHub `ghp_`/`github_pat_`
-  tokens, `sk-ant-` keys, `hooks.slack.com` webhooks, a URL's userinfo password with a
-  possessive scheme so a long `a.b-c` run is linear, `NAME=value` where the name ends
-  `TOKEN`/`SECRET`/`PASSWORD`/`PASSWD`/`API_KEY`, an `Authorization:` header) and the home
-  directory as `~`, bounded on both sides, in its dashed spelling too (Claude Code's
-  `~/.claude/projects/-home-alice-ws/`); scrubbing is idempotent.
+  skipped, since a JSON number could equal it and the mask would break the line; the
+  JSON-escaped spelling is matched as well), credential shapes whatever their source (GitHub
+  `ghp_`/`github_pat_` tokens, `sk-ant-` keys, `hooks.slack.com` webhooks, a URL's userinfo
+  password with a possessive scheme so a long `a.b-c` run is linear, `NAME=value` where the
+  name ends `TOKEN`/`SECRET`/`PASSWORD`/`PASSWD`/`API_KEY`, an `Authorization:` header) and
+  the home directory as `~`, bounded on both sides, in its dashed spelling too (Claude
+  Code's `~/.claude/projects/-home-alice-ws/`); scrubbing is idempotent.
   `Scrubber.for_deployment(settings, environ)` collects `github.token`, the `database.url`
   password, `notifications.slack.webhook_url`, every environment variable whose name ends
   like a secret, and `HOME`; `cli._deployment_scrubber` builds it once per command, logs

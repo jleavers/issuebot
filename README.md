@@ -698,8 +698,9 @@ holds a value:
 #    repository's worker checkout
 # 2. tell the running cluster (over the container's local socket, which asks no password):
 docker compose exec db psql -U issuebot -d issuebot -c "ALTER ROLE issuebot PASSWORD 'the-same-value'"
-# 3. recreate what reads it, here and in each of the other checkouts. db is recreated too,
-#    harmlessly: an existing cluster ignores POSTGRES_PASSWORD.
+# 3. recreate what reads it, here and in each of the other checkouts. db is recreated too:
+#    an existing cluster ignores POSTGRES_PASSWORD, so the data is safe, but the server
+#    restarts and every open connection drops.
 docker compose up -d
 ```
 
