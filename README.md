@@ -390,8 +390,11 @@ claims the issue and runs one session with the logs on your terminal.
   two state labels is ignored until that is fixed). The agent resumes on the same branch and
   PR, reads every comment, addresses each one and returns the issue to review. You need not do
   this for a merge conflict: when a sibling PR merges and yours turns `CONFLICTING`, the worker
-  moves the issue to `issuebot/rework` itself and records each bounce in the workpad, up to
-  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you.
+  moves the issue to `issuebot/rework` itself and notes each bounce in the workpad, up to
+  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you. The
+  bounces are counted from the issue's own label history -- the `issuebot/rework` labels the
+  worker's account added, which nothing edits away -- not from the workpad, whose body the
+  session rewrites.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
@@ -653,6 +656,12 @@ hook that would truncate it again or append a duplicate per session.
   `[A-Za-z_][A-Za-z0-9_]*`.
 - **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
   resumed after a retry still gets the file, and a hook may rewrite it between turns.
+- **Only a regular file is read.** issuebot opens the name without following symbolic links and
+  looks at what it found before reading a byte: a link, a FIFO, a device or a directory there
+  is refused with a warning naming the reason, and at most 64 KiB is read, cut at a line
+  boundary. The file sits in a directory the session can write, and under `agent.run_as` the
+  worker's uid can read files the session's cannot, so a link there would otherwise hand the
+  session whatever it pointed at.
 - **Some names are protected**, and a line naming one is dropped with a warning naming the key.
   `PATH`, `HOME`, `GH_TOKEN` and the fixed entries (`GH_PROMPT_DISABLED`,
   `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`) keep `gh` and `claude`
