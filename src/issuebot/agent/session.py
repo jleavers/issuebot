@@ -320,7 +320,7 @@ async def _turn_loop(
         # The workpad is resolved here, by author, and handed to the prompt (#77): the agent
         # follows this id rather than finding the comment by a first line anyone can write.
         # Every turn, not once: the agent creates it in turn 1 and a resumed session's is
-        # whatever the last one left. A lookup that fails fails the turn the way a refresh
+        # whatever the last one left. A lookup that fails fails the run, as a failed refresh
         # does, since rendering without it would have the agent open a second workpad.
         try:
             state.workpad = await adapter.find_workpad_comment(state.issue.number)

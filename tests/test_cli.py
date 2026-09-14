@@ -40,6 +40,7 @@ from issuebot.db import (
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
+    WORKPAD_MARKER,
     FakeGitHub,
     GitHubError,
     Issue,
@@ -1518,9 +1519,39 @@ def test_run_once_show_prompt_has_no_side_effects(
     assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 0
     assert capsys.readouterr().out == "Body for `repo-42`\n"
     assert stub_session.calls == []
-    assert [name for name, _ in fake_github.calls] == ["fetch_issues_by_ids"]
+    assert [name for name, _ in fake_github.calls] == [
+        "fetch_issues_by_ids",
+        "find_workpad_comment",
+    ]
     assert fake_github.issue(42).state is StateLabel.TODO
     assert not (tmp_path / "ws").exists()
+
+
+def test_run_once_show_prompt_renders_the_workpad_issuebot_resolved(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    """The preview is what the first turn gets: the account's own workpad, not an impostor's."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    impostor = fake_github.add_comment(42, f"{WORKPAD_MARKER}\n\nnope", author="mallory")
+    own = asyncio.run(fake_github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n"))
+    template = "{% if workpad %}pad {{ workpad.id }}{% else %}no pad{% endif %}"
+    path = _write(tmp_path, f"---\ngithub:\n  repo: example/repo\n---\n{template}")
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 0
+    out = capsys.readouterr().out
+    assert out == f"pad {own.id}\n"
+    assert str(impostor.id) not in out
+
+    async def unreachable(number: int) -> None:
+        raise GitHubError("transport", "comments unreachable")
+
+    monkeypatch.setattr(fake_github, "find_workpad_comment", unreachable)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] workpad: transport: comments unreachable" in capsys.readouterr().out
 
 
 def test_run_once_show_prompt_reports_template_errors(

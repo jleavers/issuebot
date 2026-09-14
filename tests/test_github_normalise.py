@@ -222,6 +222,9 @@ def test_a_pull_request_by_anyone_else_is_not_linked() -> None:
     assert linked({"nodes": [pr(52, "OPEN", author=None)]}).linked_pr is None, (
         "a deleted account, or an older response without the field, is nobody's"
     )
+    unanswered = pr(52, "OPEN")
+    del unanswered["isCrossRepository"]
+    assert linked({"nodes": [unanswered]}).linked_pr is None, "fail closed on a missing answer"
 
 
 def test_a_pull_request_from_a_fork_is_not_linked_even_under_the_login() -> None:

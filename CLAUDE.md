@@ -146,7 +146,8 @@ floor, not the shipped version, and moves by hand.
   `github` dispatch hold and `validate`'s `github.status` check.
 - `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
-  workpad the session last resolved for the agent, `null` until one exists); `PromptRenderer`
+  workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
+  one-turn run that created it still records `null`); `PromptRenderer`
   (Jinja2 `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `workpad`,
   `attempt`, `turn_number`, `max_turns`, `rework`, `self_review`). `workpad` (#77) is the
   comment issuebot resolved by author before the turn, `{id, url}` or `None`, looked up by

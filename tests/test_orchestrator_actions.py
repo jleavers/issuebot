@@ -488,6 +488,25 @@ async def test_finish_terminal_completes_a_merged_issue(tmp_path: Path) -> None:
     assert not workspace.exists()
 
 
+async def test_finish_terminal_cancels_an_issue_closed_by_someone_elses_pull_request(
+    tmp_path: Path,
+) -> None:
+    """issuebot's completion is issuebot's pull request (#77): a human's merged PR that closes
+    the issue is a human's decision, recorded as a cancellation, not as issuebot's delivery."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/review",), number=42)
+    h.github.open_pr(42, pr_number=43, author="mallory")
+    h.github.merge_pr(43)
+    issue = h.github.issue(42)
+    assert issue.github_state == "closed" and issue.linked_pr is None
+    assert await finish_terminal(h.github, h.bus, h.workspaces, issue) == "cancelled"
+    assert h.github.issue(42).state is None
+    assert h.recorder.kinds == ["state_changed", "issue_cancelled"]
+    cancelled = h.recorder.events[1]
+    assert isinstance(cancelled, IssueCancelled)
+    assert cancelled.reason == CANCEL_REASON
+
+
 async def test_finish_terminal_cancels_an_unmerged_issue(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/in-progress", "bug"), number=42)

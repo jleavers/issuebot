@@ -535,6 +535,9 @@ async def test_find_workpad_comment_skips_a_marker_comment_by_anyone_else() -> N
     ]
     assert [(r["comment_id"], r["author"]) for r in ignored] == [(1000, "mallory")]
     assert ignored[0]["reason"] == f"not written by {LOGIN}"
+    # The session asks every turn; one impostor is logged once per adapter, not per call.
+    assert (await adapter.find_workpad_comment(42)) is not None
+    assert stream.getvalue().count('"workpad_comment_ignored"') == 1
 
     runner = StubRunner()
     runner.on(has("issues/42/comments"), stdout=fixture("comments_impostor_only.json"))
@@ -743,6 +746,14 @@ async def test_own_login_is_probed_once_and_remembered() -> None:
     assert await adapter.find_workpad_comment(42) is not None
     assert await adapter.own_login() == "Issuebot-Agent"
     assert sum(argv[:2] == ["api", "user"] for argv, _ in runner.calls) == 1
+
+
+async def test_an_explicit_login_is_not_overwritten_by_the_probe() -> None:
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="jleavers\n")
+    adapter = make_adapter(runner, login=LOGIN)
+    assert (await adapter.auth_status()).login == "jleavers"
+    assert await adapter.own_login() == LOGIN
 
 
 async def test_auth_status_fills_the_login_cache() -> None:

@@ -149,12 +149,12 @@ def is_own_pr(item: Mapping[str, Any], login: str) -> bool:
     which anyone with a fork can write; the author is the one thing about it a third party
     cannot. A pull request issuebot opens comes from ``issuebot/<n>-<slug>`` in the repository,
     never from a fork, so a cross-repository one is not issuebot's even under its own login.
-    A reference with no author (an older response, or a deleted account) is nobody's.
+    A reference missing either answer (an older response, a deleted account) is nobody's.
     """
     author = _login(item.get("author"))
     if author is None or author.lower() != login.lower():
         return False
-    return item.get("isCrossRepository") is not True
+    return item.get("isCrossRepository") is False
 
 
 def _select_pr(connection: Any, *, login: str) -> LinkedPr | None:

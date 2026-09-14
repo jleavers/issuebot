@@ -102,6 +102,7 @@ class GhCliAdapter:
         )
         self._owner, self._name = settings.repo.split("/", 1)
         self._login = login
+        self._ignored_workpads: set[tuple[int, int]] = set()
         self._log = get_logger(__name__)
 
     @property
@@ -213,8 +214,9 @@ class GhCliAdapter:
         """The account's own comment whose first line is the marker, lowest id first.
 
         The marker is public and anyone can open a comment with it, so a match on the text
-        alone would let any commenter hand the agent its "prior state" (#77). The author is
-        checked first; a marker comment by anyone else is logged and passed over.
+        alone would let any commenter hand the agent its "prior state" (#77). A marker comment
+        by anyone else is passed over, and logged once per adapter: the session asks every
+        turn, and one impostor is one finding, not a warning per turn for as long as it stays.
         """
         self._log.debug("find_workpad_comment", issue_number=number)
         login = await self.own_login()
@@ -238,13 +240,15 @@ class GhCliAdapter:
                 comment = _comment_from(item)
                 if comment.author.lower() == login.lower():
                     return comment
-                self._log.warning(
-                    "workpad_comment_ignored",
-                    issue_number=number,
-                    comment_id=comment.id,
-                    author=comment.author,
-                    reason=f"not written by {login}",
-                )
+                if (number, comment.id) not in self._ignored_workpads:
+                    self._ignored_workpads.add((number, comment.id))
+                    self._log.warning(
+                        "workpad_comment_ignored",
+                        issue_number=number,
+                        comment_id=comment.id,
+                        author=comment.author,
+                        reason=f"not written by {login}",
+                    )
         return None
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
@@ -335,7 +339,8 @@ class GhCliAdapter:
         login = result.stdout.strip()
         if not login or login in ("null", "{}", "[1]") or login.startswith(("{", "[")):
             raise GitHubError("response", "user response has no login")
-        self._login = login
+        if self._login is None:
+            self._login = login
         return AuthStatus(login=login)
 
     async def repo_info(self) -> RepoInfo:

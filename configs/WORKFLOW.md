@@ -133,7 +133,7 @@ One persistent comment on the issue is the single source of truth for plan, prog
 
 ## Step 1: plan and reproduce
 
-1. Find or create the workpad; reconcile it with reality (check off done items, fix the plan for the current scope).
+1. Open the workpad named in the Workpad section, or create it if there is none; reconcile it with reality (check off done items, fix the plan for the current scope).
 2. Put an environment stamp at the top as a code fence line: `<hostname>:<absolute workspace path>@<short sha of HEAD>`.
 3. Write a hierarchical plan, explicit acceptance criteria and a validation checklist. If the change is user-facing, add a walkthrough criterion describing the end-to-end path to check.
 4. Reproduce first: capture a concrete signal of the current behaviour (a failing test, a command and its output) and record it under `Notes` before changing code. If the reported behaviour does not happen, go to No fault found before writing any code.
