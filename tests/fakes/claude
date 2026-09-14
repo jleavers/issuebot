@@ -2,10 +2,10 @@
 """Fake `claude` for runner tests: replays recorded stream-json, or misbehaves on request.
 
 CLAUDE_FAKE_SCENARIO selects the behaviour (success, error_result, budget, long_line,
-crash_after_init, logged_out, no_init, silent, slow, stubborn). CLAUDE_FAKE_RECORD names a file that
-receives argv, stdin, cwd and selected environment as JSON; CLAUDE_FAKE_RECORD_ENV adds
-comma-separated names to the recorded selection, which is how a test asks what the workspace's
-.issuebot/env handed over. CLAUDE_FAKE_DELAY_MS sleeps
+crash_after_init, leaky, logged_out, no_init, silent, slow, stubborn). CLAUDE_FAKE_RECORD
+names a file that receives argv, stdin, cwd and selected environment as JSON;
+CLAUDE_FAKE_RECORD_ENV adds comma-separated names to the recorded selection, which is how a
+test asks what the workspace's .issuebot/env handed over. CLAUDE_FAKE_DELAY_MS sleeps
 between replayed lines. CLAUDE_FAKE_PIDFILE receives the pid. The names carry the CLAUDE_
 prefix because only that prefix passes through the runner's environment filter.
 """
@@ -117,6 +117,25 @@ if scenario == "logged_out":
     # not the last line of stderr.
     sys.stderr.write("Invalid API key \u00b7 Please run /login\n")
     sys.stderr.write("For more information see https://docs.claude.com/\n")
+    sys.exit(1)
+if scenario == "leaky":
+    # A turn that quotes its own environment on the way out (#91): the token issuebot put
+    # there and the home directory, in the failing result's text and on stderr.
+    token = os.environ.get("GH_TOKEN", "")
+    home = os.environ.get("HOME", "")
+    emit(lines("success")[0])
+    result = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "duration_ms": 1,
+        "num_turns": 1,
+        "session_id": PLACEHOLDER,
+        "total_cost_usd": 0.01,
+        "result": f"push failed: GH_TOKEN={token} could not write {home}/ws",
+    }
+    emit(json.dumps(result))
+    sys.stderr.write(f"fatal: unable to access 'https://x:{token}@github.com/' from {home}/ws\n")
     sys.exit(1)
 if scenario == "no_init":
     sys.stdout.write("Error: not a stream-json line\n")

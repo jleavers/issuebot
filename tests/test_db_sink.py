@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.turnlog import TurnCapture, capture_turns
 from issuebot.db import StoreError, StoreUnavailableError
 from issuebot.db import sink as sink_module
@@ -82,14 +83,23 @@ class Clock:
 
 
 class Harness:
-    def __init__(self, capture: Callable[[Path], list[TurnCapture]] = capture_turns) -> None:
+    def __init__(
+        self,
+        capture: Callable[[Path], list[TurnCapture]] = capture_turns,
+        scrubber: Scrubber = DEFAULT_SCRUBBER,
+    ) -> None:
         self.store = FakeStore()
         self.sleeps: list[float] = []
         self.clock = Clock()
         self.stream = io.StringIO()
         configure_logging(fmt="json", level="DEBUG", stream=self.stream)  # type: ignore[arg-type]
         self.sink = PostgresSink(
-            self.store, sleep=self.sleep, now=self.clock, description=DESCRIPTION, capture=capture
+            self.store,
+            sleep=self.sleep,
+            now=self.clock,
+            description=DESCRIPTION,
+            capture=capture,
+            scrubber=scrubber,
         )
 
     async def sleep(self, seconds: float) -> None:
@@ -372,6 +382,26 @@ async def test_run_ended_captures_the_turn_files(h: Harness, tmp_path: Path) -> 
     captured = h.logged("db_turns_captured")[0]
     assert (captured["run_id"], captured["turns"]) == ("20260904T202535Z-0964cd", 1)
     assert captured["stream_bytes"] == 114948
+
+
+async def test_run_ended_stores_the_log_dir_scrubbed_after_reading_from_it(tmp_path: Path) -> None:
+    """The path names the operator's home and the dashboard renders it (#91); the capture
+    still needs the real one."""
+    shutil.copytree(SAMPLE, tmp_path / "run")
+    read_from: list[Path] = []
+
+    def capture(log_dir: Path) -> list[TurnCapture]:
+        read_from.append(log_dir)
+        return capture_turns(log_dir)
+
+    h = Harness(capture, scrubber=Scrubber(home=str(tmp_path)))
+    h.sink.handle(run_ended(str(tmp_path / "run")))
+    h.sink.start()
+    await h.sink.close()
+    (call,) = h.store.calls
+    assert read_from == [tmp_path / "run"]
+    assert call[1].log_dir == "~/run"
+    assert len(call[2]) == 1
 
 
 async def test_a_missing_log_dir_gives_no_captures(h: Harness, tmp_path: Path) -> None:

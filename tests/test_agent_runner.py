@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
@@ -34,6 +35,7 @@ from issuebot.agent.runner import (
     settings_for_labels,
     workspace_environment,
 )
+from issuebot.agent.scrub import REDACTED, Scrubber
 from issuebot.config import Settings
 from issuebot.log import configure_logging
 
@@ -645,6 +647,58 @@ def test_classify_result_stderr_makes_a_failing_result_an_auth_failure() -> None
     assert category == "auth_failed"
 
 
+TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+
+
+def test_classify_result_scrubs_the_result_text_and_the_stderr_line() -> None:
+    """The message is claude's words and leaves the workspace without `capture_turns` (#91)."""
+    result = {
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "result": f"env holds GH_TOKEN={TOKEN} and literal-token-value",
+    }
+    scrubber = Scrubber(secrets=["literal-token-value"])
+    category, message = classify_result(result, 1, "x", scrubber=scrubber)
+    assert category == "turn_failed"
+    assert message == f"error_during_execution: env holds GH_TOKEN={REDACTED} and {REDACTED}"
+    category, message = classify_result(
+        None,
+        1,
+        f"fetch failed\nfatal: https://x:{TOKEN}@github.com/ literal-token-value",
+        scrubber=scrubber,
+    )
+    assert category == "process_exit"
+    assert message == (
+        f"claude exited with status 1 before reporting a result: "
+        f"fatal: https://x:{REDACTED}@github.com/ {REDACTED}"
+    )
+
+
+def test_classify_result_scrubs_with_the_shapes_alone_by_default() -> None:
+    result = {"subtype": "error_during_execution", "is_error": True, "result": f"see {TOKEN}"}
+    assert classify_result(result, 1, "")[1] == f"error_during_execution: see {REDACTED}"
+
+
+def test_classify_result_scrubs_before_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A credential straddling the 500-character cut must not leave its head in the message:
+    the mask goes on first and the cut lands on the mask."""
+    monkeypatch.setattr(runner_module, "_MESSAGE_LIMIT", 8)
+    result = {"subtype": "error_during_execution", "is_error": True, "result": f"at {TOKEN} end"}
+    _, message = classify_result(result, 1, "")
+    assert message == f"error_during_execution: at {REDACTED} e"
+    _, message = classify_result(None, 1, f"first line\n{TOKEN} uvwxyz")
+    assert message == f"claude exited with status 1 before reporting a result: {REDACTED} uvwx"
+
+
+def test_classify_result_still_reads_the_raw_stderr_tail_for_an_auth_failure() -> None:
+    """The verdict is read off the words, which the mask leaves alone."""
+    category, message = classify_result(
+        None, 1, f"Invalid API key {TOKEN} \u00b7 Please run /login"
+    )
+    assert category == "auth_failed"
+    assert message is not None and TOKEN not in message and "Please run /login" in message
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -945,6 +999,51 @@ async def test_error_result_is_turn_failed(workspace: Path) -> None:
     assert turn.session_id == SESSION_ID
     assert turn.cost_usd == pytest.approx(0.0412)
     assert recorder.kinds[-2:] == ["process_exit", "turn_failed"]
+
+
+@posix
+async def test_a_turn_that_quotes_its_environment_is_scrubbed_at_the_source(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """The runner put the token into claude's environment and knows the home directory, so
+    the turn's error, its result text and the turn_failed event all come out masked (#91)."""
+    home = tmp_path / "home"
+    recorder = Recorder()
+    runner = runner_for(
+        workspace,
+        scenario="leaky",
+        token="literal-token-value",
+        extra_env={"HOME": str(home)},
+    )
+    turn = await run(runner, workspace, observer=recorder)
+    assert turn.error_category == "turn_failed"
+    assert turn.error is not None
+    assert "literal-token-value" not in turn.error and str(home) not in turn.error
+    assert (
+        turn.error
+        == f"error_during_execution: push failed: GH_TOKEN={REDACTED} could not write ~/ws"
+    )
+    assert turn.result_text == f"push failed: GH_TOKEN={REDACTED} could not write ~/ws"
+    (failed,) = [event for event in recorder.events if event.kind == "turn_failed"]
+    assert failed.detail == turn.error
+    # The files on disk are claude's stdout and stderr byte for byte; `capture_turns` is
+    # their scrubbing step (#79), not the runner.
+    assert "literal-token-value" in turn.stderr_path.read_text()
+    assert "literal-token-value" in turn.stdout_path.read_text()
+
+
+@posix
+async def test_the_runners_own_messages_read_the_home_directory_as_tilde(tmp_path: Path) -> None:
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    runner = ClaudeRunner(
+        settings(root), environ={"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    )
+    turn = await run(runner, outside, log_dir=tmp_path / "logs")
+    assert turn.error_category == "invalid_workspace_cwd"
+    assert turn.error == "~/elsewhere is not a directory inside ~/workspaces"
 
 
 @posix

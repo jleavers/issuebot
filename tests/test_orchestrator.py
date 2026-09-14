@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.session import run_session
 from issuebot.config import Settings, load_workflow, overlay_path_for
 from issuebot.events import (
@@ -211,6 +212,7 @@ class Harness:
         model: str | None = None,
         model_labels: dict[str, str] | None = None,
         initial_rate_limits: RateLimits | None = None,
+        scrubber: Scrubber = DEFAULT_SCRUBBER,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -266,6 +268,7 @@ class Harness:
             on_snapshot=self.snapshots.append,
             on_issues=self.record_polled if observe_issues else None,
             initial_rate_limits=initial_rate_limits,
+            scrubber=scrubber,
         )
 
     def record_polled(self, issues: Any) -> None:
@@ -954,6 +957,31 @@ async def test_failure_backoff_doubles_and_caps_then_escapes(tmp_path: Path) -> 
     assert "(attempt 3, 2 turns)" in body
     assert h.recorder.of(Blocked)[0].reason.startswith("3 consecutive worker sessions failed")
     assert h.orchestrator.snapshot().counters.blocked == 1
+
+
+async def test_the_blocked_escape_scrubs_what_it_writes_on_the_issue(tmp_path: Path) -> None:
+    """The workpad block and the Blocked event are public (#91): the reason quotes the run's
+    error, which the runner scrubbed at its source, and the log directory names the operator's
+    home, which only the deployment's scrubber can read as `~`."""
+    scrubber = Scrubber(secrets=["literal-token-value"], home="/workspaces")
+    h = Harness(tmp_path, max_attempts=1, scrubber=scrubber)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="worker crashed: literal-token-value under /workspaces/repo-1",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    body = h.github.comments_for(1)[0].body
+    assert "last error: process_exit: worker crashed: *** under ~/repo-1." in body
+    assert "logs: `~/repo-1/.issuebot/runs/run`" in body
+    assert "literal-token-value" not in body and "/workspaces" not in body
+    reason = h.recorder.of(Blocked)[0].reason
+    assert "literal-token-value" not in reason and "*** under ~/repo-1" in reason
 
 
 async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> None:
