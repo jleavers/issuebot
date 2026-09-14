@@ -27,6 +27,7 @@ from issuebot.agent import (
     settings_for_labels,
 )
 from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.config import (
     ConfigError,
     GitHubSettings,
@@ -233,8 +234,14 @@ class Orchestrator:
         initial_rate_limits: RateLimits | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
+        scrubber: Scrubber = DEFAULT_SCRUBBER,
     ) -> None:
         self._workflow = workflow
+        # What the blocked escape writes on the public issue goes through this (#91): the
+        # reason is scrubbed at its source already, but the run's log directory names the
+        # operator's home, which only the deployment's scrubber (the `cli` passes it) can
+        # read as `~`.
+        self._scrubber = scrubber
         self._bus = bus
         self._adapter_factory = adapter_factory
         self._workspaces_factory = workspaces_factory
@@ -1141,12 +1148,13 @@ class Orchestrator:
         )
 
     async def _escape(self, entry: RunningEntry, reason: str, result: RunResult | None) -> None:
+        log_dir = str(result.log_dir) if result is not None and result.log_dir else None
         context = BlockedContext(
-            reason=reason,
+            reason=self._scrubber.scrub(reason),
             run_id=entry.run_id,
             attempt=entry.attempt,
             turns=result.turns if result is not None else entry.turns,
-            log_dir=str(result.log_dir) if result is not None and result.log_dir else None,
+            log_dir=self._scrubber.scrub(log_dir) if log_dir else None,
         )
         outcome = await actions.blocked_escape(
             self._adapter, self._bus, entry.issue_id, context, now=self._now()

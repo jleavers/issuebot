@@ -20,6 +20,7 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceMana
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.cli import (
     StatsView,
+    _deployment_scrubber,
     _turn_capture,
     main,
     not_runnable,
@@ -2400,7 +2401,10 @@ def test_the_sink_captures_turns_through_the_deployment_scrubber(tmp_path: Path)
     config = Settings.model_validate(
         {"github": {"repo": "acme/widgets", "token": "literal-token-value"}}
     )
-    capture = _turn_capture(config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"})
+    scrubber = _deployment_scrubber(
+        config, {"HOME": "/home/alice", "ANTHROPIC_API_KEY": "key-value-1234"}
+    )
+    capture = _turn_capture(scrubber)
     line = json.dumps(
         {
             "type": "result",

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from issuebot.agent.scrub import Scrubber
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 
 PROMPT_LIMIT = 256 * 1024
 LINE_LIMIT = 64 * 1024
@@ -34,7 +34,6 @@ OMITTED_TYPE = "issuebot_omitted"
 TURN_FILE = re.compile(r"^turn-(\d+)\.jsonl$")
 # The shapes alone: what a caller gets without naming this deployment's secrets and home.
 # The worker builds ``Scrubber.for_deployment`` and hands the sink a capture bound to it.
-DEFAULT_SCRUBBER = Scrubber()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

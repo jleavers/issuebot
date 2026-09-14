@@ -2,11 +2,12 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.turnlog import TurnCapture, capture_turns
 from issuebot.db.connection import reconnect_delay
 from issuebot.db.errors import StoreError, StoreUnavailableError
@@ -66,12 +67,14 @@ class PostgresSink:
         now: Callable[[], datetime] = _utcnow,
         description: str | None = None,
         capture: Callable[[Path], list[TurnCapture]] = capture_turns,
+        scrubber: Scrubber = DEFAULT_SCRUBBER,
     ) -> None:
         self._store = store
         self._sleep = sleep
         self._now = now
         self._description = description
         self._capture_turns = capture
+        self._scrubber = scrubber
         self._queue: asyncio.Queue[_Item | None] = asyncio.Queue()
         self._issues: dict[int, IssueSnapshot] = {}
         self._issues_queued = False
@@ -201,6 +204,7 @@ class PostgresSink:
 
     async def _write(self, work: _Work) -> None:
         turns = await self._capture(work)
+        work = self._scrub_log_dir(work)
         retries = 0
         while True:
             if not self._connected:
@@ -277,6 +281,22 @@ class PostgresSink:
             stream_bytes=sum(capture.stream_bytes for capture in captures),
         )
         return tuple(captures)
+
+    def _scrub_log_dir(self, work: _Work) -> _Work:
+        """The run_ended item with its ``log_dir`` scrubbed, once the files have been read.
+
+        The path names the operator's home directory, and ``runs.log_dir`` and the event's
+        payload are what the dashboard renders (#91); the capture above needed the real one.
+        """
+        if not isinstance(work, _EventItem) or not isinstance(work.event, RunEnded):
+            return work
+        event = work.event
+        if not event.log_dir:
+            return work
+        scrubbed = self._scrubber.scrub(event.log_dir)
+        if scrubbed == event.log_dir:
+            return work
+        return _EventItem(replace(event, log_dir=scrubbed))
 
     async def _apply(self, work: _Work, turns: tuple[TurnCapture, ...]) -> None:
         if isinstance(work, _EventItem):
