@@ -224,3 +224,22 @@ def test_every_scrubbed_sample_line_still_parses() -> None:
 def test_for_deployment_ignores_an_unparseable_database_url() -> None:
     config = settings(database={"url": "postgresql://[::1/issuebot"})
     assert Scrubber.for_deployment(config, {}).secrets == 0
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "host=db port=5432 user=issuebot password=s3cretpassword dbname=issuebot",
+        "postgresql://issuebot@db:5432/issuebot?password=s3cretpassword",
+    ],
+)
+def test_for_deployment_knows_the_database_password_in_every_spelling(url: str) -> None:
+    """#105: a keyword/value DSN, or a URL carrying the password as a query parameter, used to
+    pass ``urlsplit`` with no password at all, so the value went unmasked wherever it stood
+    bare. ``Database`` refuses the first spelling, but the scrubber is built from the settings
+    before that and must know the value either way."""
+    scrubber = Scrubber.for_deployment(settings(database={"url": url}), {})
+    assert scrubber.secrets == 1
+    assert scrubber.scrub("rejected s3cretpassword for issuebot") == (
+        f"rejected {REDACTED} for issuebot"
+    )

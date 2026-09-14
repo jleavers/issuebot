@@ -1,0 +1,95 @@
+"""The shape of ``database.url``: one parser for every place that describes, masks or accepts it.
+
+A leaf module on purpose. ``issuebot.db`` imports ``issuebot.agent`` (for the turn capture), so
+``issuebot.agent.scrub`` cannot import ``issuebot.db.connection`` without a cycle, and the two
+used to carry their own ``urlsplit`` each -- which is how both came to fail open on a spelling
+neither was written for (#105): psycopg accepts libpq's keyword/value conninfo as well as the
+URL, and ``urlsplit`` on ``host=db password=s3cret dbname=issuebot`` reports no scheme and no
+password rather than raising, so ``describe`` returned the whole string and ``redact`` masked
+nothing. Everything here fails closed instead: a value that is not a well-formed
+``postgresql://`` URL is described by the placeholder, and its password is looked for in
+whichever spelling it holds.
+"""
+
+import re
+from urllib.parse import SplitResult, unquote, urlsplit
+
+REDACTED = "<database url>"
+POSTGRES_SCHEMES = ("postgresql", "postgres")
+
+# libpq's keyword/value form: ``password = 's3 cret'`` or ``password=s3cret``. A quoted value may
+# escape a quote or a backslash with a backslash; a bare one runs to the next whitespace.
+_KEYWORD_PASSWORD = re.compile(
+    r"(?<![\w-])password\s*=\s*(?:'((?:\\.|[^'\\])*)'|(\S+))", re.IGNORECASE
+)
+
+
+def parse_url(url: str) -> SplitResult | None:
+    """The parts of a well-formed ``postgresql://`` URL, or ``None`` for anything else.
+
+    Well-formed means what ``describe`` needs to take it apart safely: ``urlsplit`` accepts it,
+    the scheme is PostgreSQL's, the authority marker ``//`` follows it (``postgresql:host=db`` is
+    keyword/value text libpq would refuse, and ``urlsplit`` would read the rest as a path), and
+    the port is a number.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if port is not None and not 0 < port < 65536:
+        return None
+    if parts.scheme not in POSTGRES_SCHEMES:
+        return None
+    if not url[len(parts.scheme) + 1 :].startswith("//"):
+        return None
+    return parts
+
+
+def is_postgres_url(url: str) -> bool:
+    """True for a well-formed ``postgresql://`` or ``postgres://`` URL; the only spelling issuebot
+    accepts, since it is the only one it can describe without the password."""
+    return parse_url(url) is not None
+
+
+def describe(url: str) -> str:
+    """``postgresql://user@host:port/db`` without the password, for log lines.
+
+    The placeholder for anything ``parse_url`` rejects: a value this function cannot take apart
+    is one it must not echo, since the keyword/value spelling carries its password in clear.
+    """
+    parts = parse_url(url)
+    if parts is None:
+        return REDACTED
+    user = f"{parts.username}@" if parts.username else ""
+    host = parts.hostname or ""
+    suffix = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{user}{host}{suffix}{parts.path}"
+
+
+def dsn_secrets(url: str) -> tuple[str, ...]:
+    """Every spelling of the password a DSN carries, longest first; empty when it has none.
+
+    A URL keeps it in the userinfo (``postgresql://u:p@h/db``) or as a ``password`` query
+    parameter (``?password=p``, which libpq accepts too), and each is returned as written and
+    percent-decoded, since an error message may quote either. A keyword/value DSN keeps it in a
+    ``password=`` keyword, bare or single-quoted. Nothing here decides whether the DSN is
+    accepted -- ``Database`` does -- so a spelling issuebot refuses is still masked wherever it
+    was quoted before the refusal.
+    """
+    found: list[str] = []
+    parts = parse_url(url)
+    if parts is not None:
+        if parts.password:
+            found.append(parts.password)
+        for pair in parts.query.split("&"):
+            name, _, value = pair.partition("=")
+            if name == "password":
+                found.append(value)
+        # libpq percent-decodes both (and, unlike a form, never reads ``+`` as a space).
+        found.extend(unquote(value) for value in list(found))
+    else:
+        for quoted, bare in _KEYWORD_PASSWORD.findall(url):
+            found.append(bare or quoted.replace("\\'", "'").replace("\\\\", "\\"))
+    unique = [value for value in dict.fromkeys(found) if value]
+    return tuple(sorted(unique, key=len, reverse=True))

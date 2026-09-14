@@ -1,51 +1,49 @@
 """Connection helpers: connect, describe and redact a database URL, reconnect backoff."""
 
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlsplit
 
 import psycopg
 from psycopg import AsyncConnection
 
 from issuebot.db.errors import DatabaseError, StoreError, StoreUnavailableError
+from issuebot.dsn import POSTGRES_SCHEMES, REDACTED, describe, dsn_secrets, is_postgres_url
+
+__all__ = [
+    "APPLICATION_NAME",
+    "CONNECT_TIMEOUT_S",
+    "POSTGRES_SCHEMES",
+    "RECONNECT_DELAYS_S",
+    "REDACTED",
+    "Connector",
+    "classify",
+    "connect",
+    "describe",
+    "error_text",
+    "is_postgres_url",
+    "reconnect_delay",
+    "redact",
+]
 
 CONNECT_TIMEOUT_S = 5
 RECONNECT_DELAYS_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
-REDACTED = "<database url>"
-POSTGRES_SCHEMES = ("postgresql", "postgres")
 APPLICATION_NAME = "issuebot"
+NOT_A_URL = (
+    "database.url is not a well-formed postgresql:// URL "
+    "(libpq's keyword/value form is not accepted)"
+)
 
 Connector = Callable[[str], Awaitable[AsyncConnection]]
 
 
-def is_postgres_url(url: str) -> bool:
-    try:
-        return urlsplit(url).scheme in POSTGRES_SCHEMES
-    except ValueError:
-        return False
-
-
-def describe(url: str) -> str:
-    """``postgresql://user@host:port/db`` without the password, for log lines."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return REDACTED
-    user = f"{parts.username}@" if parts.username else ""
-    host = parts.hostname or ""
-    suffix = f":{port}" if port else ""
-    return f"{parts.scheme}://{user}{host}{suffix}{parts.path}"
-
-
 def redact(text: str, url: str) -> str:
-    """Replace the full URL and, on its own, its password with a placeholder."""
+    """Replace the full DSN and, on its own, its password with a placeholder.
+
+    The password is found by ``dsn_secrets`` in whichever spelling the DSN uses (#105), so a
+    keyword/value DSN that ``Database`` refuses is still masked in the line that refuses it.
+    """
     redacted = text.replace(url, REDACTED)
-    try:
-        password = urlsplit(url).password
-    except ValueError:
-        return redacted
-    if password:
-        redacted = redacted.replace(password, REDACTED)
+    for secret in dsn_secrets(url):
+        redacted = redacted.replace(secret, REDACTED)
     return redacted
 
 

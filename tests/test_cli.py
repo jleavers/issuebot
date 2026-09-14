@@ -415,8 +415,25 @@ def test_validate_rejects_a_non_postgres_database_url(
 ) -> None:
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
-    assert "[FAIL] database.url: not a postgresql:// URL" in out
+    assert "[FAIL] database.url: not a well-formed postgresql:// URL" in out
     assert "15 checks: 1 failed, 1 warnings" in out
+    assert fake_database.urls == []
+
+
+KEYWORD_DSN = "host=db.example port=5432 user=issuebot password=s3cretpassword dbname=issuebot"
+
+
+def test_validate_rejects_a_keyword_value_dsn_without_echoing_it(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    assert _validate_with_database(tmp_path, monkeypatch, KEYWORD_DSN) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] database.url: not a well-formed postgresql:// URL" in out
+    assert "s3cretpassword" not in out
     assert fake_database.urls == []
 
 
@@ -1975,6 +1992,24 @@ def test_database_commands_exit_two_on_an_unloadable_workflow(
     assert "[FAIL] workflow:" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+def test_a_keyword_value_dsn_is_refused_on_every_database_command(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    command: list[str],
+) -> None:
+    """#105: the shape check ``validate`` performs now sits on the path the other commands take,
+    in the facade, and the line that reports it names neither the DSN nor its password."""
+    path = _db_workflow(tmp_path, monkeypatch, url=KEYWORD_DSN)
+    assert main([*command, "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert "s3cretpassword" not in out and "db.example" not in out
+    assert fake_database.urls == [] and fake_database.migrations == 0
+
+
 def test_migrate_reports_what_it_applied(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -2282,6 +2317,21 @@ def test_web_migrates_then_serves_on_the_defaults(
     assert getattr(app, "title", None) == "issuebot"
     err = capsys.readouterr().err
     assert "web_started" in err and "s3cret" not in err and WEB_PASSWORD not in err
+
+
+def test_web_refuses_a_keyword_value_dsn_before_serving(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    assert main(["web"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.startswith("[FAIL] database: database.url is not a well-formed")
+    assert "s3cretpassword" not in captured.out + captured.err
+    assert fake_serve.calls == [] and fake_database.urls == []
 
 
 def test_web_gates_the_app_with_the_password_from_the_environment(
