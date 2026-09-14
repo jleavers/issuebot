@@ -641,6 +641,27 @@ def test_classify_result_reads_stderr_for_a_credential_that_stopped_working() ->
     assert message is not None and "Please run /login" in message
 
 
+def test_classify_result_names_the_login_whose_refresh_was_refused() -> None:
+    """The shape a lapsed login actually arrives in, captured from a live worker's
+    ``run_turns`` row on 2026-09-14: ``subtype: "success"`` with ``is_error`` and status 1,
+    carrying claude's own sentence. Reading the subtype alone made this ``turn_failed``, so
+    every issue on the board burned ``max_attempts`` and dispatch was never held (#20).
+
+    The agent's own final message is still not mined for markers: that is status 0, which
+    ``test_classify_result`` pins as ``turn_failed`` with the same words in it.
+    """
+    result = {
+        "subtype": "success",
+        "is_error": True,
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }
+    category, message = classify_result(result, 1, "")
+    assert category == "auth_failed"
+    assert message == (
+        "success: Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
+
+
 def test_classify_result_stderr_makes_a_failing_result_an_auth_failure() -> None:
     result = {"subtype": "error_during_execution", "is_error": True, "result": "stopped"}
     category, _ = classify_result(result, 1, "OAuth token has expired")
@@ -709,6 +730,9 @@ def test_classify_result_still_reads_the_raw_stderr_tail_for_an_auth_failure() -
         ("API Error: 401 authentication_error", True),
         ("Invalid API key \u00b7 Please run /login", True),
         ("your OAuth token has expired", True),
+        # What a login whose refresh is refused actually says (a live worker, 2026-09-14).
+        ("Failed to authenticate: OAuth session expired and could not be refreshed", True),
+        ("the OAuth session is invalid", True),
         ("run claude auth login to fix it", True),
         ("AUTHENTICATION FAILED", True),
         ("tool execution failed", False),
