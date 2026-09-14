@@ -13,12 +13,13 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from issuebot.agent.runas import MODULE, RunAs, RunAsError
+from issuebot.agent.runas import MODULE, RunAs, RunAsError, anonymous_fd
 from issuebot.agent.runner import ClaudeRunner
 from issuebot.agent.workspace import SHARED_DIR_MODE, WorkspaceManager
 from issuebot.config import Settings
@@ -40,11 +41,26 @@ def base_env(**extra: str) -> dict[str, str]:
     return {"PATH": fake_path(), "HOME": "/elsewhere", **extra}
 
 
+@pytest.fixture(params=["memfd", "unlinked-file"])
+def descriptor_branch(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Both branches of ``anonymous_fd``, whichever one this interpreter would take (#115).
+
+    ``uv`` installs a CPython configured against a glibc older than ``memfd_create``, so a
+    developer's run and the image's take different branches, and a test that exercised only
+    the local one would leave the other to production.
+    """
+    if request.param == "memfd" and not hasattr(os, "memfd_create"):
+        pytest.skip("this interpreter has no os.memfd_create")
+    if request.param == "unlinked-file":
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+    return request.param
+
+
 # --- the wrapper ---------------------------------------------------------------------------
 
 
 def test_prepared_wraps_the_command_and_hands_the_environment_over_a_descriptor(
-    tmp_path: Path,
+    tmp_path: Path, descriptor_branch: str
 ) -> None:
     record = tmp_path / "sudo.jsonl"
     runas = RunAs(ME, sudo=FAKE_SUDO)
@@ -60,6 +76,36 @@ def test_prepared_wraps_the_command_and_hands_the_environment_over_a_descriptor(
     assert call["C"] == fd + 1
     assert call["command"][:4] == [sys.executable, "-P", "-m", MODULE]
     assert call["command"][-3:] == ["--", "env", "-0"]
+
+
+def test_anonymous_fd_hands_back_an_unnamed_descriptor_on_either_branch(
+    descriptor_branch: str,
+) -> None:
+    fd = anonymous_fd("issuebot-test-env")
+    try:
+        assert os.write(fd, b"payload") == 7
+        assert os.lseek(fd, 0, os.SEEK_SET) == 0
+        assert os.read(fd, 16) == b"payload"
+        # No directory entry names it, so nothing else can open what it holds. A memfd's
+        # link is /memfd:..., the fallback's the deleted path; neither resolves to a file.
+        if Path("/proc/self/fd").is_dir():
+            target = os.readlink(f"/proc/self/fd/{fd}")
+            assert not Path(target).exists(), target
+            if descriptor_branch == "unlinked-file":
+                assert target.endswith(" (deleted)"), target
+    finally:
+        os.close(fd)
+
+
+def test_anonymous_fd_reports_a_failed_fallback_as_an_oserror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The spawn sites catch ``OSError``; the fallback must not invent another failure."""
+    monkeypatch.delattr(os, "memfd_create", raising=False)
+    # ``tempfile.tempdir``, not ``TMPDIR``: ``gettempdir`` caches its answer in that global.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-such-directory"))
+    with pytest.raises(OSError):
+        anonymous_fd("issuebot-test-env")
 
 
 def test_probe_answers_none_when_the_account_answers_and_names_the_refusal_otherwise() -> None:
@@ -105,7 +151,7 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 
 def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> None:
-    fd = os.memfd_create("env")
+    fd = anonymous_fd("env")
     os.write(fd, b"[1, 2]")
     os.lseek(fd, 0, os.SEEK_SET)
     completed = subprocess.run(

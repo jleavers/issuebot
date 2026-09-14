@@ -10,9 +10,9 @@ it at all.
 
 sudo's environment policy never shapes what the session sees. The worker serialises the
 environment it built (``agent_environment`` plus the workspace's ``.issuebot/env``) into an
-anonymous memory file, passes that one descriptor across the uid change, and the ``exec``
-verb of this module -- run by the worker's own interpreter, root-owned in the image --
-installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
+anonymous file (``anonymous_fd``), passes that one descriptor across the uid change, and the
+``exec`` verb of this module -- run by the worker's own interpreter, root-owned in the image
+-- installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
 account's; everything else is exactly what the worker built. ``python -m
 issuebot.agent.runas`` is the module's other face, and it has three verbs: ``exec``,
 ``kill`` (the agent's process group, since the worker's uid may not signal it) and ``remove``
@@ -29,6 +29,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,37 @@ MODULE = "issuebot.agent.runas"
 SUDO_TIMEOUT_S = 10
 # Removing a workspace as the agent walks a tree the agent wrote, node_modules included.
 REMOVE_TIMEOUT_S = 120
+
+
+def anonymous_fd(name: str) -> int:
+    """A read-write descriptor on a file no path names, positioned at its start.
+
+    ``memfd_create`` where the interpreter has it, and where it does not an immediately
+    unlinked temporary file, which is what made the memfd the right choice in the first
+    place: the descriptor is inherited through ``pass_fds`` and survives sudo's ``-C``, and
+    once there is no directory entry nothing else can open the environment it holds. A pipe
+    would not do -- the writer would block on the buffer if the environment ever outgrew it.
+
+    The fallback is not theoretical (#115): ``python-build-standalone``, which is what ``uv``
+    installs, configures against a glibc older than the call, so the interpreter a developer
+    runs the suite under is regularly one without it while the image's Debian Python has it.
+    ``sysconfig``'s ``HAVE_MEMFD_CREATE`` reads ``0`` on those builds even when the attribute
+    is there, so the attribute is what to ask.
+
+    Raises ``OSError``, like ``memfd_create`` itself, so every spawn site reports it.
+    """
+    create = getattr(os, "memfd_create", None)
+    if create is not None:
+        return create(name)
+    fd, path = tempfile.mkstemp(prefix=f"{name}-")
+    try:
+        # mkstemp opens 0600 to this uid, so the window before the unlink is not one the
+        # session -- a different uid, and not root -- could read the environment through.
+        os.unlink(path)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 
 
 class RunAsError(OSError):
@@ -90,7 +122,7 @@ class RunAs:
         reach sudo in the first place.
         """
         payload = json.dumps(self.environment(env)).encode("utf-8")
-        fd = os.memfd_create("issuebot-agent-env")
+        fd = anonymous_fd("issuebot-agent-env")
         try:
             os.write(fd, payload)
             os.lseek(fd, 0, os.SEEK_SET)
