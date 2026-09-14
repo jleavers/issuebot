@@ -53,17 +53,21 @@ the account's `~/.claude`, keeping the credential and claude's own per-session r
   untouched.
 
 - **Not a whole-home allowlist sweep that keeps only `.credentials.json`.** Sessions run
-  concurrently (`agent.max_concurrent_agents`, default 2). A whole-home sweep at one session's
-  start would delete a concurrent session's live `projects/`/`sessions/` transcripts and break
-  its `--resume`. The swept paths are never claude's own runtime state, so the denylist sweep
-  is concurrency-safe.
+  concurrently (`agent.max_concurrent_agents`, default 3, 2 in the shipped workflow). A
+  whole-home sweep at one session's start would delete a concurrent session's live
+  `projects/`/`sessions/` transcripts and break its `--resume`. The swept paths are never
+  claude's own runtime state, so the denylist sweep is concurrency-safe.
 
 - **The residual.** A denylist misses a new claude user-config location until it is added to
   `CLAUDE_HOME_SWEEP` by hand; it fails safe (a security gap, not a broken session) where an
-  allowlist would fail unsafe (wiping a runtime dir claude adds). `~/.claude.json` (MCP servers,
-  trust state) sits outside the volume — recreated with each container, so it does not persist
-  across restarts or repositories — and is left to a follow-up rather than risk `claude -p`'s
-  onboarding by removing it here.
+  allowlist would fail unsafe (wiping a runtime dir claude adds). `~/.claude.json` (user-scoped
+  `mcpServers` and project-trust state) is the sharper residual: it sits in `$HOME`, outside the
+  mounted volume, so it does not survive a container restart or reach another checkout, but a
+  single long-running worker container serves many sessions over its lifetime and the file
+  persists across all of them, and an MCP server entry is a command a later session would run.
+  It is outside the literal scope of this issue (the `~/.claude` directory) and removing the
+  whole file risks `claude -p`'s onboarding/trust behaviour, so it is deferred to a follow-up
+  (#119) rather than handled here.
 
 ## Tests
 

@@ -532,6 +532,24 @@ async def test_prompt_error_fails_before_any_turn(tmp_path: Path) -> None:
     assert h.kinds() == ["run_started", "run_ended"]
 
 
+async def test_the_session_sweeps_the_agent_home_before_the_first_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring that makes #101 real: every session clears the shared ~/.claude config once,
+    before the first claude turn. Recorded here so deleting the call in `_execute` fails."""
+    h = Harness(tmp_path)
+    order: list[str] = []
+
+    async def record_sweep() -> None:
+        order.append("sweep")
+
+    monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
+    runner = ScriptedRunner("ok", on_turn=lambda n: order.append(f"turn{n}"))
+    await h.run(runner)
+    assert order[:2] == ["sweep", "turn1"]
+    assert order.count("sweep") == 1
+
+
 async def test_before_run_failure_is_hook_error(tmp_path: Path) -> None:
     h = Harness(tmp_path, hooks={"before_run": "exit 4"})
     runner = ScriptedRunner()

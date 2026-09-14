@@ -184,6 +184,9 @@ class RunAs:
                 claude_dir = Path(self.account().pw_dir) / ".claude"
             except RunAsError:
                 return
+        # SUDO_TIMEOUT_S, not REMOVE_TIMEOUT_S: this removes a handful of small config entries,
+        # not an arbitrary workspace tree. A plugin tree deep enough to outlast it is the one
+        # case a sweep is left partial, and the next session sweeps again, so it self-heals.
         self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
 
     def _delegate(self, *args: str, timeout: float) -> None:
