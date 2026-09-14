@@ -70,6 +70,7 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "auto",
         "--permission-prompts",
         "none",
+        "--strict-mcp-config",
         "--max-budget-usd",
         "5.0",
         "--session-id",
@@ -93,9 +94,9 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     )
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
-    assert argv[10] == "2.5"
-    assert argv[11:13] == ["--resume", SESSION_ID]
-    assert argv[13:] == [
+    assert argv[11] == "2.5"
+    assert argv[12:14] == ["--resume", SESSION_ID]
+    assert argv[14:] == [
         "--model",
         "opus",
         "--setting-sources",
@@ -109,6 +110,33 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         "WebFetch",
     ]
     assert "--session-id" not in argv
+
+
+# --- the MCP config a session must not be able to plant (#119) -------------------------
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_build_argv_always_confines_mcp_to_the_command_line(tmp_path: Path, resume: bool) -> None:
+    """No setting reaches ``--strict-mcp-config``, on a fresh session or a resumed one.
+
+    The session account's ``~/.claude.json`` outlives every session in one container, and
+    ``claude`` loads ``mcpServers`` from it, so the flag is what stops a planted server being
+    offered to the next issue's session. ``setting_sources: [project]`` suppresses the same
+    entry today, which is why this is parametrised over the settings that might look like they
+    already cover it: none of them may decide the flag.
+    """
+    for extra in (
+        {},
+        {"setting_sources": ["project"]},
+        {"setting_sources": ["user", "project", "local"]},
+        {"permission_mode": "bypassPermissions", "allowed_tools": ["Read"]},
+    ):
+        runner = ClaudeRunner(settings(tmp_path, **extra), environ={})
+        argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
+        assert "--strict-mcp-config" in argv
+        # No `--mcp-config` beside it: the flag keeps only the servers named there, so issuebot
+        # naming none is what reduces the loadable set to nothing.
+        assert "--mcp-config" not in argv
 
 
 # --- per-issue model override ----------------------------------------------------------

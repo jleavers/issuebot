@@ -166,6 +166,50 @@ jobs:
               git config --local --add issuebot.probe 1
             "
           '
+      # `~/.claude.json` is the session account's own, in $HOME beside `.claude/` rather than
+      # inside the swept `claude-home` volume (#101), so it is recreated with each container and
+      # shared by every session in one -- and `claude` loads `mcpServers` out of it, offering a
+      # planted server's tools to whichever issue runs next. `--strict-mcp-config` is what stops
+      # that (#119), and it is asserted against the claude the image actually ships rather than
+      # against a help string, so a release that renamed or dropped the flag fails a PR here.
+      # Two-sided on purpose: without the flag the planted server must be *listed*, or the
+      # proof would pass just as well against a claude that never reads the file. No credential
+      # is needed, because the init line is emitted before the login check -- the run ends at
+      # `Not logged in`, which is also what shows the flag leaves a headless `claude -p`
+      # working rather than dying on an unknown argument. `/bin/true` is server enough: one
+      # that fails its handshake is still listed, and being listed is the loading at issue.
+      - name: a planted MCP server in the session account's ~/.claude.json is not loaded
+        run: |
+          mkdir -p /tmp/mcp-probe
+          cat > /tmp/mcp-probe/probe.sh <<'PROBE'
+          set -eu
+          init() {
+            printf '%s' '{"mcpServers":{"planted":{"type":"stdio","command":"/bin/true"}}}' \
+              > "$HOME/.claude.json"
+            echo hi | timeout 300 claude -p --output-format stream-json --verbose \
+              --permission-prompts none "$@" 2>/dev/null | grep -m1 '"subtype":"init"'
+          }
+          without=$(init)
+          case "$without" in
+            *'"planted"'*) ;;
+            *) echo "claude did not load the planted server, so this proves nothing" >&2
+               echo "$without" >&2; exit 1 ;;
+          esac
+          with=$(init --strict-mcp-config)
+          case "$with" in
+            *'"planted"'*) echo "--strict-mcp-config still loaded ~/.claude.json" >&2
+                           echo "$with" >&2; exit 1 ;;
+          esac
+          case "$with" in
+            *'"mcp_servers":[]'*) ;;
+            *) echo "the confined run reported no empty mcp_servers" >&2
+               echo "$with" >&2; exit 1 ;;
+          esac
+          echo "ok: loaded without the flag, gone with it"
+          PROBE
+          chmod a+rX /tmp/mcp-probe /tmp/mcp-probe/probe.sh
+          docker run --rm --user agent -v /tmp/mcp-probe:/mcp-probe:ro \
+            --entrypoint bash issuebot:ci -lc 'bash /mcp-probe/probe.sh'
       # The wrapper is what the worker actually runs (issuebot.agent.runas): the environment
       # crosses the uid change on a descriptor, so what the session sees is the mapping the
       # worker built with the account's own HOME, USER and LOGNAME, and nothing sudo adds or

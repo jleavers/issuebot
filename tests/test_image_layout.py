@@ -49,4 +49,20 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "--user agent --entrypoint sudo issuebot:ci" in CI
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
-    assert CI.count("docker run --rm --user agent -v /tmp/") == 2
+    # The npm smoke test, the README's cluster recipe, and the MCP probe (#119): three steps
+    # that mount a script from the runner and run it as the session's own account.
+    assert CI.count("docker run --rm --user agent -v /tmp/") == 3
+
+
+def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -> None:
+    """Both directions, against the image's own claude (#119).
+
+    Without the flag the planted server must be *listed*, or the proof would pass equally
+    against a claude that had stopped reading ``~/.claude.json`` -- at which point the step
+    would be testing nothing while still going green.
+    """
+    assert "--strict-mcp-config" in CI
+    assert '"mcpServers":{"planted"' in CI
+    assert "*'\"planted\"'*) ;;" in CI
+    assert "claude did not load the planted server, so this proves nothing" in CI
+    assert "*'\"mcp_servers\":[]'*) ;;" in CI
