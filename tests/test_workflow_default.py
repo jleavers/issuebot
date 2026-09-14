@@ -2,15 +2,26 @@
 
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from issuebot.agent.prompt import GITHUB_TEXT_TAG, PromptContext, PromptRenderer
 from issuebot.config import Workflow, load_workflow
-from issuebot.github.models import WORKPAD_MARKER, Issue, LinkedPr, StateLabel
+from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
 
 WORKFLOW = Path(__file__).parent.parent / "configs" / "WORKFLOW.md"
 PR = LinkedPr(
     number=51, url="https://github.com/jleavers/issuebot/pull/51", state="open", merged_at=None
+)
+
+
+WORKPAD = Comment(
+    id=5662693296,
+    body=f"{WORKPAD_MARKER}\n",
+    url="https://github.com/jleavers/issuebot/issues/42#issuecomment-5662693296",
+    author="issuebot",
+    created_at=datetime(2026, 9, 14, 10, 0, tzinfo=UTC),
+    updated_at=datetime(2026, 9, 14, 10, 0, tzinfo=UTC),
 )
 
 
@@ -216,6 +227,25 @@ def test_rework_context_names_both_authors(make_issue: Callable[..., Issue]) -> 
     )
     assert "or issuebot did because the pull request conflicts with the default branch" in text
     assert "`### Issuebot merge conflict` block says which" in text
+
+
+def test_the_workpad_is_the_comment_issuebot_resolved(make_issue: Callable[..., Issue]) -> None:
+    """The agent follows the id issuebot resolved by author; it never finds the comment by its
+    first line, which anyone can write (#77)."""
+    workflow = load()
+    renderer = PromptRenderer(workflow.prompt_template)
+    with_pad = renderer.render(context(workflow, dispatched(make_issue), workpad=WORKPAD))
+    assert f"The workpad is comment `{WORKPAD.id}`: {WORKPAD.url}" in with_pad
+    assert "do not search for the comment by its first line" in with_pad
+    assert "There is no workpad yet" not in with_pad
+    without = renderer.render(context(workflow, dispatched(make_issue)))
+    assert "There is no workpad yet (issuebot looked)" in without
+    assert "-F body=@.issuebot/workpad.md --jq .id" in without
+    assert f"comment `{WORKPAD.id}`" not in without
+    for text in (with_pad, without):
+        assert "startswith(" not in text
+        assert "--jq '.[] | select(" not in text
+        assert "a comment by anyone else that opens with the same line is not the workpad" in text
 
 
 def test_workpad_update_starts_from_the_current_body(make_issue: Callable[..., Issue]) -> None:

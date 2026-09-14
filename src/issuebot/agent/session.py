@@ -14,7 +14,7 @@ from issuebot.agent.runner import TurnObserver, TurnResult, TurnRunner
 from issuebot.agent.workspace import SessionRecord, WorkspaceManager, run_log_dir
 from issuebot.config import Workflow
 from issuebot.events import EventBus, RunEnded, RunOutcome, RunStarted
-from issuebot.github import GitHubAdapter, GitHubError, Issue, StateLabel
+from issuebot.github import Comment, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
 
 StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "cancelled", "blocked"]
@@ -100,6 +100,7 @@ class _State:
     error_category: AgentErrorCategory | None = None
     error: str | None = None
     blocker: str | None = None
+    workpad: Comment | None = None
 
     def fail(self, category: AgentErrorCategory, message: str | None) -> None:
         self.error_category = category
@@ -127,6 +128,7 @@ class _State:
             turn_number=turn_number,
             last_outcome=last_outcome,
             updated_at=datetime.now(UTC),
+            workpad_comment_id=self.workpad.id if self.workpad is not None else None,
         )
 
     def result(self) -> RunResult:
@@ -315,6 +317,16 @@ async def _turn_loop(
     settings = workflow.config
     max_turns = settings.agent.max_turns
     for turn_number in range(1, max_turns + 1):
+        # The workpad is resolved here, by author, and handed to the prompt (#77): the agent
+        # follows this id rather than finding the comment by a first line anyone can write.
+        # Every turn, not once: the agent creates it in turn 1 and a resumed session's is
+        # whatever the last one left. A lookup that fails fails the turn the way a refresh
+        # does, since rendering without it would have the agent open a second workpad.
+        try:
+            state.workpad = await adapter.find_workpad_comment(state.issue.number)
+        except GitHubError as exc:
+            state.fail("github_error", f"could not find the workpad: {exc}")
+            return
         context = PromptContext(
             issue=state.issue,
             repo=settings.github.repo,
@@ -324,6 +336,7 @@ async def _turn_loop(
             max_turns=max_turns,
             rework=rework,
             self_review=settings.agent.self_review,
+            workpad=state.workpad,
         )
         resume = turn_number > 1 or resuming
         try:

@@ -16,9 +16,19 @@ from issuebot.agent.prompt import (
     PromptRenderer,
     check_envelopes,
     issue_variables,
+    workpad_variables,
 )
 from issuebot.config import GitHubLabels
-from issuebot.github.models import WORKPAD_MARKER, Issue, LinkedPr, StateLabel
+from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
+
+WORKPAD = Comment(
+    id=1002,
+    body=f"{WORKPAD_MARKER}\n\n### Plan\n",
+    url="https://github.com/example/repo/issues/42#issuecomment-1002",
+    author="issuebot",
+    created_at=datetime(2026, 9, 2, 10, 0, tzinfo=UTC),
+    updated_at=datetime(2026, 9, 2, 10, 30, tzinfo=UTC),
+)
 
 PR = LinkedPr(
     number=51, url="https://github.com/example/repo/pull/51", state="open", merged_at=None
@@ -240,16 +250,28 @@ def test_every_documented_variable_is_reachable(make_issue: Callable[..., Issue]
     template = (
         "{{ issue.identifier }}|{{ repo }}|{{ labels.todo }}|{{ labels.in_progress }}|"
         "{{ labels.review }}|{{ labels.rework }}|{{ labels.complete }}|{{ labels.no_fault }}|"
-        "{{ workpad_marker }}|"
+        "{{ workpad_marker }}|{{ workpad.id }}|{{ workpad.url }}|"
         "{{ attempt }}|{{ turn_number }}|{{ max_turns }}|{{ rework }}|{{ self_review }}"
     )
     rendered = PromptRenderer(template).render(
-        context(make_issue(), attempt=2, turn_number=3, max_turns=5, rework=True)
+        context(make_issue(), attempt=2, turn_number=3, max_turns=5, rework=True, workpad=WORKPAD)
     )
     assert rendered == (
         "repo-42|example/repo|issuebot/todo|issuebot/in-progress|issuebot/review|"
-        f"issuebot/rework|issuebot/complete|issuebot/no-fault|{WORKPAD_MARKER}|2|3|5|True|True"
+        f"issuebot/rework|issuebot/complete|issuebot/no-fault|{WORKPAD_MARKER}|"
+        f"1002|{WORKPAD.url}|2|3|5|True|True"
     )
+
+
+def test_workpad_is_none_until_issuebot_has_resolved_one(make_issue: Callable[..., Issue]) -> None:
+    """The template sees the id and url issuebot resolved by author, never the body (#77)."""
+    assert workpad_variables(None) is None
+    assert workpad_variables(WORKPAD) == {"id": 1002, "url": WORKPAD.url}
+    template = "{% if workpad %}{{ workpad.id }}{% else %}none{% endif %}"
+    assert PromptRenderer(template).render(context(make_issue())) == "none"
+    assert PromptRenderer(template).render(context(make_issue(), workpad=WORKPAD)) == "1002"
+    with pytest.raises(AgentError):
+        PromptRenderer("{{ workpad.body }}").render(context(make_issue(), workpad=WORKPAD))
 
 
 def test_undefined_variable_is_a_prompt_error(make_issue: Callable[..., Issue]) -> None:
@@ -299,3 +321,13 @@ def test_continuation_prompt_names_turn_and_label(make_issue: Callable[..., Issu
     assert "(attempt 2)" in rendered
     assert "`issuebot/in-progress`" in rendered
     assert "repo-42" in rendered
+    assert "found no workpad on the issue yet" in rendered
+
+
+def test_continuation_prompt_names_the_workpad(make_issue: Callable[..., Issue]) -> None:
+    """A resumed session's context predates the workpad it is now expected to keep (#77)."""
+    rendered = PromptRenderer("unused").render_continuation(
+        context(make_issue(), turn_number=2, workpad=WORKPAD)
+    )
+    assert f"The workpad is comment `1002` ({WORKPAD.url})" in rendered
+    assert "found no workpad" not in rendered
