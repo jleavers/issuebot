@@ -98,7 +98,7 @@ issues that triage is most of the value.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
    things a hook cannot install are a database server and a language runtime, because the
-   container runs as uid 1000 with no `sudo` and no Docker — so if the target repository's
+   container's session runs as uid 1001 with no Docker — so if the target repository's
    tests need a PostgreSQL server, set `ISSUEBOT_POSTGRES_VERSION` in `.env` before building
    (see "A PostgreSQL server for the target repository's tests" below), and if they execute
    the repository's own client-side JavaScript, set `ISSUEBOT_NODE_VERSION` too (see "Node for
@@ -215,8 +215,9 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] github.repo: your-org/your-repo
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
-[ OK ] claude.command: /home/issuebot/.local/bin/claude (2.1.259)
+[ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
+[ OK ] agent.run_as: agent; the session runs as a separate account
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -225,16 +226,19 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-14 checks: 0 failed, 2 warnings
+15 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
 the target repository; run it once per repository, and again after an upgrade that adds a label.
 The labels warning disappears on the next `validate`.
 
-To use a Claude Code login instead of an API key, log in once inside the container: run
-`docker compose run --rm --entrypoint claude worker`, complete the login, then exit. The
-login is kept in the `claude-home` volume and survives restarts and rebuilds. Alternatively
+To use a Claude Code login instead of an API key, log in once inside the container **as the
+session's account**: run `docker compose run --rm --user agent --entrypoint claude worker`,
+complete the login, then exit. The login is kept in the `claude-home` volume, which is mounted
+at that account's home (`/home/agent/.claude`), and survives restarts and rebuilds. `--user
+agent` matters: the session authenticates with its own login, not the worker's, so a login
+written as the worker would sit in a home the session cannot read (#75). Alternatively
 run `claude setup-token` on a machine with a browser and put the result in `.env` as
 `CLAUDE_CODE_OAUTH_TOKEN`. On the host, `claude` uses whatever login you already have.
 
@@ -288,13 +292,13 @@ time rather than sitting idle for good.
 To ask `claude` directly, without going through issuebot:
 
 ```bash
-docker compose run --rm --entrypoint claude worker auth status
+docker compose run --rm --user agent --entrypoint claude worker auth status
 ```
 
 It prints JSON — `"loggedIn": true` with an `authMethod` of `claude.ai`, `oauth_token` or
 `api_key` — and `--text` gives a human-readable line instead. Note that it always exits 0, so
 read the field rather than the exit code. The `email` and `orgName` fields come back null in
-the container even when the login is good: that metadata lives in `~/.claude.json`, which sits
+the container even when the login is good: that metadata lives in `/home/agent/.claude.json`, which sits
 outside the mounted volume and is recreated with each container. The credential itself is in
 `.claude/.credentials.json`, which *is* in the volume, and it carries a refresh token, so it
 renews itself rather than expiring after a few hours.
@@ -307,7 +311,7 @@ docker volume ls | grep claude-home     # Compose prefixes the name with the pro
 docker run --rm -v issuebot_claude-home:/v alpine:3 ls -la /v
 ```
 
-A logged-in volume has `.credentials.json` in it. Compose names the volume after the directory
+A logged-in volume has `.credentials.json` in it (write it as `--user agent`, above). Compose names the volume after the directory
 you cloned into, so it is `issuebot_claude-home` here and `issuebot-frontend_claude-home` in a
 checkout called `issuebot-frontend` — hence the `docker volume ls` first. Never `cat` that
 file: it holds the live token.
@@ -512,7 +516,7 @@ Why it is shaped this way:
   `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
 - **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
   nobody else is in.
-- **`initdb` refuses to run as root**, and the container runs as uid 1000, so that is one
+- **`initdb` refuses to run as root**, and the session runs as uid 1001, so that is one
   problem the image does not have.
 - **`--encoding=UTF8 --locale=C.UTF-8`, even though the image already sets `LANG=C.UTF-8`.**
   Told neither, `initdb` takes the cluster's encoding from the locale, and on a `C` locale that
@@ -806,18 +810,31 @@ that matters on your host.
   image: after pulling a new version of issuebot, run `docker compose build` (or
   `docker compose up --build -d`) before anything else. Upgrading across the move of
   `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker`
-  once, so the worker picks up the new mount (the web no longer mounts `configs`); check
-  that your edits followed the rename
+  once, so the worker picks up the new mount (the web no longer mounts `configs`). Upgrading
+  across the session/worker split (#75) moves the login volume from the worker's home to the
+  session account's: run `docker run --rm -v issuebot_claude-home:/v alpine:3 chown -R 1001:1001
+  /v` once so `agent` owns its own login, then `docker compose up -d --force-recreate worker`.
+  Check that your edits followed the rename
   (`git status`) before starting, and note that `workspace.root` now resolves against
   `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
   make it absolute, because `/configs` is mounted read-only. A setting that a newer
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
-- **Safety.** The agent runs with no permission prompts and may run anything inside its
-  workspace. Keep it in the container, give it a repository-scoped token, and keep the
-  dashboard on loopback. The agent's environment is minimal: `PATH`, `HOME`, the
-  `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and `GH_TOKEN`;
-  nothing else from `.env` reaches it.
+- **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
+  (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
+  worker (`issuebot`, uid 1000) that supervises and credentials it (#75). So the session runs
+  with no permission prompts and may do as it likes at its own uid, but the worker's code
+  (`/app`, root-owned), its environment (`GH_TOKEN`, the database URL, the Slack webhook), its
+  home and the state it keeps inside a workspace are all out of the session's reach, and the
+  worker cannot become root or anything but `agent`. The session's login is its own, in
+  `/home/agent/.claude`. The agent's environment is otherwise minimal — `PATH`, the
+  `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and `GH_TOKEN`, with
+  `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches it — but that
+  allow-list, the workspace and the protected-key list are conveniences, not the sandbox: the
+  container and the uid are. On the host route (`agent.run_as` unset, `validate` warns) the
+  session runs as your own user with none of this, which is why the container is the supported
+  deployment. Keep it in the container, give it a repository-scoped token, and keep the
+  dashboard on loopback.
 
 ## Development
 

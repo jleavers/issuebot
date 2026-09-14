@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Protocol
 
 from issuebot.agent import (
     AgentError,
@@ -26,7 +26,8 @@ from issuebot.agent import (
     run_session,
     settings_for_labels,
 )
-from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits
+from issuebot.agent.runas import RunAs
+from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits, agent_environment
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.config import (
     ConfigError,
@@ -101,9 +102,24 @@ GITHUB_HOLD_KEY = "github"
 # GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
 MAX_HOLD_ERROR_CHARS = 300
 
+
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
 # environment, stdout or None. A seam like `which`, so tests never spawn a process.
-ClaudeAuthProbe = Callable[[str, Mapping[str, str]], str | None]
+class ClaudeAuthProbe(Protocol):
+    def __call__(
+        self, command: str, environ: Mapping[str, str], /, *, run_as: str | None = None
+    ) -> str | None: ...
+
+
+class RunAsProbe(Protocol):
+    def __call__(self, user: str, environ: Mapping[str, str], /) -> str | None: ...
+
+
+def probe_run_as(user: str, environ: Mapping[str, str]) -> str | None:
+    """None when the worker can run a command as ``user`` (#75), else why not."""
+    return RunAs(user).probe(agent_environment(environ, token=None))
+
+
 # githubstatus.com's summary body, or None. A seam for the same reason: no test reaches the
 # network, and nothing issuebot decides depends on the answer.
 GitHubStatusProbe = Callable[[], str | None]
@@ -228,6 +244,7 @@ class Orchestrator:
         which: Callable[[str], str | None] = shutil.which,
         claude_auth: ClaudeAuthProbe = claude_auth_status,
         github_status: GitHubStatusProbe = fetch_status_summary,
+        run_as_probe: RunAsProbe = probe_run_as,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
@@ -250,6 +267,7 @@ class Orchestrator:
         self._which = which
         self._claude_auth = claude_auth
         self._github_status = github_status
+        self._run_as_probe = run_as_probe
         self._clock = clock
         self._now = now
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
@@ -360,6 +378,14 @@ class Orchestrator:
             if missing:
                 names = ", ".join(missing)
                 problems.append(f"labels missing: {names}; run issuebot labels ensure")
+        # The boundary the deployment asked for has to exist before an issue is claimed
+        # (#75): a delegation that does not work would fail every run instead.
+        if settings.agent.run_as is not None:
+            error = await asyncio.to_thread(
+                self._run_as_probe, settings.agent.run_as, self._environ
+            )
+            if error is not None:
+                problems.append(f"agent.run_as: {error}")
         auth = await self._probe_claude_auth(settings.claude.command)
         self._credential = auth.credential
         if auth.verdict == "logged_out":
@@ -397,7 +423,9 @@ class Orchestrator:
         """``claude auth status`` under the agent's environment, off the event loop."""
         found = self._which(command)
         assert found is not None, "preflight resolves claude.command before the probe runs"
-        output = await asyncio.to_thread(self._claude_auth, found, self._environ)
+        output = await asyncio.to_thread(
+            self._claude_auth, found, self._environ, run_as=self._workflow.config.agent.run_as
+        )
         return describe_claude_auth(output)
 
     async def _auth_hold(self) -> _Hold | None:

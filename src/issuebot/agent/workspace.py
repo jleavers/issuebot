@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from issuebot.agent.errors import AgentError
+from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
 from issuebot.agent.scrub import Scrubber
 from issuebot.config import Settings
@@ -30,6 +32,13 @@ POST_CLONE_SCRIPT = (
     "git config --local --add credential.https://github.com.helper '!gh auth git-credential' && "
     "mkdir -p .git/info && printf '.issuebot/\\n' >> .git/info/exclude"
 )
+# Written last into ``.issuebot`` by the worker: its presence marks a workspace whose creation
+# completed, so a clone whose hooks were cut short is recreated rather than reused.
+CREATED_MARKER = "created"
+# Under ``agent.run_as`` (#75) the workspace directory and ``.issuebot`` are the worker's, and
+# sticky: the agent creates what it likes inside them but can neither unlink nor rename the
+# worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own.
+SHARED_DIR_MODE = 0o1777
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
@@ -122,6 +131,8 @@ class WorkspaceManager:
         # takes the same exits as a failed turn's (#91): so the tails are scrubbed here, where
         # the result is built, before the cut that keeps their end.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
+        # The account the clone, the hooks and the post-clone setup run as (#75), or None.
+        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
         self._log = get_logger(__name__)
 
     # --- paths --------------------------------------------------------------------
@@ -140,12 +151,12 @@ class WorkspaceManager:
 
     async def create_or_reuse(self, issue: Issue) -> Workspace:
         path = self.path_for(issue.identifier)
-        if (path / ".git").is_dir() and (path / ".issuebot").is_dir():
+        if self._is_complete(path):
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
             self._log.warning("workspace_remnant_removed", workspace=str(path))
-            _remove_path(path, "cannot remove remnant")
+            await self._remove_tree(path, "cannot remove remnant")
         try:
             self.root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -153,38 +164,86 @@ class WorkspaceManager:
                 "workspace_error", f"cannot create workspace root {self.root}: {exc}"
             ) from exc
         try:
+            # The directory first, and the worker's: the clone lands inside it, so under
+            # agent.run_as it is shared (sticky) rather than the agent's own (#75).
+            path.mkdir()
+            self._share(path)
+        except OSError as exc:
+            raise AgentError(
+                "workspace_error", f"cannot create workspace directory {path}: {exc}"
+            ) from exc
+        try:
             await self._clone(path)
+            # Before any hook: `after_create` may write `.issuebot/env`, and the state the
+            # worker keeps here (`runs/`, `session.json`) has to be its own from the start.
+            self._make_state_dir(path)
             post = await self._run_script("post_clone", POST_CLONE_SCRIPT, path)
             if not post.ok:
                 raise AgentError("workspace_error", f"post-clone setup failed: {post.summary}")
             hook = await self.run_hook("after_create", path)
             if hook is not None and not hook.ok:
                 raise AgentError("workspace_error", f"after_create hook failed: {hook.summary}")
-            # Created last: its presence marks a workspace whose creation completed.
+            # Written last: its presence marks a workspace whose creation completed.
             try:
-                (path / ".issuebot").mkdir(exist_ok=True)
+                (path / ".issuebot" / CREATED_MARKER).touch()
             except OSError as exc:
-                raise AgentError(
-                    "workspace_error", f"cannot create {path / '.issuebot'}: {exc}"
-                ) from exc
+                raise AgentError("workspace_error", f"cannot mark {path} created: {exc}") from exc
         except AgentError:
-            shutil.rmtree(path, ignore_errors=True)
+            with contextlib.suppress(AgentError):
+                await self._remove_tree(path, "cannot remove the failed workspace")
             raise
         self._log.info("workspace_created", workspace=str(path))
         return Workspace(key=path.name, path=path, created=True)
 
+    def _is_complete(self, path: Path) -> bool:
+        """A clone whose creation finished, and under agent.run_as one the worker still owns."""
+        state = path / ".issuebot"
+        if not ((path / ".git").is_dir() and (state / CREATED_MARKER).is_file()):
+            return False
+        if self._runas is None:
+            return True
+        return all(_owned_by_me(p) for p in (path, state, state / "runs", state / CREATED_MARKER))
+
+    def _share(self, path: Path) -> None:
+        if self._runas is not None:
+            os.chmod(path, SHARED_DIR_MODE)
+
+    def _make_state_dir(self, path: Path) -> None:
+        state = path / ".issuebot"
+        try:
+            # Under agent.run_as the clone is the agent's, so a repository that ships a
+            # `.issuebot` entry has put one where the worker's state goes: refuse, rather than
+            # keep state in a directory the session owns.
+            state.mkdir(exist_ok=self._runas is None)
+            self._share(state)
+            (state / "runs").mkdir(exist_ok=self._runas is None)
+        except FileExistsError as exc:
+            raise AgentError(
+                "workspace_error",
+                f"{path} already holds {exc.filename}; .issuebot inside a workspace is issuebot's",
+            ) from exc
+        except OSError as exc:
+            raise AgentError("workspace_error", f"cannot create {state}: {exc}") from exc
+
     async def _clone(self, path: Path) -> None:
         args = ["repo", "clone", self._settings.github.repo, str(path), "--", "--depth", "1"]
-        try:
-            result = await self._gh.run(args)
-        except GitHubError as exc:
-            raise AgentError("workspace_error", f"clone failed: {exc.message}") from exc
-        if result.returncode != 0:
-            lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
-            detail = lines[0][:200] if lines else ""
-            raise AgentError(
-                "workspace_error", f"clone exited with status {result.returncode}: {detail}"
-            )
+        if self._runas is not None:
+            # As the agent, so the clone is the agent's to write: gh clones into the empty
+            # directory the worker made. `_run_argv` has already reported a failure to run.
+            clone = await self._run_argv("clone", ["gh", *args], self.root)
+            if not clone.ok:
+                raise AgentError("workspace_error", f"clone failed: {clone.summary}")
+        else:
+            try:
+                result = await self._gh.run(args)
+            except GitHubError as exc:
+                raise AgentError("workspace_error", f"clone failed: {exc.message}") from exc
+            if result.returncode != 0:
+                lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+                detail = lines[0][:200] if lines else ""
+                raise AgentError(
+                    "workspace_error", f"clone exited with status {result.returncode}: {detail}"
+                )
         if not (path / ".git").is_dir():
             raise AgentError("workspace_error", f"clone produced no repository at {path}")
 
@@ -193,7 +252,7 @@ class WorkspaceManager:
         if not path.exists():
             return False
         await self.run_hook("before_remove", path)
-        _remove_path(path, "cannot remove workspace")
+        await self._remove_tree(path, "cannot remove workspace")
         self._log.info("workspace_removed", workspace=str(path))
         return True
 
@@ -205,7 +264,21 @@ class WorkspaceManager:
             return None
         return await self._run_script(name, script, workspace)
 
+    async def _remove_tree(self, path: Path, what: str) -> None:
+        """Delete a workspace: the agent's files as the agent (#75), then the worker's own."""
+        if self._runas is not None:
+            await asyncio.to_thread(self._runas.remove_tree, path)
+        _remove_path(path, what)
+
+    def _kill_group(self, process: asyncio.subprocess.Process) -> None:
+        if self._runas is not None:
+            self._runas.kill_group(process.pid)
+        _kill_group(process)
+
     async def _run_script(self, name: str, script: str, workspace: Path) -> HookResult:
+        return await self._run_argv(name, [*self.hook_shell, script], workspace)
+
+    async def _run_argv(self, name: str, argv: Sequence[str], workspace: Path) -> HookResult:
         timeout_s = self._settings.hooks.timeout_ms / 1000
         started = time.monotonic()
         # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
@@ -214,16 +287,17 @@ class WorkspaceManager:
         env, _ = workspace_environment(base, workspace)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
-            process = await asyncio.create_subprocess_exec(
-                *self.hook_shell,
-                script,
-                cwd=workspace,
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            with self._prepared(argv, env) as spawn:
+                process = await asyncio.create_subprocess_exec(
+                    *spawn.argv,
+                    cwd=workspace,
+                    env=spawn.env,
+                    pass_fds=spawn.pass_fds,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
         except OSError as exc:
             result = HookResult(
                 name=name,
@@ -238,7 +312,7 @@ class WorkspaceManager:
         try:
             out, err = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
-            _kill_group(process)
+            self._kill_group(process)
             await process.wait()
             result = HookResult(
                 name=name,
@@ -257,7 +331,7 @@ class WorkspaceManager:
             )
             return result
         except BaseException:
-            _kill_group(process)
+            self._kill_group(process)
             with contextlib.suppress(Exception):
                 await process.wait()
             raise
@@ -289,6 +363,13 @@ class WorkspaceManager:
             )
         return result
 
+    def _prepared(
+        self, argv: Sequence[str], env: Mapping[str, str]
+    ) -> contextlib.AbstractContextManager[Spawn]:
+        if self._runas is not None:
+            return self._runas.prepared(argv, env)
+        return contextlib.nullcontext(Spawn(argv=list(argv), env=dict(env), pass_fds=()))
+
     def _output_tail(self, raw: bytes) -> str:
         """The end of a hook's output, scrubbed before the cut so no credential straddles it."""
         return self._scrubber.scrub(raw.decode("utf-8", errors="replace"))[-_OUTPUT_TAIL:]
@@ -298,6 +379,11 @@ class WorkspaceManager:
     def read_session(self, workspace: Path) -> SessionRecord | None:
         path = session_path(workspace)
         try:
+            if self._runas is not None and not _owned_by_me(path):
+                # The directory is shared with the agent (#75): a record the worker did not
+                # write is the session's word about itself, and the worker resumes on nothing.
+                self._log.warning("session_file_untrusted", path=str(path))
+                return None
             data = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
@@ -315,9 +401,13 @@ class WorkspaceManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(record)
         data["updated_at"] = record.updated_at.isoformat()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        # A fresh, exclusively created name rather than a fixed one: the directory is shared
+        # with the agent under agent.run_as (#75), and a fixed name is one it could pre-create.
+        with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, prefix="session.", suffix=".tmp", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp.name, path)
 
 
 def _record_from(data: object) -> SessionRecord:
@@ -349,6 +439,13 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"expected an integer, got {value!r}")
     return value
+
+
+def _owned_by_me(path: Path) -> bool:
+    try:
+        return path.lstat().st_uid == os.getuid()
+    except OSError:
+        return False
 
 
 def _remove_path(path: Path, what: str) -> None:

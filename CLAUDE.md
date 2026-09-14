@@ -20,6 +20,8 @@ docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./configs/WORKFLOW.md and check the environment
+                                     #   (the container runs the session as uid 1001 `agent`, the
+                                     #    worker as uid 1000 `issuebot`; #75, agent.run_as)
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
 uv run issuebot labels ensure        # create/update the state labels and markers in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label
@@ -158,7 +160,22 @@ floor, not the shipped version, and moves by hand.
   is total in both directions -- `http`/`https` only, a 5 s timeout, a bounded read, and
   anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
   `github` dispatch hold and `validate`'s `github.status` check.
-- `issuebot.agent`: `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
+- `issuebot.agent`: `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
+  session runs at a different uid from the worker. With `agent.run_as` set (the image sets
+  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`), `claude -p`, every
+  hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
+  `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
+  the session's environment crosses the uid change on a memfd rather than through sudo's
+  environment policy, `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run
+  by the worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
+  process group) and `remove` (the session's files under a workspace) are the worker's uid's
+  two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
+  orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
+  its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
+  reports it like a missing `claude`. Unset (the host route, the tests) runs everything as
+  the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
+  `created` marker file (the completion sentinel), and `session.json` trusted only when the
+  worker owns it. `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`

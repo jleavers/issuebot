@@ -1,5 +1,6 @@
 """Typed runtime settings parsed from WORKFLOW.md front matter (after resolution)."""
 
+import re
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -64,6 +65,10 @@ class PollingSettings(_Model):
     interval_ms: int = Field(default=30_000, ge=1000)
 
 
+# POSIX portable user names, plus the trailing ``$`` Samba accounts carry; never a `-u` option.
+_ACCOUNT_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
+
+
 class WorkspaceSettings(_Model):
     root: Path = Path("/workspaces")
 
@@ -92,6 +97,20 @@ class AgentSettings(_Model):
     # request conflicts with the default branch; 0 turns the automatic bounce off.
     max_conflict_reworks: int = Field(default=3, ge=0)
     self_review: bool = True
+    # The account the session runs as (#75): ``claude -p``, every hook, the clone and the
+    # post-clone setup, through ``issuebot.agent.runas``. A different uid from the worker's
+    # is what puts the worker's code, environment and state out of the session's reach; unset
+    # (the host route, the tests) runs everything as the worker, which is the shared privilege
+    # domain the image no longer has. Falls back to ``ISSUEBOT_AGENT_USER`` (``resolve.py``),
+    # which the image sets to ``agent``.
+    run_as: str | None = None
+
+    @field_validator("run_as")
+    @classmethod
+    def _run_as_is_an_account_name(cls, value: str | None) -> str | None:
+        if value is not None and not _ACCOUNT_NAME.fullmatch(value):
+            raise ValueError("agent.run_as must be an account name")
+        return value
 
 
 class ClaudeSettings(_Model):

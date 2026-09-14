@@ -453,19 +453,20 @@ async def test_git_without_issuebot_marker_is_recreated(
 async def test_issuebot_marker_is_created_after_the_after_create_hook(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
-    manager, _ = make_manager(
-        tmp_path, hooks={"after_create": "test ! -e .issuebot && touch hook-ran"}
-    )
+    # `.issuebot` and its `runs/` exist before the hook (a hook may write `.issuebot/env`);
+    # the `created` marker inside it is what says creation completed, and it comes after.
+    script = "test -d .issuebot/runs && test ! -e .issuebot/created && touch hook-ran"
+    manager, _ = make_manager(tmp_path, hooks={"after_create": script})
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert (ws.path / "hook-ran").exists()
-    assert (ws.path / ".issuebot").is_dir()
+    assert (ws.path / ".issuebot" / "created").is_file()
 
 
 @posix
 async def test_marker_creation_failure_is_workspace_error(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
-    manager, _ = make_manager(tmp_path, hooks={"after_create": "touch .issuebot"})
+    manager, _ = make_manager(tmp_path, hooks={"after_create": "rmdir .issuebot/runs .issuebot"})
     with pytest.raises(AgentError) as exc:
         await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert exc.value.category == "workspace_error"

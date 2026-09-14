@@ -22,6 +22,8 @@ SECRET_FIELDS: dict[tuple[str, ...], str] = {
 WORKSPACE_ROOT_FIELD: tuple[str, ...] = ("workspace", "root")
 WORKSPACE_ROOT_FALLBACK = "ISSUEBOT_WORKSPACE_ROOT"
 WORKSPACE_ROOT_DEFAULT = "/workspaces"
+AGENT_RUN_AS_FIELD: tuple[str, ...] = ("agent", "run_as")
+AGENT_RUN_AS_FALLBACK = "ISSUEBOT_AGENT_USER"
 
 
 def resolve_env_value(
@@ -84,6 +86,19 @@ def resolve_config(
     if isinstance(root, str) and root:
         root = str(resolve_path(root, base_dir=base_dir))
     _set(config, WORKSPACE_ROOT_FIELD, root)
+
+    # The image sets the variable; the host route leaves it unset and runs the session as the
+    # worker (#75). An explicit ``agent.run_as`` in WORKFLOW.md wins over it, as for the root.
+    _set(
+        config,
+        AGENT_RUN_AS_FIELD,
+        resolve_env_value(
+            _get(config, AGENT_RUN_AS_FIELD),
+            field=".".join(AGENT_RUN_AS_FIELD),
+            fallback=AGENT_RUN_AS_FALLBACK,
+            environ=environ,
+        ),
+    )
     return config
 
 

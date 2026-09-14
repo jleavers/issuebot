@@ -107,6 +107,55 @@ jobs:
           test "$(docker run --rm --entrypoint sh issuebot:ci -c 'echo $LANG')" = C.UTF-8
           test "$(docker run --rm --entrypoint bash issuebot:ci -lc 'echo $LANG')" = C.UTF-8
           test -z "$(docker run --rm --entrypoint sh issuebot:ci -c 'echo ${LC_ALL-}')"
+      # The session and the worker are two accounts (#75), and the image is where that line is
+      # drawn: the worker (issuebot, 1000) may become the session's account (agent, 1001) and
+      # nobody else; the session's account cannot invoke sudo, write the worker's code or
+      # claude, enter the worker's home, or read the worker's environment, although the pid
+      # namespace is shared; and claude runs as both. Each is a `docker run`, since the
+      # sandbox is exactly what a unit test cannot see.
+      - name: the session's account is separate from the worker's and reaches nothing of it
+        run: |
+          test "$(docker run --rm --entrypoint id issuebot:ci -u)" = 1000
+          test "$(docker run --rm --user agent --entrypoint id issuebot:ci -u)" = 1001
+          test "$(docker run --rm --entrypoint sudo issuebot:ci -n -u agent id -u)" = 1001
+          if docker run --rm --entrypoint sudo issuebot:ci -n -u root id -u; then
+            echo "the worker may become root" >&2; exit 1
+          fi
+          if docker run --rm --user agent --entrypoint sudo issuebot:ci -n -u agent id -u; then
+            echo "the session's account can invoke sudo" >&2; exit 1
+          fi
+          docker run --rm --user agent --entrypoint sh issuebot:ci -c '
+            set -eu
+            test ! -w /app && test ! -w /app/.venv/bin/python
+            test ! -w "$(readlink -f /usr/local/bin/claude)"
+            test ! -r /home/issuebot && test ! -x /home/issuebot
+            test ! -r /etc/sudoers.d/issuebot
+          '
+          docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -w /app; test ! -r /home/agent'
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            sleep 5 &
+            if sudo -n -u agent cat /proc/$!/environ >/dev/null 2>&1; then
+              echo "the session read the worker environ" >&2; exit 1
+            fi
+          '
+          docker run --rm --user agent --entrypoint claude issuebot:ci --version
+      # The wrapper is what the worker actually runs (issuebot.agent.runas): the environment
+      # crosses the uid change on a descriptor, so what the session sees is the mapping the
+      # worker built with the account's own HOME, USER and LOGNAME, and nothing sudo adds or
+      # strips -- the variable the container was started with included.
+      - name: the wrapper hands the session exactly the environment the worker built
+        run: |
+          docker run --rm -i -e LEAKED_FROM_CONTAINER=1 --entrypoint python issuebot:ci - <<'PY'
+          import os
+          from issuebot.agent.runas import RunAs
+          env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "GH_TOKEN": "t", "CLAUDE_X": "1"}
+          got = RunAs("agent").run(["env", "-0"], env, timeout=10)
+          assert got.returncode == 0, got.stderr
+          seen = dict(item.split("=", 1) for item in got.stdout.split("\0") if item)
+          assert seen == {**env, "HOME": "/home/agent", "USER": "agent", "LOGNAME": "agent"}, seen
+          assert RunAs("agent").probe(env) is None
+          print("the session sees", sorted(seen))
+          PY
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
       # build carries both, since the checks below are about what is on PATH and under which
@@ -136,6 +185,7 @@ jobs:
           docker run --rm --entrypoint npm issuebot:ci-toolchain --version
           docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
+          test "$(docker run --rm --user agent --entrypoint id issuebot:ci-toolchain -un)" = agent
       - name: the opt-in build's locale is UTF-8
         run: |
           test "$(docker run --rm --entrypoint sh issuebot:ci-toolchain -c 'echo $LANG')" = C.UTF-8
@@ -158,7 +208,7 @@ jobs:
       # npm wrapper on PATH, resolving its own `#!/usr/bin/env node`, writing its cache and its
       # log under $HOME. The tree has no dependencies, so nothing is fetched -- and the
       # registry is pointed at a dead port so that stays true if anyone adds one.
-      - name: npm ci runs as issuebot without reaching the registry
+      - name: npm ci runs as the session's account without reaching the registry
         run: |
           mkdir -p /tmp/npm-smoke
           cat > /tmp/npm-smoke/package.json <<'JSON'
@@ -183,7 +233,7 @@ jobs:
           }
           JSON
           chmod -R a+rX /tmp/npm-smoke
-          docker run --rm -v /tmp/npm-smoke:/npm-smoke:ro --entrypoint bash issuebot:ci-toolchain -lc '
+          docker run --rm --user agent -v /tmp/npm-smoke:/npm-smoke:ro --entrypoint bash issuebot:ci-toolchain -lc '
             set -eu
             cd "$(mktemp -d)"
             cp /npm-smoke/package.json /npm-smoke/package-lock.json .
@@ -220,7 +270,7 @@ jobs:
           assert set(hooks) == {"before_run", "after_run", "before_remove"}, sorted(hooks)
           PY
           chmod a+rX /tmp/hooks /tmp/hooks/*.sh
-          docker run --rm -v /tmp/hooks:/hooks:ro --entrypoint bash issuebot:ci-toolchain -lc '
+          docker run --rm --user agent -v /tmp/hooks:/hooks:ro --entrypoint bash issuebot:ci-toolchain -lc '
             set -eu
             cd "$(mktemp -d)"
             bash /hooks/before_run.sh

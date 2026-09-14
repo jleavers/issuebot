@@ -282,7 +282,9 @@ class Harness:
     def which(self, name: str) -> str | None:
         return None if name in self.which_missing else f"/usr/bin/{name}"
 
-    def claude_auth(self, command: str, environ: Mapping[str, str]) -> str | None:
+    def claude_auth(
+        self, command: str, environ: Mapping[str, str], *, run_as: str | None = None
+    ) -> str | None:
         self.claude_auth_calls.append((command, environ))
         return self.claude_auth_output
 
