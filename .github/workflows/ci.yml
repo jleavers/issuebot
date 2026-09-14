@@ -157,7 +157,9 @@ jobs:
       # worker's code is reachable from it. One `test` per line throughout: under `set -e` only
       # the last command of an AND list is enforced, so `test A && test B` asserts B alone.
       # The last line starts the app under it for real, as far as a database it has none of:
-      # `[FAIL] database:` is the CLI's own line, printed after the interpreter, the package
+      # `[FAIL] database: cannot connect:` is the CLI's own line (`not configured` is the same
+      # prefix printed before any attempt, which is why the grep names the connect), printed
+      # after the interpreter, the package
       # and the web's dependencies have all loaded as uid 1002 and `cmd_web` has run to the
       # connection attempt, which is the one thing the account has to be able to do. Captured
       # and grepped rather than piped, since the job's shell has no pipefail.
@@ -188,7 +190,7 @@ jobs:
                issuebot:ci web > /tmp/web-start.txt 2>&1; then
             echo "the dashboard started against a dead database" >&2; exit 1
           fi
-          grep -q '^\[FAIL\] database:' /tmp/web-start.txt
+          grep -q '^\[FAIL\] database: cannot connect: ' /tmp/web-start.txt
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious

@@ -89,7 +89,10 @@ def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> No
     assert "test ! -x /usr/bin/sudo" in CI
     # The app is started under it for real, as far as a database it has none of.
     assert "docker run --rm --user web -e ISSUEBOT_WEB_PASSWORD=ci-only" in CI
-    assert "grep -q '^\\[FAIL\\] database:' /tmp/web-start.txt" in CI
+    # With a database named, since `not configured` shares the prefix and is printed before
+    # any attempt: the grep has to see the refused connection.
+    assert "-e DATABASE_URL=postgresql://issuebot@127.0.0.1:1/issuebot" in CI
+    assert "grep -q '^\\[FAIL\\] database: cannot connect: ' /tmp/web-start.txt" in CI
     # Under `set -e` only the last command of an AND list is enforced, so the sandbox scripts
     # keep one `test` per line.
     assert not re.search(r"^\s*test .* && test ", CI, re.M)
