@@ -39,6 +39,14 @@ def test_a_postgres_url_parses(url: str) -> None:
         "postgresql:host=db password=s3cretpassword",
         "postgresql://[::1/issuebot",
         "",
+        # A URL prefix on keyword/value text: libpq's URL grammar has no whitespace.
+        "postgresql://h/db password=s3cretpassword",
+        " postgresql://u@h/db",
+        # A password with an unencoded ``/``, ``?`` or ``#``: urlsplit ends the authority
+        # inside it, and the userinfo would come out as the host.
+        "postgresql://u:pa/ss@h/db",
+        "postgresql://u:pa?ss@h/db",
+        "postgresql://u:pa#ss@h/db",
     ],
 )
 def test_anything_else_is_not_a_postgres_url(url: str) -> None:
@@ -66,6 +74,10 @@ def test_describe_drops_the_password_and_keeps_the_rest() -> None:
         "postgresql:host=db password=s3cretpassword",
         "postgresql://[bad",
         "s3cretpassword",
+        "postgresql://h/db password=s3cretpassword",
+        "postgresql://u:s3cretpassword/x@h/db",
+        "postgresql://u:s3cretpassword?x@h/db",
+        "postgresql://u:s3cretpassword#x@h/db",
     ],
 )
 def test_describe_is_the_placeholder_for_anything_it_cannot_take_apart(url: str) -> None:
@@ -77,7 +89,10 @@ def test_describe_is_the_placeholder_for_anything_it_cannot_take_apart(url: str)
 def test_dsn_secrets_finds_the_url_password_in_the_userinfo_and_the_query() -> None:
     assert dsn_secrets(URL) == ("s3cret",)
     assert dsn_secrets("postgresql://u:p%40ss@h/db") == ("p%40ss", "p@ss")
+    # The keyword reading runs over a URL too, and over-matches the query as one bare token:
+    # a spelling no line ever holds, so it costs nothing, and the real values are found.
     assert dsn_secrets("postgresql://u@h/db?password=q%20r&password=other") == (
+        "q%20r&password=other",
         "q%20r",
         "other",
         "q r",
@@ -94,6 +109,7 @@ def test_dsn_secrets_finds_the_url_password_in_the_userinfo_and_the_query() -> N
         "postgresql://u:s3cretpassword@h:70000/db",
         "mysql://u:s3cretpassword@h/db",
         "postgresql:host=db password=s3cretpassword",
+        "postgresql://h/db password=s3cretpassword",
     ],
 )
 def test_dsn_secrets_reads_the_url_password_whatever_else_is_wrong_with_the_url(url: str) -> None:

@@ -122,7 +122,7 @@ floor, not the shipped version, and moves by hand.
 - `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports
-  `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a well-formed
+  `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a
   `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's
   and `//` follows it -- `postgresql:host=db` is keyword/value text -- while the host part is
   not judged, so libpq's multi-host list is accepted and a bad port is libpq's error at

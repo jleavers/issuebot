@@ -415,7 +415,7 @@ def test_validate_rejects_a_non_postgres_database_url(
 ) -> None:
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
-    assert "[FAIL] database.url: not a well-formed postgresql:// URL" in out
+    assert "[FAIL] database.url: not a postgresql:// URL" in out
     assert "15 checks: 1 failed, 1 warnings" in out
     assert fake_database.urls == []
 
@@ -432,7 +432,7 @@ def test_validate_rejects_a_keyword_value_dsn_without_echoing_it(
 ) -> None:
     assert _validate_with_database(tmp_path, monkeypatch, KEYWORD_DSN) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] database.url: not a well-formed postgresql:// URL" in out
+    assert "[FAIL] database.url: not a postgresql:// URL" in out
     assert "s3cretpassword" not in out
     assert fake_database.urls == []
 
@@ -2005,7 +2005,7 @@ def test_a_keyword_value_dsn_is_refused_on_every_database_command(
     path = _db_workflow(tmp_path, monkeypatch, url=KEYWORD_DSN)
     assert main([*command, "--workflow", str(path)]) == 1
     out = capsys.readouterr().out
-    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
     assert "s3cretpassword" not in out and "db.example" not in out
     assert fake_database.urls == [] and fake_database.migrations == 0
 
@@ -2329,7 +2329,7 @@ def test_web_refuses_a_keyword_value_dsn_before_serving(
     monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
     assert main(["web"]) == 1
     captured = capsys.readouterr()
-    assert captured.out.startswith("[FAIL] database: database.url is not a well-formed")
+    assert captured.out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
     assert "s3cretpassword" not in captured.out + captured.err
     assert fake_serve.calls == [] and fake_database.urls == []
 
@@ -2688,7 +2688,7 @@ def test_run_once_refuses_a_keyword_value_dsn_before_claiming(
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     out = capsys.readouterr().out
-    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
     assert "s3cretpassword" not in out
     assert stub_session.calls == [] and fake_database.urls == []
     assert fake_github.issue(42).state is StateLabel.TODO
@@ -2704,7 +2704,7 @@ def test_worker_refuses_a_keyword_value_dsn_before_the_orchestrator(
     monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
     assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     out = capsys.readouterr().out
-    assert out.startswith("[FAIL] database: database.url is not a well-formed postgresql:// URL")
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
     assert "s3cretpassword" not in out
     assert stub_orchestrator.instances == [] and fake_database.urls == []
 

@@ -28,10 +28,7 @@ __all__ = [
 CONNECT_TIMEOUT_S = 5
 RECONNECT_DELAYS_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 APPLICATION_NAME = "issuebot"
-NOT_A_URL = (
-    "database.url is not a well-formed postgresql:// URL "
-    "(libpq's keyword/value form is not accepted)"
-)
+NOT_A_URL = "database.url is not a postgresql:// URL (libpq's keyword/value form is not accepted)"
 
 Connector = Callable[[str], Awaitable[AsyncConnection]]
 

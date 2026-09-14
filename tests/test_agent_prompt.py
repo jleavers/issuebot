@@ -113,7 +113,7 @@ ISSUEBOT_OR_GITHUB_OWN = {
     "number",
     "github_state",
     "state",
-    "state_label",  # matched the configured label case-insensitively: the configuration's value
+    "state_label",  # the configured label lowercased: the configuration's value
     "url",
     "created_at",
     "updated_at",

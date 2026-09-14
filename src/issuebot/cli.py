@@ -542,7 +542,7 @@ def _database_check(settings: Settings) -> Check:
         return Check(subject, "ok", "not configured (history and dashboard disabled)")
     url = settings.database.url.get_secret_value()
     if not is_postgres_url(url):
-        return Check(subject, "fail", "not a well-formed postgresql:// URL")
+        return Check(subject, "fail", "not a postgresql:// URL")
     try:
         probe = asyncio.run(_database_factory(url).probe())
     except DatabaseError as exc:
