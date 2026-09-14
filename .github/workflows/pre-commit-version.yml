@@ -1,0 +1,133 @@
+name: pre-commit hooks version
+
+# The hooks in .pre-commit-config.yaml are pinned to commit digests (#111), which Dependabot
+# does not move: it bumps the digest-pinned `uses:` lines in these workflows, but has no
+# ecosystem for pre-commit. This job is that missing update PR, of the same shape as
+# claude-code-version.yml: `pre-commit autoupdate --freeze` rewrites every `rev:` to the
+# digest of each hook repository's newest tag, the hooks are run over the tree at the new
+# digests as the proof, and one pull request carries the move.
+#
+# Opening the pull request needs "Allow GitHub Actions to create and approve pull requests"
+# (Settings > Actions > General > Workflow permissions), as for claude-code-version.yml.
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC, alongside the weekly Dependabot runs.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: pre-commit-version
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --frozen
+
+      - id: check
+        name: Freeze every rev at its newest tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv run pre-commit autoupdate --freeze
+          if git diff --quiet -- .pre-commit-config.yaml; then
+            echo "::notice::every rev is at its newest tag; nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A tag must have become a digest, never the other way round: the config's own test
+          # (tests/test_pins.py) refuses a tag, and so does this job before it pushes one.
+          if git diff -U0 -- .pre-commit-config.yaml | grep -E '^\+ *rev:' \
+               | grep -Ev '^\+ *rev: [0-9a-f]{40}  # frozen: '; then
+            echo "::error::autoupdate wrote a rev that is not a frozen digest"
+            exit 1
+          fi
+          # The branch is named for the config it proposes, so a rerun that lands on the same
+          # digests finds its own branch and pull request rather than opening a second.
+          branch="pre-commit-hooks-$(git hash-object .pre-commit-config.yaml | cut -c1-12)"
+          git diff -U0 -- .pre-commit-config.yaml | grep -E '^[-+] *rev:' > /tmp/revs.txt
+          changed=true
+          reuse=false
+          # "This job's pull request" is decided by provenance, not by the branch name
+          # (#111): the REST head filter is owner-qualified, and what survives it is kept
+          # only when its head is this repository and its author is the bot this job runs
+          # as. A fork's branch of the same name, from any account, is not this job's.
+          pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100&head=${GITHUB_REPOSITORY_OWNER}:${branch}" \
+            --jq "[.[] | select(.head.repo.full_name == \"${GITHUB_REPOSITORY}\" and .user.login == \"github-actions[bot]\")] | .[0].number // \"\"")"
+          if [ -n "${pr}" ]; then
+            echo "::notice::${branch} already has pull request #${pr}; nothing to do"
+            changed=false
+          elif git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "::notice::${branch} exists with no pull request; reusing it"
+            reuse=true
+          fi
+          {
+            echo "branch=${branch}"
+            echo "changed=${changed}"
+            echo "reuse=${reuse}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Proof before the PR exists: the hooks install at the new digests and the tree passes.
+      - name: Run the hooks at the new digests
+        if: steps.check.outputs.changed == 'true'
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Open the pull request
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          REUSE: ${{ steps.check.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          if [ "${REUSE}" = "true" ]; then
+            git checkout -- .pre-commit-config.yaml
+            git fetch origin "${BRANCH}"
+            git checkout "${BRANCH}"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -b "${BRANCH}"
+            git commit -am "build: freeze the pre-commit hooks at their newest tags"
+            git push -u origin "${BRANCH}"
+          fi
+          {
+            echo 'The pre-commit hooks, re-frozen by `pre-commit autoupdate --freeze` at the'
+            echo 'digest of each repository'"'"'s newest tag (#111):'
+            echo
+            echo '```diff'
+            cat /tmp/revs.txt
+            echo '```'
+            echo
+            echo 'The hooks were run over the whole tree at these digests before the pull'
+            echo 'request was opened, so they install and the tree passes them. A ruff move'
+            echo 'here changes only the hook; the `ruff` the lockfile pins is Dependabot'"'"'s.'
+            echo
+            echo 'Note: pull requests opened with `GITHUB_TOKEN` do not start the CI workflow.'
+            echo 'Close and reopen this pull request, or push to the branch, to run it.'
+          } > /tmp/pr-body.md
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
+            -f title="build: freeze the pre-commit hooks at their newest tags" \
+            -f head="${BRANCH}" \
+            -f base="${GITHUB_REF_NAME}" \
+            -F body=@/tmp/pr-body.md \
+            --jq '.html_url'
+          then
+            echo "::error::could not open the pull request. If this is HTTP 403, turn on" \
+              "Settings > Actions > General > Workflow permissions >" \
+              "'Allow GitHub Actions to create and approve pull requests'." \
+              "The branch ${BRANCH} is pushed; re-running this job will reuse it."
+            exit 1
+          fi
