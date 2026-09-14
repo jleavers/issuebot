@@ -134,9 +134,11 @@ jobs:
           fi
           docker run --rm --user agent --entrypoint sh issuebot:ci -c '
             set -eu
-            test ! -w /app && test ! -w /app/.venv/bin/python
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
             test ! -w "$(readlink -f /usr/local/bin/claude)"
-            test ! -r /home/issuebot && test ! -x /home/issuebot
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
             test ! -r /etc/sudoers.d/issuebot
           '
           docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -w /app; test ! -r /home/agent'
@@ -152,8 +154,13 @@ jobs:
       # sudo binary is executable by root and group issuebot alone, so as `web` the delegation
       # fails the way it fails as the session's account -- and `test -x` says why, that it is
       # not even executable rather than refused. Neither home, the sudoers drop-in nor the
-      # worker's code is reachable from it, and the app still starts under it, which is the
-      # one thing it has to do.
+      # worker's code is reachable from it. One `test` per line throughout: under `set -e` only
+      # the last command of an AND list is enforced, so `test A && test B` asserts B alone.
+      # The last line starts the app under it for real, as far as a database it has none of:
+      # `[FAIL] database:` is the CLI's own line, printed after the interpreter, the package
+      # and the web's dependencies have all loaded as uid 1002 and `cmd_web` has run to the
+      # connection attempt, which is the one thing the account has to be able to do. Captured
+      # and grepped rather than piped, since the job's shell has no pipefail.
       - name: the dashboard's account is a third one and cannot invoke sudo
         run: |
           test "$(docker run --rm --user web --entrypoint id issuebot:ci -u)" = 1002
@@ -165,14 +172,23 @@ jobs:
             set -eu
             test ! -x /usr/bin/sudo
             test ! -r /etc/sudoers.d/issuebot
-            test ! -w /app && test ! -w /app/.venv/bin/python
-            test ! -r /home/issuebot && test ! -x /home/issuebot
-            test ! -r /home/agent && test ! -x /home/agent
-            test -w "$HOME" && test "$HOME" = /home/web
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
+            test ! -r /home/agent
+            test ! -x /home/agent
+            test "$HOME" = /home/web
+            test -w "$HOME"
           '
           docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
           docker run --rm --user agent --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
-          docker run --rm --user web issuebot:ci web --help >/dev/null
+          if docker run --rm --user web -e ISSUEBOT_WEB_PASSWORD=ci-only \
+               -e DATABASE_URL=postgresql://issuebot@127.0.0.1:1/issuebot \
+               issuebot:ci web > /tmp/web-start.txt 2>&1; then
+            echo "the dashboard started against a dead database" >&2; exit 1
+          fi
+          grep -q '^\[FAIL\] database:' /tmp/web-start.txt
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious
