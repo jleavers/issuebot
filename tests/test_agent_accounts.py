@@ -5,6 +5,8 @@ import os
 import pwd
 import stat
 import sys
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -226,3 +228,51 @@ def test_two_writers_do_not_lose_a_binding(tmp_path: Path) -> None:
     assert second.allocate("b") == "agent-2"
     assert first.bindings() == {"a": "agent-1", "b": "agent-2"}
     assert (tmp_path / ".issuebot" / "accounts.lock").is_file()
+
+
+def test_a_busy_account_is_one_with_a_workspace_open(tmp_path: Path) -> None:
+    """The mode is the one signal another process has that an account is in use: a workspace
+    is open exactly while a session is running in it (#121)."""
+    pool = registry(tmp_path)
+    for key in ("running", "idle"):
+        pool.allocate(key)
+        (tmp_path / key).mkdir()
+    share_with(tmp_path / "running", ME)
+    share_with(tmp_path / "idle", ME)
+    seal(tmp_path / "idle")
+    assert pool.busy_accounts() == {"agent-1"}
+    seal(tmp_path / "running")
+    assert pool.busy_accounts() == set()
+
+
+def test_the_lock_serialises_two_writers(tmp_path: Path) -> None:
+    """`flock` is per open file description, so two threads in one process contend exactly as
+    two processes would -- which is what `run-once` beside a live worker is."""
+    pool = registry(tmp_path)
+    order: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+    real_store = pool._store
+
+    def slow_store(bindings: Mapping[str, str]) -> None:
+        order.append("first-writes")
+        started.set()
+        release.wait(5)
+        real_store(bindings)
+
+    def first() -> None:
+        pool._store = slow_store  # type: ignore[method-assign]
+        pool.allocate("a")
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert started.wait(5)
+    pool._store = real_store  # type: ignore[method-assign]
+    second = threading.Thread(target=lambda: order.append(registry(tmp_path).allocate("b") or ""))
+    second.start()
+    second.join(0.2)
+    assert order == ["first-writes"], "the second writer entered the critical section"
+    release.set()
+    thread.join(5)
+    second.join(5)
+    assert registry(tmp_path).bindings() == {"a": "agent-1", "b": "agent-2"}

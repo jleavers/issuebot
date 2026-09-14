@@ -30,7 +30,7 @@ from issuebot.cli import (
     render_stats,
     render_status,
 )
-from issuebot.config import GitHubLabels, GitHubSettings, Settings, load_workflow
+from issuebot.config import GitHubLabels, GitHubSettings, Settings, Workflow, load_workflow
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
@@ -2751,7 +2751,26 @@ def test_run_once_takes_the_workspaces_own_account_from_the_pool(
     assert _with_bound_account(single, issue) is single
 
 
-def _workflow_with(tmp_path: Path, root: Path, accounts: str) -> Any:
+def test_run_once_refuses_an_account_a_live_worker_is_running(
+    tmp_path: Path, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open workspace is what a running session looks like from another process (#121):
+    taking its account would put two sessions at one uid, which is what the pool removes."""
+    from issuebot.agent import AgentError
+    from issuebot.cli import _with_bound_account
+
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    monkeypatch.setattr(
+        "issuebot.agent.accounts.AccountRegistry.busy_accounts",
+        lambda self: {"agent-1", "agent-2"},
+    )
+    workflow = _workflow_with(tmp_path, root, "agent-1,agent-2")
+    with pytest.raises(AgentError, match="every session account is busy"):
+        _with_bound_account(workflow, fake_github.add_issue("Other", number=8))
+
+
+def _workflow_with(tmp_path: Path, root: Path, accounts: str) -> Workflow:
     path = tmp_path / "WORKFLOW.md"
     path.write_text(
         "---\n"

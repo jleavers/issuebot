@@ -190,10 +190,13 @@ floor, not the shipped version, and moves by hand.
   the runner and the workspace manager are built, and `session_account` is the single reader.
   `AccountRegistry` is the worker's own record of which account each workspace belongs to
   (`<workspace.root>/.issuebot/accounts.json`, `0600` in a `0700` directory, re-read on every
-  call so a restart sees it): `allocate` binds the least-loaded account no session is running
+  call so a restart sees it, under an advisory lock since `run-once` may be run beside a live
+  worker): `allocate` binds the least-loaded account no session is running
   as (`None` when every one is busy, so the candidate waits rather than sharing a uid), `bound`
-  answers without binding, and `prune` (the terminal sweep) forgets a workspace that is gone
-  while keeping every key with a session running or a retry pending. The binding is *never*
+  answers without binding, `busy_accounts` reads which accounts have a workspace *open* (the
+  one cross-process signal that a session is running, which is how `run-once` beside a live
+  worker is visible at all), and `prune` (the terminal sweep, after its removals) forgets a
+  workspace that is gone while keeping every key with a session running or a retry pending. The binding is *never*
   derived from the directory: one computed from the workspace key would be a binding whoever
   opens the issue chooses. A workspace is open to exactly one account and only while that
   account's session is running in it: `share_with` makes it `1770`, owner the worker (sticky,
@@ -378,8 +381,11 @@ floor, not the shipped version, and moves by hand.
   account is busy is left on the board rather than moved to `in-progress` to wait there, and
   `_workspaces_for` narrows a terminal removal to the account that owns the files.
   `_prune_accounts` runs on the terminal sweep, and a record that will not read holds
-  dispatch as a fourth `DispatchHold` kind, `accounts` (set by `_bind_account`, cleared at the
-  top of `_dispatch_candidates` so the hold is that tick's own answer).
+  dispatch as a fourth `DispatchHold` kind, `accounts`: `_read_accounts` re-derives it from
+  the record once a tick, so it is a statement about the file rather than about a candidate
+  and can neither stick after a fix nor vanish on a tick whose only work was a retry; a due
+  retry in that position requeues as kind `accounts`, and one merely waiting for a busy
+  account as `slots`.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from issuebot.agent.accounts import SEALED_DIR_MODE, WORKSPACE_DIR_MODE
+from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import MODULE, RunAs, RunAsError
 from issuebot.agent.runner import ClaudeRunner
 from issuebot.agent.workspace import WorkspaceManager
@@ -256,3 +257,31 @@ def test_a_clone_owned_by_another_account_is_not_a_workspace_to_reuse(tmp_path: 
     assert manager_for(ME)._is_complete(path)
     # `nobody` exists everywhere this runs and is never the account the tests run as.
     assert not manager_for("nobody")._is_complete(path)
+
+
+async def test_a_removal_that_fails_leaves_the_workspace_closed(tmp_path: Path) -> None:
+    """The caller only logs a failed removal, so the directory stays on disk: open, the next
+    session bound to the same account could read the last issue's tree (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(
+        cfg, gh=object(), environ=base_env(HOME=str(tmp_path)), hook_shell=("bash", "-c")
+    )
+    manager.seal(path)
+
+    async def refuse(_path: Path, _what: str) -> None:
+        raise AgentError("workspace_error", "cannot remove workspace")
+
+    manager._remove_tree = refuse  # type: ignore[method-assign]
+    with pytest.raises(AgentError):
+        await manager.remove("ws")
+    assert path.is_dir()
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE

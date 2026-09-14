@@ -170,8 +170,9 @@ jobs:
           share_with(Path("/workspaces") / "idle", "agent-1")
           seal(Path("/workspaces") / "idle")
           PY
-            test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 1011 1770"
-            test "$(stat -c "%u %g %a" /workspaces/two)" = "1000 1012 1770"
+            test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 $(id -g agent-1) 1770"
+            test "$(stat -c "%u %g %a" /workspaces/two)" = "1000 $(id -g agent-2) 1770"
+            test "$(id -g agent-1)" != "$(id -g agent-2)"
             test "$(stat -c %a /workspaces)" = 755
             # Each session writes its own and is refused the other, both ways round.
             sudo -n -H -u agent-1 touch /workspaces/one/mine
@@ -188,7 +189,7 @@ jobs:
             # A workspace outlives its run, and accounts are fewer than workspaces, so an idle
             # one eventually sits beside a session running as the same account: sealed, its own
             # account cannot enter it either.
-            test "$(stat -c "%u %g %a" /workspaces/idle)" = "1000 1011 700"
+            test "$(stat -c "%u %g %a" /workspaces/idle)" = "1000 $(id -g agent-1) 700"
             if sudo -n -H -u agent-1 touch /workspaces/idle/theirs 2>/dev/null; then
               echo "a session entered a sealed workspace bound to its own account" >&2; exit 1
             fi

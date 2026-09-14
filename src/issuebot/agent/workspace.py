@@ -17,7 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, get_args
 
-from issuebot.agent.accounts import REGISTRY_DIR, seal, session_account, share_with
+from issuebot.agent.accounts import (
+    REGISTRY_DIR,
+    SEALED_DIR_MODE,
+    seal,
+    session_account,
+    share_with,
+)
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
@@ -149,9 +155,9 @@ class WorkspaceManager:
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
         if path.name == REGISTRY_DIR:
             # The worker keeps its account bindings there (#121), and a workspace is
-            # removed wholesale. Load-bearing rather than belt-and-braces: an identifier is
-            # `<repo>-<number>`, which needs no sanitising, so a repository named `.issuebot`
-            # would otherwise put a workspace exactly where the record lives.
+            # removed wholesale. No identifier reaches it today -- one is `<repo>-<number>`,
+            # so a key always ends in a digit -- but the record is not something to leave
+            # resting on how identifiers happen to be spelled.
             raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
@@ -183,8 +189,9 @@ class WorkspaceManager:
             ) from exc
         try:
             # The directory first, and the worker's: the clone lands inside it, so under
-            # agent.run_as it is shared (sticky) rather than the agent's own (#75).
-            path.mkdir()
+            # agent.run_as it is shared (sticky) rather than the agent's own (#75). Created
+            # closed and opened by `_share`, so it is never briefly wider than it ends up.
+            path.mkdir(mode=SEALED_DIR_MODE)
             self._share(path)
         except OSError as exc:
             raise AgentError(
@@ -269,7 +276,7 @@ class WorkspaceManager:
             # Under agent.run_as the clone is the agent's, so a repository that ships a
             # `.issuebot` entry has put one where the worker's state goes: refuse, rather than
             # keep state in a directory the session owns.
-            state.mkdir(exist_ok=self._runas is None)
+            state.mkdir(mode=SEALED_DIR_MODE, exist_ok=self._runas is None)
             self._share(state)
             (state / "runs").mkdir(exist_ok=self._runas is None)
         except FileExistsError as exc:
@@ -310,8 +317,15 @@ class WorkspaceManager:
         # and a workspace reaching this is a sealed one nine times in ten (#121).
         with contextlib.suppress(AgentError):
             self._share(path)
-        await self.run_hook("before_remove", path)
-        await self._remove_tree(path, "cannot remove workspace")
+        try:
+            await self.run_hook("before_remove", path)
+            await self._remove_tree(path, "cannot remove workspace")
+        finally:
+            # A removal that failed leaves the directory on disk, and an open one would be
+            # readable by the next session bound to the same account (#121). The caller only
+            # logs the failure, so closing it again is this method's job.
+            if path.exists():
+                self.seal(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
 

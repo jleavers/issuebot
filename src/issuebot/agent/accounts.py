@@ -35,6 +35,7 @@ import fcntl
 import json
 import os
 import pwd
+import stat
 import tempfile
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -133,9 +134,11 @@ def group_complaint(account: str) -> str | None:
 def share_with(path: Path, account: str) -> None:
     """Make ``path`` the worker's sticky directory, enterable by ``account`` and nobody else.
 
-    The group first and the mode second: between the two calls the directory is narrower than
-    it ends up, never wider. A worker that is not a member of the account's group cannot do
-    this at all, and the complaint says so rather than leaving the directory world-writable.
+    The group first and the mode second, so between the two calls the directory is narrower
+    than it ends up rather than wider -- which holds only because a workspace is created at
+    `SEALED_DIR_MODE` and opened from there. A worker that is not a member of the account's
+    group cannot do this at all, and the complaint says so rather than leaving the directory
+    open.
     """
     gid = account_gid(account)
     try:
@@ -215,6 +218,10 @@ class AccountRegistry:
             raise AgentError("workspace_error", f"cannot lock {path}: {exc}") from exc
         try:
             fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError as exc:
+            os.close(handle)
+            raise AgentError("workspace_error", f"cannot lock {path}: {exc}") from exc
+        try:
             yield
         finally:
             os.close(handle)
@@ -256,15 +263,15 @@ class AccountRegistry:
         self._log.info("account_bound", workspace_key=key, account=chosen)
         return chosen
 
-    def release(self, key: str) -> None:
-        """Forget ``key``'s binding, which a removed workspace no longer needs."""
-        with self._locked():
-            bindings = self._load()
-            account = bindings.pop(key, None)
-            if account is None:
-                return
-            self._store(bindings)
-        self._log.info("account_released", workspace_key=key, account=account)
+    def busy_accounts(self) -> set[str]:
+        """The accounts with a workspace open, readable from outside the worker's memory.
+
+        A workspace is open exactly while a session is running in it, so its mode is the one
+        cross-process signal there is that an account is in use. `run-once` is the caller that
+        needs it -- the operator may run it beside a live worker, and the flock keeps the two
+        from losing a binding but says nothing about which account is busy right now.
+        """
+        return {account for key, account in self._load().items() if _is_open(self._root / key)}
 
     def prune(self, keep: Collection[str]) -> None:
         """Drop bindings whose workspace is gone, so an out-of-band removal cannot skew the
@@ -326,6 +333,14 @@ class AccountRegistry:
                 with contextlib.suppress(OSError):
                     tmp.unlink()
             raise AgentError("workspace_error", f"cannot write {self.path}: {exc}") from exc
+
+
+def _is_open(path: Path) -> bool:
+    """True when ``path`` is a workspace `share_with` has opened and `seal` has not closed."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode) == WORKSPACE_DIR_MODE
+    except OSError:
+        return False
 
 
 def _bindings_from(document: object) -> dict[str, str]:

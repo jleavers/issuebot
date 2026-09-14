@@ -145,6 +145,13 @@ the credential never lands in a home.
   `agent` — because turning it on is a credential decision the image cannot make for the
   operator.
 
+- **`run-once` beside a live worker.** The operator's debugging tool may run while the worker
+  does, so the registry's read-modify-write is under an advisory lock and `busy_accounts` reads
+  which accounts have a workspace open — the one signal of a running session another process
+  can see, and the reason the seal is load-bearing twice over. `run-once` refuses rather than
+  take an account a session is already in; the orchestrator unions that reading with its own
+  `_running`.
+
 - **`remove`, `kill` and the probes run per account.** They already ran through `RunAs`; what
   changed is which account the orchestrator hands them. A terminal removal goes through a
   manager narrowed to *that* workspace's bound account, not the pool's first member. Startup

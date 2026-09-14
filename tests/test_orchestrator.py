@@ -46,7 +46,7 @@ from issuebot.orchestrator.orchestrator import (
     fetch_states,
     preflight,
 )
-from issuebot.orchestrator.state import RunningEntry
+from issuebot.orchestrator.state import RetryEntry, RunningEntry
 
 START = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 START_MONO = 1000.0
@@ -3282,8 +3282,32 @@ async def test_an_unreadable_account_record_holds_dispatch_rather_than_idling_qu
     hold = orchestrator.snapshot().dispatch_hold
     assert hold is not None and hold.kind == "accounts"
     assert "unusable" in hold.reason
+    # And it holds on a tick whose only dispatchable work is a retry the candidate loop skips,
+    # which is where a hold derived from that loop alone would quietly vanish.
+    h.add_issue(2, "todo")
+    orchestrator._retries["2"] = _retry_entry(h, 2)
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
     # And it lifts of its own accord once the record reads again.
+    orchestrator._retries.clear()
     (h.root / ".issuebot" / "accounts.json").unlink()
     await h.tick()
     assert orchestrator.snapshot().dispatch_hold is None
-    assert list(orchestrator.running) == ["1"]
+    assert sorted(orchestrator.running) == ["1", "2"]
+
+
+def _retry_entry(h: Harness, number: int) -> RetryEntry:
+    issue = h.github.issue(number)
+    return RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue_number=number,
+        issue_url=issue.url,
+        title=issue.title,
+        attempt=2,
+        kind="failure",
+        due_mono=h.clock.value + 3600,
+        due_at=h.now(),
+        error="boom",
+    )

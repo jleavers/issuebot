@@ -1045,14 +1045,25 @@ def _with_bound_account(workflow: Workflow, issue: Issue) -> Workflow:
 
     Unchanged without a pool: one account, or none, binds nothing. With one, `run-once` goes
     through the same worker-owned record the orchestrator does, so a workspace keeps the
-    account it was created under however it is dispatched.
+    account it was created under however it is dispatched, and refuses an account some other
+    process already has a session in.
     """
     settings = workflow.config
     if not settings.agent.run_as_pooled:
         return workflow
     pool = AccountRegistry(settings.workspace.root, settings.agent.run_as)
     key = workspace_key(issue.identifier)
-    account = pool.bound(key) or pool.allocate(key)
+    busy = pool.busy_accounts()
+    account = pool.bound(key) or pool.allocate(key, busy=busy)
+    if account is None or account in busy:
+        # A worker may be running beside this command, and an open workspace is the one signal
+        # of that another process can read (#121). Refusing beats putting two sessions at one
+        # uid, which is the whole point of the pool.
+        raise AgentError(
+            "workspace_error",
+            f"every session account is busy ({', '.join(sorted(busy))}); "
+            "a worker is running one, so wait for it or stop the worker",
+        )
     return replace(workflow, config=settings_with_run_as(settings, account))
 
 

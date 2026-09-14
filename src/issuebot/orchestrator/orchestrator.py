@@ -861,9 +861,7 @@ class Orchestrator:
         await self._fetch_issues()
 
     async def _dispatch_candidates(self) -> int:
-        # Cleared here and set by `_bind_account`, so the hold is this tick's answer: a tick
-        # with nothing to claim holds nothing, whatever the last one found (#121).
-        self._accounts_block = None
+        self._read_accounts()
         issues = await self._fetch_issues()
         if issues is None:
             return 0
@@ -906,6 +904,24 @@ class Orchestrator:
             return record.attempt, record.session_id
         return 1, None
 
+    def _read_accounts(self) -> None:
+        """Re-derive the accounts hold from the record itself, once a tick (#121).
+
+        A statement about the record rather than about a candidate, so it can neither stick
+        after the file is fixed nor vanish on a tick whose only dispatchable work was a retry
+        the candidate loop skips. `_bind_account` may still set it, for a failure the plain
+        read did not see.
+        """
+        if self._pool is None:
+            self._accounts_block = None
+            return
+        try:
+            self._pool.bindings()
+        except AgentError as exc:
+            self._accounts_block = exc.message
+        else:
+            self._accounts_block = None
+
     def _pool_keys(self) -> set[str]:
         """The workspace keys a binding must survive whether or not the directory exists yet:
         every running session's and every pending retry's."""
@@ -930,8 +946,13 @@ class Orchestrator:
         if self._pool is None:
             return session_account(self._workflow.config), True
         key = workspace_key(issue.identifier)
-        busy = {entry.account for entry in self._running.values() if entry.account is not None}
         try:
+            # This worker's own sessions, and any other process's: an open workspace is what a
+            # running session looks like from outside, which is what `run-once` beside a live
+            # worker would otherwise be invisible as (#121).
+            busy = {
+                entry.account for entry in self._running.values() if entry.account is not None
+            } | self._pool.busy_accounts()
             account = self._pool.bound(key) or self._pool.allocate(key, busy=busy)
         except AgentError as exc:
             # A record that will not read is not "busy": it stops every candidate, so it holds
@@ -1126,7 +1147,6 @@ class Orchestrator:
 
     async def terminal_sweep(self) -> None:
         """Symphony §8.6, repeated: closed issues still carrying a state label."""
-        self._prune_accounts()
         try:
             issues = await self._adapter.fetch_terminal_issues()
         except GitHubError as exc:
@@ -1138,6 +1158,9 @@ class Orchestrator:
                 continue
             self._retries.pop(issue.id, None)
             await self._finish(issue)
+        # After the removals above, so a workspace this sweep deleted gives its account back
+        # now rather than on the next one (#121).
+        self._prune_accounts()
 
     async def _finish(self, issue: Issue) -> None:
         # Removing a workspace means unlinking what the session wrote, which only the session's
@@ -1510,13 +1533,15 @@ class Orchestrator:
             )
             return
         if not self._bind_account(issue)[1]:
-            # A slot is free but this workspace's account is not (#121). Requeued rather than
-            # dropped: `_dispatch` would only refuse it, and the attempt count would go with it.
+            # A slot is free but this workspace's account is not, or the record that would name
+            # it will not read (#121). Requeued rather than dropped: `_dispatch` would only
+            # refuse it, and the attempt count would go with it.
+            blocked = self._accounts_block
             self._requeue(
                 entry,
-                kind="slots",
+                kind="accounts" if blocked else "slots",
                 delay_ms=settings.polling.interval_ms,
-                error=self._accounts_block or "the workspace's session account is busy",
+                error=blocked or "the workspace's session account is busy",
             )
             return
         attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1
