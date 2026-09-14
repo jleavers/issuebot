@@ -12,6 +12,7 @@ from issuebot.db.queries import (
     DailyPoint,
     EventRow,
     IssueRow,
+    LedgerRow,
     RepoRow,
     RunRow,
     RunTotals,
@@ -72,6 +73,7 @@ class FakeQueries:
         self.groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
         self.counts: dict[str, int] = {role.value: 0 for role in StateLabel}
         self.issue_list: list[IssueRow] = []
+        self.ledger_rows: list[LedgerRow] = []
         self.state_asked: str | None = None
         self.series: list[DailyPoint] = []
         self.issue_rows: dict[int, IssueRow] = {}
@@ -110,7 +112,7 @@ class FakeQueries:
 
 
 class FakeRepoQueries:
-    """Stands in for RepoQueries: the fourteen per-repository reads over the parent's data."""
+    """Stands in for RepoQueries: the per-repository reads over the parent's data."""
 
     def __init__(self, parent: FakeQueries, repo: str) -> None:
         self._parent = parent
@@ -137,6 +139,10 @@ class FakeRepoQueries:
     async def run_totals(self, window: timedelta) -> RunTotals:
         self._check("run_totals")
         return self._parent.totals[window.days]
+
+    async def issue_ledgers(self, *, limit: int = 500, days: int = 90) -> list[LedgerRow]:
+        self._check("issue_ledgers")
+        return self._parent.ledger_rows
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
         self._check("issues_by_state")

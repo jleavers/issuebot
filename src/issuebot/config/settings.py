@@ -96,6 +96,14 @@ class AgentSettings(_Model):
     # How many times the worker may move one issue from review to rework because its pull
     # request conflicts with the default branch; 0 turns the automatic bounce off.
     max_conflict_reworks: int = Field(default=3, ge=0)
+    # The other half of the admission gate's budget (#112). ``max_attempts`` bounds one chain
+    # of failures, and the escape that ends a chain lets a human restart it by relabelling --
+    # so nothing bounds what an issue may cost over a lifetime of being relabelled. This does:
+    # it is cumulative per issue, across every label it wears, and no move resets it. ``0``
+    # turns it off, which is the default because what a run is worth depends on the plan (an
+    # agent on a subscription reports no cost at all, and there ``max_attempts`` is the
+    # ceiling that bites).
+    max_issue_cost_usd: float = Field(default=0.0, ge=0)
     self_review: bool = True
     # The account the session runs as (#75): ``claude -p``, every hook, the clone and the
     # post-clone setup, through ``issuebot.agent.runas``. A different uid from the worker's

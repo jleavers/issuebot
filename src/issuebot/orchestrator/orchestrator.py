@@ -39,7 +39,6 @@ from issuebot.config import (
 )
 from issuebot.events import EventBus
 from issuebot.github import (
-    ACTIVE_STATES,
     GhCliAdapter,
     GitHubAdapter,
     GitHubError,
@@ -50,6 +49,16 @@ from issuebot.github import (
 )
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
+from issuebot.orchestrator.admission import (
+    Admission,
+    AdmissionRequest,
+    Hold,
+    IssueLedger,
+    Ledger,
+    RefusalKind,
+    Refused,
+    admit,
+)
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
     TERMINAL_SWEEP_EVERY_TICKS,
@@ -211,13 +220,14 @@ class RunObserver:
             entry.turns = event.turn_number
 
 
-@dataclass(frozen=True, slots=True)
-class _Hold:
-    """One tick's answer to "why will this worker not claim?", before it reaches the snapshot."""
-
-    kind: DispatchHoldKind
-    reason: str
-    key: str | None = None
+# What a refusal with nothing to wait for is called in the `retry_released` line.
+_RELEASE_REASONS: dict[RefusalKind, str] = {
+    "busy": "already claimed",
+    "inactive": "not_active",
+    "attempts": "attempts exhausted",
+    "spend": "spend exhausted",
+    "stopping": "stopping",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +259,7 @@ class Orchestrator:
         now: Callable[[], datetime] = _utcnow,
         environ: Mapping[str, str] | None = None,
         initial_rate_limits: RateLimits | None = None,
+        initial_ledger: Mapping[str, IssueLedger] | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
@@ -278,6 +289,11 @@ class Orchestrator:
         self._running: dict[str, RunningEntry] = {}
         self._retries: dict[str, RetryEntry] = {}
         self._totals = ClaudeTotals()
+        # The admission gate's durable half (#112): what each issue has cost this worker,
+        # keyed by identifier and outliving every label it wears. Seeded from the store by the
+        # caller that has one, the way `initial_rate_limits` is, because restarting is how
+        # this worker is deployed and a budget that a deployment resets is not a ceiling.
+        self._ledger = Ledger(initial_ledger, on_evict=self._note_ledger_eviction)
         self._counters = Counters()
         self._tick_count = 0
         self._last_tick_at: datetime | None = None
@@ -285,8 +301,15 @@ class Orchestrator:
         self._dispatch_hold: DispatchHold | None = None
         self._hold_identity: tuple[str, str] | None = None
         self._reported_reload_error: str | None = None
-        self._reported_preflight: str | None = None
+        # The three holds are now all state on this object, in the order they outrank each
+        # other (#112). The preflight one used to be a local inside `tick`, which is why the
+        # retry timer could honour the other two and not it: there was nothing to consult.
+        self._preflight_block: str | None = None
         self._auth_block: str | None = None
+        # How the authentication hold words itself, and what makes two of them the same one.
+        # Both callers read this, so neither can refuse on terms the other would not.
+        self._auth_reason: str | None = None
+        self._auth_key: str | None = None
         self._reported_auth_block: str | None = None
         self._credential: Credential = "unknown"
         # Seeded from the last stored snapshot by the caller that has a database, so a restart
@@ -428,8 +451,8 @@ class Orchestrator:
         )
         return describe_claude_auth(output)
 
-    async def _auth_hold(self) -> _Hold | None:
-        """The hold an authentication failure puts on dispatch, or None; re-probes once per tick.
+    async def _refresh_auth_hold(self) -> bool:
+        """True while an authentication failure holds dispatch; re-probes once per tick.
 
         A run that failed to authenticate (#20) is evidence the worker cannot work any issue,
         so it stops claiming rather than escalating one issue after another with an opaque
@@ -443,14 +466,14 @@ class Orchestrator:
         caller has just run preflight, so ``claude.command`` resolves.
         """
         if self._auth_block is None:
-            return None
+            return False
         auth = await self._probe_claude_auth(self._workflow.config.claude.command)
         if auth.verdict in ("ok", "ambiguous"):
             self._log.info(
                 "dispatch_auth_recovered", claude_auth=auth.detail, error=self._auth_block
             )
             self._release_hold()
-            return None
+            return False
         if auth.verdict == "logged_out":
             self._unreadable_auth_probes = 0
         else:
@@ -463,14 +486,18 @@ class Orchestrator:
                     error=self._auth_block,
                 )
                 self._release_hold()
-                return None
+                return False
         if self._auth_block != self._reported_auth_block:
             self._log.error("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
             self._reported_auth_block = self._auth_block
         else:
             # An idle worker says nothing else, so the hold keeps reporting itself.
             self._log.warning("dispatch_auth_held", claude_auth=auth.detail, error=self._auth_block)
-        return _Hold("auth", f"claude authentication unavailable: {auth.detail}", key=auth.verdict)
+        # The probe's own words, so the snapshot's reason and the reason a waiting retry
+        # carries are the same string (#112); the verdict keys the hold's `since`.
+        self._auth_reason = f"claude authentication unavailable: {auth.detail}"
+        self._auth_key = auth.verdict
+        return True
 
     async def _note_fetch_failure(self, error: str) -> None:
         """Count a failed read of the board and, past the threshold, hold dispatch (#88).
@@ -567,14 +594,48 @@ class Orchestrator:
         return None if status is None else status.detail
 
     def _hold_dispatch(self, error: str) -> None:
-        """Stop claiming issues until a probe reports the credential works again."""
+        """Stop claiming issues until a probe reports the credential works again.
+
+        The reason starts as the run's own error and is re-worded by the next tick's probe;
+        either way it is the one string every caller refuses on.
+        """
         self._auth_block = error
+        self._auth_reason = f"claude authentication unavailable: {error}"
+        self._auth_key = None
         self._unreadable_auth_probes = 0
 
     def _release_hold(self) -> None:
         self._auth_block = None
+        self._auth_reason = None
+        self._auth_key = None
         self._reported_auth_block = None
         self._unreadable_auth_probes = 0
+
+    def _current_hold(self) -> Hold | None:
+        """This worker's one live reason not to claim anything, whoever is asking (#112).
+
+        ``preflight`` and ``auth`` outrank ``github``: both name something the operator can
+        fix on this host, and a ``gh`` that will not run is why the fetch failed rather than a
+        second, independent fault. One function composes it, so the snapshot the operator
+        reads and the answer the gate gives a caller can never be two different claims.
+        """
+        if self._preflight_block is not None:
+            return Hold("preflight", self._preflight_block)
+        if self._auth_reason is not None:
+            return Hold("auth", self._auth_reason, key=self._auth_key)
+        if self._github_block is not None:
+            return Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
+        return None
+
+    def _note_ledger_eviction(self, identifier: str, entry: IssueLedger) -> None:
+        """An evicted entry is a budget reset, so it is never silent."""
+        self._log.info(
+            "ledger_evicted",
+            issue_identifier=identifier,
+            runs=entry.runs,
+            failures=entry.failures,
+            cost_usd=entry.cost_usd,
+        )
 
     def _hold_snapshot(
         self, kind: DispatchHoldKind, reason: str, *, key: str | None = None
@@ -603,14 +664,13 @@ class Orchestrator:
         await self.reconcile()
         self._reload_workflow()
         dispatched = 0
-        hold: _Hold | None = None
         problems = preflight(self._workflow.config, which=self._which)
         if problems:
             message = "; ".join(problems)
-            hold = _Hold("preflight", message)
-            if message != self._reported_preflight:
+            if message != self._preflight_block:
                 self._log.error("dispatch_preflight_failed", problems=problems)
-                self._reported_preflight = message
+            # State, not a local (#112): the retry timer has to be able to consult it too.
+            self._preflight_block = message
             if fetch_preflight(self._workflow.config, which=self._which):
                 # `gh` or the token is what is missing, so nothing is asked of GitHub (#88).
                 self._note_fetch_skipped()
@@ -618,14 +678,13 @@ class Orchestrator:
                 # Only `claude` is missing, so the board can still be kept current (#29).
                 await self._poll_issues()
         else:
-            self._reported_preflight = None
-            hold = await self._auth_hold()
-            if hold is not None:
+            self._preflight_block = None
+            if await self._refresh_auth_hold():
                 # The fetch still works, so the board stays fresh while nothing is claimed (#29).
                 await self._poll_issues()
             else:
                 dispatched = await self._dispatch_candidates()
-        self._settle_dispatch_hold(hold)
+        self._settle_dispatch_hold()
         self._tick_count += 1
         self._last_tick_at = self._now()
         self._log.debug(
@@ -638,18 +697,14 @@ class Orchestrator:
         )
         self._publish_snapshot()
 
-    def _settle_dispatch_hold(self, hold: _Hold | None) -> None:
-        """Record this tick's one hold: the caller's if it has one, else GitHub's, else none.
+    def _settle_dispatch_hold(self) -> None:
+        """Carry this tick's one hold, from ``_current_hold``, into the snapshot.
 
-        One place decides, and it decides after the fetch, because the snapshot carries a
-        single hold whose ``since`` has to survive a tick that re-derives the same reason:
-        releasing and re-holding would restart the clock on a hold that never lifted.
-        ``preflight`` and ``auth`` outrank ``github`` -- both name something the operator can
-        fix on this host, and a ``gh`` that will not run is why the fetch failed rather than a
-        second, independent fault.
+        It settles after the fetch, because the snapshot carries a single hold whose ``since``
+        has to survive a tick that re-derives the same reason: releasing and re-holding would
+        restart the clock on a hold that never lifted.
         """
-        if hold is None and self._github_block is not None:
-            hold = _Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
+        hold = self._current_hold()
         if hold is None:
             self._release_snapshot_hold()
         else:
@@ -796,30 +851,83 @@ class Orchestrator:
             return
         await self._fetch_issues()
 
+    def _admit(self, identifier: str, issue_id: str, issue: Issue | None) -> Admission:
+        """Ask the one gate (#112). Every precondition is its, and it reads the live holds.
+
+        Live rather than ``self._dispatch_hold``, which only settles at the end of a tick: a
+        GitHub hold that this tick's successful fetch has just lifted must not refuse the
+        claim that fetch produced.
+        """
+        agent = self._workflow.config.agent
+        return admit(
+            AdmissionRequest(
+                identifier=identifier,
+                issue=issue,
+                ledger=self._ledger.get(identifier),
+                hold=self._current_hold(),
+                slots=self._slots(),
+                busy=issue_id in self._running or issue_id in self._retries,
+                stopping=self._stopping,
+                max_attempts=agent.max_attempts,
+                max_issue_cost_usd=agent.max_issue_cost_usd,
+            )
+        )
+
+    def _note_refusal(self, identifier: str, number: int, verdict: Refused) -> None:
+        """Log a refusal the operator needs to see, once per issue per reason.
+
+        ``busy`` and ``inactive`` are the loop passing over an issue it has already claimed or
+        does not want, which is every tick's normal business; a budget refusal is an issue
+        that has stopped moving, which is not.
+        """
+        if verdict.kind not in ("attempts", "spend"):
+            return
+        if self._ledger.refused(identifier, verdict.reason):
+            self._log.warning(
+                "dispatch_refused",
+                issue_number=number,
+                issue_identifier=identifier,
+                refusal=verdict.kind,
+                reason=verdict.reason,
+            )
+
     async def _dispatch_candidates(self) -> int:
         issues = await self._fetch_issues()
         if issues is None:
             return 0
         dispatched = 0
         for issue in sort_candidates(issues):
-            if self._slots() <= 0:
-                break
-            if not issue.dispatchable or issue.state not in ACTIVE_STATES:
+            verdict = self._admit(issue.identifier, issue.id, issue)
+            if isinstance(verdict, Refused):
+                if verdict.kind == "slots":
+                    break
+                self._note_refusal(issue.identifier, issue.number, verdict)
                 continue
-            if issue.id in self._running or issue.id in self._retries:
-                continue
-            attempt, resume_session_id = 1, None
+            resume_session_id = None
             if issue.state is StateLabel.IN_PROGRESS:
                 plan = self._resume_plan(issue)
                 if plan is None:
                     continue
-                attempt, resume_session_id = plan
-            if await self._dispatch(issue, attempt=attempt, resume_session_id=resume_session_id):
+                resume_session_id, recorded = plan
+                if recorded > verdict.attempt:
+                    # The workspace record is durable per-issue history too, and the only kind
+                    # a worker without a store has. Fold it in and ask the gate again rather
+                    # than taking the attempt number from it here: that is how the two call
+                    # sites came to disagree in the first place.
+                    self._ledger.observed(issue.identifier, attempt=recorded)
+                    verdict = self._admit(issue.identifier, issue.id, issue)
+                    if isinstance(verdict, Refused):
+                        self._note_refusal(issue.identifier, issue.number, verdict)
+                        continue
+            if await self._dispatch(
+                issue, attempt=verdict.attempt, resume_session_id=resume_session_id
+            ):
                 dispatched += 1
         return dispatched
 
-    def _resume_plan(self, issue: Issue) -> tuple[int, str | None] | None:
-        """How to dispatch an orphaned in_progress issue: resume, fresh, or not at all."""
+    def _resume_plan(self, issue: Issue) -> tuple[str | None, int] | None:
+        """How to dispatch an orphaned in_progress issue: the session to resume and the
+        attempt its workspace last recorded, or None when it cannot be dispatched at all."""
         try:
             path = self._workspaces.path_for(issue.identifier)
         except AgentError as exc:
@@ -836,8 +944,8 @@ class Orchestrator:
             and record.issue_number == issue.number
             and record.last_outcome in (None, "cancelled")
         ):
-            return record.attempt, record.session_id
-        return 1, None
+            return record.session_id, record.attempt
+        return None, 1
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
         rework = issue.state is StateLabel.REWORK
@@ -867,6 +975,7 @@ class Orchestrator:
         self._running[issue.id] = entry
         self._retries.pop(issue.id, None)
         self._counters = self._counters.bump(runs_started=1)
+        ledger = self._ledger.dispatched(issue.identifier, at=self._now())
         self._log.info(
             "dispatched",
             issue_number=issue.number,
@@ -876,6 +985,8 @@ class Orchestrator:
             resumed=entry.resumed,
             run_id=entry.run_id,
             slots_left=self._slots(),
+            issue_runs=ledger.runs,
+            issue_cost_usd=ledger.cost_usd,
         )
         return True
 
@@ -1021,7 +1132,10 @@ class Orchestrator:
             await self._finish(issue)
 
     async def _finish(self, issue: Issue) -> None:
+        """Close the issue out and drop its ledger entry: a reopened one starts from zero."""
         outcome = await actions.finish_terminal(self._adapter, self._bus, self._workspaces, issue)
+        if outcome != "failed":
+            self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):
             # A no-fault close is a completion here too: the investigation is the delivered work.
             self._counters = self._counters.bump(issues_completed=1)
@@ -1057,6 +1171,8 @@ class Orchestrator:
         else:
             result = task.result()
             self._totals = self._totals.add(result)
+            # What the issue cost, however the run ended: a release is still spend.
+            self._ledger.spent(entry.identifier, turns=result.turns, cost_usd=result.cost_usd)
         self._log.info(
             "worker_exited",
             issue_number=entry.issue.number,
@@ -1104,9 +1220,12 @@ class Orchestrator:
                 reason = result.blocker or "the session reported a blocker"
                 await self._escape(entry, reason, result)
                 return
+            # A run that actually succeeded is the one thing besides the escape that ends a
+            # failure chain (#112). A label move is not, whoever made it.
+            ledger = self._ledger.cleared(entry.identifier)
             self._schedule(
                 entry.issue,
-                attempt=1,
+                attempt=ledger.attempt,
                 kind="continuation",
                 delay_ms=CONTINUATION_DELAY_MS,
                 error=None,
@@ -1165,17 +1284,18 @@ class Orchestrator:
         # the exception did, so every message leaves through the scrubber once, here (#91).
         error = self._scrubber.scrub(error)
         agent = self._workflow.config.agent
-        if entry.attempt >= agent.max_attempts:
-            reason = (
-                f"{agent.max_attempts} consecutive worker sessions failed; last error: {error}."
-            )
+        # The chain lives on the ledger, not on the label (#112), so a move between the
+        # failure and the retry cannot hand the issue a fresh `agent.max_attempts`.
+        ledger = self._ledger.failed(entry.identifier)
+        if ledger.failures >= agent.max_attempts:
+            reason = f"{ledger.failures} consecutive worker sessions failed; last error: {error}."
             await self._escape(entry, reason, result)
             return
         self._schedule(
             entry.issue,
-            attempt=entry.attempt + 1,
+            attempt=ledger.attempt,
             kind="failure",
-            delay_ms=backoff_ms(entry.attempt + 1, agent.max_retry_backoff_ms),
+            delay_ms=backoff_ms(ledger.attempt, agent.max_retry_backoff_ms),
             error=error,
         )
 
@@ -1191,6 +1311,7 @@ class Orchestrator:
         outcome = await actions.blocked_escape(
             self._adapter, self._bus, entry.issue_id, context, now=self._now()
         )
+        self._record_escape(entry.identifier, outcome)
         if outcome == "applied":
             self._counters = self._counters.bump(blocked=1)
         elif outcome == "failed":
@@ -1202,6 +1323,17 @@ class Orchestrator:
                 error="blocked escape failed",
                 escape=context,
             )
+
+    def _record_escape(self, identifier: str, outcome: actions.EscapeOutcome) -> None:
+        """An escape that landed ends the chain; one that could not be written has not.
+
+        ``skipped`` ends it too: the issue had already moved or closed, so there is no chain
+        left to bound. The README's recovery -- fix the cause, then relabel -- works because
+        of this line, and it is the *only* thing besides a run that succeeded which clears
+        the chain, so a label move on its own still cannot (#112).
+        """
+        if outcome in ("applied", "skipped"):
+            self._ledger.cleared(identifier)
 
     def _schedule(
         self,
@@ -1295,6 +1427,7 @@ class Orchestrator:
             outcome = await actions.blocked_escape(
                 self._adapter, self._bus, entry.issue_id, entry.escape, now=self._now()
             )
+            self._record_escape(entry.identifier, outcome)
             if outcome == "applied":
                 self._counters = self._counters.bump(blocked=1)
             elif outcome == "failed":
@@ -1305,25 +1438,13 @@ class Orchestrator:
                     error="blocked escape failed",
                 )
             return
-        if self._auth_block is not None:
-            self._requeue(
-                entry,
-                kind="auth",
-                delay_ms=settings.polling.interval_ms,
-                error=f"claude authentication unavailable: {self._auth_block}",
-            )
-            return
-        if self._github_block is not None:
-            # Claiming is a write to the board this worker has just failed to read (#88), so a
-            # retry waits with dispatch rather than spending an attempt on a request that is
-            # going to fail. The escape above goes first for the same reason it does under an
-            # authentication hold: it is the one retry whose whole job is to leave a note.
-            self._requeue(
-                entry,
-                kind="github",
-                delay_ms=settings.polling.interval_ms,
-                error=self._github_block,
-            )
+        # The gate, asked before the refresh (#112). A worker that may not claim anything
+        # should not spend a request finding out which issue it may not claim -- and claiming
+        # is a write to a board a GitHub hold means it has just failed to read. The escape
+        # above still goes first: it is the one retry whose whole job is to leave a note.
+        verdict = self._admit(entry.identifier, entry.issue_id, None)
+        if isinstance(verdict, Refused):
+            self._wait_or_release(entry, verdict)
             return
         try:
             issues = await self._adapter.fetch_issues_by_ids([entry.issue_id])
@@ -1343,19 +1464,35 @@ class Orchestrator:
         if issue.github_state == "closed":
             await self._finish(issue)
             return
-        if not issue.dispatchable or issue.state not in ACTIVE_STATES:
-            self._release(entry, "not_active")
+        # Asked again with the issue in hand: the fetch was awaited, so a slot can have gone
+        # while it was in flight, and the issue's own state is only knowable now. The attempt
+        # number comes back from the ledger, never from the label the fetch just read.
+        verdict = self._admit(issue.identifier, issue.id, issue)
+        if isinstance(verdict, Refused):
+            self._wait_or_release(entry, verdict)
             return
-        if self._slots() <= 0:
-            self._requeue(
-                entry,
-                kind="slots",
-                delay_ms=settings.polling.interval_ms,
-                error="no available orchestrator slots",
-            )
+        await self._dispatch(issue, attempt=verdict.attempt, resume_session_id=None)
+
+    def _wait_or_release(self, entry: RetryEntry, verdict: Refused) -> None:
+        """Do what the gate said: wait with the hold, wait for a slot, or let the entry go.
+
+        A refusal with no ``wait`` names something waiting will not change. Shutdown is the
+        exception: the entry goes back where ``fire_due_retries`` found it, since a worker on
+        its way out is not a verdict about the issue.
+        """
+        if verdict.kind == "stopping":
+            self._retries[entry.issue_id] = entry
             return
-        attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1
-        await self._dispatch(issue, attempt=attempt, resume_session_id=None)
+        if verdict.wait is None:
+            self._release(entry, _RELEASE_REASONS[verdict.kind])
+            self._note_refusal(entry.identifier, entry.issue_number, verdict)
+            return
+        self._requeue(
+            entry,
+            kind=verdict.wait,
+            delay_ms=self._workflow.config.polling.interval_ms,
+            error=verdict.reason,
+        )
 
     # --- the loop -----------------------------------------------------------------------
 
