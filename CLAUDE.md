@@ -524,7 +524,9 @@ floor, not the shipped version, and moves by hand.
   `stale` past three poll intervals, or `none`), `snapshot_at`, `snapshot_age_s` and
   `dispatch_hold`; the top-level `worker` is the worst of them, `none` > `stale` > `held` >
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
-  byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
+  byte-for-byte: `tests/test_web_vendor.py` parses the SHA-256 block and the table out of
+  `vendor/README.md` and hashes the files beside it, so the record is the check and a bump is
+  a one-file edit, #108); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
   `unsafe-inline`). The gate (#73, `auth.py`, pure): authorisation is a property of the
   request the app checks itself, never of where the socket is bound. `require_identity` is

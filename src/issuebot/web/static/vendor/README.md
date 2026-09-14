@@ -1,8 +1,10 @@
 # Vendored front-end libraries
 
 Pinned files, served from `/static/vendor/`; no CDN, no build step (roadmap decision 7). Bump
-them by hand: download the new file, verify its checksum against the release, update this table
-and the licence file beside it. Dependabot does not see these files.
+them by hand: download the new file, verify its checksum against the release, update this table,
+the digest block below and the licence file beside it. Dependabot does not see these files;
+`tests/test_web_vendor.py` parses this file and fails on a digest that does not match the bytes,
+a version the file does not carry, or a file beside it this file does not record (#108).
 
 | File | Library | Version | Source | Licence |
 |---|---|---|---|---|
