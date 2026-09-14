@@ -29,10 +29,15 @@ TABLES = {
 # --- discovery (no database) -------------------------------------------------------------
 
 
-def test_the_package_ships_the_three_migrations() -> None:
+def test_the_package_ships_the_four_migrations() -> None:
     migrations = discover_migrations()
-    assert [m.label for m in migrations] == ["0001_initial", "0002_run_turns", "0003_repos"]
-    assert [m.version for m in migrations] == [1, 2, 3]
+    assert [m.label for m in migrations] == [
+        "0001_initial",
+        "0002_run_turns",
+        "0003_repos",
+        "0004_run_turns_repo",
+    ]
+    assert [m.version for m in migrations] == [1, 2, 3, 4]
     assert "CREATE TABLE issues" in migrations[0].sql
     assert "CREATE TABLE runtime_snapshot" in migrations[0].sql
     assert "CREATE TABLE run_turns" in migrations[1].sql
@@ -87,15 +92,15 @@ async def _tables(conn: psycopg.AsyncConnection) -> set[str]:
 async def test_migrate_applies_every_migration_once(db_url: str) -> None:
     first = await migrate(db_url)
     assert (first.applied, first.version) == (
-        ("0001_initial", "0002_run_turns", "0003_repos"),
-        3,
+        ("0001_initial", "0002_run_turns", "0003_repos", "0004_run_turns_repo"),
+        4,
     )
     second = await migrate(db_url)
-    assert (second.applied, second.version) == ((), 3)
+    assert (second.applied, second.version) == ((), 4)
     conn = await connect(db_url)
     try:
         assert await _tables(conn) == TABLES
-        assert await schema_version(conn) == 3
+        assert await schema_version(conn) == 4
     finally:
         await conn.close()
 
@@ -114,7 +119,7 @@ async def test_a_newer_recorded_version_is_refused(db_url: str) -> None:
     try:
         await apply_migrations(conn)
         await conn.execute("INSERT INTO schema_migrations (version, name) VALUES (7, 'future')")
-        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(3\)"):
+        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(4\)"):
             await apply_migrations(conn)
     finally:
         await conn.close()
@@ -158,6 +163,71 @@ async def _at_version_two(db_url: str) -> psycopg.AsyncConnection:
     return conn
 
 
+async def _at_version_three(db_url: str) -> psycopg.AsyncConnection:
+    """A connection to a schema migrated to version 3 only (run_turns without a repo)."""
+    conn = await connect(db_url)
+    await apply_migrations(conn, discover_migrations()[:3])
+    return conn
+
+
+RUN_V3 = """
+INSERT INTO runs (repo, run_id, issue_number, issue_identifier, attempt, started_at)
+VALUES (%s, %s, 1, 'x-1', 1, now())
+"""
+
+TURN_V3 = """
+INSERT INTO run_turns (run_id, turn_number, captured_at, prompt, prompt_bytes, stream,
+                       stream_bytes, stream_lines, omitted_lines, stderr, stderr_bytes, truncated)
+VALUES (%s, 1, now(), 'p', 1, '', 0, 0, 0, '', 0, false)
+"""
+
+CONSTRAINTS = """
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = %s::regclass AND contype IN ('p', 'f') ORDER BY conname
+"""
+
+
+async def test_0004_gives_every_turn_its_run_s_repository_and_keys_both_by_it(
+    db_url: str,
+) -> None:
+    conn = await _at_version_three(db_url)
+    try:
+        await conn.execute(RUN_V3, ("alpha/one", "run-a"))
+        await conn.execute(RUN_V3, ("beta/two", "run-b"))
+        await conn.execute(TURN_V3, ("run-a",))
+        await conn.execute(TURN_V3, ("run-b",))
+    finally:
+        await conn.close()
+    result = await migrate(db_url)
+    assert result.version == 4 and result.applied == ("0004_run_turns_repo",)
+    conn = await connect(db_url)
+    try:
+        turns = await (
+            await conn.execute("SELECT run_id, repo FROM run_turns ORDER BY run_id")
+        ).fetchall()
+        assert turns == [("run-a", "alpha/one"), ("run-b", "beta/two")]
+        runs = dict(await (await conn.execute(CONSTRAINTS, ("runs",))).fetchall())
+        assert runs == {"runs_pkey": "PRIMARY KEY (repo, run_id)"}
+        turns_c = dict(await (await conn.execute(CONSTRAINTS, ("run_turns",))).fetchall())
+        assert turns_c == {
+            "run_turns_pkey": "PRIMARY KEY (repo, run_id, turn_number)",
+            "run_turns_repo_run_id_fkey": (
+                "FOREIGN KEY (repo, run_id) REFERENCES runs(repo, run_id) ON DELETE CASCADE"
+            ),
+        }
+        # The write is where the check lives now: a turn against another repository's run
+        # has no run to reference, however its run_id reads.
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            await conn.execute(
+                "INSERT INTO run_turns (repo, run_id, turn_number, captured_at, prompt, "
+                "prompt_bytes, stream, stream_bytes, stream_lines, omitted_lines, stderr, "
+                "stderr_bytes, truncated) VALUES ('beta/two', 'run-a', 2, now(), 'p', 1, '', "
+                "0, 0, 0, '', 0, false)"
+            )
+    finally:
+        await conn.close()
+
+
 ISSUE_V2 = """
 INSERT INTO issues (number, identifier, title, github_state, url, created_at, updated_at, seen_at)
 VALUES (7, 'repo-7', 'Old', 'open', 'https://github.com/x/y/issues/7', now(), now(), now())
@@ -189,13 +259,14 @@ async def test_0003_ignores_a_stored_snapshot(db_url: str) -> None:
     finally:
         await conn.close()
     result = await migrate(db_url)
-    assert result.version == 3 and result.applied == ("0003_repos",)
+    assert result.version == 4 and result.applied == ("0003_repos", "0004_run_turns_repo")
     conn = await connect(db_url)
     try:
         columns = await (
             await conn.execute(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'runtime_snapshot' ORDER BY ordinal_position"
+                "WHERE table_schema = current_schema() AND table_name = 'runtime_snapshot' "
+                "ORDER BY ordinal_position"
             )
         ).fetchall()
         assert [c[0] for c in columns] == ["repo", "at", "written_at", "data"]

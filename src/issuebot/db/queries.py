@@ -119,7 +119,7 @@ class TurnSummaryRow:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class TurnRow(TurnSummaryRow):
-    """The whole ``run_turns`` row."""
+    """The whole ``run_turns`` row but its ``repo``, which is in the request."""
 
     prompt: str
     stream: str
@@ -144,6 +144,7 @@ ISSUE_COLUMNS = ", ".join(f.name for f in fields(IssueRow))
 RUN_COLUMNS = ", ".join(f.name for f in fields(RunRow))
 EVENT_COLUMNS = ", ".join(f.name for f in fields(EventRow))
 SUMMARY_COLUMNS = ", ".join(f"t.{f.name}" for f in fields(TurnSummaryRow))
+TURN_COLUMNS = ", ".join(f"t.{f.name}" for f in fields(TurnRow))
 
 
 CLOSED_COUNT = """
@@ -226,16 +227,18 @@ SELECT {EVENT_COLUMNS} FROM events WHERE repo = %(repo)s AND issue_number = %(nu
 ORDER BY id DESC LIMIT %(limit)s
 """
 
+# A run and its turns are the same repository's by construction (0004: run_turns references
+# runs on (repo, run_id)), so the join is on both and the predicate is the turn's own column.
 TURN_SUMMARIES_FOR_ISSUE = f"""
-SELECT {SUMMARY_COLUMNS} FROM run_turns t JOIN runs r ON r.run_id = t.run_id
-WHERE r.repo = %(repo)s AND r.issue_number = %(number)s
+SELECT {SUMMARY_COLUMNS} FROM run_turns t
+JOIN runs r ON r.repo = t.repo AND r.run_id = t.run_id
+WHERE t.repo = %(repo)s AND r.issue_number = %(number)s
 ORDER BY r.started_at DESC, r.run_id DESC, t.turn_number
 """
 
-# run_turns has no repo column of its own, so the join to runs is what scopes it.
-TURN = """
-SELECT t.* FROM run_turns t JOIN runs r ON r.run_id = t.run_id
-WHERE r.repo = %(repo)s AND t.run_id = %(run_id)s AND t.turn_number = %(turn_number)s
+TURN = f"""
+SELECT {TURN_COLUMNS} FROM run_turns t
+WHERE t.repo = %(repo)s AND t.run_id = %(run_id)s AND t.turn_number = %(turn_number)s
 """
 
 STATE_COUNTS = """

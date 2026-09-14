@@ -64,8 +64,13 @@ async def test_probe_before_and_after_migrate(db_url: str) -> None:
     database = Database(db_url)
     before = await database.probe()
     assert before.server_version.startswith("PostgreSQL ")
-    assert (before.schema_version, before.latest_version, before.behind) == (0, 3, True)
+    assert (before.schema_version, before.latest_version, before.behind) == (0, 4, True)
     result = await database.migrate()
-    assert result.applied == ("0001_initial", "0002_run_turns", "0003_repos")
+    assert result.applied == (
+        "0001_initial",
+        "0002_run_turns",
+        "0003_repos",
+        "0004_run_turns_repo",
+    )
     after = await database.probe()
-    assert (after.schema_version, after.behind, after.ahead) == (3, False, False)
+    assert (after.schema_version, after.behind, after.ahead) == (4, False, False)
