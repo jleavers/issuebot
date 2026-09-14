@@ -1468,6 +1468,16 @@ class Orchestrator:
                 error="no available orchestrator slots",
             )
             return
+        if not self._bind_account(issue)[1]:
+            # A slot is free but this workspace's account is not (#121). Requeued rather than
+            # dropped: `_dispatch` would only refuse it, and the attempt count would go with it.
+            self._requeue(
+                entry,
+                kind="slots",
+                delay_ms=settings.polling.interval_ms,
+                error="the workspace's session account is busy",
+            )
+            return
         attempt = entry.attempt if issue.state is StateLabel.IN_PROGRESS else 1
         await self._dispatch(issue, attempt=attempt, resume_session_id=None)
 

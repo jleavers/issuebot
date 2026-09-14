@@ -30,7 +30,7 @@ from issuebot.cli import (
     render_stats,
     render_status,
 )
-from issuebot.config import GitHubLabels, GitHubSettings, Settings
+from issuebot.config import GitHubLabels, GitHubSettings, Settings, load_workflow
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
@@ -2726,6 +2726,41 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     assert "[WARN] agent.run_as: agent; the session runs as a separate account, but all 3" in out
     assert probed == ["agent"]
     assert "15 checks: 0 failed, 2 warnings" in out
+
+
+def test_run_once_takes_the_workspaces_own_account_from_the_pool(
+    tmp_path: Path, fake_github: FakeGitHub
+) -> None:
+    """One issue means one account (#121), and the same one every time it is dispatched."""
+    from issuebot.agent.accounts import AccountRegistry
+    from issuebot.cli import _with_bound_account
+
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    workflow = _workflow_with(tmp_path, root, "agent-1,agent-2")
+    issue = fake_github.add_issue("Sample", labels=("issuebot/todo",), number=7)
+    bound = _with_bound_account(workflow, issue)
+    assert bound.config.agent.run_as == ("agent-1",)
+    assert not bound.config.agent.run_as_pooled
+    assert AccountRegistry(root, ("agent-1", "agent-2")).bound(issue.identifier) == "agent-1"
+    # Read back from the record, not recomputed: a rework writes the clone the first run made.
+    assert _with_bound_account(workflow, issue).config.agent.run_as == ("agent-1",)
+    # One account is no pool, so nothing is bound and nothing is written.
+    single = _workflow_with(tmp_path, root, "agent")
+    assert _with_bound_account(single, issue) is single
+
+
+def _workflow_with(tmp_path: Path, root: Path, accounts: str) -> Any:
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text(
+        "---\n"
+        "github:\n  repo: example/repo\n"
+        f"workspace:\n  root: {root}\n"
+        "---\n\nPrompt {{ issue.identifier }}\n"
+    )
+    return load_workflow(
+        path, environ={"GH_TOKEN": "t", "ISSUEBOT_AGENT_USER": accounts}, overlay=False
+    )
 
 
 def test_validate_reports_a_pool_of_session_accounts(

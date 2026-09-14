@@ -162,6 +162,12 @@ class WorkspaceManager:
     async def create_or_reuse(self, issue: Issue) -> Workspace:
         path = self.path_for(issue.identifier)
         if self._is_complete(path):
+            # Re-applied on reuse, not only on creation: the mode and the group are what keep a
+            # sibling session out (#121), and a workspace whose bound account changed -- the
+            # pool shrank, or the setting did -- would otherwise be one its own session could
+            # not enter. Idempotent, and the directories are the worker's either way.
+            self._share(path)
+            self._share(path / ".issuebot")
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():

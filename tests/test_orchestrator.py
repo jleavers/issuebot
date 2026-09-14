@@ -3222,3 +3222,36 @@ async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path:
     for _ in range(10):
         await h.tick()
     assert orchestrator._pool.bound(identifier) is None
+
+
+async def test_a_retry_whose_account_is_busy_is_requeued_rather_than_dropped(
+    tmp_path: Path,
+) -> None:
+    """A free slot is not a free account (#121): requeueing keeps the attempt count, which
+    letting `_dispatch` refuse the issue would spend."""
+    h = Harness(tmp_path, max_concurrent=3, max_retry_backoff_ms=30_000)
+    orchestrator = _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    assert h.entry(1).account == "agent-1"
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    # Issue 3 takes the freed account, so when issue 1's retry comes due both are busy.
+    await h.tick()
+    assert h.entry(3).account == "agent-1"
+    assert orchestrator._slots() == 1
+    await h.fire(20)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt) == ("slots", 2)
+    assert retry.error == "the workspace's session account is busy"
+    assert [run.issue.number for run in h.sessions.runs] == [1, 2, 3], (
+        "issue 1 was dispatched again while its own account was still running"
+    )

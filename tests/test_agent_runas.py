@@ -211,8 +211,14 @@ async def test_workspace_creation_and_removal_run_as_the_account(
     assert commands[0][:3] == ["gh", "repo", "clone"], commands
     assert all(c["u"] == ME for c in calls)
     # Reuse, then removal: the account's files go through the helper, the worker's own after.
+    # Reuse re-applies the mode and the group (#121), so a workspace whose bound account
+    # changed is one its own session can still enter.
+    ws.path.chmod(0o1777)
+    (ws.path / ".issuebot").chmod(0o1777)
     again = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert not again.created
+    for shared in (ws.path, state):
+        assert stat.S_IMODE(shared.stat().st_mode) == WORKSPACE_DIR_MODE
     assert await manager.remove("example-42") is True
     assert not ws.path.exists()
     assert [c["command"][-2] for c in calls[len(commands) :]] == [] or any(
