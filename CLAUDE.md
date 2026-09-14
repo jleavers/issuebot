@@ -193,7 +193,11 @@ floor, not the shipped version, and moves by hand.
   `BLOCKED:` line is read off the latter), and `_Emitter` scrubs `TurnEvent.detail` before
   its own debug line. A runner built without settings, and `classify_result` called bare, use
   `DEFAULT_SCRUBBER` (`scrub.py`), the shapes alone. The turn files on disk stay claude's
-  bytes; `capture_turns` is their step.
+  bytes; `capture_turns` is their step. A hook's output takes the same exit -- its last
+  stderr line is `HookResult.summary`, which `before_run hook failed: ...` quotes into the
+  run's error -- and a hook runs with the token in its environment, so `WorkspaceManager`
+  owns the same `Scrubber.for_deployment` and scrubs both tails where the `HookResult` is
+  built, before the cut that keeps their end.
   `budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
   caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
   same session with a fresh ledger. Failing there would end the run, and the retry after it
@@ -271,7 +275,9 @@ floor, not the shipped version, and moves by hand.
   constructor argument, `DEFAULT_SCRUBBER` unless `cli` passes the deployment's) before
   `blocked_escape` writes them on the public issue (#91): the reason quotes the run's error,
   already scrubbed at its source, but the log directory names the operator's home, which only
-  the deployment's scrubber reads as `~`.
+  the deployment's scrubber reads as `~`. `_after_failure` scrubs its `error` once on entry
+  for the same reason: a `worker crashed: <exc>` names whatever the exception did, and the
+  retry it schedules carries the message into the snapshot's `retrying` rows.
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
   that session's model.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry

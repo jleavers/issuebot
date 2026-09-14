@@ -17,6 +17,7 @@ from typing import Literal, get_args
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runner import agent_environment, workspace_environment
+from issuebot.agent.scrub import Scrubber
 from issuebot.config import Settings
 from issuebot.events.types import RunOutcome
 from issuebot.github import GhRunner, GhRunnerLike, GitHubError, Issue
@@ -112,6 +113,11 @@ class WorkspaceManager:
             token=settings.github.token, timeout_ms=settings.hooks.timeout_ms
         )
         self._environ = dict(os.environ if environ is None else environ)
+        # A hook runs with the token in its environment and prints what it likes on the way
+        # out, and its last stderr line becomes the run's error (`HookResult.summary`), which
+        # takes the same exits as a failed turn's (#91): so the tails are scrubbed here, where
+        # the result is built, before the cut that keeps their end.
+        self._scrubber = Scrubber.for_deployment(settings, self._environ)
         self._log = get_logger(__name__)
 
     # --- paths --------------------------------------------------------------------
@@ -221,9 +227,9 @@ class WorkspaceManager:
                 timed_out=False,
                 duration_ms=_elapsed_ms(started),
                 stdout_tail="",
-                stderr_tail=str(exc),
+                stderr_tail=self._scrubber.scrub(str(exc)),
             )
-            self._log.warning("hook_failed", hook=name, error=str(exc))
+            self._log.warning("hook_failed", hook=name, error=result.stderr_tail)
             return result
         try:
             out, err = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
@@ -256,8 +262,8 @@ class WorkspaceManager:
             returncode=process.returncode,
             timed_out=False,
             duration_ms=_elapsed_ms(started),
-            stdout_tail=out.decode("utf-8", errors="replace")[-_OUTPUT_TAIL:],
-            stderr_tail=err.decode("utf-8", errors="replace")[-_OUTPUT_TAIL:],
+            stdout_tail=self._output_tail(out),
+            stderr_tail=self._output_tail(err),
         )
         if result.ok:
             self._log.info(
@@ -278,6 +284,10 @@ class WorkspaceManager:
                 stderr=result.stderr_tail,
             )
         return result
+
+    def _output_tail(self, raw: bytes) -> str:
+        """The end of a hook's output, scrubbed before the cut so no credential straddles it."""
+        return self._scrubber.scrub(raw.decode("utf-8", errors="replace"))[-_OUTPUT_TAIL:]
 
     # --- session.json ---------------------------------------------------------------
 

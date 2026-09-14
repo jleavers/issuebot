@@ -692,9 +692,13 @@ def test_classify_result_scrubs_before_the_cap(monkeypatch: pytest.MonkeyPatch) 
 
 def test_classify_result_still_reads_the_raw_stderr_tail_for_an_auth_failure() -> None:
     """The verdict is read off the words, which the mask leaves alone."""
-    category, message = classify_result(
-        None, 1, f"Invalid API key {TOKEN} \u00b7 Please run /login"
-    )
+    tail = f"Invalid API key {TOKEN} \u00b7 Please run /login"
+    category, message = classify_result(None, 1, tail)
+    assert category == "auth_failed"
+    assert message is not None and TOKEN not in message and "Please run /login" in message
+    # The result path reads the *scrubbed* text; the markers are prose the mask leaves alone.
+    result = {"subtype": "error_during_execution", "is_error": True, "result": tail}
+    category, message = classify_result(result, 1, "")
     assert category == "auth_failed"
     assert message is not None and TOKEN not in message and "Please run /login" in message
 

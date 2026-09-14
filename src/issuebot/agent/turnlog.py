@@ -32,8 +32,6 @@ STDERR_LIMIT = 64 * 1024
 RESULT_TEXT_LIMIT = 4 * 1024
 OMITTED_TYPE = "issuebot_omitted"
 TURN_FILE = re.compile(r"^turn-(\d+)\.jsonl$")
-# The shapes alone: what a caller gets without naming this deployment's secrets and home.
-# The worker builds ``Scrubber.for_deployment`` and hands the sink a capture bound to it.
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

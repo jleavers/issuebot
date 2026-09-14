@@ -984,6 +984,20 @@ async def test_the_blocked_escape_scrubs_what_it_writes_on_the_issue(tmp_path: P
     assert "literal-token-value" not in reason and "*** under ~/repo-1" in reason
 
 
+async def test_a_retrys_error_is_scrubbed_before_it_reaches_the_snapshot(tmp_path: Path) -> None:
+    """`worker crashed: <exc>` names whatever the exception did; the retry's error is what
+    `issuebot status`, `/state` and the dashboard show (#91)."""
+    scrubber = Scrubber(secrets=["literal-token-value"], home="/workspaces")
+    h = Harness(tmp_path, max_attempts=3, scrubber=scrubber)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.run_for(1).fail(OSError("cannot write /workspaces/repo-1/x: literal-token-value"))
+    await h.drain()
+    assert h.retry(1).error == "worker crashed: cannot write ~/repo-1/x: ***"
+    (retry,) = h.orchestrator.snapshot().retrying
+    assert retry.error == h.retry(1).error
+
+
 async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.add_issue(1, "todo")

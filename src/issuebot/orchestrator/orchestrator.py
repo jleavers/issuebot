@@ -1132,6 +1132,10 @@ class Orchestrator:
     async def _after_failure(
         self, entry: RunningEntry, error: str, result: RunResult | None
     ) -> None:
+        # The retry's `error` reaches the snapshot (`issuebot status`, `/state`, the dashboard)
+        # and the escape's reason reaches the issue; a `worker crashed: <exc>` names whatever
+        # the exception did, so every message leaves through the scrubber once, here (#91).
+        error = self._scrubber.scrub(error)
         agent = self._workflow.config.agent
         if entry.attempt >= agent.max_attempts:
             reason = (
