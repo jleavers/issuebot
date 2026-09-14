@@ -14,7 +14,7 @@ what the verdict says; nothing in this module reaches GitHub, the clock or the w
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from issuebot.github import ACTIVE_STATES, Issue
@@ -73,6 +73,7 @@ class IssueLedger:
 
 
 EMPTY_LEDGER = IssueLedger()
+_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 
 def seeded_chain(failures: int, max_attempts: int) -> int:
@@ -102,7 +103,11 @@ class Ledger:
     on a deployment. Restarting is how this worker is deployed.
 
     Insertion order is the eviction order: every write moves its entry to the end, so the one
-    that goes when the cap is reached is the one this worker has not touched for longest.
+    that goes when the cap is reached is the one this worker has not run for longest. A seed
+    arrives in whatever order its reader produced -- the store's is newest first -- so it is
+    sorted by ``last_run_at`` on the way in rather than trusted, since getting that backwards
+    would evict the issues that ran minutes before the restart and keep the ones that have not
+    run for months.
     """
 
     def __init__(
@@ -112,7 +117,12 @@ class Ledger:
         limit: int = LEDGER_LIMIT,
         on_evict: EvictionCallback | None = None,
     ) -> None:
-        self._entries: dict[str, IssueLedger] = dict(entries or {})
+        self._entries: dict[str, IssueLedger] = {
+            identifier: entry
+            for identifier, entry in sorted(
+                (entries or {}).items(), key=lambda item: item[1].last_run_at or _EPOCH
+            )
+        }
         self._limit = max(limit, 1)
         self._on_evict = on_evict
         self._trim()
@@ -223,7 +233,6 @@ class AdmissionRequest:
     Without an issue the answer covers the worker's own preconditions and stops there.
     """
 
-    identifier: str
     issue: Issue | None = None
     ledger: IssueLedger = EMPTY_LEDGER
     hold: Hold | None = None

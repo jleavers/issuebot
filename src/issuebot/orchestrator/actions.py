@@ -192,22 +192,46 @@ async def blocked_escape(
 # ever. The reason names the counts, so a second one would only repeat what the first said.
 BUDGET_HEADING = "### Issuebot budget limit ("
 
+BudgetLimit = Literal["attempts", "spend"]
 
-def budget_block(reason: str, now: datetime, labels: GitHubLabels) -> str:
+# What actually gets the issue moving again, which is not the same for the two ceilings: the
+# escape clears the failure chain on its way out, so relabelling is enough for `attempts` and
+# is not for `spend`, where the figure the ceiling compares against never resets. A note that
+# got this backwards would have an operator raise a setting and wait for nothing.
+_BUDGET_RECOVERY: dict[BudgetLimit, str] = {
+    "attempts": (
+        "Fix what the runs kept failing on, then label the issue `{rework}` or `{todo}`: "
+        "handing it over here ends the chain of failures, so the next label move starts the "
+        "run budget again."
+    ),
+    "spend": (
+        "Raise `agent.max_issue_cost_usd` (or close the issue), *then* relabel. Relabelling "
+        "on its own only brings the issue back here: what this ceiling counts is what the "
+        "issue has already cost, and that never resets."
+    ),
+}
+
+
+def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubLabels) -> str:
     """The block the budget escape appends to the workpad."""
+    recovery = _BUDGET_RECOVERY[limit].format(rework=labels.rework, todo=labels.todo)
     return (
         f"{BUDGET_HEADING}{_stamp(now)})\n\n"
-        f"issuebot will not claim this issue again: {reason}.\n"
-        f"Moved to `{labels.review}` for a human to look at. Raising the setting, or closing "
-        f"the issue, is the way out; relabelling on its own is not, which is the point of the "
-        f"ceiling."
+        f"issuebot has stopped claiming this issue: {reason}.\n"
+        f"Moved to `{labels.review}` for a human to look at. {recovery}"
     )
+
+
+def _has_budget_block(body: str) -> bool:
+    """Line-anchored, like the conflict count: a quoted heading is not a block."""
+    return any(line.startswith(BUDGET_HEADING) for line in body.split("\n"))
 
 
 async def budget_escape(
     adapter: GitHubAdapter,
     bus: EventBus,
     issue_id: str,
+    limit: BudgetLimit,
     reason: str,
     *,
     now: datetime,
@@ -217,11 +241,14 @@ async def budget_escape(
     The blocked escape above is something a *run* does, and this is the one escalation with no
     run behind it: the admission gate refused the claim before there was one. Without it a
     refused issue would sit on the board with nothing said about it anywhere a human looks,
-    which is worse than having no ceiling at all.
+    which is worse than having no ceiling at all. Moving it also stops the refusal repeating,
+    since the gate reads a ``review`` issue as one this worker does not claim.
 
-    Unlike ``blocked_escape`` it accepts the issue in any state this worker claims, because
-    that is exactly where a refused issue sits -- ``todo`` or ``rework``, never
-    ``in_progress``, since the gate runs before the claim.
+    Unlike ``blocked_escape`` it accepts the issue in any of ``ACTIVE_STATES``, because a
+    refused issue is wherever the gate found it -- usually ``todo`` or ``rework``, but an
+    orphaned ``in_progress`` candidate is gated before it is resumed, and a continuation retry
+    fires on one too. What keeps this off a *running* issue is not the state but the gate:
+    ``admit`` answers ``busy`` long before it reaches the budget.
     """
     log = get_logger(__name__)
     try:
@@ -240,9 +267,9 @@ async def budget_escape(
             )
             return "skipped"
         workpad = await adapter.find_workpad_comment(issue.number)
-        if workpad is None or BUDGET_HEADING not in workpad.body:
+        if workpad is None or not _has_budget_block(workpad.body):
             await _append_workpad(
-                adapter, issue.number, workpad, budget_block(reason, now, adapter.labels)
+                adapter, issue.number, workpad, budget_block(limit, reason, now, adapter.labels)
             )
         await adapter.set_state(issue.number, StateLabel.REVIEW)
     except GitHubError as exc:

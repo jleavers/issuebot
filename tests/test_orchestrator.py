@@ -3220,7 +3220,11 @@ async def test_a_spent_chain_refuses_the_claim_when_the_escape_never_landed(
     assert "agent.max_attempts is 1" in refusals[0]["reason"]
     # And the refusal is not silent: the issue is handed to a human where they can see it.
     assert h.github.issue(1).state is StateLabel.REVIEW
-    assert "### Issuebot budget limit (" in h.github.comments_for(1)[0].body
+    body = h.github.comments_for(1)[0].body
+    assert "### Issuebot budget limit (" in body
+    # The chain is what ran out, and handing the issue over ends a chain, so relabelling is
+    # genuinely the way back -- which is not what the spend ceiling's note says.
+    assert "the next label move starts the run budget again" in body
 
 
 async def test_the_cumulative_spend_ceiling_refuses_a_claim(tmp_path: Path) -> None:
@@ -3247,6 +3251,7 @@ async def test_the_cumulative_spend_ceiling_refuses_a_claim(tmp_path: Path) -> N
     body = h.github.comments_for(1)[0].body
     assert "### Issuebot budget limit (" in body
     assert "agent.max_issue_cost_usd is $0.75" in body
+    assert "Relabelling on its own only brings the issue back here" in body
     assert h.orchestrator.snapshot().counters.blocked == 1
 
 
@@ -3267,6 +3272,32 @@ async def test_the_spend_ceiling_keeps_saying_no_without_repeating_itself(
     assert h.github.issue(1).state is StateLabel.REVIEW
     assert attempts_dispatched(h, 1) == [1]
     assert h.github.comments_for(1)[0].body.count("### Issuebot budget limit (") == 1
+
+
+async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path) -> None:
+    """The conflict bounce and the gate disagree about one issue; the bounce limit ends it.
+
+    The bounce is a decision about a pull request and the gate is a decision about a claim, so
+    neither consults the other -- that is the whole point of the gate owning one question. The
+    two do meet on an over-budget issue in `review` whose pull request conflicts: the bounce
+    moves it to `rework`, the gate refuses it and hands it back. `agent.max_conflict_reworks`
+    is what stops that, and this pins it.
+    """
+    h = Harness(tmp_path, max_issue_cost_usd=0.4, max_conflict_reworks=2)
+    h.add_issue(1)
+    await h.tick()
+    h.github.open_pr(1, pr_number=2)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    h.github.set_pr_mergeable(2, "conflicting")
+    for _ in range(6):
+        await h.fire(60)
+        await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert attempts_dispatched(h, 1) == [1]  # never claimed again
+    body = h.github.comments_for(1)[0].body
+    assert body.count("### Issuebot merge conflict (") == 2  # the bounce limit held
+    assert body.count("### Issuebot budget limit (") == 1
 
 
 async def test_a_seeded_chain_at_the_ceiling_still_gets_a_run_that_can_escalate(
@@ -3336,15 +3367,19 @@ async def test_a_retry_releases_an_issue_that_is_already_running(tmp_path: Path)
     assert len(h.sessions.runs) == 1  # no second worker for the same issue
 
 
-async def test_a_terminal_issue_is_forgotten_by_the_ledger(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+async def test_a_reopened_issue_starts_from_a_clean_budget(tmp_path: Path) -> None:
+    """A terminal finish forgets the issue, so closing and reopening really does start over."""
+    h = Harness(tmp_path, max_attempts=2)
     h.add_issue(1)
     await h.tick()
     await fail_once(h, 1)
-    assert h.orchestrator._ledger.get("repo-1").failures == 1
     h.github.close_issue(1)
-    await h.fire(20)
-    assert h.orchestrator._ledger.get("repo-1") == IssueLedger()
+    await h.fire(20)  # the retry finds it closed and finishes it
+
+    h.github.reopen_issue(1)
+    h.github.human_set_state(1, StateLabel.TODO)
+    await h.tick()
+    assert attempts_dispatched(h, 1) == [1, 1]
 
 
 async def test_the_dispatch_line_carries_what_the_issue_has_cost(tmp_path: Path) -> None:

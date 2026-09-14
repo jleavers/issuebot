@@ -227,7 +227,6 @@ _RELEASE_REASONS: dict[RefusalKind, str] = {
     "inactive": "not_active",
     "attempts": "attempts exhausted",
     "spend": "spend exhausted",
-    "stopping": "stopping",
 }
 
 
@@ -865,7 +864,6 @@ class Orchestrator:
         agent = self._workflow.config.agent
         return admit(
             AdmissionRequest(
-                identifier=identifier,
                 issue=issue,
                 ledger=self._ledger.get(identifier),
                 hold=self._current_hold(),
@@ -885,6 +883,11 @@ class Orchestrator:
         is the board having stopped moving for that issue, and a refusal nobody can see would
         be worse than having no ceiling at all -- so it is written on the issue and the issue
         is handed to a human, which is also what stops it being refused again every tick.
+
+        An escape that GitHub refuses is retried by the next tick rather than by a queued
+        entry with a backoff: the issue is still a candidate, so the loop comes back to it on
+        its own, one poll interval later. That is the same cadence the other holds report
+        themselves at, and it costs nothing while GitHub is answering.
         """
         if verdict.kind not in ("attempts", "spend"):
             return
@@ -897,7 +900,7 @@ class Orchestrator:
                 reason=verdict.reason,
             )
         outcome = await actions.budget_escape(
-            self._adapter, self._bus, issue.id, verdict.reason, now=self._now()
+            self._adapter, self._bus, issue.id, verdict.kind, verdict.reason, now=self._now()
         )
         if outcome == "applied":
             self._counters = self._counters.bump(blocked=1)
@@ -934,6 +937,10 @@ class Orchestrator:
                         attempt=recorded,
                         max_attempts=self._workflow.config.agent.max_attempts,
                     )
+                    # `observed` caps the chain below `max_attempts` and touches nothing else,
+                    # so this cannot refuse today. It is asked anyway because the attempt
+                    # number is the gate's to give: a cap that ever moves must not quietly
+                    # start handing out a number the gate would have refused.
                     verdict = self._admit(issue.identifier, issue.id, issue)
                     if isinstance(verdict, Refused):
                         await self._handle_refusal(issue, verdict)

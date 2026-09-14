@@ -324,12 +324,20 @@ floor, not the shipped version, and moves by hand.
   again and again. A budget refusal is never silent, because a board that stops moving for an
   issue with nothing said about it anywhere a human looks is worse than no ceiling at all:
   `_handle_refusal` logs `dispatch_refused` and takes `actions.budget_escape`, the one
-  escalation with no run behind it (`BUDGET_HEADING`, written once per issue; it accepts the
-  issue in any of `ACTIVE_STATES`, since the gate refuses before the claim and the issue is
-  therefore `todo` or `rework`, never `in_progress`), which also stops the refusal repeating:
-  the issue lands in `review`, where the gate refuses it as `inactive` instead. `Ledger` is
+  escalation with no run behind it (`BUDGET_HEADING`, written once per issue and matched
+  line-anchored like the conflict count; it accepts the issue in any of `ACTIVE_STATES`,
+  including the orphaned `in_progress` one the gate meets before `_resume_plan`, because what
+  keeps it off a *running* issue is `admit` answering `busy` long before it reaches the budget,
+  not the state), which also stops the refusal repeating: the issue lands in `review`, where
+  the gate refuses it as `inactive` instead. Its block names the way out, which differs by
+  ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
+  is not for `spend`, whose figure never resets. A failed escape is retried by the next tick
+  rather than by a queued entry, since the issue is still a candidate. `Ledger` is
   keyed by `Issue.identifier` (the column the store records runs
-  under), bounded at `LEDGER_LIMIT` with the least recently run entry evicted and logged, and
+  under), bounded at `LEDGER_LIMIT` with the least recently run entry evicted and logged (a
+  seed is sorted by `last_run_at` on the way in rather than trusted: the store answers newest
+  first, and eviction is a budget reset, so taking that order as given would drop the issues
+  that ran minutes before the restart), and
   seeded at construction (`initial_ledger=`, `cli._initial_ledger` over
   `RepoQueries.issue_ledgers`) the way `initial_rate_limits` is, since restarting is how this
   worker is deployed and a budget a deployment resets is not a ceiling. Every chain that comes

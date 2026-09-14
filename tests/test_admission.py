@@ -21,7 +21,7 @@ NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 
 
 def request(**overrides: object) -> AdmissionRequest:
-    fields: dict[str, object] = {"identifier": "repo-42", "slots": 1, "max_attempts": 3}
+    fields: dict[str, object] = {"slots": 1, "max_attempts": 3}
     fields.update(overrides)
     return AdmissionRequest(**fields)  # type: ignore[arg-type]
 
@@ -127,10 +127,28 @@ def test_a_write_makes_an_entry_the_most_recently_touched() -> None:
     assert evicted == ["repo-2"]
 
 
-def test_a_seeded_ledger_over_the_cap_is_trimmed_at_construction() -> None:
-    seed = {f"repo-{n}": IssueLedger(failures=1) for n in range(5)}
+def test_a_seeded_ledger_over_the_cap_keeps_the_most_recently_run() -> None:
+    """The store answers newest first, and getting this backwards is a budget reset."""
+    seed = {
+        f"repo-{n}": IssueLedger(failures=1, last_run_at=NOW - timedelta(hours=n)) for n in range(5)
+    }
     ledger = Ledger(seed, limit=2)
-    assert len(ledger) == 2
+    assert set(ledger.entries()) == {"repo-0", "repo-1"}
+
+
+def test_a_seeded_entry_with_no_run_time_is_the_first_to_go() -> None:
+    ledger = Ledger(
+        {"old": IssueLedger(failures=1), "new": IssueLedger(failures=1, last_run_at=NOW)},
+        limit=1,
+    )
+    assert set(ledger.entries()) == {"new"}
+
+
+def test_a_seed_is_evicted_before_a_run_this_process_saw() -> None:
+    ledger = Ledger({"seeded": IssueLedger(failures=1, last_run_at=NOW)}, limit=2)
+    ledger.dispatched("fresh", at=NOW + timedelta(hours=1))
+    ledger.failed("newest")
+    assert set(ledger.entries()) == {"fresh", "newest"}
 
 
 def test_a_cleared_chain_makes_a_refusal_news_again() -> None:
