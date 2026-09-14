@@ -375,3 +375,33 @@ def test_the_stream_read_is_bounded_and_the_stderr_read_keeps_its_tail(
     assert capture.stream_bytes == len(INIT) + len(RESULT) + 2
     assert capture.subtype is None  # the result line lay past the bound
     assert (capture.stderr, capture.stderr_bytes) == ("tail", 11)
+
+
+def test_a_stream_past_the_head_limit_still_yields_its_result_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session decides how much claude prints; the summary is read from a tail read."""
+    from dataclasses import replace
+
+    from issuebot.agent.boundary import TURN_STREAM
+
+    filler = [assistant(f"line {n}") for n in range(20)]
+    lines = [INIT, *filler, RESULT]
+    # The head bound covers the first four lines and is larger than the result line, since a
+    # read never takes more than the artefact declares, from either end.
+    head = sum(len(line) + 1 for line in lines[:4])
+    assert head > len(RESULT) + 10
+    monkeypatch.setattr(turnlog, "TURN_STREAM", replace(TURN_STREAM, limit=head))
+    monkeypatch.setattr(turnlog, "STREAM_TAIL_LIMIT", len(RESULT) + 10)
+    write_turn(tmp_path, 1, lines)
+    capture = only(capture_turns(tmp_path))
+    assert capture.truncated
+    assert capture.stream == "".join(f"{line}\n" for line in [*lines[:4], RESULT])
+    assert (capture.subtype, capture.cost_usd, capture.num_turns) == ("success", 0.25, 3)
+    assert capture.model == "claude-opus-5"
+    assert capture.stream_bytes == sum(len(line) + 1 for line in lines)
+    # A tail with no result line in it leaves the summary empty and the stream the head.
+    monkeypatch.setattr(turnlog, "STREAM_TAIL_LIMIT", 3)
+    capture = only(capture_turns(tmp_path))
+    assert capture.subtype is None
+    assert capture.stream == "".join(f"{line}\n" for line in lines[:4])

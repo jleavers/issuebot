@@ -1030,6 +1030,7 @@ class Orchestrator:
 
     async def _finish(self, issue: Issue) -> None:
         outcome = await actions.finish_terminal(self._adapter, self._bus, self._workspaces, issue)
+        self._conflict_limit_noted.pop(issue.id, None)
         if outcome in ("complete", "no_change"):
             # A no-fault close is a completion here too: the investigation is the delivered work.
             self._counters = self._counters.bump(issues_completed=1)

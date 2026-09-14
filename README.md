@@ -171,7 +171,7 @@ ignored.
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
-| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
+| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off. Counted from the `issuebot/rework` labels the token's account added to the issue, so under a shared account (your own login as the token) a rework you set by hand counts too; raise the setting to give such an issue more | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
@@ -394,7 +394,9 @@ claims the issue and runs one session with the logs on your terminal.
   `agent.max_conflict_reworks` times, after which it leaves a note and waits for you. The
   bounces are counted from the issue's own label history -- the `issuebot/rework` labels the
   worker's account added, which nothing edits away -- not from the workpad, whose body the
-  session rewrites.
+  session rewrites. That history is GitHub's word on *who* added the label, so if the token
+  is your own login rather than a bot account's, a rework you set by hand is counted as a
+  bounce as well; a dedicated account keeps the two apart.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:

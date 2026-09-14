@@ -178,7 +178,8 @@ def test_a_device_node_is_refused() -> None:
     if not (dev / "zero").exists():
         pytest.skip("no /dev/zero here")
     with pytest.raises(BoundaryError, match="not a regular file"):
-        # /dev is root's, so the walk refuses it before the device is looked at.
+        # A boundary whose worker owns /dev, so the walk passes and the device itself is
+        # what is refused, on the descriptor, before a byte of it is read.
         Boundary(worker_uid=os.stat(dev).st_uid).read(dev, ("zero",), ENV_FILE)
 
 

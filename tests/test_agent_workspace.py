@@ -576,3 +576,37 @@ async def test_a_pre_placed_marker_fails_creation_cleanly(
     assert exc.value.category == "workspace_error"
     assert "cannot mark" in exc.value.message
     assert not (manager.root / "example-42").exists()
+
+
+def test_hooks_read_the_env_file_through_the_managers_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under agent.run_as the hook that wrote `.issuebot/env` ran as the session, so the file
+    is the session's; the manager's boundary, not a default one, is what admits it (#104)."""
+    import stat as stat_module
+
+    from issuebot.agent import boundary as boundary_module
+    from issuebot.agent.boundary import Boundary
+    from issuebot.agent.runner import agent_environment, workspace_environment
+
+    manager, _ = make_manager(tmp_path)
+    ws = manager.root / "example-42"
+    (ws / ".issuebot").mkdir(parents=True)
+    (ws / ".issuebot" / "env").write_text("DSN=postgresql:///x\n")
+    me = os.getuid()
+    real_fstat = os.fstat
+
+    def fstat_as_session(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if stat_module.S_ISREG(st.st_mode):
+            return os.stat_result((*st[:4], me + 1, *st[5:]))
+        return st
+
+    monkeypatch.setattr(boundary_module.os, "fstat", fstat_as_session)
+    split = Boundary(worker_uid=me, session_uid=me + 1)
+    monkeypatch.setattr(manager, "_boundary", split)
+    base = agent_environment({"PATH": "/usr/bin"}, token=None)
+    # The default boundary (the worker alone) refuses the session-owned file...
+    assert workspace_environment(base, ws)[1] == []
+    # ...and the manager's admits it, which is what its hooks read through.
+    assert workspace_environment(base, ws, boundary=manager._boundary)[1] == ["DSN"]

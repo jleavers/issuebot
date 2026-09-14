@@ -175,11 +175,15 @@ class Boundary:
 
         ``limit`` may take less than the artefact declares, never more.
 
-        ``base`` is a directory the worker owns (a workspace, or a run's log directory); every
-        component under it is opened without following links and must be the worker's, and
-        the final one must be a regular file owned by one of the artefact's writers. A
-        refusal is ``BoundaryError``; a file that is simply absent is ``FileNotFoundError``, as
-        before, since no file is the normal case for most of these.
+        ``base`` is a directory the worker owns (a workspace, or a run's log directory) and is
+        opened by its path, so it must itself be reached through names the session cannot
+        rename or replace: the workspace root is the worker's, and under it the workspace
+        and ``.issuebot`` are the worker's and sticky, so a run's log directory under
+        ``.issuebot/runs`` (0755, the worker's) qualifies as a base too. Every component
+        *under* it is opened without following links and must be the worker's, and the
+        final one must be a regular file owned by one of the artefact's writers. A refusal
+        is ``BoundaryError``; a file that is simply absent is ``FileNotFoundError``, as before,
+        since no file is the normal case for most of these.
         """
         bound = artefact.limit if limit is None else min(limit, artefact.limit)
         fd = self._open(base, parts, _OPEN_FILE)

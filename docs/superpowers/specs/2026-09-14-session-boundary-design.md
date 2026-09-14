@@ -86,7 +86,13 @@ timeline items made by the account the adapter runs as (`gh api graphql`, pagina
 for the `Int!`; the fake keeps the same history). `conflict_rework` reads its bounce number
 from it: every `rework` the account added is one bounce. GitHub credits every event to its
 actor and nobody can remove one, so the session -- which shares the account -- can only add
-to the count, which tightens the cap. The workpad blocks remain as the note a person reads.
+to the count, which tightens the cap. The same holds for an operator whose token is their
+own login rather than a bot account's: a `rework` they set by hand is counted as a bounce,
+and the remedy is the setting (documented in the README). A marker label of issuebot's own,
+added beside `rework` on every bounce and counted the same way, would tell the two apart
+without trusting the workpad; it was not added here because the provenance rule of #77
+already reads the account as issuebot's everywhere else. The workpad blocks remain as the
+note a person reads.
 The limit note's presence is the session's to erase, so the orchestrator remembers per
 issue and limit that it wrote one (`_conflict_limit_noted`): a stripped note is rewritten
 once per process, not per tick, and a changed limit is looked at afresh.

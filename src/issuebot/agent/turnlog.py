@@ -20,7 +20,11 @@ Every file is read through the boundary (#104): the run directory is the worker'
 files in it are the worker's tee, but the directory sits inside a workspace the session has
 had its uid in, so each name is opened without following a link, refused unless it is a
 regular file the worker owns, and read to the artefact's limit and no further -- the stream
-from its head, stderr from its tail.
+from its head, stderr from its tail. A stream past the head limit is a session that printed
+more than any transcript holds, and the session decides how much claude prints, so the
+summary is not left to that: the last ``STREAM_TAIL_LIMIT`` bytes are read as well and the
+last ``result`` line in them is the one the summary (cost, tokens, subtype) is parsed from
+and kept beside the head, exactly as a result past ``STREAM_LIMIT`` was already kept.
 """
 
 import json
@@ -37,6 +41,9 @@ LINE_LIMIT = 64 * 1024
 STREAM_LIMIT = 2 * 1024 * 1024
 STDERR_LIMIT = 64 * 1024
 RESULT_TEXT_LIMIT = 4 * 1024
+# The tail read behind a stream past `TURN_STREAM.limit`: room for the result line and the
+# lines claude prints before it (a result line over LINE_LIMIT is stubbed but still parsed).
+STREAM_TAIL_LIMIT = 1024 * 1024
 OMITTED_TYPE = "issuebot_omitted"
 TURN_FILE = re.compile(r"^turn-(\d+)\.jsonl$")
 
@@ -90,11 +97,16 @@ def capture_turns(
     for number, name in sorted(numbered):
         try:
             stream = boundary.read(log_dir, (name,), TURN_STREAM)
+            tail = None
+            if stream.truncated:
+                tail = boundary.read(
+                    log_dir, (name,), TURN_STREAM, keep="tail", limit=STREAM_TAIL_LIMIT
+                ).data
         except OSError:
             continue
         prompt = _read(boundary, log_dir, f"turn-{number}.prompt.md")
         stderr = _read(boundary, log_dir, f"turn-{number}.stderr.log")
-        captures.append(_capture(number, stream, prompt, stderr, scrubber))
+        captures.append(_capture(number, stream, prompt, stderr, scrubber, tail=tail))
     return captures
 
 
@@ -108,7 +120,13 @@ def _read(boundary: Boundary, log_dir: Path, name: str) -> ReadBack:
 
 
 def _capture(
-    turn_number: int, stream: ReadBack, prompt: ReadBack, stderr: ReadBack, scrubber: Scrubber
+    turn_number: int,
+    stream: ReadBack,
+    prompt: ReadBack,
+    stderr: ReadBack,
+    scrubber: Scrubber,
+    *,
+    tail: bytes | None = None,
 ) -> TurnCapture:
     raw = stream.data
     lines = [line for line in raw.splitlines() if line.strip()]
@@ -130,6 +148,22 @@ def _capture(
         kept.append(line)
         total += len(line) + 1
     result_index = _last_index(messages, "result")
+    if tail is not None:
+        # The head read was cut: the result line, if there is one, lies in the tail. Its
+        # first line may be a fragment, which parses as nothing and is passed over.
+        tail_lines = [line for line in tail.splitlines() if line.strip()]
+        tail_messages = [_message(line) for line in tail_lines]
+        tail_index = _last_index(tail_messages, "result")
+        if tail_index is not None:
+            line = tail_lines[tail_index]
+            if len(line) > LINE_LIMIT:
+                omitted += 1
+                line = _stub(tail_messages[tail_index], len(line))
+            lines.append(tail_lines[tail_index])
+            messages.append(tail_messages[tail_index])
+            stored.append(line)
+            result_index = len(stored) - 1
+            truncated = True
     if truncated and result_index is not None and result_index >= len(kept):
         kept.append(stored[result_index])
     init_index = _last_index(messages, "system", subtype="init")

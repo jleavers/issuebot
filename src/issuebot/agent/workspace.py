@@ -301,7 +301,7 @@ class WorkspaceManager:
         # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
         # want the same DSN. `after_create` runs before any file can exist, which is fine.
         base = agent_environment(self._environ, token=self._settings.github.token)
-        env, _ = workspace_environment(base, workspace)
+        env, _ = workspace_environment(base, workspace, boundary=self._boundary)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
             with self._prepared(argv, env) as spawn:
