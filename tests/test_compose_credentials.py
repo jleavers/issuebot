@@ -3,7 +3,7 @@
 The shared store's password is ``ISSUEBOT_DB_PASSWORD``, supplied per deployment through
 ``.env`` with no default: ``compose.yaml`` names it as a required substitution wherever the
 credential is used, ``.env.example`` ships the key empty, and every DSN in the operator-facing
-files is a placeholder over it. This session cannot run ``docker compose config`` (the CI
+files carries the placeholder as its password or none at all. This session cannot run ``docker compose config`` (the CI
 ``docker`` job proves the refusal itself), so this pins the shape the refusal depends on.
 """
 
@@ -48,8 +48,13 @@ OPERATOR_FACING = [
     "Dockerfile",
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / ".github" / "workflows").glob("*.yml")),
 ]
-DSN_WITH_PASSWORD = re.compile(r"postgres(?:ql)?://[^:/@\s]+:(?!\$\{ISSUEBOT_DB_PASSWORD)[^@\s]+@")
-PASSWORD_ASSIGNMENT = re.compile(r"POSTGRES_PASSWORD\s*[:=]\s*(.+?)\s*$")
+# The password position may hold the bare placeholder or the required form, and nothing else:
+# ``${ISSUEBOT_DB_PASSWORD:-issuebot}`` is the retired credential under another spelling.
+PLACEHOLDER = r"\$\{ISSUEBOT_DB_PASSWORD(?::\?[^}]*)?\}"
+DSN_WITH_PASSWORD = re.compile(rf"postgres(?:ql)?://[^:/@\s]+:(?!{PLACEHOLDER}@)[^@\s]+@")
+# The value up to a trailing comment, unquoted, so a legitimate line annotated or quoted is
+# judged on its value and a comment is never called a credential.
+PASSWORD_ASSIGNMENT = re.compile(r"""POSTGRES_PASSWORD\s*[:=]\s*(?P<value>"[^"]*"|'[^']*'|\S+)""")
 
 
 def _services() -> dict[str, dict]:
@@ -114,7 +119,37 @@ def _is_working_credential(line: str) -> bool:
     if DSN_WITH_PASSWORD.search(line):
         return True
     assignment = PASSWORD_ASSIGNMENT.search(line)
-    return assignment is not None and not REQUIRED.fullmatch(assignment.group(1))
+    if assignment is None:
+        return False
+    value = assignment.group("value").strip("\"'")
+    return not REQUIRED.fullmatch(value)
+
+
+@pytest.mark.parametrize(
+    ("line", "working"),
+    [
+        ("DATABASE_URL: postgresql://issuebot:changeme@db:5432/issuebot", True),
+        ("postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:-issuebot}@127.0.0.1:5432/issuebot", True),
+        ("postgresql://issuebot:${ISSUEBOT_DB_PASSWORD-x}@db/issuebot", True),
+        ("postgres://a:b@c", True),
+        ("POSTGRES_PASSWORD: issuebot", True),
+        ("- POSTGRES_PASSWORD=hunter22", True),
+        ('POSTGRES_PASSWORD: "${ISSUEBOT_DB_PASSWORD:-x}"', True),
+        ("postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:5432/issuebot", False),
+        (
+            "postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD unset}@db:5432/x",
+            False,
+        ),
+        ("postgresql://issuebot@/arrowbot_test?host=/tmp", False),
+        ("postgresql://issuebot@db:5432/issuebot", False),
+        ("POSTGRES_PASSWORD: ${ISSUEBOT_DB_PASSWORD:?set ISSUEBOT_DB_PASSWORD}  # required", False),
+        ('POSTGRES_PASSWORD: "${ISSUEBOT_DB_PASSWORD:?set ISSUEBOT_DB_PASSWORD}"', False),
+        ("The image reads `POSTGRES_PASSWORD` once, at initdb.", False),
+        ("POSTGRES_PASSWORD=", False),
+    ],
+)
+def test_working_credential_predicate(line: str, working: bool) -> None:
+    assert _is_working_credential(line) is working
 
 
 @pytest.mark.parametrize("relative", OPERATOR_FACING)
@@ -131,7 +166,7 @@ def test_no_operator_facing_file_holds_a_working_database_credential(relative: s
 def test_retired_credential_appears_nowhere_else_in_the_tracked_tree() -> None:
     hits = []
     for name in _tracked_files():
-        if name.startswith(RETIRED_ALLOWED):
+        if name.startswith(RETIRED_ALLOWED) or not (ROOT / name).is_file():
             continue
         text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
         hits.extend(
