@@ -38,4 +38,11 @@ if not opts["n"] or not opts["u"] or not args:
     sys.exit(64)
 if opts["C"] is not None:
     os.closerange(opts["C"], 4096)
+pretend = os.environ.get("CLAUDE_SUDO_PRETEND_UID")
+if pretend and args[-2:] == ["id", "-u"]:
+    # The fake changes no uid, so a probe through it always sees the invoking one; this knob
+    # answers the probe's `id -u` as the account would, which is the one thing the tests
+    # cannot get from a real uid change.
+    sys.stdout.write(pretend + "\n")
+    sys.exit(0)
 os.execvp(args[0], args)

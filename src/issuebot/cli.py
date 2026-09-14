@@ -489,7 +489,14 @@ def _run_as_check(run_as: str | None) -> Check:
     error = _run_as_probe(run_as, os.environ)
     if error is not None:
         return Check(subject, "fail", error)
-    return Check(subject, "ok", f"{run_as}; the session runs as a separate account")
+    # The probe compared the delegated uid with this process's (#111); the line says so.
+    uid = os.getuid() if hasattr(os, "getuid") else "?"
+    return Check(
+        subject,
+        "ok",
+        f"{run_as}; the session runs as a separate account, at a uid other than this "
+        f"process's ({uid})",
+    )
 
 
 def _version_text(version: tuple[int, int, int]) -> str:
