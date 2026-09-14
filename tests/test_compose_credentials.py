@@ -3,8 +3,9 @@
 The shared store's password is ``ISSUEBOT_DB_PASSWORD``, supplied per deployment through
 ``.env`` with no default: ``compose.yaml`` names it as a required substitution wherever the
 credential is used, ``.env.example`` ships the key empty, and every DSN in the operator-facing
-files carries the placeholder as its password or none at all. This session cannot run ``docker compose config`` (the CI
-``docker`` job proves the refusal itself), so this pins the shape the refusal depends on.
+files carries the placeholder as its password or none at all. This session cannot run
+``docker compose config`` (the CI ``docker`` job proves the refusal itself), so this pins the
+shape the refusal depends on.
 """
 
 from __future__ import annotations
@@ -54,7 +55,9 @@ PLACEHOLDER = r"\$\{ISSUEBOT_DB_PASSWORD(?::\?[^}]*)?\}"
 DSN_WITH_PASSWORD = re.compile(rf"postgres(?:ql)?://[^:/@\s]+:(?!{PLACEHOLDER}@)[^@\s]+@")
 # The value up to a trailing comment, unquoted, so a legitimate line annotated or quoted is
 # judged on its value and a comment is never called a credential.
-PASSWORD_ASSIGNMENT = re.compile(r"""POSTGRES_PASSWORD\s*[:=]\s*(?P<value>"[^"]*"|'[^']*'|\S+)""")
+PASSWORD_ASSIGNMENT = re.compile(
+    r"""POSTGRES_PASSWORD\s*[:=]\s*(?P<value>"[^"]*"|'[^']*'|\$\{[^}]*\}|\S+)"""
+)
 
 
 def _services() -> dict[str, dict]:
