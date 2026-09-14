@@ -2257,33 +2257,90 @@ def fake_serve(monkeypatch: pytest.MonkeyPatch) -> FakeServe:
     return fake
 
 
+WEB_PASSWORD = "dashboard-password-for-tests"
+
+
+@pytest.fixture
+def web_password(monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setenv("ISSUEBOT_WEB_PASSWORD", WEB_PASSWORD)
+    return WEB_PASSWORD
+
+
 def test_web_migrates_then_serves_on_the_defaults(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 0
+    assert fake_database.migrations == 1 and fake_database.urls == [DB_URL]
+    ((app, host, port),) = fake_serve.calls
+    # Loopback by default (#73): placement hardens the gate rather than standing in for it.
+    assert (host, port) == ("127.0.0.1", 8080)
+    assert getattr(app, "title", None) == "issuebot"
+    err = capsys.readouterr().err
+    assert "web_started" in err and "s3cret" not in err and WEB_PASSWORD not in err
+
+
+def test_web_gates_the_app_with_the_password_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    from base64 import b64encode
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 0
+    ((app, _host, _port),) = fake_serve.calls
+    client = TestClient(app)  # type: ignore[arg-type]
+    assert client.get("/api/v1/repos").status_code == 401
+    token = b64encode(f":{web_password}".encode()).decode()
+    assert (
+        client.get("/api/v1/repos", headers={"Authorization": f"Basic {token}"}).status_code == 200
+    )
+
+
+def test_web_needs_its_password(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
-    assert main(["web"]) == 0
-    assert fake_database.migrations == 1 and fake_database.urls == [DB_URL]
-    ((app, host, port),) = fake_serve.calls
-    assert (host, port) == ("0.0.0.0", 8080)
-    assert getattr(app, "title", None) == "issuebot"
-    err = capsys.readouterr().err
-    assert "web_started" in err and "s3cret" not in err
+    for value in (None, ""):
+        if value is None:
+            monkeypatch.delenv("ISSUEBOT_WEB_PASSWORD", raising=False)
+        else:
+            monkeypatch.setenv("ISSUEBOT_WEB_PASSWORD", value)
+        assert main(["web"]) == 1
+        assert capsys.readouterr().out == (
+            "[FAIL] web: not configured; export ISSUEBOT_WEB_PASSWORD\n"
+        )
+    assert fake_database.urls == [] and fake_serve.calls == []
 
 
 def test_web_takes_the_bind_and_port_from_the_command_line(
-    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
-    assert main(["web", "--bind", "127.0.0.1", "--port", "0"]) == 0
+    assert main(["web", "--bind", "0.0.0.0", "--port", "0"]) == 0
     ((_app, host, port),) = fake_serve.calls
-    assert (host, port) == ("127.0.0.1", 0)
+    assert (host, port) == ("0.0.0.0", 0)
 
 
 def test_web_reads_no_workflow(
-    monkeypatch: pytest.MonkeyPatch, fake_database: FakeDatabase, fake_serve: FakeServe
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     monkeypatch.setenv("ISSUEBOT_WORKFLOW", "/nowhere/WORKFLOW.md")
@@ -2294,7 +2351,10 @@ def test_web_reads_no_workflow(
 
 
 def test_web_needs_database_url(
-    capsys: pytest.CaptureFixture[str], fake_database: FakeDatabase, fake_serve: FakeServe
+    capsys: pytest.CaptureFixture[str],
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
 ) -> None:
     assert main(["web"]) == 1
     assert capsys.readouterr().out == "[FAIL] database: not configured; export DATABASE_URL\n"
@@ -2306,6 +2366,7 @@ def test_web_fails_fast_when_the_migration_fails(
     monkeypatch: pytest.MonkeyPatch,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
+    web_password: str,
 ) -> None:
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
     monkeypatch.setenv("DATABASE_URL", DB_URL)
@@ -2319,6 +2380,7 @@ def test_web_rejects_a_port_out_of_range(
     monkeypatch: pytest.MonkeyPatch,
     fake_database: FakeDatabase,
     fake_serve: FakeServe,
+    web_password: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     assert main(["web", "--port", "70000"]) == 1
@@ -2329,6 +2391,7 @@ def test_web_rejects_a_port_out_of_range(
 def test_web_exits_one_when_uvicorn_cannot_bind(
     monkeypatch: pytest.MonkeyPatch,
     fake_database: FakeDatabase,
+    web_password: str,
 ) -> None:
     async def refuse(app: object, *, host: str, port: int) -> None:
         raise SystemExit(3)  # what uvicorn's startup() does on a bind failure

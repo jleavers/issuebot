@@ -1,5 +1,6 @@
 """Builders for the web tests: rows shaped like the query module's, a clock, a test client."""
 
+import base64
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,6 +51,15 @@ RUN_ID = "20260904T202535Z-0964cd"
 REPO = "example/repo"
 BASE = "/r/example/repo"
 API = "/api/v1/repos/example/repo"
+PASSWORD = "correct-horse-battery-staple"
+# What the Poll-now button sends: htmx's own header is the refresh route's cross-site proof.
+REFRESH_HEADERS = {"HX-Request": "true"}
+
+
+def basic_auth(password: str, username: str = "") -> dict[str, str]:
+    """An ``Authorization`` header presenting ``password`` as HTTP Basic."""
+    token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def repo_row(**overrides: Any) -> RepoRow:
@@ -277,10 +287,14 @@ class Harness:
         self.queries = self.database.queries_obj
         self.queries.repo_rows[REPO] = repo_row()
         self.clock = Clock()
-        self.client = TestClient(
-            create_app(self.database, clock=self.clock, now=self.clock.utcnow),
-            raise_server_exceptions=False,
+        self.app = create_app(
+            self.database, password=PASSWORD, clock=self.clock, now=self.clock.utcnow
         )
+        # ``client`` presents the credential on every request; ``anonymous`` presents none.
+        self.client = TestClient(
+            self.app, raise_server_exceptions=False, headers=basic_auth(PASSWORD)
+        )
+        self.anonymous = TestClient(self.app, raise_server_exceptions=False)
 
     def register(self, name: str, **overrides: Any) -> None:
         self.queries.repo_rows[name] = repo_row(repo=name, **overrides)
