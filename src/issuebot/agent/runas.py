@@ -14,9 +14,10 @@ anonymous memory file, passes that one descriptor across the uid change, and the
 verb of this module -- run by the worker's own interpreter, root-owned in the image --
 installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
 account's; everything else is exactly what the worker built. ``python -m
-issuebot.agent.runas`` is the module's other face, and it has three verbs: ``exec``,
-``kill`` (the agent's process group, since the worker's uid may not signal it) and ``remove``
-(the agent's files under a workspace, which the worker's uid may not unlink).
+issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec``,
+``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
+(the agent's files under a workspace, which the worker's uid may not unlink) and ``sweep``
+(the loadable config a prior session left in the agent's shared ``~/.claude``, #101).
 """
 
 import argparse
@@ -39,6 +40,28 @@ MODULE = "issuebot.agent.runas"
 SUDO_TIMEOUT_S = 10
 # Removing a workspace as the agent walks a tree the agent wrote, node_modules included.
 REMOVE_TIMEOUT_S = 120
+
+# The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
+# instructions or behaviour, and that a session must therefore not leave behind for the next
+# one at the same uid (#101). The home is a shared volume (``claude-home``) across every
+# session and repository, so a slash command, subagent, plugin, output style, memory file or
+# settings a hostile issue plants would otherwise be read by an unrelated session next week.
+# ``--setting-sources project`` (the default workflow) keeps ``settings.json`` out of a turn,
+# but nothing gates the others; they are swept regardless as defence in depth. The credential
+# (``.credentials.json``, which rotates its refresh token) and claude's own per-session runtime
+# state (``projects``/``sessions``/``shell-snapshots``/... -- transcripts, not instructions) are
+# deliberately absent: the volume must stay writable for the token, and wiping live runtime
+# would break a concurrent session's ``--resume``. A new claude config location has to be added
+# here by hand, which is the residual this denylist accepts over a whole-home allowlist.
+CLAUDE_HOME_SWEEP: tuple[str, ...] = (
+    "CLAUDE.md",
+    "commands",
+    "agents",
+    "plugins",
+    "output-styles",
+    "settings.json",
+    "settings.local.json",
+)
 
 
 class RunAsError(OSError):
@@ -148,6 +171,21 @@ class RunAs:
         """Remove what the account owns under ``path``; the worker removes its own after."""
         self._delegate("remove", str(path), timeout=REMOVE_TIMEOUT_S)
 
+    def sweep_home(self, claude_dir: Path | None = None) -> None:
+        """Clear the loadable config surfaces under the account's ``~/.claude`` (#101).
+
+        Delegated, since the home is the account's and closed to the worker's uid; never raises,
+        like ``kill_group`` and ``remove_tree``. ``claude_dir`` defaults to the account's own
+        ``~/.claude``; a caller (the tests) passes an explicit path so the sweep can be proved
+        without touching a real home.
+        """
+        if claude_dir is None:
+            try:
+                claude_dir = Path(self.account().pw_dir) / ".claude"
+            except RunAsError:
+                return
+        self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
+
     def _delegate(self, *args: str, timeout: float) -> None:
         argv = [*self._sudo(), "--", *self._helper(*args)]
         with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -207,6 +245,22 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
+def _sweep(claude_dir: Path) -> None:
+    """Remove the loadable config surfaces under ``claude_dir`` (``CLAUDE_HOME_SWEEP``).
+
+    Keeps the credential and claude's own runtime state by naming only what it removes.
+    Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
+    unlinked rather than followed, so the tree it points at is never touched.
+    """
+    for name in CLAUDE_HOME_SWEEP:
+        target = claude_dir / name
+        with contextlib.suppress(OSError):
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target, onexc=lambda *_: None)
+            else:
+                target.unlink()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"python -m {MODULE}")
     verbs = parser.add_subparsers(dest="verb", required=True)
@@ -217,6 +271,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     kill.add_argument("pgid", type=int)
     remove = verbs.add_parser("remove")
     remove.add_argument("path", type=Path)
+    sweep = verbs.add_parser("sweep")
+    sweep.add_argument("path", type=Path)
     args = parser.parse_args(argv)
     if args.verb == "exec":
         command = list(args.argv)
@@ -227,6 +283,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _exec(args.env_fd, command)
     elif args.verb == "kill":
         _kill(args.pgid)
+    elif args.verb == "sweep":
+        _sweep(args.path)
     else:
         _remove(args.path)
     return 0

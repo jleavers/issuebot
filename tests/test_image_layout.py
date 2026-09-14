@@ -50,3 +50,13 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
     assert CI.count("docker run --rm --user agent -v /tmp/") == 2
+
+
+def test_ci_proves_the_session_home_sweep() -> None:
+    """The shared ``~/.claude`` config a session plants is swept before the next session, and
+    the credential and runtime state are kept (#101). Proved in the image, where the uid split
+    and the volume are real."""
+    assert "issuebot.agent.runas sweep /home/agent/.claude" in CI
+    assert "echo poison > /home/agent/.claude/commands/evil.md" in CI
+    assert "test ! -e /home/agent/.claude/commands" in CI
+    assert "test -f /home/agent/.claude/.credentials.json" in CI

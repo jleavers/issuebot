@@ -170,7 +170,15 @@ floor, not the shipped version, and moves by hand.
   environment policy, `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run
   by the worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
+  two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
+  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `commands`,
+  `agents`, `plugins`, `output-styles`, `settings.json`, `settings.local.json`, the surfaces a
+  later `claude -p` loads as instructions or behaviour, keeping `.credentials.json` (the volume
+  stays writable for the rotating refresh token) and claude's own per-session runtime
+  (`projects`/`sessions`/... transcripts, whose removal would break a concurrent session's
+  `--resume`). `WorkspaceManager.sweep_agent_home()` delegates it once per session, before the
+  first turn, from `session._execute`; a no-op on the host route (`run_as` unset), where the
+  home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git

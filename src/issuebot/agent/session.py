@@ -271,6 +271,9 @@ async def _execute(
         return
     state.workspace_path = workspace.path
     state.log_dir = run_log_dir(workspace.path, state.run_id)
+    # Before any claude turn: a prior session in this or another repository shares the account's
+    # ~/.claude, so clear the config surfaces it could have planted there (#101).
+    await workspaces.sweep_agent_home()
     try:
         hook = await workspaces.run_hook("before_run", workspace.path)
         if hook is not None and not hook.ok:

@@ -251,6 +251,19 @@ class WorkspaceManager:
         if not (path / ".git").is_dir():
             raise AgentError("workspace_error", f"clone produced no repository at {path}")
 
+    async def sweep_agent_home(self) -> None:
+        """Clear the loadable config a prior session may have left in the account's shared
+        ``~/.claude`` before this session's first turn (#101).
+
+        Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
+        left untouched, and the container is the boundary regardless. Off the event loop, since
+        it delegates through sudo like the removal and the kill.
+        """
+        if self._runas is None:
+            return
+        await asyncio.to_thread(self._runas.sweep_home)
+        self._log.debug("claude_home_swept")
+
     async def remove(self, identifier: str) -> bool:
         path = self.path_for(identifier)
         if not path.exists():

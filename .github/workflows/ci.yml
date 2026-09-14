@@ -183,6 +183,34 @@ jobs:
           assert RunAs("agent").probe(env) is None
           print("the session sees", sorted(seen))
           PY
+      # The session account's ~/.claude is a shared volume across every session and repository
+      # (#101), so a slash command, subagent or plugin one session plants there is loaded by the
+      # next at the same uid. The worker sweeps that config before each session; the credential
+      # and claude's own runtime state stay. Proved in the image because it is the real uid split
+      # and the real home: the worker (issuebot) delegates the sweep to the session's account.
+      - name: a session's ~/.claude config does not survive to the next session
+        run: |
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            set -eu
+            # A prior session poisons the shared home and a credential is in place.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              mkdir -p /home/agent/.claude/commands /home/agent/.claude/projects
+              echo poison > /home/agent/.claude/commands/evil.md
+              echo cred > /home/agent/.claude/.credentials.json
+              echo transcript > /home/agent/.claude/projects/keep.jsonl
+            "
+            # The worker (issuebot, uid 1000) sweeps the account home the way a session start does.
+            test "$(id -u)" = 1000
+            sudo -n -u agent /app/.venv/bin/python -m issuebot.agent.runas sweep /home/agent/.claude
+            # The next session finds no planted command, but the credential and runtime remain.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              test ! -e /home/agent/.claude/commands
+              test -f /home/agent/.claude/.credentials.json
+              test -f /home/agent/.claude/projects/keep.jsonl
+            "
+          '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
       # build carries both, since the checks below are about what is on PATH and under which

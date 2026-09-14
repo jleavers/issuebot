@@ -837,7 +837,14 @@ that matters on your host.
   workspace are all out of the session's reach, and the worker cannot become root or anything
   but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
   pushes with it, which is why the token should be scoped to the repository. The session's
-  login is its own, in `/home/agent/.claude`. The agent's environment is otherwise minimal —
+  login is its own, in `/home/agent/.claude`. That home is a shared volume across every session
+  and repository, so before each session the worker sweeps the config a prior one could have
+  left there (#101) — a user-level `CLAUDE.md`, `commands/`, `agents/`, `plugins/`,
+  `output-styles/`, `settings.json` and `settings.local.json`, the surfaces a later `claude -p`
+  loads as instructions or behaviour — keeping only the credential (`.credentials.json`, which
+  rotates its refresh token) and claude's own transcripts. So a slash command or agent a hostile
+  issue plants cannot be waiting for a session working a different issue next week. The login
+  recipe is unaffected: it writes `.credentials.json`, which the sweep never touches. The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
   it — but that allow-list, the workspace and the protected-key list are conveniences, not the
