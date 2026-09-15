@@ -253,28 +253,35 @@ class RunAs:
         """Remove what the account owns under ``path``; the worker removes its own after."""
         self._delegate("remove", str(path), timeout=REMOVE_TIMEOUT_S)
 
-    def sweep_home(self, claude_dir: Path | None = None) -> None:
+    def sweep_home(self, claude_dir: Path | None = None) -> bool:
         """Clear the loadable config surfaces under the account's ``~/.claude`` (#101).
 
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
-        like ``kill_group`` and ``remove_tree``. ``claude_dir`` defaults to the account's own
-        ``~/.claude``; a caller (the tests) passes an explicit path so the sweep can be proved
-        without touching a real home.
+        like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
+        and exited 0, because a sweep that silently never happens is a security control with
+        no failure signal. ``claude_dir`` defaults to the account's own ``~/.claude``; a caller
+        (the tests) passes an explicit path so the sweep can be proved without touching a real
+        home.
         """
         if claude_dir is None:
             try:
                 claude_dir = Path(self.account().pw_dir) / ".claude"
             except RunAsError:
-                return
+                return False
         # SUDO_TIMEOUT_S, not REMOVE_TIMEOUT_S: this removes a handful of small config entries,
-        # not an arbitrary workspace tree. A plugin tree deep enough to outlast it is the one
-        # case a sweep is left partial, and the next session sweeps again, so it self-heals.
-        self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
+        # not an arbitrary workspace tree. The timeout bounds the worker's wait, not the helper:
+        # `subprocess.run` kills `sudo`, while the helper, the account's own process, runs on to
+        # completion. A tree deep enough to outlast it reads as a failed sweep here, and the
+        # next turn sweeps again.
+        return self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
 
-    def _delegate(self, *args: str, timeout: float) -> None:
+    def _delegate(self, *args: str, timeout: float) -> bool:
+        """Run one helper verb as the account; ``True`` only when it ran and exited 0."""
         argv = [*self._sudo(), "--", *self._helper(*args)]
         with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+            completed = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+            return completed.returncode == 0
+        return False
 
     def _sudo(self) -> list[str]:
         return [self.sudo, "-n", "-u", self.user]
@@ -343,16 +350,23 @@ def _remove(path: Path) -> None:
 
 def _sweep_targets(claude_dir: Path) -> Iterator[Path]:
     """Every path the sweep removes under ``claude_dir``: the named surfaces and each project's
-    auto memory directory. A symlinked ``projects`` or project entry is skipped rather than
-    followed, so a link a session planted cannot aim the removal outside the home."""
+    auto memory directory. ``projects`` and each entry in it are walked, never followed: claude
+    creates real directories there, so a symlink at either level is a session's, planted to
+    point claude's memory read at a tree the sweep would not visit, and it is yielded as the
+    target -- unlinked like a symlinked surface -- rather than stepped through."""
     yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
     projects = claude_dir / projects_name
-    if projects.is_symlink() or not projects.is_dir():
+    if projects.is_symlink():
+        yield projects
+        return
+    if not projects.is_dir():
         return
     with contextlib.suppress(OSError):
         for project in projects.iterdir():
-            if not project.is_symlink() and project.is_dir():
+            if project.is_symlink():
+                yield project
+            elif project.is_dir():
                 yield project / memory_name
 
 

@@ -876,10 +876,12 @@ that matters on your host.
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next
   session's prompt on the same repository. So a slash command, skill or memory a hostile issue
-  plants is not waiting for a session working a different issue next week; what remains is the
+  plants is not waiting for a session working a different issue next week. What remains: the
   window between one turn's sweep and its `claude -p` start, in which a session running beside
-  it can still plant, and a `~/.claude.json` outside the volume (#119). The login recipe is
-  unaffected: it writes `.credentials.json`, which the sweep never touches.
+  it can still plant; `/home/agent/.claude.json`, outside the volume, whose `mcpServers` no
+  session loads (`--strict-mcp-config`, #119) while its trust state persists for the container's
+  lifetime; and the account's shell profile, which a login-shell hook sources (#137). The login
+  recipe is unaffected: it writes `.credentials.json`, which the sweep never touches.
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches

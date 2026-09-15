@@ -89,6 +89,7 @@ def test_ci_proves_the_session_home_sweep() -> None:
         assert f"test ! -e {planted}" in CI, planted
     assert "echo poison > commands/evil.md" in CI
     assert "echo poison > skills/evil/SKILL.md" in CI
+    assert "echo poison > rules/evil.md" in CI
     assert "echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md" in CI
     assert "test -f .credentials.json" in CI
     assert "test -f projects/-workspaces-issuebot-7/keep.jsonl" in CI

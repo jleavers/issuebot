@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from issuebot.agent import runas as runas_module
 from issuebot.agent.runas import (
@@ -362,18 +363,24 @@ def test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads() -> No
     assert CLAUDE_HOME_MEMORY_DIR == ("projects", "memory")
 
 
-def test_sweep_does_not_follow_a_symlinked_project_to_its_memory(tmp_path: Path) -> None:
-    """`projects/<project>` is walked to reach `memory/`, so a link planted there must not aim
-    the removal outside the home, and neither must a link at `projects` itself."""
+def test_sweep_unlinks_a_symlinked_project_or_projects_dir_without_following_it(
+    tmp_path: Path,
+) -> None:
+    """`projects/<project>` is walked to reach `memory/`. Claude creates real directories there,
+    so a link at either level is a session's, planted to point claude's memory read somewhere
+    the sweep would not visit: the link goes, like a symlinked surface, and the tree it pointed
+    at is never touched."""
     outside = tmp_path / "outside"
     (outside / "memory").mkdir(parents=True)
     (outside / "memory" / "keep").write_text("x")
     claude = tmp_path / ".claude"
-    (claude / "projects").mkdir(parents=True)
+    (claude / "projects" / "real").mkdir(parents=True)
+    (claude / "projects" / "real" / "a.jsonl").write_text("{}")
     (claude / "projects" / "linked").symlink_to(outside, target_is_directory=True)
     _sweep(claude)
     assert (outside / "memory" / "keep").exists()
-    assert (claude / "projects" / "linked").is_symlink()  # the link itself is not the target
+    assert not (claude / "projects" / "linked").is_symlink()
+    assert (claude / "projects" / "real" / "a.jsonl").exists()
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "p" / "memory").mkdir(parents=True)
     other = tmp_path / ".claude2"
@@ -381,6 +388,7 @@ def test_sweep_does_not_follow_a_symlinked_project_to_its_memory(tmp_path: Path)
     (other / "projects").symlink_to(elsewhere, target_is_directory=True)
     _sweep(other)
     assert (elsewhere / "p" / "memory").exists()
+    assert not (other / "projects").exists()
 
 
 def test_sweep_is_a_no_op_on_a_missing_home(tmp_path: Path) -> None:
@@ -406,7 +414,7 @@ def test_sweep_home_delegates_and_clears_the_config_through_the_wrapper(
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
     claude = tmp_path / ".claude"
     _plant_home(claude)
-    RunAs(ME, sudo=FAKE_SUDO).sweep_home(claude)
+    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(claude) is True
     assert not (claude / "commands").exists()
     assert (claude / ".credentials.json").exists()
     (call,) = [json.loads(line) for line in record.read_text().splitlines()]
@@ -424,13 +432,15 @@ def test_sweep_home_defaults_to_the_accounts_own_claude_dir(
     record = tmp_path / "sudo.jsonl"
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
     monkeypatch.setenv("CLAUDE_SUDO_DENY", "1")
-    RunAs(ME, sudo=FAKE_SUDO).sweep_home()
+    # And a sudo that refuses is reported, not swallowed: the caller logs it.
+    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home() is False
     (call,) = [json.loads(line) for line in record.read_text().splitlines()]
     assert call["command"][-2:] == ["sweep", str(Path(pwd.getpwnam(ME).pw_dir) / ".claude")]
 
 
-def test_sweep_home_on_a_missing_account_is_a_no_op() -> None:
-    RunAs("no-such-account-x", sudo=FAKE_SUDO).sweep_home()  # never raises
+def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises() -> None:
+    assert RunAs("no-such-account-x", sudo=FAKE_SUDO).sweep_home() is False
+    assert RunAs(ME, sudo="/no/such/sudo").sweep_home(Path("/nonexistent")) is False
 
 
 def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> None:
@@ -511,9 +521,34 @@ async def test_sweep_agent_home_delegates_under_run_as(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[Path | None] = []
+
+    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
+        calls.append(claude_dir)
+        return True
+
+    monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", record)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    with capture_logs() as logs:
+        await manager.sweep_agent_home()
+    # No explicit path: the account's own ~/.claude, resolved inside sweep_home.
+    assert calls == [None]
+    assert [entry["event"] for entry in logs] == ["claude_home_swept"]
+
+
+async def test_sweep_agent_home_warns_when_the_delegation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that never ran must not read as one that did: the turn goes on, since the next
+    turn sweeps again, but the miss is said at WARNING."""
     monkeypatch.setattr(
-        "issuebot.agent.runas.RunAs.sweep_home",
-        lambda self, claude_dir=None: calls.append(claude_dir),
+        "issuebot.agent.runas.RunAs.sweep_home", lambda self, claude_dir=None: False
     )
     cfg = Settings.model_validate(
         {
@@ -523,9 +558,11 @@ async def test_sweep_agent_home_delegates_under_run_as(
         }
     )
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
-    await manager.sweep_agent_home()
-    # No explicit path: the account's own ~/.claude, resolved inside sweep_home.
-    assert calls == [None]
+    with capture_logs() as logs:
+        await manager.sweep_agent_home()
+    assert [(entry["event"], entry["log_level"], entry["user"]) for entry in logs] == [
+        ("claude_home_sweep_failed", "warning", ME)
+    ]
 
 
 async def test_workspace_creation_and_removal_run_as_the_account(

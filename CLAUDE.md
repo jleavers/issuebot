@@ -195,8 +195,8 @@ floor, not the shipped version, and moves by hand.
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
   `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
   (`projects/<project>/memory`, walked without following a symlink at either level), the
-  surfaces a later `claude -p` loads as instructions or behaviour (pinned against the
-  `claude-directory` docs by `test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads`).
+  surfaces a later `claude -p` loads as instructions or behaviour, per the `claude-directory`
+  docs (a test pins the list, so dropping a name is a deliberate edit in both places).
   A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
   for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
   `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
@@ -208,7 +208,9 @@ floor, not the shipped version, and moves by hand.
   an option: it never reads the OAuth credential the login recipe writes.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
   `session._turn_loop`, since concurrent sessions re-read the home each turn and the `before_run`
-  hook runs as the account too; a no-op on the host route (`run_as` unset), where the
+  hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
+  `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
+  sweeps again); a no-op on the host route (`run_as` unset), where the
   home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`

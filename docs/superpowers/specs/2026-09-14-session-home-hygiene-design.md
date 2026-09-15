@@ -43,7 +43,7 @@ and auto memory is switched off in the session's environment so nothing writes i
 
 - **`issuebot.agent.runas` grows a `sweep` verb.** The home is the account's and closed to the
   worker's uid, so the sweep is delegated exactly as the clone, the kill and the removal are:
-  `sudo -n -u agent -- python -m issuebot.agent.runas sweep <~/.claude>`, run by the worker's
+  `sudo -n -u agent -- python -P -m issuebot.agent.runas sweep <~/.claude>`, run by the worker's
   own root-owned interpreter as the session's account. `CLAUDE_HOME_SWEEP` names what it
   removes — `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`, `workflows`, `agent-memory`,
   `plugins`, `output-styles`, `settings.json`, `settings.local.json` — and
@@ -52,7 +52,11 @@ and auto memory is switched off in the session's environment so nothing writes i
   project entry is skipped rather than followed. Any target that is a symlink is unlinked
   rather than followed, so a link a session planted cannot redirect the removal outside the
   home. `RunAs.sweep_home()` defaults the path to the account's own `~/.claude`; the tests pass
-  an explicit path so the sweep is proved without touching a real home.
+  an explicit path so the sweep is proved without touching a real home. Unlike the kill and the
+  removal it reports whether the helper ran and exited 0, and `sweep_agent_home` logs
+  `claude_home_sweep_failed` at WARNING when it did not: the turn still runs, since the startup
+  probe proved sudo can become the account and the next turn sweeps again, but a control that
+  silently never ran would be no control.
 
 - **`WorkspaceManager.sweep_agent_home()`** delegates it, off the event loop, and
   `session._turn_loop` calls it immediately before every `runner.run_turn`, the first included.
@@ -98,15 +102,18 @@ and auto memory is switched off in the session's environment so nothing writes i
   closing it takes a per-session config directory, which is the credential problem above.
 
 - **`~/.claude.json`** (user-scoped `mcpServers` and project-trust state) is read whatever
-  `setting_sources` says. It sits in `$HOME`, outside the mounted volume, so it does not
-  survive a container restart or reach another checkout, but a single long-running worker
-  container serves many sessions over its lifetime and the file persists across all of them,
-  and an MCP server entry is a command a later session would run. It is outside the literal
-  scope of this issue (the `~/.claude` directory) and removing the whole file risks `claude
-  -p`'s onboarding/trust behaviour, so it is deferred to #119. A lead for that issue: the SDK
-  documents `strictMcpConfig` as the switch that ignores every MCP configuration but the one
-  passed explicitly, and issuebot passes none, so its CLI spelling may neutralise the file's
-  one executable surface at no cost.
+  `setting_sources` says. It sits in `$HOME`, outside the mounted volume and outside this
+  issue's literal scope, and a single long-running worker container serves many sessions over
+  its lifetime. Its one executable surface is closed by #119: every turn runs with
+  `--strict-mcp-config`, so no server named in the file, or in a repository's `.mcp.json`,
+  reaches a session (`2026-09-14-mcp-config-confinement-design.md`). The rest of the file --
+  account metadata, trust state, the `projects` map -- persists for the container's lifetime
+  and is not instructions.
+
+- **The account's shell profile** (#137). `/home/agent` is the account's and writable, only
+  `.claude` in it is the volume, and hooks run under `bash -lc`, so a `~/.profile` one session
+  writes is sourced by every later session's hooks for the container's lifetime. The same
+  class as this issue, one directory up; filed rather than folded in.
 
 ## Tests
 

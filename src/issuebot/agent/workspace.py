@@ -272,8 +272,13 @@ class WorkspaceManager:
         """
         if self._runas is None:
             return
-        await asyncio.to_thread(self._runas.sweep_home)
-        self._log.debug("claude_home_swept")
+        if await asyncio.to_thread(self._runas.sweep_home):
+            self._log.debug("claude_home_swept")
+        else:
+            # The turn still runs: the startup probe proved sudo can become the account, and a
+            # sweep that failed once is retried before the next turn. But it is said, at
+            # WARNING, since a control that silently never ran is no control.
+            self._log.warning("claude_home_sweep_failed", user=self._runas.user)
 
     async def remove(self, identifier: str) -> bool:
         path = self.path_for(identifier)
