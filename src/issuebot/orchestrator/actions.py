@@ -7,6 +7,7 @@ from issuebot.agent import AgentError, WorkspaceManager
 from issuebot.config import GitHubLabels
 from issuebot.events import Blocked, EventBus, IssueCancelled, IssueCompleted, StateChanged
 from issuebot.github import (
+    ACTIVE_STATES,
     WORKPAD_MARKER,
     Comment,
     GitHubAdapter,
@@ -183,6 +184,146 @@ async def blocked_escape(
         issue_identifier=issue.identifier,
         run_id=context.run_id,
         reason=context.reason,
+    )
+    return "applied"
+
+
+# The heading of the block a budget escape writes. Both ceilings share it, so it is not what
+# makes two blocks the same block: the *reason* is, since it names the ceiling, the figure and
+# the counts. A bounce that returns an over-budget issue runs no session, so it reproduces the
+# reason exactly and writes nothing; an issue escalated on `attempts` that later runs up
+# `max_issue_cost_usd`, or one whose operator raised the ceiling and relabelled, has a new
+# reason and gets its own block -- which matters because the way out differs by ceiling, and
+# the first block would name the wrong one.
+BUDGET_HEADING = "### Issuebot budget limit ("
+BUDGET_REASON_PREFIX = "issuebot has stopped claiming this issue: "
+
+BudgetLimit = Literal["attempts", "spend"]
+
+# What actually gets the issue moving again, which is not the same for the two ceilings: the
+# escape clears the failure chain on its way out, so relabelling is enough for `attempts` and
+# is not for `spend`, where the figure the ceiling compares against never resets. A note that
+# got this backwards would have an operator raise a setting and wait for nothing.
+_BUDGET_RECOVERY: dict[BudgetLimit, str] = {
+    "attempts": (
+        "Fix what the runs kept failing on, then label the issue `{rework}` or `{todo}`: "
+        "handing it over here ends the chain of failures, so the next label move starts the "
+        "run budget again."
+    ),
+    "spend": (
+        "Raise `agent.max_issue_cost_usd` (or close the issue), *then* relabel. Relabelling "
+        "on its own only brings the issue back here: what this ceiling counts is what the "
+        "issue has already cost, and that never resets."
+    ),
+}
+
+
+def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubLabels) -> str:
+    """The block the budget escape appends to the workpad."""
+    recovery = _BUDGET_RECOVERY[limit].format(rework=labels.rework, todo=labels.todo)
+    return (
+        f"{BUDGET_HEADING}{_stamp(now)})\n\n"
+        f"{BUDGET_REASON_PREFIX}{reason}.\n"
+        f"Moved to `{labels.review}` for a human to look at. {recovery}"
+    )
+
+
+def _has_budget_block(body: str, reason: str) -> bool:
+    """Has this issue already been told *this*? Anchored to a line of its own, so prose that
+    mentions the reason is not a block; surrounding whitespace is tolerated, since a body
+    fetched from GitHub may carry CRLF line endings. A quotation indented to look like the
+    line would suppress the block, which costs a note and never an announcement: those are
+    now two different identities, which is the point of splitting them."""
+    line = f"{BUDGET_REASON_PREFIX}{reason}."
+    return any(candidate.strip() == line for candidate in body.split("\n"))
+
+
+async def budget_escape(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue_id: str,
+    limit: BudgetLimit,
+    reason: str,
+    *,
+    now: datetime,
+    announce: bool = True,
+) -> EscapeOutcome:
+    """Hand an issue that has spent its per-issue budget to a human (#112).
+
+    The blocked escape above is something a *run* does, and this is the one escalation with no
+    run behind it: the admission gate refused the claim before there was one. Without it a
+    refused issue would sit on the board with nothing said about it anywhere a human looks,
+    which is worse than having no ceiling at all. Moving it also stops the refusal repeating,
+    since the gate reads a ``review`` issue as one this worker does not claim -- unless the
+    conflict bounce moves it back to ``rework``, which `agent.max_conflict_reworks` bounds.
+
+    ``announce`` is that round trip's answer, and it is the caller's to give: the ``Blocked``
+    event is a Slack line and a count on the dashboard's blocked tile, and an issue bouncing
+    between ``review`` and ``rework`` is one escalation being returned, not several being
+    made. The decision cannot be read off the workpad here, because the block landing and the
+    event going out are two writes with a failure point between them -- an escape whose
+    ``set_state`` fails has left the block behind and announced nothing, and the tick that
+    retries it must still be able to. So the orchestrator remembers on the issue's ledger
+    entry, where only a *run* clears it, and this function returns ``applied`` exactly when it
+    published. The label move is published either way: it happened, and the board should say so.
+
+    Unlike ``blocked_escape`` it accepts the issue in any of ``ACTIVE_STATES``, because a
+    refused issue is wherever the gate found it -- usually ``todo`` or ``rework``, but an
+    orphaned ``in_progress`` candidate is gated before it is resumed, and a continuation retry
+    fires on one too. What keeps this off a *running* issue is not the state but the gate:
+    ``admit`` answers ``busy`` long before it reaches the budget.
+    """
+    log = get_logger(__name__)
+    try:
+        issues = await adapter.fetch_issues_by_ids([issue_id])
+        if not issues:
+            log.info("budget_escape_skipped", issue_id=issue_id, reason="issue missing")
+            return "skipped"
+        issue = issues[0]
+        if issue.github_state == "closed" or issue.state not in ACTIVE_STATES:
+            state = "closed" if issue.github_state == "closed" else (issue.state or "unlabelled")
+            log.info(
+                "budget_escape_skipped",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                reason=f"issue is {state}",
+            )
+            return "skipped"
+        workpad = await adapter.find_workpad_comment(issue.number)
+        if workpad is None or not _has_budget_block(workpad.body, reason):
+            await _append_workpad(
+                adapter, issue.number, workpad, budget_block(limit, reason, now, adapter.labels)
+            )
+        await adapter.set_state(issue.number, StateLabel.REVIEW)
+    except GitHubError as exc:
+        log.warning("budget_escape_failed", issue_id=issue_id, error=str(exc))
+        return "failed"
+    bus.publish(
+        StateChanged(
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            from_label=state_label_name(issue),
+            to_label=adapter.labels.review,
+            actor="issuebot",
+            pr_url=pr_url(issue),
+        )
+    )
+    if not announce:
+        log.info(
+            "budget_escape_returned",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            reason=reason,
+        )
+        return "skipped"
+    bus.publish(
+        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
+    )
+    log.warning(
+        "budget_escape_applied",
+        issue_number=issue.number,
+        issue_identifier=issue.identifier,
+        reason=reason,
     )
     return "applied"
 

@@ -42,6 +42,11 @@ FIXED_ENVIRONMENT: dict[str, str] = {
     "NO_COLOR": "1",
     "GH_PAGER": "cat",
     "DISABLE_AUTOUPDATER": "1",
+    # Auto memory (`~/.claude/projects/<project>/memory/`) is read whatever `--setting-sources`
+    # says and keyed by repository, so under the shared session home (#101) one issue's notes
+    # would be the next session's system prompt on the same repository. Off at the source; the
+    # sweep in `runas.py` clears what an older image or a session's own hand wrote there.
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 # Hooks hand the agent variables by writing them here, inside the workspace: `agent_environment`
 # is an allow-list, so a DSN a `before_run` shell exports dies with that shell.
@@ -732,12 +737,14 @@ class ClaudeRunner:
             "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),
+            # Always passed (#107): claude's own default would load the clone's CLAUDE.md,
+            # .claude/ and .mcp.json as configuration, and the setting is never empty.
+            "--setting-sources",
+            ",".join(cfg.setting_sources),
         ]
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         if cfg.model:
             argv += ["--model", cfg.model]
-        if cfg.setting_sources:
-            argv += ["--setting-sources", ",".join(cfg.setting_sources)]
         if cfg.append_system_prompt:
             argv += ["--append-system-prompt", cfg.append_system_prompt]
         if cfg.allowed_tools:

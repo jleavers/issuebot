@@ -102,6 +102,14 @@ class AgentSettings(_Model):
     # How many times the worker may move one issue from review to rework because its pull
     # request conflicts with the default branch; 0 turns the automatic bounce off.
     max_conflict_reworks: int = Field(default=3, ge=0)
+    # The other half of the admission gate's budget (#112). ``max_attempts`` bounds one chain
+    # of failures, and the escape that ends a chain lets a human restart it by relabelling --
+    # so nothing bounds what an issue may cost over a lifetime of being relabelled. This does:
+    # it is cumulative per issue, across every label it wears, and no move resets it. ``0``
+    # turns it off, which is the default because what a run is worth depends on the plan (an
+    # agent on a subscription reports no cost at all, and there ``max_attempts`` is the
+    # ceiling that bites).
+    max_issue_cost_usd: float = Field(default=0.0, ge=0)
     self_review: bool = True
     # The account the session runs as (#75): ``claude -p``, every hook, the clone and the
     # post-clone setup, through ``issuebot.agent.runas``. A different uid from the worker's
@@ -129,7 +137,14 @@ class ClaudeSettings(_Model):
     allowed_tools: list[str] = Field(default_factory=list)
     disallowed_tools: list[str] = Field(default_factory=list)
     append_system_prompt: str | None = None
-    setting_sources: list[SettingSource] | None = None
+    # Which of Claude Code's settings sources the session loads (#107). Always passed, never
+    # claude's own default: with ``project`` or ``local`` in the list the clone's ``CLAUDE.md``
+    # and ``.claude/`` (settings, hooks, skills, commands) are configuration in force for every
+    # session, and anyone who can merge to the watched repository can change them (its
+    # ``.mcp.json`` stays out either way: ``--strict-mcp-config`` is always passed, #119).
+    # ``user`` alone is the deployment's own home and nothing from the clone; the clone's
+    # ``CLAUDE.md`` and ``AGENTS.md`` reach the prompt as enveloped data instead.
+    setting_sources: list[SettingSource] = Field(default_factory=lambda: ["user"])
     model_labels: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("model_labels")
@@ -144,18 +159,29 @@ class ClaudeSettings(_Model):
             raise ValueError("label names must be distinct (compared case-insensitively)")
         return {name.strip(): model.strip() for name, model in value.items()}
 
+    @field_validator("setting_sources", mode="before")
+    @classmethod
+    def _setting_sources_are_given(cls, value: object) -> object:
+        if value is None:
+            raise ValueError(
+                "claude.setting_sources can no longer be null (claude's own default loads the "
+                "clone's files as configuration); omit it for [user], or name the sources"
+            )
+        return value
+
     @field_validator("setting_sources")
     @classmethod
-    def _setting_sources_are_usable(
-        cls, value: list[SettingSource] | None
-    ) -> list[SettingSource] | None:
-        if value is None:
-            return None
+    def _setting_sources_are_usable(cls, value: list[SettingSource]) -> list[SettingSource]:
         if not value:
-            raise ValueError("claude.setting_sources must name at least one source or be omitted")
+            raise ValueError("claude.setting_sources must name at least one source")
         if len(set(value)) != len(value):
             raise ValueError("claude.setting_sources must not repeat a source")
         return value
+
+    @property
+    def loads_clone_settings(self) -> bool:
+        """True when a source names the clone: its files are then claude's configuration."""
+        return any(source != "user" for source in self.setting_sources)
 
 
 class DatabaseSettings(_Model):

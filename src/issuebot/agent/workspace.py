@@ -141,6 +141,11 @@ class WorkspaceManager:
         self._boundary = Boundary.current(settings.agent.run_as)
         self._log = get_logger(__name__)
 
+    @property
+    def boundary(self) -> Boundary:
+        """The worker's side of the line, for a read of a workspace made outside this class."""
+        return self._boundary
+
     # --- paths --------------------------------------------------------------------
 
     def path_for(self, identifier: str) -> Path:
@@ -261,6 +266,24 @@ class WorkspaceManager:
                 )
         if not (path / ".git").is_dir():
             raise AgentError("workspace_error", f"clone produced no repository at {path}")
+
+    async def sweep_agent_home(self) -> None:
+        """Clear the loadable config a prior or concurrent session may have left in the
+        account's shared ``~/.claude``, immediately before each of this session's turns (#101).
+
+        Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
+        left untouched, and the container is the boundary regardless. Off the event loop, since
+        it delegates through sudo like the removal and the kill.
+        """
+        if self._runas is None:
+            return
+        if await asyncio.to_thread(self._runas.sweep_home):
+            self._log.debug("claude_home_swept")
+        else:
+            # The turn still runs: the startup probe proved sudo can become the account, and a
+            # sweep that failed once is retried before the next turn. But it is said, at
+            # WARNING, since a control that silently never ran is no control.
+            self._log.warning("claude_home_sweep_failed", user=self._runas.user)
 
     async def remove(self, identifier: str) -> bool:
         path = self.path_for(identifier)

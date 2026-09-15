@@ -17,6 +17,7 @@ from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
+    PROTECTED_ENV_NAMES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -74,6 +75,9 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "--strict-mcp-config",
         "--max-budget-usd",
         "5.0",
+        # Never claude's default (#107): the clone's files are not its configuration.
+        "--setting-sources",
+        "user",
         "--session-id",
         SESSION_ID,
     ]
@@ -96,12 +100,11 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
     assert argv[11] == "2.5"
-    assert argv[12:14] == ["--resume", SESSION_ID]
-    assert argv[14:] == [
+    assert argv[12:14] == ["--setting-sources", "project,local"]
+    assert argv[14:16] == ["--resume", SESSION_ID]
+    assert argv[16:] == [
         "--model",
         "opus",
-        "--setting-sources",
-        "project,local",
         "--append-system-prompt",
         "Be terse.",
         "--allowedTools",
@@ -213,7 +216,17 @@ def test_agent_environment_passes_only_the_allowed_names() -> None:
         "NO_COLOR": "1",
         "GH_PAGER": "cat",
         "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     }
+
+
+def test_agent_environment_turns_auto_memory_off_and_a_hook_cannot_turn_it_back_on() -> None:
+    """Auto memory is read whatever `--setting-sources` says and lives in the shared session
+    home (#101): fixed off, and protected like the rest of the fixed entries, so a workspace
+    env line cannot re-enable it for the next turn."""
+    parent = {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}
+    assert agent_environment(parent, token=None)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in PROTECTED_ENV_NAMES
 
 
 def test_agent_environment_adds_the_configured_token() -> None:

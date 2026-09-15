@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from issuebot.agent.errors import AgentError, AgentErrorCategory, outcome_for
+from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import PromptContext, PromptRenderer
 from issuebot.agent.runner import TurnObserver, TurnResult, TurnRunner
 from issuebot.agent.workspace import SessionRecord, WorkspaceManager, run_log_dir
@@ -282,6 +283,11 @@ async def _execute(
             state.fail(exc.category, exc.message)
             return
         _save(workspaces, workspace.path, state.session_record(0, None))
+        # After `before_run`, which may have merged or installed things, and once per run:
+        # the first turn's prompt carries the files, and a resumed session already has them.
+        instructions = await asyncio.to_thread(
+            read_repository_instructions, workspace.path, boundary=workspaces.boundary
+        )
         await _turn_loop(
             state,
             workflow,
@@ -290,6 +296,7 @@ async def _execute(
             workspaces,
             runner,
             workspace.path,
+            instructions,
             rework=rework,
             resuming=resuming,
             cancel=cancel,
@@ -308,6 +315,7 @@ async def _turn_loop(
     workspaces: WorkspaceManager,
     runner: TurnRunner,
     workspace: Path,
+    instructions: tuple[RepositoryFile, ...],
     *,
     rework: bool,
     resuming: bool,
@@ -348,6 +356,7 @@ async def _turn_loop(
             rework=rework,
             self_review=settings.agent.self_review,
             workpad=state.workpad,
+            repo_instructions=instructions,
         )
         resume = turn_number > 1 or resuming
         try:
@@ -355,6 +364,13 @@ async def _turn_loop(
         except AgentError as exc:
             state.fail(exc.category, exc.message)
             return
+        # Immediately before every `claude -p`, not once per session: the account's ~/.claude is
+        # shared with a prior session in this or another repository, and with the sessions
+        # running beside this one, each of which re-reads it on every turn. A sweep here clears
+        # what any of them planted and leaves the smallest window a concurrent one can plant
+        # into (#101). Total today, so a sweep that cannot run costs a turn its hygiene, never
+        # the run.
+        await workspaces.sweep_agent_home()
         turn = await runner.run_turn(
             prompt=prompt,
             workspace=workspace,
