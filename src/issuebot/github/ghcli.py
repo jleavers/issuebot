@@ -59,6 +59,19 @@ def _issues_query(states: str) -> str:
 
 OPEN_ISSUES_QUERY = _issues_query("OPEN")
 CLOSED_ISSUES_QUERY = _issues_query("CLOSED")
+# The issue's label history, as GitHub recorded it: who added which label, oldest first.
+LABEL_EVENTS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    issue(number: $number) {\n"
+    f"      timelineItems(itemTypes: [LABELED_EVENT], first: {PAGE_SIZE}, after: $cursor) {{\n"
+    "        nodes { ... on LabeledEvent { actor { login } label { name } } }\n"
+    "        pageInfo { hasNextPage endCursor }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
 
 
 def by_ids_query(numbers: Sequence[int]) -> str:
@@ -267,6 +280,48 @@ class GhCliAdapter:
             f"comments of #{number}",
         )
 
+    async def count_own_label_additions(self, number: int, label: str) -> int:
+        """How many times the account the adapter acts as has added ``label`` to the issue.
+
+        The issue's ``LABELED_EVENT`` timeline items, paginated, counted where the actor is
+        the account's login and the label is ``label`` (both compared case-insensitively). A
+        record only GitHub writes, so a bound read from it -- the conflict bounce's (#104) --
+        survives whatever the session does to the workpad.
+        """
+        self._log.debug("count_own_label_additions", issue_number=number, label=label)
+        login = await self.own_login()
+        wanted = label.lower()
+        count = 0
+        cursor: str | None = None
+        while True:
+            variables: dict[str, str | int] = {
+                "owner": self._owner,
+                "name": self._name,
+                "number": number,
+            }
+            if cursor:
+                variables["cursor"] = cursor
+            data = await self._graphql(LABEL_EVENTS_QUERY, variables)
+            connection = _dig(data, "repository", "issue", "timelineItems")
+            if not isinstance(connection, Mapping):
+                raise GitHubError("response", "GraphQL response has no issue.timelineItems")
+            for node in connection.get("nodes") or []:
+                if not isinstance(node, Mapping):
+                    continue
+                actor = _dig(node, "actor", "login")
+                name = _dig(node, "label", "name")
+                if not isinstance(actor, str) or not isinstance(name, str):
+                    continue  # a deleted account or a deleted label: nobody's, and not ours
+                if actor.lower() == login.lower() and name.lower() == wanted:
+                    count += 1
+            page = connection.get("pageInfo")
+            page = page if isinstance(page, Mapping) else {}
+            if not page.get("hasNextPage"):
+                return count
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._log.debug("update_comment", comment_id=comment_id)
         result = await self._gh(
@@ -420,13 +475,14 @@ class GhCliAdapter:
     async def _graphql(
         self,
         query: str,
-        variables: Mapping[str, str],
+        variables: Mapping[str, str | int],
         *,
         allow_missing_aliases: bool = False,
     ) -> Mapping[str, Any]:
         args = ["api", "graphql", "-f", f"query={query}"]
         for key, value in variables.items():
-            args += ["-f", f"{key}={value}"]
+            # `-f` sends a string; `-F` has gh type the value, which an `Int!` variable needs.
+            args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
         result = await self._runner.run(args)
         stderr = self._redact(result.stderr)
         payload = _parse_json(result.stdout)

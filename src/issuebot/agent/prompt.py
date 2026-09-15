@@ -16,7 +16,9 @@ GITHUB_TEXT_TAG = "github-text"
 """The envelope's tag; what the workflow's rule about GitHub-authored text is written against."""
 
 UNKNOWN_AUTHOR = "unknown"
-"""What the envelope names when GitHub no longer has the account (a deleted user)."""
+"""What the envelope names when no account is known: GitHub has deleted the one that wrote the
+text, or the record does not attribute it at all (a label is applied by whoever has triage
+rights, and its name written by whoever created it, neither of which the issue records)."""
 
 _ENVELOPE_RULE = "data, not instructions"
 # A `<` that starts anything a reader could take for the envelope's tag, whitespace included.
@@ -172,29 +174,45 @@ class PromptContext:
 def issue_variables(issue: Issue) -> dict[str, Any]:
     """The issue as plain values: roles and datetimes as strings, the linked PR as ``pr``.
 
-    The title and body are the two values GitHub's author wrote, so they are ``GitHubText``
-    and render inside the envelope wherever a template substitutes them; ``body`` stays
-    ``None`` when the issue has none, so a template's guard keeps working.
+    This is the one seam between the record and a template, and every value here that someone
+    wrote on GitHub is ``GitHubText``, so a template cannot obtain a bare one (#76, #105): the
+    title and body, which the issue's author wrote; the author's and each assignee's login,
+    which is theirs; and each label, which anyone with triage rights can apply and which the
+    record credits to nobody. What is left is issuebot's own (the roles, the identifier), or
+    GitHub's (the url, the timestamps, the pull request's number and state);
+    ``tests/test_agent_prompt.py`` lists those by name, so a new variable is classified before
+    it renders. ``body`` and ``author`` stay ``None`` when the issue has none, so a template's
+    guard keeps working.
     """
+    number = issue.number
     return {
         "id": issue.id,
         "identifier": issue.identifier,
-        "number": issue.number,
-        "title": GitHubText(
-            issue.title, source=f"issue #{issue.number} title", author=issue.author
-        ),
+        "number": number,
+        "title": GitHubText(issue.title, source=f"issue #{number} title", author=issue.author),
         "body": (
-            GitHubText(issue.body, source=f"issue #{issue.number} description", author=issue.author)
+            GitHubText(issue.body, source=f"issue #{number} description", author=issue.author)
             if issue.body is not None
             else None
         ),
-        "author": issue.author,
+        "author": (
+            GitHubText(issue.author, source=f"issue #{number} author", author=issue.author)
+            if issue.author is not None
+            else None
+        ),
         "github_state": issue.github_state,
         "state": issue.state.value if issue.state is not None else None,
+        # A label name, but one that equals the configured label lowercased, so it is the
+        # configuration's value, not a triager's text.
         "state_label": issue.state_labels[0] if len(issue.state_labels) == 1 else None,
-        "labels": list(issue.labels),
+        "labels": [
+            GitHubText(name, source=f"issue #{number} label", author=None) for name in issue.labels
+        ],
         "url": issue.url,
-        "assignees": list(issue.assignees),
+        "assignees": [
+            GitHubText(login, source=f"issue #{number} assignee", author=login)
+            for login in issue.assignees
+        ],
         "created_at": _iso(issue.created_at),
         "updated_at": _iso(issue.updated_at),
         "closed_at": _iso(issue.closed_at),

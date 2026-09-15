@@ -3123,3 +3123,59 @@ async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_prob
     await orchestrator.startup()
     assert probed == ["agent"]
     assert h.claude_auth_calls, "the login was probed after the account"
+
+
+async def test_the_bounce_cap_holds_when_the_session_strips_the_workpad(tmp_path: Path) -> None:
+    """The count is the label history, not the workpad (#104): a session that rewrites the
+    body without issuebot's blocks still gets `max_conflict_reworks` bounces and no more."""
+    h = Harness(tmp_path, max_conflict_reworks=2)
+    h.add_conflicting_review(1, pr_number=7)
+    for expected in (StateLabel.REWORK, StateLabel.REWORK, StateLabel.REVIEW):
+        await h.tick()
+        assert h.github.issue(1).state is expected
+        if expected is StateLabel.REVIEW:
+            break
+        await h.tick()  # dispatched as rework
+        assert list(h.orchestrator.running) == ["1"]
+        # The session rewrites the workpad whole, dropping every `### Issuebot` block, and
+        # returns the issue to review; the PR still conflicts after the next sibling merge.
+        pad = await h.github.find_workpad_comment(1)
+        assert pad is not None
+        await h.github.update_comment(pad.id, f"{WORKPAD_MARKER}\n\n### Plan\n\n- [x] done\n")
+        h.github.human_set_state(1, StateLabel.REVIEW)
+        await h.exit(h.run_for(1), final_state=StateLabel.REVIEW, final_issue=h.github.issue(1))
+        await h.fire(1.0)
+        assert h.orchestrator.running == {} and h.orchestrator.retries == {}
+    body = h.github.comments_for(1)[0].body
+    assert body.count("### Issuebot merge conflict (") == 0
+    assert body.count("### Issuebot merge conflict limit (") == 1
+    assert h.calls("set_state").count((1, StateLabel.REWORK)) == 2
+
+
+async def test_a_stripped_limit_note_is_rewritten_once_per_process_not_per_tick(
+    tmp_path: Path,
+) -> None:
+    """The note's presence is the session's to erase; the orchestrator remembers it wrote it."""
+    h = Harness(tmp_path, max_conflict_reworks=1)
+    h.add_conflicting_review(1, pr_number=7)
+    await h.tick()
+    await h.tick()  # dispatched as rework
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_state=StateLabel.REVIEW, final_issue=h.github.issue(1))
+    await h.fire(1.0)
+    await h.tick()  # at the limit: the note lands
+    pad = await h.github.find_workpad_comment(1)
+    assert pad is not None and "### Issuebot merge conflict limit (" in pad.body
+    stripped = f"{WORKPAD_MARKER}\n\n### Plan\n"
+    await h.github.update_comment(pad.id, stripped)
+    h.github.calls.clear()
+    for _ in range(3):
+        await h.tick()
+    assert h.github.comments_for(1)[0].body == stripped
+    assert h.calls("count_own_label_additions") == []
+    assert h.calls("update_comment") == []
+    # A different limit is a different decision: the issue is looked at again.
+    h.orchestrator._conflict_limit_noted["1"] = 5  # the memory under test
+    await h.tick()
+    assert h.calls("count_own_label_additions") == [(1, "issuebot/rework")]
+    assert "### Issuebot merge conflict limit (" in h.github.comments_for(1)[0].body

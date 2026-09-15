@@ -236,3 +236,20 @@ Operators who resolve conflicts by hand on the agent's branch set it to `0`.
 - Reacting to the sibling merge itself (a webhook, or watching `main`): polling
   `mergeable` is enough at one poll interval, and it needs no new surface.
 - Showing mergeability on the dashboard.
+
+## Amendment (2026-09-14, #104)
+
+The count moved out of the workpad. The rule this design rested on -- "the agent not
+overwriting the blocks" -- is prose in the prompt, and the session PATCHes the comment's
+whole body, so the bound was the restrained party's to zero: strip the headings and the cap
+never engaged. The count is now `GitHubAdapter.count_own_label_additions(number,
+labels.rework)`, the issue's `LABELED_EVENT` timeline items made by the account the adapter
+runs as. That record is GitHub's, credited to the actor, survives a restart as the workpad
+did, and can only be *added* to: a `rework` the session's account applied for any other
+reason counts as a bounce, which tightens the cap rather than loosening it. The bounce and
+limit blocks stay as the note a person reads. The "note without the label would be counted
+again" concern in section 4 no longer applies, and a note that fails after the label moved
+now leaves the count exact. The limit note's idempotence (its presence in the workpad) is
+the session's to erase too, so the orchestrator remembers, per issue and limit, that it
+wrote one, and a stripped note is rewritten once per process rather than on every tick.
+Spec: `2026-09-14-session-boundary-design.md`.
