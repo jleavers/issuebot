@@ -186,19 +186,28 @@ jobs:
           REUSE: ${{ needs.build.outputs.reuse }}
         run: |
           set -euo pipefail
+          # Everything below came from the job that ran the unreviewed release, so none of it
+          # is taken on trust. The version first: it must be a plain release number, since it
+          # reaches a branch name, a commit message and the greps that follow.
+          if ! printf '%s' "${LATEST}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::the resolved version is not a version: ${LATEST}"
+            exit 1
+          fi
           if [ "${REUSE}" = "true" ]; then
             git fetch origin "${BRANCH}"
             git checkout "${BRANCH}"
-          else
-            # The artefact crossed a job boundary, so its shape is re-checked here, in the
-            # job that pushes. The version must still be a plain release number, since it
-            # reaches a branch name and a commit message; the Dockerfile it carries must be
-            # pinned to that version; and copying it in must move that one line and nothing
-            # else, so the file cannot bring anything along with the pin.
-            if ! printf '%s' "${LATEST}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "::error::the resolved version is not a version: ${LATEST}"
+            # A branch left on the remote is whatever is on the remote -- the wreckage of an
+            # earlier run, and writable by anyone who can push here -- so it is held to the
+            # same rule as one this job writes: it must already carry the resolved pin.
+            if ! grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile; then
+              echo "::error::${BRANCH} is not pinned to ${LATEST}"
               exit 1
             fi
+          else
+            # The artefact crossed a job boundary, so its shape is re-checked here, in the
+            # job that pushes: the Dockerfile it carries must be pinned to that version, and
+            # copying it in must move that one line and nothing else, so the file cannot
+            # bring anything along with the pin.
             if ! grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/bump/Dockerfile; then
               echo "::error::the artefact's Dockerfile is not pinned to ${LATEST}"
               exit 1
@@ -240,8 +249,8 @@ jobs:
           \`\`\`
 
           That build ran in a job holding read scopes only, checked out with
-          \`persist-credentials: false\` (#138); this job downloaded the rewritten
-          \`Dockerfile\` as an artefact, re-checked its pin, and built nothing.
+          \`persist-credentials: false\` (#138). This job checked that the tree it proposes
+          carries exactly that pin, and built and ran nothing itself.
 
           \`MIN_CLAUDE_VERSION\` in \`src/issuebot/agent/runner.py\` is untouched: it is the
           oldest claude issuebot works with, not the one it ships. Raise it by hand only when
