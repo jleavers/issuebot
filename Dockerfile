@@ -153,8 +153,9 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # A pool of them, in fact (#121). `agent` alone is one uid for the whole deployment, so with
 # `agent.max_concurrent_agents` above 1 every concurrent session shares it: the workspaces are
 # siblings under a traversable root and each one is that account's to write, which is no
-# boundary between an issue anybody may open and an honest issue's working tree. So the image
-# also builds `agent-1` .. `agent-N` (uids 1011 upwards, ISSUEBOT_AGENT_POOL_SIZE), and
+# boundary between an issue anybody may open and an honest issue's working tree. So the image's
+# default is the pool, `agent-1` .. `agent-N` (uids 1011 upwards, ISSUEBOT_AGENT_POOL_SIZE) --
+# `agent` alone is the single-account route, for an operator who wants one -- and
 # `agent.run_as` may name the pool -- as a YAML list, or a comma-separated ISSUEBOT_AGENT_USER
 # -- for the orchestrator to bind one member per running slot.
 # Every session account is in group `agents`, and the sudo rule is `(%agents)`: the worker may
@@ -204,6 +205,13 @@ RUN set -eu; \
       install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
       usermod --append --groups "${account}" issuebot; \
     done; \
+    install -d -m 0755 /etc/issuebot; \
+    if [ "${ISSUEBOT_AGENT_POOL_SIZE}" -ge 1 ]; then \
+      seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}" | sed 's/^/agent-/' > /etc/issuebot/session-accounts; \
+    else \
+      echo agent > /etc/issuebot/session-accounts; \
+    fi; \
+    chmod 0444 /etc/issuebot/session-accounts; \
     chmod 0750 /home/issuebot /home/web; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
     git config --system --add safe.directory '/workspaces/*'; \
@@ -248,10 +256,11 @@ USER issuebot
 # stop a target repository's own LC_* settings from taking effect.
 # No HOME here: Docker sets it from /etc/passwd for whichever account runs, so `--user agent`
 # (the login recipe in the README) gets /home/agent and the worker /home/issuebot.
-# ISSUEBOT_AGENT_USER is `agent.run_as`'s fallback (resolve.py): the session runs as `agent`
-# in every container built from this image unless a WORKFLOW.md says otherwise.
+# No ISSUEBOT_AGENT_USER: `agent.run_as` falls back to /etc/issuebot/session-accounts, written
+# by the account loop above, so the image's default is the pool it built rather than a name
+# that could outlive the accounts (#142). The variable still overrides it for an operator who
+# wants one account, and WORKFLOW.md overrides both.
 ENV LANG=C.UTF-8 \
-    ISSUEBOT_AGENT_USER=agent \
     PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
 # The flag assertions are the point of pinning: a release that drops --permission-prompts

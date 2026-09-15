@@ -25,7 +25,18 @@ def test_two_accounts_and_one_delegation() -> None:
     assert "'issuebot ALL=(%agents) NOPASSWD: ALL'" in DOCKERFILE
     assert "closefrom_override" in DOCKERFILE
     assert "chmod 4750 /usr/bin/sudo" in DOCKERFILE and "chgrp issuebot /usr/bin/sudo" in DOCKERFILE
-    assert "ISSUEBOT_AGENT_USER=agent" in DOCKERFILE
+
+
+def test_the_image_records_the_accounts_it_built_and_names_none_in_the_environment() -> None:
+    """#142: the pool is the default, expressed once. The loop that creates the accounts
+    writes them, so `agent.run_as` cannot resolve a name the build did not create; and no
+    `ENV ISSUEBOT_AGENT_USER` is left to shadow that list with a single account.
+    """
+    assert "install -d -m 0755 /etc/issuebot" in DOCKERFILE
+    assert "sed 's/^/agent-/' > /etc/issuebot/session-accounts" in DOCKERFILE
+    assert "echo agent > /etc/issuebot/session-accounts" in DOCKERFILE
+    assert "chmod 0444 /etc/issuebot/session-accounts" in DOCKERFILE
+    assert "ISSUEBOT_AGENT_USER=" not in DOCKERFILE
 
 
 def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() -> None:
