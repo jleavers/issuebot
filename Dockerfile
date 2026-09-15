@@ -138,15 +138,15 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # next (#121). `issuebot` (uid 1000) is the worker: it holds GH_TOKEN, the database URL and
 # the Slack webhook, parses what the session writes and decides every label move. `agent`
 # (uid 1001) is the session: `claude -p`, every hook, the clone and
-# the post-clone setup run as it, and the login it authenticates with lives in its own home
-# (compose mounts `claude-home` at /home/agent/.claude). Nothing the session can read or
-# write at its own uid is an input to the worker: /app is root's and writable by neither,
-# /home/issuebot and /home/agent are closed to the other account, /proc/<worker>/environ is
-# unreadable across the uid line, and the worker's state inside a workspace sits in sticky
-# directories it owns. The worker stays unprivileged: sudo carries exactly one rule, issuebot
-# may become a session account and nobody else, and the binary is executable by root and
-# group issuebot alone, so a session's uid cannot invoke sudo at all -- not even to be
-# refused by it.
+# the post-clone setup run as it, and the credential it authenticates with comes from the
+# environment (#142): its home holds no login, because nobody logs into it. Nothing the
+# session can read or write at its own uid is an input to the worker: /app is root's and
+# writable by neither, /home/issuebot and /home/agent are closed to the other account,
+# /proc/<worker>/environ is unreadable across the uid line, and the worker's state inside a
+# workspace sits in sticky directories it owns. The worker stays unprivileged: sudo carries
+# exactly one rule, issuebot may become a session account and nobody else, and the binary is
+# executable by root and group issuebot alone, so a session's uid cannot invoke sudo at all --
+# not even to be refused by it.
 # `closefrom_override` is for the one descriptor the worker passes across the uid change, the
 # session's environment (issuebot.agent.runas); `!use_pty` keeps a turn's stream-json byte for
 # byte when `docker compose run` gives the worker a terminal.
@@ -168,7 +168,9 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # more privileged side of the line in any case.
 # The pool accounts get a `.claude` of their own and no volume: a pool shares no login between
 # its accounts on purpose, and takes its credential from the environment instead (#121, the
-# spec). `agent` keeps /home/agent/.claude, which is where compose mounts `claude-home`.
+# spec). `agent` is no different (#142): its home holds no login either, since nobody logs
+# into it, and every account -- pooled or the single `agent` -- reads the same credential from
+# the environment.
 # A third kind of account, `web` (uid 1002), for the dashboard (#102). compose builds the `web`
 # service from this image and selects it with `user: web`; nothing in the image runs as it by
 # default, since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP
@@ -255,7 +257,8 @@ USER issuebot
 # nothing to install for it. LANG and not LC_ALL: LC_ALL overrides every category, which would
 # stop a target repository's own LC_* settings from taking effect.
 # No HOME here: Docker sets it from /etc/passwd for whichever account runs, so `--user agent`
-# (the login recipe in the README) gets /home/agent and the worker /home/issuebot.
+# (CI's sweep proof, #101, is what still runs a command as agent) gets /home/agent and the
+# worker /home/issuebot.
 # No ISSUEBOT_AGENT_USER: `agent.run_as` falls back to /etc/issuebot/session-accounts, written
 # by the account loop above, so the image's default is the pool it built rather than a name
 # that could outlive the accounts (#142). The variable still overrides it for an operator who
@@ -291,7 +294,7 @@ WORKDIR /app
 # mount pins the inode, so an atomic save on the host leaves the container reading the old
 # one (#46). compose.yaml mounts ./configs and sets this same value.
 ENV ISSUEBOT_WORKFLOW=/configs/WORKFLOW.md
-VOLUME ["/workspaces", "/home/agent/.claude"]
+VOLUME ["/workspaces"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
       org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator" \

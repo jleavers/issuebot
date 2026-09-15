@@ -75,10 +75,15 @@ def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:
     assert "/home/issuebot/.local/bin" not in DOCKERFILE
 
 
-def test_the_login_volume_is_the_sessions_home() -> None:
-    assert "claude-home:/home/agent/.claude" in COMPOSE
-    assert "/home/issuebot/.claude" not in COMPOSE
-    assert "/home/issuebot/.claude" not in DOCKERFILE
+def test_no_login_volume_is_mounted_anywhere() -> None:
+    """#142: a session account's home holds no login, because nobody logs into it -- the
+    credential is in the environment, where every account reads the same one. A volume at that
+    path would be a second, stale credential route for the default deployment to disagree with.
+    """
+    assert "claude-home" not in COMPOSE
+    assert "/home/agent/.claude" not in COMPOSE
+    assert 'VOLUME ["/workspaces"]' in DOCKERFILE
+    assert "/home/agent/.claude" not in DOCKERFILE
 
 
 def test_the_session_may_run_git_in_the_workspace_the_worker_owns() -> None:
@@ -172,7 +177,6 @@ def test_compose_runs_the_web_as_its_own_account_and_the_worker_as_the_images() 
     # The worker needs the image's `USER issuebot` -- the sudo rule is its -- so it names none;
     # neither does anything else, since only the dashboard has an account of its own.
     assert [name for name, service in SERVICES.items() if "user" in service] == ["web"]
-    assert "claude-home" not in " ".join(SERVICES["web"].get("volumes", []))
 
 
 def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> None:
