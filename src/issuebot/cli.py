@@ -38,6 +38,7 @@ from issuebot.agent import (
     settings_for_labels,
     settings_with_model,
 )
+from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
 from issuebot.agent.turnlog import TurnCapture, capture_turns
@@ -342,6 +343,7 @@ def run_checks(
         _workspace_check(cfg.workspace.root),
         _claude_check(cfg.claude.command),
         _claude_auth_check(cfg.claude.command, run_as=cfg.agent.run_as),
+        _setting_sources_check(cfg),
         _run_as_check(cfg.agent.run_as),
         _executable_check("gh", "gh"),
     ]
@@ -473,6 +475,25 @@ def _claude_auth_check(command: str, *, run_as: str | None = None) -> Check:
         return Check(subject, "warn", f"skipped ({command} not found)")
     auth: ClaudeAuth = describe_claude_auth(_claude_auth(found, os.environ, run_as=run_as))
     return Check(subject, _AUTH_LEVELS[auth.verdict], auth.detail)
+
+
+def _setting_sources_check(settings: Settings) -> Check:
+    """Whether the clone's files are claude's configuration (#107): a warning when they are."""
+    subject = "claude.setting_sources"
+    sources = ", ".join(settings.claude.setting_sources)
+    if not settings.claude.loads_clone_settings:
+        return Check(
+            subject,
+            "ok",
+            f"{sources}; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration",
+        )
+    detail = (
+        f"{sources}; the clone's CLAUDE.md and .claude/ (settings, hooks, skills) are "
+        "claude's own configuration for every session, and anyone who can merge to "
+        f"{settings.github.repo} can change them (.mcp.json stays out under "
+        "--strict-mcp-config either way); omit the setting to load only the user's"
+    )
+    return Check(subject, "warn", detail)
 
 
 def _run_as_check(run_as: str | None) -> Check:
@@ -649,6 +670,15 @@ def _sample_context(settings: Settings) -> PromptContext:
         max_turns=settings.agent.max_turns,
         rework=False,
         self_review=settings.agent.self_review,
+        repo_instructions=(
+            RepositoryFile(
+                path="CLAUDE.md",
+                text="Sample project instructions.\n",
+                size=29,
+                carried=29,
+                truncated=False,
+            ),
+        ),
     )
 
 
@@ -908,6 +938,10 @@ async def _run_once(
             rework=rework,
             self_review=settings.agent.self_review,
             workpad=workpad,
+            # The clone's instruction files, when a workspace already holds the clone (#107).
+            repo_instructions=read_repository_instructions(
+                workspaces.path_for(issue.identifier), boundary=workspaces.boundary
+            ),
         )
         try:
             print(PromptRenderer(workflow.prompt_template).render(context).rstrip("\n"))

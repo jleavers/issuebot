@@ -74,6 +74,9 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "--strict-mcp-config",
         "--max-budget-usd",
         "5.0",
+        # Never claude's default (#107): the clone's files are not its configuration.
+        "--setting-sources",
+        "user",
         "--session-id",
         SESSION_ID,
     ]
@@ -96,12 +99,11 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
     assert argv[11] == "2.5"
-    assert argv[12:14] == ["--resume", SESSION_ID]
-    assert argv[14:] == [
+    assert argv[12:14] == ["--setting-sources", "project,local"]
+    assert argv[14:16] == ["--resume", SESSION_ID]
+    assert argv[16:] == [
         "--model",
         "opus",
-        "--setting-sources",
-        "project,local",
         "--append-system-prompt",
         "Be terse.",
         "--allowedTools",
