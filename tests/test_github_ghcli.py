@@ -15,6 +15,7 @@ from issuebot.github.ghcli import (
     ID_BATCH_SIZE,
     ISSUE_FIELDS,
     MAX_COMMENT_PAGES,
+    MAX_TIMELINE_PAGES,
     GhCliAdapter,
     by_ids_query,
 )
@@ -892,6 +893,32 @@ async def test_count_own_label_additions_reads_the_timeline_and_paginates() -> N
     assert first[first.index("number=42") - 1] == "-F"
     assert first[first.index("owner=example") - 1] == "-f"
     assert len(runner.calls) == 2
+
+
+async def test_count_own_label_additions_gives_up_past_the_page_cap() -> None:
+    """A label history longer than ``MAX_TIMELINE_PAGES`` is an error, not a longer read (#110)."""
+    runner = StubRunner()
+    runner.on(
+        both(has("LABELED_EVENT"), lacks("cursor=")),
+        stdout=_timeline_page(
+            [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}], end_cursor="c1"
+        ),
+    )
+    for page in range(1, MAX_TIMELINE_PAGES + 2):
+        runner.on(
+            both(has("LABELED_EVENT"), has(f"cursor=c{page}")),
+            stdout=_timeline_page(
+                [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}],
+                end_cursor=f"c{page + 1}",
+            ),
+        )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).count_own_label_additions(42, "issuebot/rework")
+    assert excinfo.value.category == "response"
+    assert str(excinfo.value).endswith(
+        f"label history of #42 runs past {MAX_TIMELINE_PAGES * 100} events"
+    )
+    assert len(runner.calls) == MAX_TIMELINE_PAGES
 
 
 async def test_count_own_label_additions_rejects_a_malformed_response() -> None:

@@ -158,8 +158,9 @@ floor, not the shipped version, and moves by hand.
   hand back inside that time;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given;
   `count_own_label_additions(number, label)` (#104) is the issue's `LABELED_EVENT` timeline
-  items the adapter's own account made, paginated, the record the conflict bounce is bounded
-  by);
+  items the adapter's own account made, paginated one page at a time and at most
+  `MAX_TIMELINE_PAGES` (10) of them, past which it is a `response` error (#110, the same rule
+  as the workpad read), the record the conflict bounce is bounded by);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved

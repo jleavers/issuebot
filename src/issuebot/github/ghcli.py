@@ -32,6 +32,13 @@ ID_BATCH_SIZE = 50
 # open another one.
 MAX_COMMENT_PAGES = 10
 
+# How many pages of an issue's ``LABELED_EVENT`` timeline ``count_own_label_additions`` reads
+# (#110, the same rule): a hundred label additions a page, and a thousand is a bound no board
+# reaches by working. Past it the count is a ``response`` error, so the conflict bounce that
+# asks for it fails loudly and is retried, rather than reading a history anyone with triage
+# can lengthen for as long as it grows.
+MAX_TIMELINE_PAGES = 10
+
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body state url createdAt updatedAt closedAt
   author { login }
@@ -286,14 +293,15 @@ class GhCliAdapter:
         The issue's ``LABELED_EVENT`` timeline items, paginated, counted where the actor is
         the account's login and the label is ``label`` (both compared case-insensitively). A
         record only GitHub writes, so a bound read from it -- the conflict bounce's (#104) --
-        survives whatever the session does to the workpad.
+        survives whatever the session does to the workpad. The read itself is bounded too
+        (#110): at most ``MAX_TIMELINE_PAGES`` pages, past which it is a ``response`` error.
         """
         self._log.debug("count_own_label_additions", issue_number=number, label=label)
         login = await self.own_login()
         wanted = label.lower()
         count = 0
         cursor: str | None = None
-        while True:
+        for _page_number in range(MAX_TIMELINE_PAGES):
             variables: dict[str, str | int] = {
                 "owner": self._owner,
                 "name": self._name,
@@ -321,6 +329,10 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+        raise GitHubError(
+            "response",
+            f"label history of #{number} runs past {MAX_TIMELINE_PAGES * PAGE_SIZE} events",
+        )
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._log.debug("update_comment", comment_id=comment_id)
