@@ -677,8 +677,10 @@ hook that would truncate it again or append a duplicate per session.
   session whatever it pointed at.
 - **Some names are protected**, and a line naming one is dropped with a warning naming the key.
   `PATH`, `HOME`, `GH_TOKEN` and the fixed entries (`GH_PROMPT_DISABLED`,
-  `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`) keep `gh` and `claude`
-  running, so a typo cannot take either down in the middle of a run. So is anything starting
+  `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`,
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) keep `gh` and `claude` running as issuebot launched them,
+  so a typo cannot take either down in the middle of a run and a line cannot switch the shared
+  home's auto memory back on (#101). So is anything starting
   `ANTHROPIC_` or `CLAUDE_`: the file lives in the agent's own workspace, so the *session* can
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
@@ -861,16 +863,35 @@ that matters on your host.
   workspace are all out of the session's reach, and the worker cannot become root or anything
   but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
   pushes with it, which is why the token should be scoped to the repository. The session's
-  login is its own, in `/home/agent/.claude`. The dashboard is a third account: compose runs
-  the `web` service as `web` (uid 1002), which takes HTTP from a browser, needs no privilege
-  transition and so has none — it cannot execute `sudo` at all, and neither the worker's home
-  nor the session's is readable from it (#102). The agent's environment is otherwise minimal —
+  login is its own, in `/home/agent/.claude`. That home is a shared volume across every session
+  and repository, so before every turn the worker sweeps the config a prior or concurrent session
+  could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
+  `agents/`, `workflows/`, `agent-memory/`, `plugins/`, `output-styles/`, `settings.json`,
+  `settings.local.json` and each project's auto memory (`projects/<project>/memory/`), the
+  surfaces a later `claude -p` loads as instructions or behaviour — and leaves the rest of the
+  home alone: the credential (`.credentials.json`, which rotates its refresh token), the
+  transcripts beside the memory it removes, and anything else claude keeps there. It is a
+  denylist of what is loaded, not an allowlist of what is kept, so a new claude location has to
+  be added to it by hand. Auto memory is also switched off for the session
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
+  `setting_sources` says and keyed by repository, so one issue's notes would be the next
+  session's prompt on the same repository. So a slash command, skill or memory a hostile issue
+  plants is not waiting for a session working a different issue next week. What remains: the
+  window between one turn's sweep and its `claude -p` start, in which a session running beside
+  it can still plant; `/home/agent/.claude.json`, outside the volume, whose `mcpServers` no
+  session loads (`--strict-mcp-config`, #119) while its trust state persists for the container's
+  lifetime; and the account's shell profile, which a login-shell hook sources (#137). The login
+  recipe is unaffected: it writes `.credentials.json`, which the sweep never touches.
+  The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
   it — but that allow-list, the workspace and the protected-key list are conveniences, not the
   sandbox: the container and the uid are. On the host route (`agent.run_as` unset, `validate`
   warns) the session runs as your own user with none of this, which is why the container is
-  the supported deployment. Keep it in the container and give it a repository-scoped token. The dashboard
+  the supported deployment. Keep it in the container and give it a repository-scoped token.
+  The dashboard is a third account: compose runs the `web` service as `web` (uid 1002), which
+  takes HTTP from a browser, needs no privilege transition and so has none — it cannot execute
+  `sudo` at all, and neither the worker's home nor the session's is readable from it (#102). It
   asks for its password on every request, so placement hardens it rather than standing in
   for it: keep it on loopback all the same, or put TLS and rate limiting in front of it,
   because HTTP Basic sends the password with every request and the app itself limits no

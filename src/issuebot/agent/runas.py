@@ -14,9 +14,10 @@ anonymous file (``anonymous_fd``), passes that one descriptor across the uid cha
 ``exec`` verb of this module -- run by the worker's own interpreter, root-owned in the image
 -- installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
 account's; everything else is exactly what the worker built. ``python -m
-issuebot.agent.runas`` is the module's other face, and it has three verbs: ``exec``,
-``kill`` (the agent's process group, since the worker's uid may not signal it) and ``remove``
-(the agent's files under a workspace, which the worker's uid may not unlink).
+issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec``,
+``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
+(the agent's files under a workspace, which the worker's uid may not unlink) and ``sweep``
+(the loadable config a prior session left in the agent's shared ``~/.claude``, #101).
 """
 
 import argparse
@@ -41,6 +42,47 @@ MODULE = "issuebot.agent.runas"
 SUDO_TIMEOUT_S = 10
 # Removing a workspace as the agent walks a tree the agent wrote, node_modules included.
 REMOVE_TIMEOUT_S = 120
+
+# The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
+# instructions or behaviour, and that a session must therefore not leave behind for the next
+# one at the same uid (#101). The home is a shared volume (``claude-home``) across every
+# session and repository, so a slash command, skill, rule, subagent, workflow, plugin, output
+# style, memory file or settings a hostile issue plants would otherwise be read by an unrelated
+# session next week. The shipped workflow's ``setting_sources: [project]`` already keeps the
+# ``user`` source out of a turn -- ``settings.json``, ``CLAUDE.md``, ``rules``, ``skills``,
+# ``commands`` and ``agents`` -- but the setting defaults to unset (every source), an overlay can
+# drop the pin, and ``plugins``, ``output-styles``, ``workflows`` and ``agent-memory`` are not in
+# that flag's table at all, so the whole list is swept regardless: the flag is a workflow's
+# choice and the sweep is the worker's. Auto memory (``projects/<project>/memory/``) is read
+# whatever the flag says and keyed by repository, so a session working one issue seeds every
+# later session on the same repository; it is swept below by ``CLAUDE_HOME_MEMORY_DIR`` and
+# never written in the first place, since ``FIXED_ENVIRONMENT`` (``runner.py``) sets
+# ``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``. The credential (``.credentials.json``, which rotates
+# its refresh token) and claude's own per-session runtime state
+# (``projects/<project>/*.jsonl``/``sessions``/``shell-snapshots``/... -- transcripts, not
+# instructions) are deliberately absent: the volume must stay writable for the token, and
+# wiping live runtime would break a concurrent session's ``--resume``. A denylist, not an
+# allowlist: everything it does not name is left alone, and a new claude config location has
+# to be added here by hand, which is the residual accepted over a whole-home allowlist that
+# would fail the other way, by wiping a runtime directory claude adds.
+CLAUDE_HOME_SWEEP: tuple[str, ...] = (
+    "CLAUDE.md",
+    "rules",
+    "skills",
+    "commands",
+    "agents",
+    "workflows",
+    "agent-memory",
+    "plugins",
+    "output-styles",
+    "settings.json",
+    "settings.local.json",
+)
+# Auto memory sits beside the transcripts it must not take with it: ``projects/<project>/`` holds
+# the session ``.jsonl`` files (kept) and a ``memory/`` directory (swept). Named as the two path
+# components rather than a glob, so the sweep walks ``projects`` itself and can refuse to follow
+# a symlink at either level.
+CLAUDE_HOME_MEMORY_DIR: tuple[str, str] = ("projects", "memory")
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -211,10 +253,35 @@ class RunAs:
         """Remove what the account owns under ``path``; the worker removes its own after."""
         self._delegate("remove", str(path), timeout=REMOVE_TIMEOUT_S)
 
-    def _delegate(self, *args: str, timeout: float) -> None:
+    def sweep_home(self, claude_dir: Path | None = None) -> bool:
+        """Clear the loadable config surfaces under the account's ``~/.claude`` (#101).
+
+        Delegated, since the home is the account's and closed to the worker's uid; never raises,
+        like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
+        and exited 0, because a sweep that silently never happens is a security control with
+        no failure signal. ``claude_dir`` defaults to the account's own ``~/.claude``; a caller
+        (the tests) passes an explicit path so the sweep can be proved without touching a real
+        home.
+        """
+        if claude_dir is None:
+            try:
+                claude_dir = Path(self.account().pw_dir) / ".claude"
+            except RunAsError:
+                return False
+        # SUDO_TIMEOUT_S, not REMOVE_TIMEOUT_S: this removes a handful of small config entries,
+        # not an arbitrary workspace tree. The timeout bounds the worker's wait, not the helper:
+        # `subprocess.run` kills `sudo`, while the helper, the account's own process, runs on to
+        # completion. A tree deep enough to outlast it reads as a failed sweep here, and the
+        # next turn sweeps again.
+        return self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
+
+    def _delegate(self, *args: str, timeout: float) -> bool:
+        """Run one helper verb as the account; ``True`` only when it ran and exited 0."""
         argv = [*self._sudo(), "--", *self._helper(*args)]
         with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+            completed = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+            return completed.returncode == 0
+        return False
 
     def _sudo(self) -> list[str]:
         return [self.sudo, "-n", "-u", self.user]
@@ -281,6 +348,44 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
+def _sweep_targets(claude_dir: Path) -> Iterator[Path]:
+    """Every path the sweep removes under ``claude_dir``: the named surfaces and each project's
+    auto memory directory. ``projects`` and each entry in it are walked, never followed: claude
+    creates real directories there, so a symlink at either level is a session's, planted to
+    point claude's memory read at a tree the sweep would not visit, and it is yielded as the
+    target -- unlinked like a symlinked surface -- rather than stepped through."""
+    yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
+    projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
+    projects = claude_dir / projects_name
+    if projects.is_symlink():
+        yield projects
+        return
+    if not projects.is_dir():
+        return
+    with contextlib.suppress(OSError):
+        for project in projects.iterdir():
+            if project.is_symlink():
+                yield project
+            elif project.is_dir():
+                yield project / memory_name
+
+
+def _sweep(claude_dir: Path) -> None:
+    """Remove the loadable config surfaces under ``claude_dir`` (``CLAUDE_HOME_SWEEP`` and
+    each project's ``CLAUDE_HOME_MEMORY_DIR``).
+
+    Keeps the credential and claude's own runtime state by naming only what it removes.
+    Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
+    unlinked rather than followed, so the tree it points at is never touched.
+    """
+    for target in _sweep_targets(claude_dir):
+        with contextlib.suppress(OSError):
+            if target.is_symlink() or not target.is_dir():
+                target.unlink()
+            else:
+                shutil.rmtree(target, onexc=lambda *_: None)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"python -m {MODULE}")
     verbs = parser.add_subparsers(dest="verb", required=True)
@@ -291,6 +396,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     kill.add_argument("pgid", type=int)
     remove = verbs.add_parser("remove")
     remove.add_argument("path", type=Path)
+    sweep = verbs.add_parser("sweep")
+    sweep.add_argument("path", type=Path)
     args = parser.parse_args(argv)
     if args.verb == "exec":
         command = list(args.argv)
@@ -301,6 +408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _exec(args.env_fd, command)
     elif args.verb == "kill":
         _kill(args.pgid)
+    elif args.verb == "sweep":
+        _sweep(args.path)
     else:
         _remove(args.path)
     return 0

@@ -312,6 +312,14 @@ async def test_hook_sees_the_workspace_env_file(
     assert seen_path != "/hijacked"
 
 
+async def test_sweep_agent_home_is_a_no_op_on_the_host_route(tmp_path: Path) -> None:
+    # agent.run_as unset (the default here): the home is the operator's own, so nothing is
+    # swept and the call is a no-op that never raises.
+    manager, _ = make_manager(tmp_path)
+    assert manager._runas is None
+    await manager.sweep_agent_home()
+
+
 @posix
 async def test_unconfigured_hook_returns_none(
     tmp_path: Path, make_issue: Callable[..., Issue]
