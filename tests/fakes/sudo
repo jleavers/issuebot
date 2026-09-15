@@ -3,7 +3,9 @@
 the descriptors `-C` names as the real one does, and execs the command as the same uid.
 
 CLAUDE_SUDO_RECORD names a file that receives the parsed options as JSON; CLAUDE_SUDO_DENY makes
-every invocation fail the way an unlisted rule does. It records into the *parent's* file
+every invocation fail the way an unlisted rule does; CLAUDE_SUDO_PRETEND_UID answers `id -u` with
+that uid instead of running the command, which is how a delegation that works without separating
+is tested (#111). It records into the *parent's* file
 rather than the environment it was given, because the helper replaces that environment.
 """
 

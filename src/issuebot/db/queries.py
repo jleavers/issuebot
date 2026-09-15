@@ -93,7 +93,8 @@ class SnapshotRow:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class TurnSummaryRow:
-    """Every ``run_turns`` column except the three texts (prompt, stream, stderr)."""
+    """Every ``run_turns`` column except the three texts (prompt, stream, stderr) and
+    ``repo``, which is in the request."""
 
     run_id: str
     turn_number: int

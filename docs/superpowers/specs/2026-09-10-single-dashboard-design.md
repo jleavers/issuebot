@@ -125,7 +125,11 @@ CREATE TABLE repos (
   indexes get `repo` as their leading column.
 - `runs` gains `repo text NOT NULL`. `run_id` stays the primary key: it is a
   second-resolution timestamp plus six hex digits, unique enough across repositories, and
-  `run_turns` references it. The per-issue index becomes `(repo, issue_number, started_at
+  `run_turns` references it. *Amended 2026-09-14 (#111): "unique enough" is the stand-in this
+  design should not have accepted -- a 24-bit suffix inside one UTC second is a bound, not a
+  key, and `RUN_STARTED`'s `ON CONFLICT (run_id)` would have had one repository's row
+  overwrite another's. `0004_run_turns_repo` re-keys this table `(repo, run_id)`.* The
+  per-issue index becomes `(repo, issue_number, started_at
   DESC)`; `runs_started_at_idx` gains `repo` as its leading column.
 - `events` gains `repo text NOT NULL`; both indexes get `repo` as their leading column.
 - `runtime_snapshot` drops its one-row `id` column and check and is keyed by `repo`, one

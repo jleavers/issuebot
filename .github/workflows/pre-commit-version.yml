@@ -7,6 +7,16 @@ name: pre-commit hooks version
 # digest of each hook repository's newest tag, the hooks are run over the tree at the new
 # digests as the proof, and one pull request carries the move.
 #
+# It runs as two jobs on purpose, and the split is #111's own rule applied to this workflow.
+# `freeze` fetches each hook repository at a tag it has not seen before, `pip install`s it --
+# arbitrary build-backend code -- and runs its entry points. That is third-party code whose
+# referent nobody has checked yet, which is the whole reason the digests exist, so it executes
+# with a read-only `GITHUB_TOKEN` and with `persist-credentials: false`, so the checkout leaves
+# no pushable credential in `.git/config` for it to read. `open-pr` holds the write scopes and
+# runs no hook: it takes the frozen config as an artefact, re-checks its shape, commits, pushes
+# and opens the pull request. The workflow that hardens the supply chain must not be the one
+# that hands it a token.
+#
 # Opening the pull request needs "Allow GitHub Actions to create and approve pull requests"
 # (Settings > Actions > General > Workflow permissions), as for claude-code-version.yml.
 
@@ -21,14 +31,23 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  bump:
+  freeze:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      branch: ${{ steps.check.outputs.branch }}
+      changed: ${{ steps.check.outputs.changed }}
+      reuse: ${{ steps.check.outputs.reuse }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Nothing in this job pushes, and the hooks below are unreviewed upstream code.
+          persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
@@ -64,7 +83,7 @@ jobs:
           # (#111): the REST head filter is owner-qualified, and what survives it is kept
           # only when its head is this repository and its author is the bot this job runs
           # as (github-actions[bot] is GITHUB_TOKEN's login: a switch to a PAT or an App
-          # changes it, and the POST below then fails loudly with 422, not silently).
+          # changes it, and the POST in open-pr then fails loudly with 422, not silently).
           # A fork's branch of the same name, from any account, is not this job's.
           pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100&head=${GITHUB_REPOSITORY_OWNER}:${branch}" \
             --jq "[.[] | select(.head.repo.full_name == \"${GITHUB_REPOSITORY}\" and .user.login == \"github-actions[bot]\")] | .[0].number // \"\"")"
@@ -82,23 +101,60 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # Proof before the PR exists: the hooks install at the new digests and the tree passes.
+      # This is the step that runs code fetched from the new tags, which is why the job it
+      # sits in holds no write scope and no persisted credential.
       - name: Run the hooks at the new digests
         if: steps.check.outputs.changed == 'true'
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
-      - name: Open the pull request
+      - name: Collect the frozen config for the job that can push
         if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/frozen
+          cp .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml
+          cp /tmp/revs.txt /tmp/frozen/revs.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.check.outputs.changed == 'true'
+        with:
+          name: frozen-pre-commit-config
+          path: /tmp/frozen/
+          retention-days: 1
+
+  open-pr:
+    needs: freeze
+    if: needs.freeze.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frozen-pre-commit-config
+          path: /tmp/frozen
+
+      - name: Open the pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.check.outputs.branch }}
-          REUSE: ${{ steps.check.outputs.reuse }}
+          BRANCH: ${{ needs.freeze.outputs.branch }}
+          REUSE: ${{ needs.freeze.outputs.reuse }}
         run: |
           set -euo pipefail
           if [ "${REUSE}" = "true" ]; then
-            git checkout -- .pre-commit-config.yaml
             git fetch origin "${BRANCH}"
             git checkout "${BRANCH}"
           else
+            cp /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml
+            # The artefact crossed a job boundary, so the shape is re-checked here, in the
+            # job that pushes: this one must never write a tag where a digest belongs.
+            if grep -E '^ *rev:' .pre-commit-config.yaml \
+                 | grep -Ev '^ *rev: [0-9a-f]{40}  # frozen: '; then
+              echo "::error::the frozen config carries a rev that is not a digest"
+              exit 1
+            fi
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git checkout -b "${BRANCH}"
@@ -110,7 +166,7 @@ jobs:
             echo 'digest of each repository'"'"'s newest tag (#111):'
             echo
             echo '```diff'
-            cat /tmp/revs.txt
+            cat /tmp/frozen/revs.txt
             echo '```'
             echo
             echo 'The hooks were run over the whole tree at these digests before the pull'

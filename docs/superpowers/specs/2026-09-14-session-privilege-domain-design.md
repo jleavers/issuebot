@@ -53,8 +53,8 @@ image's uid layout and the compose mounts.
   root-owned interpreter, `-P` so the agent's workspace cwd cannot shadow the package —
   installs that environment whole and execs. `kill`
   (the session's process group, which the worker's uid may not signal) and `remove` (the
-  session's files under a workspace, which the worker's uid may not unlink) are the other two
-  verbs; a `probe` reports whether the delegation works at all -- and, since #111, whether it
+  session's files under a workspace, which the worker's uid may not unlink) are two more, and
+  `sweep` (#101, the account's shared `~/.claude`) is the fourth; a `probe` reports whether the delegation works at all -- and, since #111, whether it
   *separates*: the delegated uid is compared with the invoking one, not only the target's.
 
 - **Workspace state is the worker's.** Under `agent.run_as` the workspace directory and its

@@ -2867,10 +2867,12 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     uid = os.getuid()
+    # The account's own uid is named when it resolves on this host and left out when it does
+    # not, so the assertion is on the two parts that do not depend on /etc/passwd.
+    assert "[ OK ] agent.run_as: agent" in out
     assert (
-        "[ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other "
-        f"than this process's ({uid})"
-    ) in out
+        f"the session runs as a separate account, at a uid other than this process's ({uid})" in out
+    )
     assert probed == ["agent"]
     assert "16 checks: 0 failed, 1 warnings" in out
 

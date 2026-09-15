@@ -254,7 +254,9 @@ def test_probe_is_affirmative_only_when_the_delegated_uid_is_the_target_s_and_no
     """The probe compares against the invoking uid (#111): a delegation that works is not a
     delegation that separates."""
     me = os.getuid()
-    other = next(entry for entry in pwd.getpwall() if entry.pw_uid != me)
+    other = next((entry for entry in pwd.getpwall() if entry.pw_uid != me), None)
+    if other is None:  # pragma: no cover - a stripped /etc/passwd, not a failure
+        pytest.skip("no account other than this process's to delegate to")
     # The account named is this process's own: nothing to separate, and sudo is never asked.
     assert RunAs(ME, sudo=FAKE_SUDO).probe(base_env()) == (
         f"agent.run_as names {ME!r}, this process's own account (uid {me}); "
