@@ -138,6 +138,42 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     assert "--session-id" not in argv
 
 
+# --- the MCP config a session must not be able to plant (#119) -------------------------
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({}, id="defaults"),
+        pytest.param({"setting_sources": ["project"]}, id="setting-sources-project"),
+        pytest.param({"setting_sources": ["user", "project"]}, id="setting-sources-user-project"),
+        pytest.param({"permission_mode": "bypassPermissions"}, id="bypass-permissions"),
+        pytest.param({"allowed_tools": ["Read"]}, id="allowed-tools"),
+    ],
+)
+def test_build_argv_always_confines_mcp_to_the_command_line(
+    tmp_path: Path, resume: bool, extra: dict[str, object]
+) -> None:
+    """No setting reaches ``--strict-mcp-config``, on a fresh session or a resumed one.
+
+    The session account's ``~/.claude.json`` outlives every session in one container, and
+    ``claude`` loads ``mcpServers`` from it, so the flag is what stops a planted server being
+    offered to the next issue's session. The cases are the settings that might look as though
+    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, and
+    ``[user, project]`` does not -- and each is named, so a failure says which shape broke
+    rather than which loop iteration.
+    """
+    runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
+    assert "--strict-mcp-config" in argv
+    # No `--mcp-config` beside it: the flag keeps only the servers named there, and none of
+    # these settings names one, so the loadable set is nothing. The one that does is
+    # `claude.mcp_config` (#109), the front matter's, empty by default and pinned in
+    # `test_the_tool_policy_is_a_setting_and_nothing_else_widens_it`.
+    assert "--mcp-config" not in argv
+
+
 # --- per-issue model override ----------------------------------------------------------
 
 

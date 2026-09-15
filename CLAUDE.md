@@ -265,17 +265,34 @@ floor, not the shipped version, and moves by hand.
   is fixed at spawn from the front matter and never by the prompt (#109, spec
   `2026-09-14-session-authority-design.md`): `claude.disallowed_tools` ships
   `DEFAULT_DISALLOWED_TOOLS` (`WebFetch`, `WebSearch`) and `build_argv` emits it, `[]` widens
-  it, `--strict-mcp-config` is unconditional, so the clone's `.mcp.json` adds nothing, and
+  it, `--strict-mcp-config` is unconditional (below, #119), so the clone's `.mcp.json` adds nothing, and
   `claude.mcp_config` (`--mcp-config`, paths or JSON strings, default none; a path is resolved
   against the workflow's directory in `resolve.py`, never read relative to the clone, which is
   the session's cwd and the session's to write) is the one route
-  in; the Dockerfile asserts both flags at build. The `<github-text>` envelope is therefore a hint to
+  in; the Dockerfile asserts all three flags at build. The `<github-text>` envelope is therefore a hint to
   the model, not the boundary: `_defang` neutralises a `<` (or the fullwidth and small forms
   NFKC folds to it) that is followed, on the text's skeleton (`tag_skeleton`: Unicode format
   characters, category `Cf`, removed and compatibility forms folded), by any run of
   whitespace and an optional `/` and then the tag name; it is total over that skeleton, which
   `check_envelopes` also walks, so text inside an envelope can never fail the render however
-  its tag is spelled, while a template or an unwrapped value that forges an edge still does; `workspace_environment` layers the
+  its tag is spelled, while a template or an unwrapped value that forges an edge still does.
+  `--strict-mcp-config` is unconditional for the reason
+  `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
+  `claude-home` volume, so it is recreated with each container but shared by every session in
+  one -- a server a session plants there is offered to whichever issue runs next. The flag
+  names what survives rather than what is removed (only `--mcp-config` servers, which is
+  what `claude.mcp_config` names and nothing else does), so it covers a target repository's `.mcp.json` and any MCP location a later
+  `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
+  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
+  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
+  operator's setting is not what the confinement rests on. The flag is asserted against
+  `claude --help` in the image build beside `--permission-prompts` and `--disallowedTools`,
+  so a release that drops any of them fails the build rather than a session. The CI `docker` job proves both
+  directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
+  is listed in the init line without the flag and absent with it, no credential needed since
+  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -605,7 +622,9 @@ floor, not the shipped version, and moves by hand.
   `stale` past three poll intervals, or `none`), `snapshot_at`, `snapshot_age_s` and
   `dispatch_hold`; the top-level `worker` is the worst of them, `none` > `stale` > `held` >
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
-  byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
+  byte-for-byte: `tests/test_web_vendor.py` parses the SHA-256 block and the table out of
+  `vendor/README.md` and hashes the files beside it, so the record is the check and a bump is
+  a one-file edit, #108); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
   `unsafe-inline`). The headers are added by `_SecureExit` (#106), a plain ASGI middleware
   that decorates the `send` channel rather than the response `call_next` returns: Starlette's

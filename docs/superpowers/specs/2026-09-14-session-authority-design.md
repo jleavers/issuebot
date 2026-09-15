@@ -50,7 +50,9 @@ what the session may do within them.
   purpose-built way to fetch the next page of it. `build_argv` emits the list, so a default
   argv now carries `--disallowedTools WebFetch WebSearch`, and always emits
   `--strict-mcp-config`, so no MCP server from the clone's `.mcp.json`, the project's settings
-  or the account's home joins the set; `claude.mcp_config`, a list of what `--mcp-config`
+  or the account's home joins the set (#119, `2026-09-14-mcp-config-confinement-design.md`,
+  measured that `claude -p` does load `mcpServers` from the session account's `~/.claude.json`
+  at the shipped defaults, and landed the same unconditional flag); `claude.mcp_config`, a list of what `--mcp-config`
   takes (a path resolved against the workflow's directory, never relative to the clone, which
   is the session's cwd and the session's to write) and empty by default, is the one route in, so a deployment that used a server from
   its home names it in the front matter and gets it back. That is a change on upgrade: a

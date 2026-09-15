@@ -717,10 +717,18 @@ class ClaudeRunner:
             cfg.permission_mode,
             "--permission-prompts",
             "none",
-            # No MCP server from the clone's `.mcp.json` or any settings file (#109): the
-            # session's tool set is what this argv says, and a repository that ships a server
-            # configuration would otherwise add to it on the next session. `claude.mcp_config`
-            # below is the one route in, and without it the built-in tools are the set.
+            # Unconditional, like `--permission-prompts none`, and for the same reason (#119,
+            # #109): it is what makes the run safe, not what makes it convenient, so no
+            # setting turns it off. `claude` otherwise loads `mcpServers` out of the session
+            # account's `~/.claude.json` -- which lives in $HOME beside `.claude/`, outside
+            # the `claude-home` volume, is recreated per container and persists across every
+            # session in one -- and offers the planted server's tools to the next session. It
+            # also drops a target repository's `.mcp.json`, and any MCP location a later
+            # `claude` adds, since the flag names what is kept rather than what is removed:
+            # only `--mcp-config` servers survive it, and `claude.mcp_config` below, the front
+            # matter's and empty by default, is the one place they are named. The session's
+            # tool set is therefore what this argv says. The volume's own config surfaces are
+            # a separate question, open as #101.
             "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),
