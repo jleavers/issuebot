@@ -1166,7 +1166,13 @@ class Orchestrator:
             await self._finish(issue)
 
     async def _finish(self, issue: Issue) -> None:
-        """Close the issue out and drop its ledger entry: a reopened one starts from zero."""
+        """Close the issue out, and drop what this worker remembered about it.
+
+        The conflict-limit memo goes whatever GitHub answered: a closed issue is never a
+        bounce candidate again. The ledger entry goes only when the close actually landed,
+        since a ``failed`` one leaves the issue open and its budget still in force. A reopened
+        issue starts from zero either way.
+        """
         outcome = await actions.finish_terminal(self._adapter, self._bus, self._workspaces, issue)
         self._conflict_limit_noted.pop(issue.id, None)
         if outcome != "failed":

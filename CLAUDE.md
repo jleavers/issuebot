@@ -395,7 +395,12 @@ floor, not the shipped version, and moves by hand.
   including the orphaned `in_progress` one the gate meets before `_resume_plan`, because what
   keeps it off a *running* issue is `admit` answering `busy` long before it reaches the budget,
   not the state), which also stops the refusal repeating: the issue lands in `review`, where
-  the gate refuses it as `inactive` instead. Its block names the way out, which differs by
+  the gate refuses it as `inactive` instead -- unless the conflict bounce moves it back to
+  `rework`, the one way one issue reaches the escape twice, which `agent.max_conflict_reworks`
+  bounds. The block is the escalation's identity as well as its record: an issue whose workpad
+  already carries one is *returned* to `review` rather than escalated afresh, so the outcome
+  is `skipped`, the label move is still published and a second `Blocked` -- a second Slack
+  line, a second count on the dashboard's blocked tile -- is not. Its block names the way out, which differs by
   ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
   is not for `spend`, whose figure never resets. A failed escape is retried by the next tick
   rather than by a queued entry, since the issue is still a candidate. `Ledger` is

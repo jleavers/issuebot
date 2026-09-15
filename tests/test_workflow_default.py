@@ -285,8 +285,9 @@ def test_the_workpad_is_the_comment_issuebot_resolved(make_issue: Callable[..., 
 
 
 def test_workpad_update_starts_from_the_current_body(make_issue: Callable[..., Issue]) -> None:
-    """issuebot appends blocks between sessions; a PATCH from a stale local copy would erase
-    the merge-conflict count the cap is read from."""
+    """issuebot appends blocks between sessions -- the conflict note, the blocked escape, the
+    budget one -- and a PATCH from a stale local copy would erase them: they are what a human
+    reads, and what those escapes match on to write themselves only once."""
     workflow = load()
     text = PromptRenderer(workflow.prompt_template).render(
         context(workflow, dispatched(make_issue))

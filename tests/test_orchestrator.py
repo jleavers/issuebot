@@ -3337,7 +3337,9 @@ async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path
     neither consults the other -- that is the whole point of the gate owning one question. The
     two do meet on an over-budget issue in `review` whose pull request conflicts: the bounce
     moves it to `rework`, the gate refuses it and hands it back. `agent.max_conflict_reworks`
-    is what stops that, and this pins it.
+    is what stops that, and this pins it -- along with the escalation staying *one* escalation
+    while it lasts: the block is written once, and so are the `Blocked` event behind the Slack
+    line and the count behind the dashboard's blocked tile.
     """
     h = Harness(tmp_path, max_issue_cost_usd=0.4, max_conflict_reworks=2)
     h.add_issue(1)
@@ -3354,6 +3356,9 @@ async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path
     body = h.github.comments_for(1)[0].body
     assert body.count("### Issuebot merge conflict (") == 2  # the bounce limit held
     assert body.count("### Issuebot budget limit (") == 1
+    # The return trips are returns, not fresh escalations: one block, one event, one count.
+    assert len(h.recorder.of(Blocked)) == 1
+    assert h.orchestrator.snapshot().counters.blocked == 1
 
 
 async def test_a_seeded_chain_at_the_ceiling_still_gets_a_run_that_can_escalate(

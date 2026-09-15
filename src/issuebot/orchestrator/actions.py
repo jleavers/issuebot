@@ -237,7 +237,15 @@ async def budget_escape(
     run behind it: the admission gate refused the claim before there was one. Without it a
     refused issue would sit on the board with nothing said about it anywhere a human looks,
     which is worse than having no ceiling at all. Moving it also stops the refusal repeating,
-    since the gate reads a ``review`` issue as one this worker does not claim.
+    since the gate reads a ``review`` issue as one this worker does not claim -- unless the
+    conflict bounce moves it back to ``rework``, which is the one way this is reached twice
+    for one issue, and `agent.max_conflict_reworks` bounds that.
+
+    The block is the escalation, so it is also its identity: an issue whose workpad already
+    carries one is being *returned* to ``review``, not escalated afresh, and the outcome is
+    ``skipped``. The label move is still published -- it happened, and the board should say so
+    -- but a second ``Blocked`` is not, since a second Slack line and a second count would
+    report an escalation that was only ever made once.
 
     Unlike ``blocked_escape`` it accepts the issue in any of ``ACTIVE_STATES``, because a
     refused issue is wherever the gate found it -- usually ``todo`` or ``rework``, but an
@@ -262,7 +270,8 @@ async def budget_escape(
             )
             return "skipped"
         workpad = await adapter.find_workpad_comment(issue.number)
-        if workpad is None or not _has_budget_block(workpad.body):
+        noted = workpad is not None and _has_budget_block(workpad.body)
+        if not noted:
             await _append_workpad(
                 adapter, issue.number, workpad, budget_block(limit, reason, now, adapter.labels)
             )
@@ -280,6 +289,14 @@ async def budget_escape(
             pr_url=pr_url(issue),
         )
     )
+    if noted:
+        log.info(
+            "budget_escape_skipped",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            reason="already escalated",
+        )
+        return "skipped"
     bus.publish(
         Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
     )

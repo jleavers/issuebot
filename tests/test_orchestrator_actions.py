@@ -734,15 +734,24 @@ async def test_budget_escape_creates_the_workpad_when_there_is_none(tmp_path: Pa
     assert body.startswith(f"{WORKPAD_MARKER}\n\n{BUDGET_HEADING}")
 
 
-async def test_budget_escape_writes_its_block_once(tmp_path: Path) -> None:
-    """The reason names the counts, which cannot change: a second block would only repeat it."""
+async def test_budget_escape_escalates_once_and_then_only_returns_the_issue(
+    tmp_path: Path,
+) -> None:
+    """The block is the escalation, so an issue that has one is returned rather than escalated.
+
+    The reason names the counts, which cannot change, so a second block would only repeat the
+    first -- and a second `Blocked` would report a second escalation to Slack and to the
+    dashboard's blocked tile when only one was ever made. The label move is published either
+    way: the issue really did come back from `rework`, and the board should say so.
+    """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
     assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "applied"
     h.github.human_set_state(42, StateLabel.REWORK)
-    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "applied"
+    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "skipped"
     assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
     assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked", "state_changed"]
 
 
 @pytest.mark.parametrize("state", ["review", "complete"])
