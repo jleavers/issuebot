@@ -26,6 +26,9 @@ USES = re.compile(r"^\s*(?:- )?uses: [\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40} 
 UNPINNABLE = re.compile(r"^\s*(?:- )?uses: (?:\./|docker://)")
 # <40 hex>  # frozen: <tag>, as `pre-commit autoupdate --freeze` writes it
 REV = re.compile(r"^\s*rev: [0-9a-f]{40}  # frozen: \S+$")
+# Building or running an image: the `docker` verbs and the `docker/...` actions that wrap
+# them. Matched against a step's `uses` and `run` together, so neither spelling escapes it.
+EXECUTES = re.compile(r"\bdocker(?:/|\s+(?:run|build|buildx|compose)\b)")
 
 
 def _lines(path: Path, key: str) -> list[str]:
@@ -78,6 +81,28 @@ def test_the_action_digests_still_have_a_bump_channel() -> None:
     assert "github-actions" in ecosystems, f"no github-actions ecosystem in {DEPENDABOT.name}"
 
 
+def _bump_split(name: str, runner: str, writer: str) -> tuple[dict, dict]:
+    """The two halves of a bump job: the one that runs unreviewed code, the one that pushes.
+
+    Both bump workflows fetch third-party code at a referent nobody has looked at yet -- the
+    very thing the digest pins above exist for -- and both then have to push a branch and
+    open a pull request. The rule (#129 for the hooks, #138 for the claude pin) is that those
+    are never the same job. The half that executes holds read scopes only and checks out with
+    ``persist-credentials: false``, so ``actions/checkout`` leaves no pushable token in
+    ``.git/config`` for that code to read out; the half that holds the write scopes takes the
+    result across a job boundary as an artefact and executes none of it.
+    """
+    config = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+    run_job, write_job = config["jobs"][runner], config["jobs"][writer]
+
+    assert set(run_job["permissions"].values()) == {"read"}, f"{name}: {run_job['permissions']}"
+    checkout = next(s for s in run_job["steps"] if "actions/checkout@" in s.get("uses", ""))
+    assert checkout["with"]["persist-credentials"] is False, name
+    assert write_job["needs"] == runner, name
+    assert write_job["permissions"] == {"contents": "write", "pull-requests": "write"}, name
+    return run_job, write_job
+
+
 def test_the_pre_commit_bump_job_runs_the_hooks_without_a_write_token() -> None:
     """The hooks are unreviewed upstream code, so they run in the job that cannot push.
 
@@ -85,14 +110,7 @@ def test_the_pre_commit_bump_job_runs_the_hooks_without_a_write_token() -> None:
     and runs its entry points. That job holds read scopes only and checks out without a
     persisted credential; the job that commits and opens the pull request runs no hook.
     """
-    config = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "pre-commit-version.yml").read_text(encoding="utf-8")
-    )
-    freeze, open_pr = config["jobs"]["freeze"], config["jobs"]["open-pr"]
-
-    assert set(freeze["permissions"].values()) == {"read"}, freeze["permissions"]
-    checkout = next(step for step in freeze["steps"] if "actions/checkout@" in step.get("uses", ""))
-    assert checkout["with"]["persist-credentials"] is False
+    freeze, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
 
     # The invocation, not the word: open-pr copies `.pre-commit-config.yaml` about and its
     # pull request body quotes the command in prose. Every hook this workflow runs, it runs
@@ -102,4 +120,38 @@ def test_the_pre_commit_bump_job_runs_the_hooks_without_a_write_token() -> None:
         "the freeze job runs no hooks"
     )
     assert not [step for step in open_pr["steps"] if invokes.search(step.get("run", ""))]
-    assert open_pr["permissions"] == {"contents": "write", "pull-requests": "write"}
+
+
+def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_token() -> None:
+    """The new claude release is installed and executed in the job that cannot push (#138).
+
+    The image build pipes ``claude.ai/install.sh`` into ``bash`` at a version published
+    moments earlier, and the proof step then executes the binary that produced. Neither may
+    sit beside a credential that can push to this repository or move its pull requests, so
+    the build job holds read scopes only and the job that commits downloads the rewritten
+    ``Dockerfile`` as an artefact, re-checks the pin it carries, and builds nothing.
+    """
+    build, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
+
+    def executes(job: dict) -> list[dict]:
+        steps = job["steps"]
+        return [s for s in steps if EXECUTES.search(f"{s.get('uses', '')}\n{s.get('run', '')}")]
+
+    assert executes(build), "the build job never builds or runs the new version"
+    assert not executes(open_pr), "the job that pushes builds or runs the new version"
+    assert not [s for s in open_pr["steps"] if "build-args" in (s.get("with") or {})]
+
+    # The artefact crossed a job boundary, so the job that commits re-checks the shape it
+    # carries -- the pin is the version this run resolved -- before it writes a branch.
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    assert 'grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}"' in opens["run"]
+
+    # Dropping the persisted credential also drops git's own access to the remote, and this
+    # repository is private: an unauthenticated `git ls-remote` fails outright rather than
+    # reporting an absent branch, and the `if` around it would read that failure as "no
+    # branch" and lose the reuse path. So the lookup asks the API, which still has GH_TOKEN.
+    # The invocation, not the word: the line that replaced it says why in a comment.
+    check = next(step for step in build["steps"] if step.get("id") == "check")
+    assert 'gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}"' in check["run"]
+    commands = [ln for ln in check["run"].splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in commands if "git ls-remote" in ln], "asks git for a remote ref"

@@ -103,11 +103,21 @@ autoupdate --freeze`, the hooks over the tree as the proof, one PR from a branch
 the config's blob hash so a rerun finds its own. Both bump jobs recognise their own pull
 request by provenance and never by the branch name, which any fork can carry: REST
 `pulls?head=<owner>:<branch>`, kept only when `head.repo.full_name` is this repository and
-`user.login` is `github-actions[bot]`.
-`claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
-Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
-new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
-floor, not the shipped version, and moves by hand.
+`user.login` is `github-actions[bot]`. Both are also two jobs rather than one (#129 for the
+hooks, #138 for the claude pin), because a bump job has to *execute* the referent it is
+proposing -- the hooks at their new digests, the claude release at its new version -- and
+that is third-party code nobody has reviewed yet, which is the whole reason the digests
+exist. So the half that executes holds read scopes only and checks out with
+`persist-credentials: false`, leaving no pushable `GITHUB_TOKEN` in `.git/config` for it to
+read out; it hands its result over as an artefact, and the half holding `contents: write`
+re-checks that artefact's shape, commits, pushes and opens the PR while building and running
+none of it. `tests/test_pins.py` pins that split for both.
+`claude-code-version.yml` covers what Dependabot cannot see: weekly, its `build` job compares
+the Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, writes the new pin,
+builds the image with it and runs `claude --version` out of it as the proof; `open-pr` then
+downloads that rewritten `Dockerfile`, refuses it unless the pin is the resolved version and
+the copy moves that one line alone, and opens the PR. `MIN_CLAUDE_VERSION`
+(`agent/runner.py`) is a compatibility floor, not the shipped version, and moves by hand.
 
 ## Package layout
 

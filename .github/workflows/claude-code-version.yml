@@ -5,6 +5,17 @@ name: Claude Code version
 # the Dockerfile; MIN_CLAUDE_VERSION in src/issuebot/agent/runner.py is a compatibility floor
 # and rises by hand, when the code starts depending on something newer.
 #
+# It runs as two jobs on purpose, and the split is #111's rule applied here as #129 applied it
+# to pre-commit-version.yml. Building the image pipes claude.ai/install.sh into `bash` at a
+# release published moments earlier, and the proof step then executes the binary that
+# produced: third-party code whose referent nobody has looked at yet, which is the whole
+# reason the pins exist. So it runs in `build`, which holds read scopes only and checks out
+# with `persist-credentials: false`, leaving no pushable GITHUB_TOKEN in `.git/config` for
+# that code to read out of. `open-pr` holds the write scopes, downloads the rewritten
+# Dockerfile as an artefact, re-checks the pin it carries, commits, pushes and opens the pull
+# request -- and builds and runs nothing. The workflow that vets a release must not be the one
+# that hands it a token.
+#
 # Opening the pull request needs "Allow GitHub Actions to create and approve pull requests"
 # (Settings > Actions > General > Workflow permissions). Without it the push succeeds and
 # only the pull request is refused, with HTTP 403.
@@ -20,14 +31,27 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  bump:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The provenance filter below is a pull request read, and that is all it needs.
+      pull-requests: read
+    outputs:
+      current: ${{ steps.check.outputs.current }}
+      latest: ${{ steps.check.outputs.latest }}
+      branch: ${{ steps.check.outputs.branch }}
+      changed: ${{ steps.check.outputs.changed }}
+      reuse: ${{ steps.check.outputs.reuse }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Nothing in this job pushes, and the build below installs and runs a claude
+          # release nobody has reviewed.
+          persist-credentials: false
 
       - id: check
         name: Compare the pin with the npm dist-tag
@@ -62,7 +86,7 @@ jobs:
             # (#111): the REST head filter is owner-qualified, and what survives it is kept
             # only when its head is this repository and its author is the bot this job runs
             # as (github-actions[bot] is GITHUB_TOKEN's login: a switch to a PAT or an App
-            # changes it, and the POST below then fails loudly with 422, not silently).
+            # changes it, and the POST in open-pr then fails loudly with 422, not silently).
             # A fork's branch of the same name, from any account, is not this job's and
             # cannot stand in for it.
             pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100&head=${GITHUB_REPOSITORY_OWNER}:${branch}" \
@@ -71,7 +95,12 @@ jobs:
               echo "::notice::${branch} already has pull request #${pr}; nothing to do"
             else
               changed=true
-              if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+              # Asked of the API, not of `git ls-remote`: this checkout persists no
+              # credential, so an unauthenticated ls-remote against a private repository
+              # fails with "Repository not found" and the `if` reads that as "no branch" --
+              # which would have open-pr try to create a branch that is already there and
+              # be rejected on push. `gh` has GH_TOKEN, and reading a ref is contents: read.
+              if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent >/dev/null 2>&1; then
                 echo "::notice::${branch} exists with no pull request; reusing it"
                 reuse=true
               fi
@@ -85,11 +114,24 @@ jobs:
             echo "reuse=${reuse}"
           } >> "$GITHUB_OUTPUT"
 
+      # The pin moves before the build, so what is built is the file open-pr will commit
+      # rather than a build argument that happens to agree with it.
+      - name: Write the new pin into the Dockerfile
+        if: steps.check.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
+          grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile
+
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
         if: steps.check.outputs.changed == 'true'
 
       # Proof before the PR exists: the build installs that exact version and asserts the
-      # --permission-prompts flag the unattended design rests on is still there.
+      # --permission-prompts flag the unattended design rests on is still there. This is the
+      # step that fetches and executes the new release, which is why the job it sits in holds
+      # no write scope and no persisted credential.
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         if: steps.check.outputs.changed == 'true'
         with:
@@ -104,23 +146,81 @@ jobs:
 
       - name: Report the installed version
         if: steps.check.outputs.changed == 'true'
-        run: docker run --rm --entrypoint claude issuebot:bump --version
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bump
+          docker run --rm --entrypoint claude issuebot:bump --version \
+            | tee /tmp/bump/claude-version.txt
+
+      - name: Collect the rewritten Dockerfile for the job that can push
+        if: steps.check.outputs.changed == 'true'
+        run: cp Dockerfile /tmp/bump/Dockerfile
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.check.outputs.changed == 'true'
+        with:
+          name: claude-code-pin
+          path: /tmp/bump/
+          retention-days: 1
+
+  open-pr:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: claude-code-pin
+          path: /tmp/bump
 
       - name: Open the pull request
-        if: steps.check.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CURRENT: ${{ steps.check.outputs.current }}
-          LATEST: ${{ steps.check.outputs.latest }}
-          BRANCH: ${{ steps.check.outputs.branch }}
-          REUSE: ${{ steps.check.outputs.reuse }}
+          CURRENT: ${{ needs.build.outputs.current }}
+          LATEST: ${{ needs.build.outputs.latest }}
+          BRANCH: ${{ needs.build.outputs.branch }}
+          REUSE: ${{ needs.build.outputs.reuse }}
         run: |
           set -euo pipefail
           if [ "${REUSE}" = "true" ]; then
             git fetch origin "${BRANCH}"
             git checkout "${BRANCH}"
           else
-            sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
+            # The artefact crossed a job boundary, so its shape is re-checked here, in the
+            # job that pushes. The version must still be a plain release number, since it
+            # reaches a branch name and a commit message; the Dockerfile it carries must be
+            # pinned to that version; and copying it in must move that one line and nothing
+            # else, so the file cannot bring anything along with the pin.
+            if ! printf '%s' "${LATEST}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::the resolved version is not a version: ${LATEST}"
+              exit 1
+            fi
+            if ! grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/bump/Dockerfile; then
+              echo "::error::the artefact's Dockerfile is not pinned to ${LATEST}"
+              exit 1
+            fi
+            cp /tmp/bump/Dockerfile Dockerfile
+            if [ "$(git diff --numstat -- Dockerfile)" != "$(printf '1\t1\tDockerfile')" ]; then
+              echo "::error::the artefact changes more of the Dockerfile than the pin"
+              git diff -- Dockerfile
+              exit 1
+            fi
+          fi
+          # The version string below is output from the very release under review, and it
+          # lands in a body a human reads to decide whether to merge. So it is taken as one
+          # line, stripped of the backticks that would end the fence it is quoted in, capped,
+          # and refused unless it names the version this run resolved -- which is also the
+          # proof that the image installed what the pin asks for.
+          version="$(head -n 1 /tmp/bump/claude-version.txt | tr -d '`' | cut -c1-120)"
+          if ! printf '%s' "${version}" | grep -qF -- "${LATEST}"; then
+            echo "::error::the built image reports '${version}', which does not name ${LATEST}"
+            exit 1
+          fi
+          if [ "${REUSE}" != "true" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git checkout -b "${BRANCH}"
@@ -131,8 +231,17 @@ jobs:
           Claude Code ${CURRENT} → ${LATEST} (npm \`dist-tags.latest\` for
           \`@anthropic-ai/claude-code\`).
 
-          The image was built with this version before the pull request was opened, so the
-          install succeeded and \`claude --help\` still lists \`--permission-prompts\`.
+          The image was built with this version, and the binary it produced was run, before
+          this pull request existed -- so the install succeeded and \`claude --help\` still
+          lists \`--permission-prompts\`. It reports:
+
+          \`\`\`text
+          ${version}
+          \`\`\`
+
+          That build ran in a job holding read scopes only, checked out with
+          \`persist-credentials: false\` (#138); this job downloaded the rewritten
+          \`Dockerfile\` as an artefact, re-checked its pin, and built nothing.
 
           \`MIN_CLAUDE_VERSION\` in \`src/issuebot/agent/runner.py\` is untouched: it is the
           oldest claude issuebot works with, not the one it ships. Raise it by hand only when
