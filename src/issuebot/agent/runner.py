@@ -737,12 +737,14 @@ class ClaudeRunner:
             "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),
+            # Always passed (#107): claude's own default would load the clone's CLAUDE.md,
+            # .claude/ and .mcp.json as configuration, and the setting is never empty.
+            "--setting-sources",
+            ",".join(cfg.setting_sources),
         ]
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         if cfg.model:
             argv += ["--model", cfg.model]
-        if cfg.setting_sources:
-            argv += ["--setting-sources", ",".join(cfg.setting_sources)]
         if cfg.append_system_prompt:
             argv += ["--append-system-prompt", cfg.append_system_prompt]
         if cfg.allowed_tools:

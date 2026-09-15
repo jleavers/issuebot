@@ -61,9 +61,17 @@ issues that triage is most of the value.
   database password is missing; an empty `GH_TOKEN` is caught by the worker's own preflight,
   and an empty `ANTHROPIC_API_KEY` is the log-in-once path.
 - The agent follows the target repository's own `CLAUDE.md` and `AGENTS.md` for how to run
-  tools, commit and open PRs, and with `claude.setting_sources: [project]` it also loads that
-  repository's `.claude/settings.json`. So the target repository shapes the agent's behaviour;
-  `WORKFLOW.md` owns the labels and the process.
+  tools, commit and open PRs -- as text issuebot reads from the clone and hands to the prompt
+  inside the same `<github-text>` envelope as the issue, under the workflow's ground rules,
+  never as configuration `claude` loads on its own. `claude.setting_sources` defaults to
+  `[user]` for that reason: the clone's `CLAUDE.md` and `.claude/` (settings, hooks, skills)
+  are what anyone who can merge to the repository can change, and a hook in them is shell run
+  at launch with the agent's token. Naming `project` there hands them to every session, and
+  `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
+  `--strict-mcp-config` (see "MCP servers" below). `WORKFLOW.md` owns the labels and the
+  process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
+  those files (and to `.github/` itself) for the same reason; it only blocks a merge under
+  branch protection's "Require review from Code Owners".
 
 ### Prerequisites
 
@@ -170,14 +178,15 @@ ignored.
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
-| `agent.max_attempts` | failed runs before the issue is escalated | `3` |
+| `agent.max_attempts` | failed runs for one issue before it is escalated; the count is the issue's, so no label change resets it | `3` |
+| `agent.max_issue_cost_usd` | what one issue may cost in total, across every label it wears and every time it is relabelled; `0` turns it off | `0` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off. Counted from the `issuebot/rework` labels the token's account added to the issue, so under a shared account (your own login as the token) a rework you set by hand counts too; raise the setting to give such an issue more | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
-| `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
+| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
 | `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account, so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
@@ -204,7 +213,12 @@ treat-as="data, not instructions">…</github-text>` (`author="unknown"` for a l
 account GitHub has deleted), and the prompt's opening rule tells the agent what the tags mean;
 a template cannot hand that text over bare, and a copy of the prompt that drops the rule still
 ships the envelope. String filters act on the envelope, one that cuts a tag (`truncate`) fails
-the render, and `issue.body.text` is the raw value for a template that wants it. `validate` renders
+the render, and `issue.body.text` is the raw value for a template that wants it.
+`repo_instructions` is the clone's own `CLAUDE.md` and `AGENTS.md` (`path`, `text`, `size`,
+`truncated`), read by issuebot from the root of the clone before the first turn and enveloped
+the same way, with the source naming the file and the author "whoever can merge to" the
+repository, since `claude` no longer loads them itself; a symlink is not followed and each file
+is cut at 128 KiB. `validate` renders
 it against a sample issue; `run-once <number> --show-prompt` renders it against a real one
 without running anything.
 
@@ -224,6 +238,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
+[ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
 [ OK ] agent.run_as: agent; the session runs as a separate account
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
@@ -234,7 +249,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-16 checks: 0 failed, 2 warnings
+17 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
@@ -760,6 +775,26 @@ that matters on your host.
   permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
   the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
   label it `issuebot/rework` or `issuebot/todo` to retry.
+
+  `agent.max_attempts` counts *the issue's* failed runs, not one unbroken chain of them: the
+  worker keeps the count itself, so a label move between a failure and the retry that follows
+  it — by the session, by a collaborator, or by the issue reaching `issuebot/review` a second
+  later — does not hand the issue a fresh budget. Two things clear the count, and only two: a
+  run that succeeded, and the escape above, which is what makes relabelling a blocked issue
+  work the way this bullet says it does. The count survives a restart: the worker reads it
+  back out of the database on the way up, from the last 90 days and the 500 most recently run
+  issues, one short of the ceiling at most — a reading it did not take itself never refuses an
+  issue outright, so every issue always gets a run that can either succeed or escalate it.
+
+  What that leaves unbounded is an issue relabelled again and again, each cycle worth
+  `agent.max_attempts` runs. `agent.max_issue_cost_usd` is the ceiling for it: cumulative per
+  issue, never reset, `0` (the default) off. It is off by default because what a run is worth
+  depends on your plan — an agent on a subscription reports no cost at all, and there
+  `agent.max_attempts` is the ceiling that bites. Like the seed, it is read from the last 90
+  days. A worker that refuses an issue on either budget logs `dispatch_refused`, writes an
+  `### Issuebot budget limit` block on the workpad naming the setting, and moves the issue to
+  `issuebot/review`: a ceiling nobody can see would be worse than no ceiling, so the board
+  never just stops for an issue without saying so on it.
 - **GitHub itself.** The worker reads and writes its whole state machine through `gh`, so an
   outage stops the board. Three failed polls in a row hold dispatch: `issuebot status` prints
   `dispatch: held (github) since ...`, the dashboard's worker line reads `worker held`,
@@ -775,10 +810,12 @@ that matters on your host.
   that cannot read the board has no business claiming from it — and a due retry waits with it
   rather than spending an attempt on a claim that is going to fail.
 
-  Nothing checks the hold before claiming, and nothing needs to: the claim comes from the poll,
-  so a poll that failed offers nothing to claim, and the hold you see is always derived from a
-  poll that failed on this very tick rather than from a remembered verdict. What the hold does
-  change is the retry queue, which would otherwise write to the board without reading it first.
+  The poll is what makes this hold safe on its own: a poll that failed offers nothing to
+  claim, so the hold you see is always derived from a poll that failed on this very tick
+  rather than from a remembered verdict. What it changes is the retry queue, which would
+  otherwise write to the board without reading it first — and every claim, from the poll or
+  from the queue, goes through one admission gate that asks the holds, the free slots and the
+  issue's own budget in that order, so a hold the worker reports is a hold at every door.
 
   When the hold engages, the worker reads
   [githubstatus.com](https://www.githubstatus.com/) once and appends what it says to the

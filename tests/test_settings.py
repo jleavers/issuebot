@@ -39,6 +39,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.agent.max_attempts == 3
     assert s.agent.max_retry_backoff_ms == 300_000
     assert s.agent.max_conflict_reworks == 3
+    assert s.agent.max_issue_cost_usd == 0.0
     assert s.claude.command == "claude"
     assert s.claude.model is None
     assert s.claude.permission_mode == "auto"
@@ -120,6 +121,7 @@ def test_label_must_not_be_empty() -> None:
         ("agent", "max_attempts", 0),
         ("agent", "max_retry_backoff_ms", 999),
         ("agent", "max_conflict_reworks", -1),
+        ("agent", "max_issue_cost_usd", -0.01),
         ("claude", "command", ""),
         ("claude", "max_budget_usd", 0),
         ("claude", "turn_timeout_ms", 0),
@@ -136,6 +138,12 @@ def test_constraints_reject_out_of_range_values(section: str, field: str, value:
 def test_zero_conflict_reworks_is_the_off_switch() -> None:
     s = Settings.model_validate({**MINIMAL, "agent": {"max_conflict_reworks": 0}})
     assert s.agent.max_conflict_reworks == 0
+
+
+def test_the_per_issue_spend_ceiling_is_a_float_and_zero_is_off() -> None:
+    s = Settings.model_validate({**MINIMAL, "agent": {"max_issue_cost_usd": 25}})
+    assert s.agent.max_issue_cost_usd == 25.0
+    assert Settings.model_validate({**MINIMAL}).agent.max_issue_cost_usd == 0.0
 
 
 @pytest.mark.parametrize("mode", ["auto", "acceptEdits", "dontAsk", "bypassPermissions"])
@@ -185,7 +193,9 @@ def test_settings_are_frozen() -> None:
 def test_phase_three_defaults() -> None:
     s = Settings.model_validate(MINIMAL)
     assert s.agent.self_review is True
-    assert s.claude.setting_sources is None
+    # The deployment's own settings and nothing from the clone (#107).
+    assert s.claude.setting_sources == ["user"]
+    assert s.claude.loads_clone_settings is False
 
 
 def test_self_review_can_be_disabled() -> None:
@@ -196,17 +206,26 @@ def test_self_review_can_be_disabled() -> None:
 def test_setting_sources_accepts_known_sources() -> None:
     s = Settings.model_validate({**MINIMAL, "claude": {"setting_sources": ["project", "local"]}})
     assert s.claude.setting_sources == ["project", "local"]
+    # Naming the clone is the opt-in `validate` warns about (#107).
+    assert s.claude.loads_clone_settings is True
+    assert (
+        Settings.model_validate(
+            {**MINIMAL, "claude": {"setting_sources": ["user"]}}
+        ).claude.loads_clone_settings
+        is False
+    )
 
 
 @pytest.mark.parametrize(
     ("value", "needle"),
     [
         ([], "at least one source"),
+        (None, "omit it for \\[user\\]"),
         (["project", "project"], "repeat"),
         (["global"], "user"),
     ],
 )
-def test_setting_sources_rejects_bad_values(value: list[str], needle: str) -> None:
+def test_setting_sources_rejects_bad_values(value: object, needle: str) -> None:
     with pytest.raises(ValidationError, match=needle) as exc:
         Settings.model_validate({**MINIMAL, "claude": {"setting_sources": value}})
     assert any(loc.startswith("claude.setting_sources") for loc in _locs(exc.value))

@@ -10,6 +10,7 @@ from typing import Any
 from jinja2 import Environment, StrictUndefined, Template, TemplateError
 
 from issuebot.agent.errors import AgentError
+from issuebot.agent.instructions import RepositoryFile
 from issuebot.config import GitHubLabels
 from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
 
@@ -242,11 +243,18 @@ class PromptContext:
     # comment, or ``None`` when there is none yet. The template follows this rather than
     # finding the comment by its first line, which anyone can write.
     workpad: Comment | None = None
+    # The clone's own instruction files as issuebot read them before the run (#107):
+    # ``CLAUDE.md`` and ``AGENTS.md`` at its root, each rendered inside the envelope, since
+    # ``claude`` is no longer allowed to load them as its own configuration.
+    repo_instructions: tuple[RepositoryFile, ...] = ()
 
     def to_variables(self) -> dict[str, Any]:
         return {
             "issue": issue_variables(self.issue),
             "repo": self.repo,
+            "repo_instructions": [
+                instruction_variables(file, self.repo) for file in self.repo_instructions
+            ],
             "labels": {
                 **{role.value: getattr(self.labels, role.value) for role in StateLabel},
                 "no_fault": self.labels.no_fault,
@@ -308,6 +316,24 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
         "closed_at": _iso(issue.closed_at),
         "dispatchable": issue.dispatchable,
         "pr": _pr_variables(issue.linked_pr),
+    }
+
+
+def instruction_variables(file: RepositoryFile, repo: str) -> dict[str, Any]:
+    """One of the clone's instruction files as the template sees it.
+
+    The text is ``GitHubText`` like the issue's body: the file was committed to the
+    repository by whoever could merge to it, which the envelope's ``author`` says in as many
+    words, since no one login wrote it. A cut file's source says how much of it this is.
+    """
+    source = f"{file.path} in the clone of {repo}"
+    if file.truncated:
+        source += f", first {file.carried} bytes of {file.size}"
+    return {
+        "path": file.path,
+        "text": GitHubText(file.text, source=source, author=f"whoever can merge to {repo}"),
+        "size": file.size,
+        "truncated": file.truncated,
     }
 
 

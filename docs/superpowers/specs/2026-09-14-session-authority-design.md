@@ -133,8 +133,8 @@ what the session may do within them.
   named, confines the file tools to the working directories, refuses `bypassPermissions` and
   lets only a person or the permission handler approve writes to settings, git and
   tool-configuration files. Whether `MIN_CLAUDE_VERSION` has it is not known from here, and it
-  ignores the project settings `setting_sources: [project]` promises to load, so it is a
-  decision rather than a default; filed as #127.
+  ignores the project settings `setting_sources` would load when an operator names
+  `project`, so it is a decision rather than a default; filed as #127.
 - **The Claude credential.** It is the session's own and stays so (#75, "What this does not
   do").
 - **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare,
