@@ -19,25 +19,44 @@ from issuebot.db import (
 URL = "postgresql://issuebot:s3cret@db.example:5433/issuebot?sslmode=require"
 
 
+KEYWORDS = "host=db port=5432 user=issuebot password=s3cretpassword dbname=issuebot"
+
+
 def test_is_postgres_url_accepts_both_schemes_and_rejects_others() -> None:
     assert is_postgres_url(URL)
     assert is_postgres_url("postgres://u@h/db")
     assert not is_postgres_url("mysql://u@h/db")
     assert not is_postgres_url("not a url")
     assert not is_postgres_url("http://[bad")
+    # #105: the spellings that parse as *something* under urlsplit but are not a URL.
+    assert not is_postgres_url(KEYWORDS)
+    assert not is_postgres_url("postgresql:host=db password=s3cretpassword")
+    assert is_postgres_url("postgresql://u@h:notaport/db")  # libpq's error, at connect time
 
 
 def test_describe_drops_the_password_and_keeps_the_rest() -> None:
     assert describe(URL) == "postgresql://issuebot@db.example:5433/issuebot"
     assert describe("postgresql://db/issuebot") == "postgresql://db/issuebot"
     assert describe("postgresql://[bad") == REDACTED
-    assert describe("postgresql://u@h:notaport/db") == REDACTED
+    assert describe("postgresql://u:s3cret@h:notaport/db") == "postgresql://u@h:notaport/db"
+    assert describe(KEYWORDS) == REDACTED
 
 
 def test_redact_removes_the_url_and_the_bare_password() -> None:
     text = f"connection to {URL} failed: password s3cret rejected"
     assert redact(text, URL) == f"connection to {REDACTED} failed: password {REDACTED} rejected"
     assert redact("nothing here", URL) == "nothing here"
+
+
+def test_redact_masks_the_password_of_a_keyword_value_dsn_too() -> None:
+    """#105: the spelling ``Database`` refuses is still masked in the line that refuses it,
+    and wherever else it was quoted; the placeholder for the whole DSN and for the bare value."""
+    text = f"connection to {KEYWORDS} failed: password s3cretpassword rejected"
+    assert redact(text, KEYWORDS) == (
+        f"connection to {REDACTED} failed: password {REDACTED} rejected"
+    )
+    query = "postgresql://issuebot@db/issuebot?password=s3cretpassword"
+    assert redact("bad s3cretpassword", query) == f"bad {REDACTED}"
 
 
 def test_redact_copes_without_a_password_or_with_a_malformed_url() -> None:

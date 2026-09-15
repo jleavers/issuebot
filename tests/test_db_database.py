@@ -6,7 +6,7 @@ import psycopg
 import pytest
 
 from issuebot.config import GitHubLabels
-from issuebot.db import StoreUnavailableError
+from issuebot.db import DatabaseError, StoreUnavailableError
 from issuebot.db.database import Database, Probe
 from issuebot.db.listen import RefreshListener
 from issuebot.db.store import PostgresStore
@@ -20,6 +20,25 @@ async def refuse(url: str) -> Any:
 
 def test_description_hides_the_password() -> None:
     assert Database(URL).description == "postgresql://issuebot@db.example:5433/issuebot"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "host=db.example port=5433 user=issuebot password=s3cret dbname=issuebot",
+        "postgresql:host=db.example password=s3cret",
+        "mysql://issuebot:s3cret@db.example/issuebot",
+    ],
+)
+def test_anything_but_a_postgres_url_is_refused_before_connecting(url: str) -> None:
+    """#105: psycopg would take libpq's keyword/value form, but ``describe`` cannot take it
+    apart without the password, so the facade -- the path every command takes -- refuses it
+    with a message that names the rule and never the value."""
+    with pytest.raises(DatabaseError) as info:
+        Database(url, connect=refuse)
+    assert "postgresql:// URL" in info.value.message
+    assert "s3cret" not in info.value.message
+    assert "db.example" not in info.value.message
 
 
 def test_store_and_listener_are_built_with_the_url() -> None:
