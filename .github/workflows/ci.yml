@@ -80,6 +80,11 @@ jobs:
             # worker-only checkout configures without it, and with it every profile does.
             COMPOSE_PROFILES=$profiles ISSUEBOT_DB_PASSWORD=ci-only ISSUEBOT_WEB_PASSWORD=ci-only docker compose config --quiet
           done
+          # The dashboard runs as its own account (#102): the compose side of the choice, that
+          # the service selects `web` rather than inheriting the image's `USER issuebot`. The
+          # image side -- that the account exists and cannot invoke sudo -- is proved below.
+          test "$(COMPOSE_PROFILES=hub ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r .services.web.user)" = web
+          test "$(COMPOSE_PROFILES=worker ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r '.services.worker.user // "none"')" = none
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
@@ -129,9 +134,11 @@ jobs:
           fi
           docker run --rm --user agent --entrypoint sh issuebot:ci -c '
             set -eu
-            test ! -w /app && test ! -w /app/.venv/bin/python
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
             test ! -w "$(readlink -f /usr/local/bin/claude)"
-            test ! -r /home/issuebot && test ! -x /home/issuebot
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
             test ! -r /etc/sudoers.d/issuebot
           '
           docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -w /app; test ! -r /home/agent'
@@ -194,6 +201,48 @@ jobs:
               echo "a session entered a sealed workspace bound to its own account" >&2; exit 1
             fi
           '
+      # The dashboard is a third account (#102): compose runs the `web` service as `web` (1002),
+      # which takes HTTP from a browser and needs no privilege transition, so it gets none. The
+      # sudo binary is executable by root and group issuebot alone, so as `web` the delegation
+      # fails the way it fails as the session's account -- and `test -x` says why, that it is
+      # not even executable rather than refused. Neither home, the sudoers drop-in nor the
+      # worker's code is reachable from it. One `test` per line throughout: under `set -e` only
+      # the last command of an AND list is enforced, so `test A && test B` asserts B alone.
+      # The last line starts the app under it for real, as far as a database it has none of:
+      # `[FAIL] database: cannot connect:` is the CLI's own line (`not configured` is the same
+      # prefix printed before any attempt, which is why the grep names the connect), printed
+      # after the interpreter, the package
+      # and the web's dependencies have all loaded as uid 1002 and `cmd_web` has run to the
+      # connection attempt, which is the one thing the account has to be able to do. Captured
+      # and grepped rather than piped, since the job's shell has no pipefail.
+      - name: the dashboard's account is a third one and cannot invoke sudo
+        run: |
+          test "$(docker run --rm --user web --entrypoint id issuebot:ci -u)" = 1002
+          test "$(docker run --rm --user web --entrypoint id issuebot:ci -Gn)" = web
+          if docker run --rm --user web --entrypoint sudo issuebot:ci -n -u agent id -u; then
+            echo "the dashboard's account can invoke sudo" >&2; exit 1
+          fi
+          docker run --rm --user web --entrypoint sh issuebot:ci -c '
+            set -eu
+            test ! -x /usr/bin/sudo
+            test ! -r /etc/sudoers.d/issuebot
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
+            test ! -r /home/agent
+            test ! -x /home/agent
+            test "$HOME" = /home/web
+            test -w "$HOME"
+          '
+          docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
+          docker run --rm --user agent --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
+          if docker run --rm --user web -e ISSUEBOT_WEB_PASSWORD=ci-only \
+               -e DATABASE_URL=postgresql://issuebot@127.0.0.1:1/issuebot \
+               issuebot:ci web > /tmp/web-start.txt 2>&1; then
+            echo "the dashboard started against a dead database" >&2; exit 1
+          fi
+          grep -q '^\[FAIL\] database: cannot connect: ' /tmp/web-start.txt
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious

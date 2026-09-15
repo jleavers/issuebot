@@ -167,6 +167,15 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # The pool accounts get a `.claude` of their own and no volume: a pool shares no login between
 # its accounts on purpose, and takes its credential from the environment instead (#121, the
 # spec). `agent` keeps /home/agent/.claude, which is where compose mounts `claude-home`.
+# A third kind of account, `web` (uid 1002), for the dashboard (#102). compose builds the `web`
+# service from this image and selects it with `user: web`; nothing in the image runs as it by
+# default, since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP
+# from a browser and needs no privilege transition at all, so it must not carry the worker's:
+# outside group issuebot it cannot execute sudo, and outside group `agents` the rule names
+# nothing it could become; it owns nothing the worker or a session writes -- its home is closed
+# to all of them and theirs to it, and /app is root's. `nologin` because no shell is ever opened
+# as it: `issuebot web` is the one process, and a `docker compose exec web` still runs whatever
+# command it names.
 # The split needs one thing of git. A workspace directory is the worker's and sticky, so the
 # session cannot unlink the state kept there, while the clone inside it is the session's own --
 # and git refuses to work in a repository whose worktree belongs to another account (`detected
@@ -185,6 +194,7 @@ RUN set -eu; \
     groupadd --system agents; \
     useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
     useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
+    useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
     for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
       useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
     done; \
@@ -193,7 +203,7 @@ RUN set -eu; \
       install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
       usermod --append --groups "${account}" issuebot; \
     done; \
-    chmod 0750 /home/issuebot; \
+    chmod 0750 /home/issuebot /home/web; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
     git config --system --add safe.directory '/workspaces/*'; \
     printf '%s\n' \

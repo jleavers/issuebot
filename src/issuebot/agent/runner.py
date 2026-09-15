@@ -516,6 +516,7 @@ class StreamParser:
 AUTH_FAILURE_MARKERS: tuple[str, ...] = (
     "authentication_error",
     "authentication failed",
+    "failed to authenticate",
     "invalid api key",
     "invalid x-api-key",
     "invalid_api_key",
@@ -524,8 +525,15 @@ AUTH_FAILURE_MARKERS: tuple[str, ...] = (
     "claude auth login",
 )
 # The OAuth family says the same thing too many ways to list ("has expired", "is invalid",
-# "was revoked", ...), so a token word and a verdict word co-occurring is the marker.
-AUTH_TOKEN_WORDS: tuple[str, ...] = ("oauth token", "bearer token", "access token")
+# "was revoked", ...), so a token word and a verdict word co-occurring is the marker. What
+# lapses is not always spelled "token": a login whose refresh is refused reports the *session*
+# gone ("OAuth session expired and could not be refreshed", the live wording on 2026-09-14).
+AUTH_TOKEN_WORDS: tuple[str, ...] = (
+    "oauth token",
+    "oauth session",
+    "bearer token",
+    "access token",
+)
 AUTH_VERDICT_WORDS: tuple[str, ...] = ("expire", "invalid", "revoke", "unauthorized")
 
 
@@ -555,8 +563,16 @@ def classify_result(
 
     ``stderr_tail`` is the end of the turn's stderr. Every failure reads it for a credential
     problem (#20), and reports its last line; a result's own text is read for one only when
-    the subtype says claude failed, because a "success" result carries the agent's final
+    claude itself failed, because a "success" result normally carries the agent's final
     message, which may discuss API keys without one having failed.
+
+    "Claude itself failed" is the subtype saying so *or* a non-zero exit status, not the
+    subtype alone: a login whose refresh is refused arrives as ``subtype: "success"`` with
+    ``is_error`` and status 1, carrying claude's own sentence rather than the agent's (a live
+    worker, 2026-09-14). Reading only the subtype made ``auth_failed`` unreachable for the
+    commonest lapse there is, so every issue on the board burned ``max_attempts`` and the
+    dispatch hold that should have parked it never engaged. The agent's own final message is
+    still never mined for markers: that is the status-0 case, and it stays ``turn_failed``.
 
     The message is built from claude's own words, and it leaves the workspace without passing
     ``capture_turns`` (#91): it becomes the run's ``error``, which reaches the ``events`` and
@@ -576,7 +592,7 @@ def classify_result(
     if subtype == "error_max_budget_usd":
         return "budget_exceeded", text or "claude stopped at the --max-budget-usd cap"
     if is_error or subtype != "success":
-        if subtype != "success" and is_auth_failure(text):
+        if (subtype != "success" or exit_code != 0) and is_auth_failure(text):
             auth = True
         return (
             "auth_failed" if auth else "turn_failed",
