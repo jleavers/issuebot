@@ -71,9 +71,10 @@ def no_sweep_outside_the_suite(
 
     A test that means to sweep points ``pwd.getpwnam`` at an account under ``tmp_path`` first
     (see ``_account_home`` in ``tests/test_agent_runas.py``); anything else is a mistake, and it
-    fails here, before the delegation, rather than on somebody's machine. A sweep whose account
-    is this process's own is left alone: ``sweep_home`` refuses that itself, before it removes
-    anything, so there is nothing to guard and a test may be proving exactly that. Under the guard
+    fails here, before the delegation, rather than on somebody's machine. Every target is
+    checked, one whose account is this process's own included: ``sweep_home`` refuses that one
+    itself, but a net that trusted the line it is netting would be no net -- a one-line
+    regression there would cost a developer their dotfiles with a green suite. Under the guard
     rather than a fake ``sudo`` on ``PATH``: a fake that changed no uid would run the real
     sweep against the real home just as happily.
     """
@@ -84,14 +85,9 @@ def no_sweep_outside_the_suite(
 
     def guarded(self: Any, home: Path | None = None) -> bool:
         try:
-            account = self.account()
+            target = home if home is not None else Path(self.account().pw_dir)
         except OSError:  # RunAsError: no such account, which sweep_home reports itself
             return real(self, home)
-        if account.pw_uid == os.getuid():
-            # The account is this process's own, so `sweep_home` refuses before it removes
-            # anything: nothing to guard, and a test may well be proving that refusal.
-            return real(self, home)
-        target = home if home is not None else Path(account.pw_dir)
         if not target.resolve().is_relative_to(suite_tmp):
             raise AssertionError(
                 f"the suite aimed the home sweep at {target}, outside {suite_tmp}: "

@@ -90,6 +90,12 @@ The issue offered three routes. The sweep is the one taken.
 - **Not leaving the start-up files in place and root-owned.** The home is the account's and
   writable, so the account can unlink a root-owned file in it and write its own.
 
+The cost is one extra `sudo` and interpreter spawn per hook — four or five per run, tenths of a
+second each, against hooks whose own timeout is `hooks.timeout_ms` (60 s by default) — including
+before `after_run` and `before_remove`, where no new session is about to read the home. Paid
+unconditionally for the same reason the per-turn sweep is: which hook could be the one a plant
+outlives is not something the seam should be deciding.
+
 ## Residuals
 
 - **The denylist**, as in #101: a shell issuebot does not run today (`zsh`'s `~/.zshenv`, say) is
@@ -113,6 +119,13 @@ The issue offered three routes. The sweep is the one taken.
   (`ProxyCommand`) are the same shape one tool further out, and neither is a shell start-up file;
   out of this issue's scope, filed as #151 rather than folded in.
 
+- **`~/.claude/shell-snapshots/`**, which the config sweep deliberately keeps as claude's own
+  runtime state, is the one thing left under the home that a Bash tool sources. Claude writes a
+  fresh snapshot per session rather than reading one it finds, so a planted file is not offered
+  to the next session the way a `~/.profile` was; named here because the criterion says "hook or
+  Bash tool" and because that is a fact about claude's behaviour rather than something issuebot
+  enforces.
+
 - **`~/.claude.json`**, unchanged from #101 and #119: claude's own file, kept by a denylist that
   does not name it, with its one executable surface closed by `--strict-mcp-config`.
 
@@ -131,11 +144,13 @@ reused workspace, that the run's first login shell is still `before_run`'s and s
 is the case the pool's "first sweep of the run" rests on and the one a regression that moved the
 call into workspace creation would pass without.
 The refusal has its own test (a sweep aimed at the caller's own account removes nothing and never
-reaches sudo), and `tests/conftest.py` carries an autouse guard behind all of it: a sweep that
-would really run and is aimed outside the suite's `tmp_path` fails the test rather than a
-developer's home. The guard is why the new call site is safe to add — `_run_script` means any
-future test that runs a hook under `agent.run_as` reaches a real `sweep_home`, whose delegation
-resolves `sudo` from the developer's own `PATH` rather than from the environment a test built.
+reaches sudo), and `tests/conftest.py` carries an autouse guard behind all of it: a sweep aimed
+outside the suite's `tmp_path` fails the test, before the delegation, rather than a developer's
+home. Every target is checked, the caller's own account included — the refusal would stop that
+one anyway, but a net that trusted the line it is netting would be no net. Both are needed
+because of the new call site: `_run_script` means any future test that runs a hook under
+`agent.run_as` reaches a real `sweep_home`, whose delegation resolves `sudo` from the developer's
+own `PATH` rather than from the environment the test built.
 `tests/test_image_layout.py` pins the CI step. The CI `docker` job proves it in the real image,
 the real uid split and the real home, through the worker's own `RunAs("agent").sweep_home()`: the
 same `bash -lc` runs before the sweep, where the plant must run, and after it, where it must not,

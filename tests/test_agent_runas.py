@@ -568,9 +568,12 @@ def test_sweep_home_defaults_to_the_accounts_own_home(
 
 
 def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert RunAs("no-such-account-x", sudo=FAKE_SUDO).sweep_home() is False
+    # The account is substituted so the second call reaches the delegation rather than stopping
+    # at the refusal above: what is under test is a `sudo` that cannot run, reported not raised.
+    _account_home(monkeypatch, tmp_path / "home")
     assert RunAs(ME, sudo="/no/such/sudo").sweep_home(tmp_path / "nonexistent") is False
 
 
@@ -781,11 +784,6 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
 async def test_workspace_creation_and_removal_run_as_the_account(
     tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Creation runs the post-clone setup and `after_create`, and every script in a login shell
-    # sweeps the account's home first (#137). Here that account is this process's own, so
-    # `sweep_home` refuses it and nothing is removed -- which is the whole reason it refuses:
-    # a delegation that does not separate is one that would be unlinking the caller's own
-    # dotfiles. (`no_sweep_outside_the_suite` in conftest fails any test that gets past that.)
     root = tmp_path / "workspaces"
     cfg = Settings.model_validate(
         {
@@ -802,12 +800,11 @@ async def test_workspace_creation_and_removal_run_as_the_account(
         environ=base_env(HOME=str(tmp_path), CLAUDE_SUDO_RECORD=str(record)),
         hook_shell=("bash", "-c"),
     )
-    # The spawns resolve `sudo` from the environment above, where the fake comes first; the
-    # sweep's delegation does not (`subprocess.run` with no `env=`), so it is pointed at the
-    # fake by hand. The removal below is left as it was, on the real `sudo`: with one uid a
-    # delegated removal that actually ran would unlink the worker's own directory too, which
-    # it cannot do where the accounts differ.
-    monkeypatch.setattr(manager, "_runas", RunAs(ME, sudo=FAKE_SUDO))
+    # Creation runs the post-clone setup and `after_create`, and every script in a login shell
+    # sweeps the account's home first (#137). That is proved above, on a home under `tmp_path`;
+    # this test is about the workspace, and the account it names is the one running the suite,
+    # so it performs no sweep at all rather than aiming one anywhere near a real home.
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert ws.created and (ws.path / ".git").is_dir()
     state = ws.path / ".issuebot"

@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -611,33 +611,32 @@ async def test_the_session_sweeps_the_agent_home_before_every_turn_and_every_hoo
     starts. Recorded here so deleting either call, or moving the turn one back to once per
     session, fails.
 
-    Each entry is appended when the thing it names has *happened*, so the list is the order
-    the session ran them in: a hook's own sweep is the entry before it.
+    A script is recorded where it is spawned (`_run_argv`, which `_run_script` reaches after
+    its sweep) and a turn where it runs, so the list is the order things happened in and a
+    sweep that moved to *after* the shell it protects would show up here as one.
     """
     h = Harness(tmp_path, max_turns=3, hooks={"before_run": "true", "after_run": "true"})
     order: list[str] = []
-    real_hook = h.workspaces.run_hook
+    real_argv = h.workspaces._run_argv
 
     async def record_sweep() -> None:
         order.append("sweep")
 
-    async def record_hook(name: str, path: Path) -> object:
-        result = await real_hook(name, path)
+    async def record_spawn(name: str, argv: Sequence[str], workspace: Path) -> object:
         order.append(name)
-        return result
+        return await real_argv(name, argv, workspace)
 
     monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
-    monkeypatch.setattr(h.workspaces, "run_hook", record_hook)
+    monkeypatch.setattr(h.workspaces, "_run_argv", record_spawn)
     runner = ScriptedRunner(on_turn=lambda n: order.append(f"turn{n}"))
     await h.run(runner)
-    # The first sweep is the post-clone setup's: that is a `bash -lc` script too, and the
-    # session's first command at its own uid (`_run_script` is the seam, so hooks and setup
-    # alike sweep first). `after_create` is the workspace's own hook, configured with nothing
-    # here -- so it opens no shell and takes no sweep of its own, which is the entry missing
-    # between the two below.
+    # The first script is the post-clone setup: a `bash -lc` script too, and the session's
+    # first command at its own uid, so it sweeps like a hook does (`_run_script` is the seam).
+    # `after_create` is the workspace's own hook, configured with nothing here, so it opens no
+    # shell and takes no sweep -- two scripts before the loop, two sweeps, and no third.
     assert order == [
         "sweep",
-        "after_create",
+        "post_clone",
         "sweep",
         "before_run",
         "sweep",
@@ -661,15 +660,14 @@ async def test_a_reused_workspace_still_sweeps_before_its_first_hook(
     h = Harness(tmp_path, max_turns=1, hooks={"before_run": "true"})
     await h.run(ScriptedRunner())
     order: list[str] = []
-    real_hook = h.workspaces.run_hook
+    real_argv = h.workspaces._run_argv
 
     async def record_sweep() -> None:
         order.append("sweep")
 
-    async def record_hook(name: str, path: Path) -> object:
-        result = await real_hook(name, path)
+    async def record_spawn(name: str, argv: Sequence[str], workspace: Path) -> object:
         order.append(name)
-        return result
+        return await real_argv(name, argv, workspace)
 
     clones: list[list[str]] = []
     real_gh = h.gh.run
@@ -679,7 +677,7 @@ async def test_a_reused_workspace_still_sweeps_before_its_first_hook(
         return await real_gh(args, stdin=stdin)
 
     monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
-    monkeypatch.setattr(h.workspaces, "run_hook", record_hook)
+    monkeypatch.setattr(h.workspaces, "_run_argv", record_spawn)
     monkeypatch.setattr(h.gh, "run", counting)
     await h.run(ScriptedRunner(on_turn=lambda n: order.append(f"turn{n}")))
     # Nothing was cloned the second time, so the workspace really was reused -- and the run's
