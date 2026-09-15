@@ -188,13 +188,24 @@ floor, not the shipped version, and moves by hand.
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
   two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
-  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `commands`,
-  `agents`, `plugins`, `output-styles`, `settings.json`, `settings.local.json`, the surfaces a
-  later `claude -p` loads as instructions or behaviour, keeping `.credentials.json` (the volume
-  stays writable for the rotating refresh token) and claude's own per-session runtime
-  (`projects`/`sessions`/... transcripts, whose removal would break a concurrent session's
-  `--resume`). `WorkspaceManager.sweep_agent_home()` delegates it once per session, before the
-  first turn, from `session._execute`; a no-op on the host route (`run_as` unset), where the
+  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
+  `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
+  `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
+  (`projects/<project>/memory`, walked without following a symlink at either level), the
+  surfaces a later `claude -p` loads as instructions or behaviour (pinned against the
+  `claude-directory` docs by `test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads`).
+  A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
+  for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
+  `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
+  among them. The shipped `setting_sources: [project]` already gates the `user` source
+  (`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`), but the setting
+  defaults to every source and the rest are outside the flag's table, so the sweep runs
+  regardless; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
+  an option: it never reads the OAuth credential the login recipe writes.
+  `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
+  `session._turn_loop`, since concurrent sessions re-read the home each turn and the `before_run`
+  hook runs as the account too; a no-op on the host route (`run_as` unset), where the
   home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`

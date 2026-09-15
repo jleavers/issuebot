@@ -252,8 +252,8 @@ class WorkspaceManager:
             raise AgentError("workspace_error", f"clone produced no repository at {path}")
 
     async def sweep_agent_home(self) -> None:
-        """Clear the loadable config a prior session may have left in the account's shared
-        ``~/.claude`` before this session's first turn (#101).
+        """Clear the loadable config a prior or concurrent session may have left in the
+        account's shared ``~/.claude``, immediately before each of this session's turns (#101).
 
         Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
         left untouched, and the container is the boundary regardless. Off the event loop, since

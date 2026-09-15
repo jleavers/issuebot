@@ -46,24 +46,43 @@ REMOVE_TIMEOUT_S = 120
 # The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
 # instructions or behaviour, and that a session must therefore not leave behind for the next
 # one at the same uid (#101). The home is a shared volume (``claude-home``) across every
-# session and repository, so a slash command, subagent, plugin, output style, memory file or
-# settings a hostile issue plants would otherwise be read by an unrelated session next week.
-# ``--setting-sources project`` (the default workflow) keeps ``settings.json`` out of a turn,
-# but nothing gates the others; they are swept regardless as defence in depth. The credential
-# (``.credentials.json``, which rotates its refresh token) and claude's own per-session runtime
-# state (``projects``/``sessions``/``shell-snapshots``/... -- transcripts, not instructions) are
-# deliberately absent: the volume must stay writable for the token, and wiping live runtime
-# would break a concurrent session's ``--resume``. A new claude config location has to be added
-# here by hand, which is the residual this denylist accepts over a whole-home allowlist.
+# session and repository, so a slash command, skill, rule, subagent, workflow, plugin, output
+# style, memory file or settings a hostile issue plants would otherwise be read by an unrelated
+# session next week. The shipped workflow's ``setting_sources: [project]`` already keeps the
+# ``user`` source out of a turn -- ``settings.json``, ``CLAUDE.md``, ``rules``, ``skills``,
+# ``commands`` and ``agents`` -- but the setting defaults to unset (every source), an overlay can
+# drop the pin, and ``plugins``, ``output-styles``, ``workflows`` and ``agent-memory`` are not in
+# that flag's table at all, so the whole list is swept regardless: the flag is a workflow's
+# choice and the sweep is the worker's. Auto memory (``projects/<project>/memory/``) is read
+# whatever the flag says and keyed by repository, so a session working one issue seeds every
+# later session on the same repository; it is swept below by ``CLAUDE_HOME_MEMORY_DIR`` and
+# never written in the first place, since ``FIXED_ENVIRONMENT`` (``runner.py``) sets
+# ``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``. The credential (``.credentials.json``, which rotates
+# its refresh token) and claude's own per-session runtime state
+# (``projects/<project>/*.jsonl``/``sessions``/``shell-snapshots``/... -- transcripts, not
+# instructions) are deliberately absent: the volume must stay writable for the token, and
+# wiping live runtime would break a concurrent session's ``--resume``. A denylist, not an
+# allowlist: everything it does not name is left alone, and a new claude config location has
+# to be added here by hand, which is the residual accepted over a whole-home allowlist that
+# would fail the other way, by wiping a runtime directory claude adds.
 CLAUDE_HOME_SWEEP: tuple[str, ...] = (
     "CLAUDE.md",
+    "rules",
+    "skills",
     "commands",
     "agents",
+    "workflows",
+    "agent-memory",
     "plugins",
     "output-styles",
     "settings.json",
     "settings.local.json",
 )
+# Auto memory sits beside the transcripts it must not take with it: ``projects/<project>/`` holds
+# the session ``.jsonl`` files (kept) and a ``memory/`` directory (swept). Named as the two path
+# components rather than a glob, so the sweep walks ``projects`` itself and can refuse to follow
+# a symlink at either level.
+CLAUDE_HOME_MEMORY_DIR: tuple[str, str] = ("projects", "memory")
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -322,20 +341,35 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
+def _sweep_targets(claude_dir: Path) -> Iterator[Path]:
+    """Every path the sweep removes under ``claude_dir``: the named surfaces and each project's
+    auto memory directory. A symlinked ``projects`` or project entry is skipped rather than
+    followed, so a link a session planted cannot aim the removal outside the home."""
+    yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
+    projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
+    projects = claude_dir / projects_name
+    if projects.is_symlink() or not projects.is_dir():
+        return
+    with contextlib.suppress(OSError):
+        for project in projects.iterdir():
+            if not project.is_symlink() and project.is_dir():
+                yield project / memory_name
+
+
 def _sweep(claude_dir: Path) -> None:
-    """Remove the loadable config surfaces under ``claude_dir`` (``CLAUDE_HOME_SWEEP``).
+    """Remove the loadable config surfaces under ``claude_dir`` (``CLAUDE_HOME_SWEEP`` and
+    each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
     Keeps the credential and claude's own runtime state by naming only what it removes.
     Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
     unlinked rather than followed, so the tree it points at is never touched.
     """
-    for name in CLAUDE_HOME_SWEEP:
-        target = claude_dir / name
+    for target in _sweep_targets(claude_dir):
         with contextlib.suppress(OSError):
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target, onexc=lambda *_: None)
-            else:
+            if target.is_symlink() or not target.is_dir():
                 target.unlink()
+            else:
+                shutil.rmtree(target, onexc=lambda *_: None)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

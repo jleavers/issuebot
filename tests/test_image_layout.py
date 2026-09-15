@@ -2,7 +2,8 @@
 
 This session cannot build the image; the CI ``docker`` job runs the checks. This pins the
 shape those checks depend on, so a drift in the Dockerfile, the compose file or the job
-itself fails here first. The dashboard's account (#102) is pinned the same way.
+itself fails here first. The dashboard's account (#102) and the sweep of the session's shared
+``~/.claude`` (#101) are pinned the same way.
 """
 
 import re
@@ -58,12 +59,19 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
 
 def test_ci_proves_the_session_home_sweep() -> None:
     """The shared ``~/.claude`` config a session plants is swept before the next session, and
-    the credential and runtime state are kept (#101). Proved in the image, where the uid split
-    and the volume are real."""
-    assert "issuebot.agent.runas sweep /home/agent/.claude" in CI
-    assert "echo poison > /home/agent/.claude/commands/evil.md" in CI
-    assert "test ! -e /home/agent/.claude/commands" in CI
-    assert "test -f /home/agent/.claude/.credentials.json" in CI
+    the credential and transcripts are kept (#101). Proved in the image, where the uid split
+    and the home are real, and through ``RunAs.sweep_home`` with its default target, so the
+    worker's own code path is what passes -- not the helper verb run by hand."""
+    assert 'RunAs(\\"agent\\").sweep_home()' in CI
+    assert "issuebot.agent.runas sweep" not in CI
+    assert "cd /home/agent/.claude" in CI
+    for planted in ("commands", "skills", "rules", "projects/-workspaces-issuebot-7/memory"):
+        assert f"test ! -e {planted}" in CI, planted
+    assert "echo poison > commands/evil.md" in CI
+    assert "echo poison > skills/evil/SKILL.md" in CI
+    assert "echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md" in CI
+    assert "test -f .credentials.json" in CI
+    assert "test -f projects/-workspaces-issuebot-7/keep.jsonl" in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:

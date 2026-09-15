@@ -532,22 +532,40 @@ async def test_prompt_error_fails_before_any_turn(tmp_path: Path) -> None:
     assert h.kinds() == ["run_started", "run_ended"]
 
 
-async def test_the_session_sweeps_the_agent_home_before_the_first_turn(
+async def test_the_session_sweeps_the_agent_home_before_every_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The wiring that makes #101 real: every session clears the shared ~/.claude config once,
-    before the first claude turn. Recorded here so deleting the call in `_execute` fails."""
-    h = Harness(tmp_path)
+    """The wiring that makes #101 real: the shared ~/.claude config is cleared immediately
+    before every claude turn, the first included, so what a prior session, the before_run
+    hook or a concurrent session planted is gone when `claude -p` starts. Recorded here so
+    deleting the call in `_turn_loop`, or moving it back to once per session, fails."""
+    h = Harness(tmp_path, max_turns=3, hooks={"before_run": "true", "after_run": "true"})
     order: list[str] = []
+    real_hook = h.workspaces.run_hook
 
     async def record_sweep() -> None:
         order.append("sweep")
 
+    async def record_hook(name: str, path: Path) -> object:
+        order.append(name)
+        return await real_hook(name, path)
+
     monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
-    runner = ScriptedRunner("ok", on_turn=lambda n: order.append(f"turn{n}"))
+    monkeypatch.setattr(h.workspaces, "run_hook", record_hook)
+    runner = ScriptedRunner(on_turn=lambda n: order.append(f"turn{n}"))
     await h.run(runner)
-    assert order[:2] == ["sweep", "turn1"]
-    assert order.count("sweep") == 1
+    # `after_create` is the workspace's own hook, run at creation (its shell is a no-op here).
+    assert order == [
+        "after_create",
+        "before_run",
+        "sweep",
+        "turn1",
+        "sweep",
+        "turn2",
+        "sweep",
+        "turn3",
+        "after_run",
+    ]
 
 
 async def test_before_run_failure_is_hook_error(tmp_path: Path) -> None:

@@ -272,11 +272,6 @@ async def _execute(
     state.workspace_path = workspace.path
     state.log_dir = run_log_dir(workspace.path, state.run_id)
     try:
-        # Before any claude turn, and inside the guarded region so after_run still runs should a
-        # future change make it raise: a prior session in this or another repository shares the
-        # account's ~/.claude, so clear the config surfaces it could have planted there (#101).
-        # Total today, so a sweep that cannot run costs one session its hygiene, never the run.
-        await workspaces.sweep_agent_home()
         hook = await workspaces.run_hook("before_run", workspace.path)
         if hook is not None and not hook.ok:
             state.fail("hook_error", f"before_run hook failed: {hook.summary}")
@@ -349,6 +344,13 @@ async def _turn_loop(
         except AgentError as exc:
             state.fail(exc.category, exc.message)
             return
+        # Immediately before every `claude -p`, not once per session: the account's ~/.claude is
+        # shared with a prior session in this or another repository, and with the sessions
+        # running beside this one, each of which re-reads it on every turn. A sweep here clears
+        # what any of them planted and leaves the smallest window a concurrent one can plant
+        # into (#101). Total today, so a sweep that cannot run costs a turn its hygiene, never
+        # the run.
+        await workspaces.sweep_agent_home()
         turn = await runner.run_turn(
             prompt=prompt,
             workspace=workspace,
