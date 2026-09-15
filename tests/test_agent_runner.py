@@ -16,6 +16,7 @@ from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
+    PROTECTED_ENV_NAMES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -239,7 +240,17 @@ def test_agent_environment_passes_only_the_allowed_names() -> None:
         "NO_COLOR": "1",
         "GH_PAGER": "cat",
         "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     }
+
+
+def test_agent_environment_turns_auto_memory_off_and_a_hook_cannot_turn_it_back_on() -> None:
+    """Auto memory is read whatever `--setting-sources` says and lives in the shared session
+    home (#101): fixed off, and protected like the rest of the fixed entries, so a workspace
+    env line cannot re-enable it for the next turn."""
+    parent = {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}
+    assert agent_environment(parent, token=None)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in PROTECTED_ENV_NAMES
 
 
 def test_agent_environment_adds_the_configured_token() -> None:

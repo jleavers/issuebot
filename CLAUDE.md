@@ -190,7 +190,28 @@ floor, not the shipped version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; `probe`/`probe_run_as` report whether the delegation works, which the
+  two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
+  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
+  `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
+  `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
+  (`projects/<project>/memory`, walked without following a symlink at either level), the
+  surfaces a later `claude -p` loads as instructions or behaviour, per the `claude-directory`
+  docs (a test pins the list, so dropping a name is a deliberate edit in both places).
+  A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
+  for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
+  `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
+  among them. The shipped `setting_sources: [project]` already gates the `user` source
+  (`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`), but the setting
+  defaults to every source and the rest are outside the flag's table, so the sweep runs
+  regardless; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
+  an option: it never reads the OAuth credential the login recipe writes.
+  `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
+  `session._turn_loop`, since concurrent sessions re-read the home each turn and the `before_run`
+  hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
+  `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
+  sweeps again); a no-op on the host route (`run_as` unset), where the
+  home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git

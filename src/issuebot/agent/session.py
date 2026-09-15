@@ -344,6 +344,13 @@ async def _turn_loop(
         except AgentError as exc:
             state.fail(exc.category, exc.message)
             return
+        # Immediately before every `claude -p`, not once per session: the account's ~/.claude is
+        # shared with a prior session in this or another repository, and with the sessions
+        # running beside this one, each of which re-reads it on every turn. A sweep here clears
+        # what any of them planted and leaves the smallest window a concurrent one can plant
+        # into (#101). Total today, so a sweep that cannot run costs a turn its hygiene, never
+        # the run.
+        await workspaces.sweep_agent_home()
         turn = await runner.run_turn(
             prompt=prompt,
             workspace=workspace,
