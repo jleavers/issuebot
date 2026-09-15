@@ -226,9 +226,9 @@ def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubL
 def _has_budget_block(body: str, reason: str) -> bool:
     """Has this issue already been told *this*? Anchored to a line of its own, so prose that
     mentions the reason is not a block; surrounding whitespace is tolerated, since a body
-    fetched from GitHub may carry ``\r\n``. A quotation indented to look like the line would
-    suppress the block, which costs a note and never an announcement: those are now two
-    different identities, which is the point of splitting them."""
+    fetched from GitHub may carry CRLF line endings. A quotation indented to look like the
+    line would suppress the block, which costs a note and never an announcement: those are
+    now two different identities, which is the point of splitting them."""
     line = f"{BUDGET_REASON_PREFIX}{reason}."
     return any(candidate.strip() == line for candidate in body.split("\n"))
 

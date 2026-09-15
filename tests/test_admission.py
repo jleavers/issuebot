@@ -208,6 +208,13 @@ def test_marking_an_escalation_does_not_move_the_entry_down_the_eviction_queue()
     assert sorted(ledger.entries()) == ["new", "newest"]  # `old` still went first
 
 
+def test_escalating_an_issue_the_ledger_never_saw_remembers_nothing() -> None:
+    """It cannot happen, and if it did, announcing again beats remembering a phantom."""
+    ledger = Ledger()
+    assert ledger.escalate("ghost") is True
+    assert len(ledger) == 0
+
+
 def test_a_refusal_on_an_issue_with_no_history_is_neither_kept_nor_reported() -> None:
     ledger = Ledger()
     assert ledger.refused("repo-42", "busy") is False
