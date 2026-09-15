@@ -73,9 +73,11 @@ value with the one that is wrong. The list is written by the loop that does the 
 it is the built fact rather than a number to re-derive from.
 
 **The explicit path stays diagnosable.** An operator who names accounts by hand keeps every
-way to get it wrong, so `validate`'s `agent.run_as` check reports the built pool alongside its
-verdict, and a runtime `ISSUEBOT_AGENT_POOL_SIZE` that disagrees with the built list is a
-warning naming `docker compose build worker`. That is the line this session went looking for
+way to get it wrong, so `validate`'s `agent.run_as` check names the built pool where
+naming it carries information: a runtime `ISSUEBOT_AGENT_POOL_SIZE` that disagrees with
+the built list is a warning carrying both the accounts the image has and `docker compose
+build worker`. On an image that agrees, the line already names those accounts and saying
+it twice would be noise. That is the line this session went looking for
 in `docker history`. On the host route there is no file and no built pool, so the check says
 what it says today and nothing more.
 
