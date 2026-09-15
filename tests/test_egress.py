@@ -438,6 +438,12 @@ async def test_the_proxy_refuses_a_flood_rather_than_running_out_of_descriptors(
     server.close()
 
 
+def test_the_connection_bound_sits_above_the_tunnel_bound() -> None:
+    """Otherwise the tunnel bound is dead code: no connection could survive to establish one,
+    and the 503 an operator saw would never be the one the tunnel limit's message describes."""
+    assert MAX_CONNECTIONS >= MAX_TUNNELS
+
+
 @pytest.mark.asyncio
 async def test_a_connection_that_says_nothing_is_bounded_before_it_is_read() -> None:
     """The descriptor bound has to be the *accepted* socket, not the established tunnel.
@@ -447,7 +453,6 @@ async def test_a_connection_that_says_nothing_is_bounded_before_it_is_read() -> 
     ``max_tunnels`` not at all. That is the cheapest possible flood -- no request, no name to
     look up -- so the refusal is asked for here without sending a single byte.
     """
-    assert MAX_CONNECTIONS >= MAX_TUNNELS
     rules, _ = parse_allow(["allowed.test"])
     proxy = Proxy(rules, max_connections=0)
     server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=MAX_REQUEST_BYTES)

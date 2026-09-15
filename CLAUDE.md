@@ -192,13 +192,19 @@ floor, not the shipped version, and moves by hand.
   compose healthcheck both ask, so the two can never drift; `reachable_directly` is the other
   half, the question the proxy cannot answer -- an allow-list bounds egress only while there is
   no route round it. `MAX_TUNNELS` (256) bounds established relays and
-  `MAX_CONNECTIONS` (512) bounds accepted sockets, both answering 503 past it. The second is
-  what bounds the descriptor table: a tunnel counts only once its upstream is open, so a peer
-  that connects and says nothing would otherwise hold a descriptor for the request timeout
-  against no limit at all. Neither is a reservation for the worker, which this process cannot
-  offer -- the session shares its container, so two connections arriving here cannot be told
-  apart; what answers a session filling the table with *allowed* connections is the allow-list,
-  not the counter. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
+  `MAX_CONNECTIONS` (2048) bounds accepted sockets, both answering 503 past it. The second is
+  what bounds *sustained* descriptor growth: a tunnel counts only once its upstream is open, so
+  a peer that connects and says nothing would otherwise hold a descriptor for
+  `REQUEST_TIMEOUT_S` (10 s, short for this reason) against no limit at all. Neither is a
+  reservation for the worker, and none can be: the session shares the worker's container and
+  the proxy sees only sockets, so a shared ceiling is a shared *availability* ceiling and a
+  session that reaches it refuses the worker too. Both numbers are therefore set well above
+  this deployment's load rather than close to it -- a limit tight enough to be reached is a
+  denial of service an attacker gets for free -- and what they buy is a definite 503 rather
+  than `accept()` failing with EMFILE, which the event loop retries hot until the proxy serves
+  nobody. `egress_connections_exhausted` is logged on the saturation *edge*, not per refusal,
+  since that refusal is the cheapest line in the process to provoke. An exception `handle` does
+  not anticipate is swallowed to keep the service up, but logged with its traceback at ERROR. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
   not interchangeable: curl deliberately ignores an upper-case `HTTP_PROXY` (a CGI script's
   environment carries the request's `Proxy:` header under that name) while other clients read
   only the upper-case spelling; `configured_proxy` reads `https_proxy` then `HTTPS_PROXY`.

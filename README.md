@@ -106,8 +106,11 @@ issues that triage is most of the value.
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
    credential comes from the environment (see step 2 below).
-3. **Docker with Compose**: the image bundles `git`, `gh` and `claude`, and Compose brings
-   PostgreSQL for history and the dashboard.
+3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
+   and Compose brings PostgreSQL for history and the dashboard. The version floor is the
+   `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
+   uses so that the worker's `depends_on` on it clears in about a second rather than after a
+   full health-check interval; an older engine rejects the key rather than ignoring it.
 4. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two

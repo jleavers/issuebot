@@ -234,6 +234,22 @@ def test_the_worker_has_no_route_off_the_host_but_the_proxy() -> None:
     assert SERVICES["web"]["networks"] == ["issuebot"]
 
 
+_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def _seconds(duration: str) -> float:
+    """A compose duration (`30s`, `1m30s`, `500ms`) as seconds.
+
+    `ms` is matched before `m`, which is the whole subtlety: read left to right, `500ms` is
+    otherwise 500 minutes.
+    """
+    total = 0.0
+    for number, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|[smh])", str(duration)):
+        total += float(number) * _UNITS[unit]
+    assert total > 0, f"unparsed compose duration: {duration!r}"
+    return total
+
+
 def test_the_worker_waits_for_the_proxy_it_has_no_route_without() -> None:
     """#126: `docker compose run --rm worker validate` is the README's step 2, and it runs
     before anything is up. The worker is on internal networks alone, so without the proxy
@@ -245,9 +261,15 @@ def test_the_worker_waits_for_the_proxy_it_has_no_route_without() -> None:
     """
     assert SERVICES["worker"]["depends_on"] == {"egress": {"condition": "service_healthy"}}
     # Waiting on health means the health check has to become healthy promptly, or the first
-    # `compose run` sits through a whole interval before its first probe.
+    # `compose run` sits through a whole interval before its first probe -- so the start
+    # interval has to be meaningfully shorter than the steady-state one, not merely present.
     health = SERVICES["egress"]["healthcheck"]
-    assert "start_period" in health and "start_interval" in health
+    assert _seconds(health["start_interval"]) < _seconds(health["interval"])
+    # And the start period has to be short enough that a proxy which can never pass still
+    # reaches `unhealthy` quickly, since failures in it do not count against `retries`.
+    assert _seconds(health["start_period"]) <= 10
+    # An older engine rejects `start_interval` outright, so the floor is a documented one.
+    assert "Engine 25.0 or newer" in (ROOT / "README.md").read_text()
 
 
 def test_the_worker_points_every_client_at_the_proxy() -> None:

@@ -213,8 +213,13 @@ services:
       # The proxy is listening in well under a second, and `depends_on` above waits for this
       # check to pass before the worker runs at all -- so without a start period the first
       # `docker compose run --rm worker ...` would sit through a whole 30 s interval before its
-      # first probe. During the start period failures do not count against `retries`.
-      start_period: 30s
+      # first probe. During the start period failures do not count against `retries`, which is
+      # why it is 10s and not longer: a proxy that can *never* pass (a stale image without
+      # `issuebot.egress`, say) has to reach `unhealthy` quickly too, or the worker's first
+      # command fails with compose's "dependency failed to start" instead of the `[FAIL]
+      # egress:` line validate was about to print. `start_interval` needs Docker Engine 25.0 or
+      # newer, which the README's requirements name.
+      start_period: 10s
       start_interval: 1s
 
   web:

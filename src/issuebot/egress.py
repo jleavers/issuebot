@@ -124,27 +124,39 @@ DEFAULT_TARGET_PORT = 443
 MAX_REQUEST_BYTES = 8 * 1024
 # How long the request may take to arrive. The tunnel that follows is not bounded here: a turn
 # of `claude -p` is a single long-lived CONNECT, and an idle timeout on it would be a limit on
-# how long a session may think.
-REQUEST_TIMEOUT_S = 30.0
+# how long a session may think. The gap this actually bounds is the one between a client
+# connecting and finishing its request line -- every client issuebot spawns sends it at
+# once -- and it is also how long a connection that says nothing occupies a slot in
+# MAX_CONNECTIONS below, which is what makes such a connection churn rather than accumulate.
+REQUEST_TIMEOUT_S = 10.0
 # How long the proxy waits for the allowed host itself.
 UPSTREAM_TIMEOUT_S = 30.0
 _RELAY_CHUNK = 64 * 1024
 # How many tunnels may be established at once, and how many connections may be accepted at
-# once. Both are needed, and the second is the one that bounds the descriptor table: a tunnel
-# is only counted once its upstream is open, so a peer that connects and then says nothing
-# holds a socket for REQUEST_TIMEOUT_S while counting towards nothing. MAX_CONNECTIONS is
-# checked before a byte is read, so that shape is refused rather than accumulated.
+# once. Both are needed, and the second is the one that bounds *sustained* descriptor growth: a
+# tunnel is counted only once its upstream is open, so a peer that connects and then says
+# nothing holds a socket for REQUEST_TIMEOUT_S while counting towards nothing. MAX_CONNECTIONS
+# is checked before a byte is read, so that shape is refused rather than accumulated. It is not
+# a bound on the descriptor *table*: the check runs before the increment, so a refused
+# connection is not itself counted and a burst larger than the limit still holds its sockets
+# for as long as it takes to answer them.
 #
-# A session is the adversary here, and the worker's own polls of GitHub go through this same
-# proxy. What these bound is the descriptor table, so the proxy answers 503 instead of failing
-# to accept at all; they are deliberately *not* a reservation for the worker, which is not
-# something this process can offer -- the session and the worker share a container, so two
-# connections arriving here are indistinguishable. A session may still fill the table with
-# allowed connections, and the answer to that is the allow-list and the session's own timeouts,
-# not this counter. Generous for the real load: a handful of concurrent sessions, each with a
-# turn and a few `gh` calls.
+# Be clear about what a shared counter can and cannot do here, because the obvious reading is
+# wrong. A session is the adversary, the worker's own polls go through this same proxy, and the
+# two cannot be told apart -- they share a container, and the proxy sees only sockets. So a
+# shared ceiling is a shared *availability* ceiling: whatever the number, a session that reaches
+# it refuses the worker too. The number is therefore chosen to sit well above any load this
+# deployment produces -- a handful of concurrent sessions, each with a turn and a few `gh`
+# calls -- rather than close to it, because a limit tight enough to be reached is a denial of
+# service an attacker gets for free. What it buys is a definite 503 rather than `accept()`
+# failing with EMFILE, which is the worse failure: the event loop retries that hot and the
+# proxy stops serving anyone at all.
+#
+# The answer to a session that simply wants the proxy down is not this counter, which it can
+# always reach; it is that the session is issuebot's own child, bounded by the run's timeouts,
+# and that the attempt is in the log.
 MAX_TUNNELS = 256
-MAX_CONNECTIONS = 512
+MAX_CONNECTIONS = 2048
 # How long the proxy waits for its established tunnels on the way out. Since 3.12.1
 # `Server.wait_closed()` waits for every handler task, and nothing bounds a tunnel's time -- one
 # turn of `claude -p` is a single long CONNECT -- so waiting for them outright would hold the
@@ -350,6 +362,7 @@ class Proxy:
         self._max_connections = max_connections
         self._open = 0
         self._accepted = 0
+        self._saturated = False
         self._log = get_logger(__name__)
 
     @property
@@ -371,11 +384,18 @@ class Proxy:
         socket closes at once, without a read, a name lookup or a timeout to wait out.
         """
         if self._accepted >= self._max_connections:
-            self._log.warning(
-                "egress_connections_exhausted",
-                accepted=self._accepted,
-                limit=self._max_connections,
-            )
+            if not self._saturated:
+                # The edge rather than every refusal. This is the cheapest line in the process
+                # to provoke -- no request sent, no name looked up -- and compose sets no
+                # logging options, so one line per connection would be the flood's second
+                # payload. The next connection admitted clears the flag, so a later episode
+                # says so again.
+                self._saturated = True
+                self._log.warning(
+                    "egress_connections_exhausted",
+                    accepted=self._accepted,
+                    limit=self._max_connections,
+                )
             with contextlib.suppress(OSError):
                 await _reply(
                     writer,
@@ -387,11 +407,21 @@ class Proxy:
                 )
             await _close(writer)
             return
+        self._saturated = False
         self._accepted += 1
         try:
             await self._serve(reader, writer)
-        except Exception as exc:
+        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
+            # The three a connection fails with in the ordinary course of events: a peer that
+            # went away, a truncated request, a request head over the limit. Not worth a line
+            # above DEBUG, since a session may produce them all day.
             self._log.debug("egress_connection_failed", error=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            # Anything else is a bug in this module, and this module is the whole deployment's
+            # egress. Swallowing it honours the contract above, but it goes out with its
+            # traceback at ERROR: at DEBUG it would reach an operator as "some requests just
+            # fail", with nothing in the log at any level they actually run.
+            self._log.exception("egress_connection_error")
         finally:
             self._accepted -= 1
             await _close(writer)

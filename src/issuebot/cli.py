@@ -1744,7 +1744,14 @@ def cmd_egress(args: argparse.Namespace) -> int:
     return asyncio.run(_run_egress(rules, bind=args.bind, port=args.port))
 
 
-async def _run_egress(rules: Sequence[Rule], *, bind: str, port: int) -> int:
+async def _run_egress(
+    rules: Sequence[Rule], *, bind: str, port: int, stop: asyncio.Event | None = None
+) -> int:
+    """Serve until SIGTERM, SIGINT or ``stop``.
+
+    ``stop`` is the seam the shutdown test drives, so that the bounded drain below can be
+    proved without raising a real signal in the test process.
+    """
     try:
         server = await serve_egress(rules, bind=bind, port=port)
     except OSError as exc:
@@ -1753,7 +1760,7 @@ async def _run_egress(rules: Sequence[Rule], *, bind: str, port: int) -> int:
     get_logger(__name__).info(
         "egress_started", bind=bind, port=port, allow=[str(rule) for rule in rules]
     )
-    stop = asyncio.Event()
+    stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
     for signame in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):

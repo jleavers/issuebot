@@ -5,9 +5,11 @@ import json
 import os
 import pwd
 import signal
+import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -43,7 +45,8 @@ from issuebot.db import (
     refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
-from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW
+from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, allow_rules
+from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
@@ -2870,6 +2873,37 @@ def test_egress_serves_the_default_list_extended_by_the_environment(
     assert names[: len(DEFAULT_ALLOW)] == [f"{host}:443" for host in DEFAULT_ALLOW]
     assert names[len(DEFAULT_ALLOW) :] == ["pypi.org:443", ".example.internal:8443"]
     assert (served["bind"], served["port"]) == ("0.0.0.0", 3128)
+
+
+@pytest.mark.asyncio
+async def test_egress_shutdown_does_not_wait_out_a_connection_it_is_holding() -> None:
+    """SIGTERM must not be held by a tunnel, which nothing bounds in time.
+
+    Since 3.12.1 ``Server.wait_closed()`` waits for every handler task, so the obvious
+    ``async with server`` would hold the process until Docker's SIGKILL on every
+    ``docker compose up -d egress`` -- the documented way to change the allow-list. The drain
+    is bounded instead, and this pins it: a client is parked mid-request, so its handler is
+    still live, and the serve loop still has to return well inside the drain.
+    """
+    stop = asyncio.Event()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    rules, _ = allow_rules({})
+    task = asyncio.create_task(cli._run_egress(rules, bind="127.0.0.1", port=port, stop=stop))
+    await asyncio.sleep(0.2)
+
+    held = socket.create_connection(("127.0.0.1", port), 5)
+    try:
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        stop.set()
+        assert await asyncio.wait_for(task, timeout=EGRESS_SHUTDOWN_DRAIN_S + 10) == 0
+        # Bounded by the drain, not by the connection: without it this waits for the handler,
+        # which sits in its request timeout.
+        assert time.monotonic() - started < EGRESS_SHUTDOWN_DRAIN_S + 3
+    finally:
+        held.close()
 
 
 def test_refresh_notifies_and_reports_failures(
