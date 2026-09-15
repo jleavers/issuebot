@@ -11,6 +11,7 @@ import errno
 import json
 import os
 import pwd
+import shutil
 import signal
 import stat
 import subprocess
@@ -692,6 +693,41 @@ async def test_a_removal_runs_as_every_account_that_owns_something_in_the_tree(
     # sealed directory it arrived as.
     assert passes == [(ME, WORKSPACE_DIR_MODE), ("nobody", WORKSPACE_DIR_MODE)]
     assert not path.exists()
+
+
+async def test_a_removal_the_delegated_pass_completed_is_not_a_failure(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delegated half is best-effort by construction and takes everything the account owns
+    (#143). Where the workspace directory is not the worker's own -- an operator clearing
+    ``/workspaces``, a second remover, a ``run-once`` beside a live worker -- that pass can
+    unlink the directory as well as empty it, and the worker's own pass then finds nothing.
+    That is the state the removal asked for, so it is not a ``workspace_error``; and with no
+    error there is nothing to re-seal, so the reseal's own ENOENT goes with it.
+
+    The sibling above stubs ``remove_tree`` with a recorder, so there the worker's pass always
+    finds the tree intact; this one lets the stub actually remove it.
+    """
+    root = tmp_path / "workspaces"
+    path = root / "example-42"
+    (path / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        runas_module.RunAs, "remove_tree", lambda self, target: shutil.rmtree(target)
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    with capture_logs() as logs:
+        assert await manager.remove("example-42") is True
+    assert not path.exists()
+    events = [entry["event"] for entry in logs]
+    assert "workspace_removed" in events
+    assert "workspace_seal_failed" not in events
 
 
 def test_the_owners_a_removal_delegates_to_come_from_the_tree_not_the_binding(
