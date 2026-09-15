@@ -23,7 +23,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from issuebot.agent import runas as runas_module
-from issuebot.agent.accounts import SEALED_DIR_MODE, WORKSPACE_DIR_MODE
+from issuebot.agent.accounts import (
+    SEALED_DIR_MODE,
+    WORKSPACE_DIR_MODE,
+    settings_with_run_as,
+)
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import (
     CLAUDE_HOME_MEMORY_DIR,
@@ -792,3 +796,33 @@ async def test_a_removal_that_fails_leaves_the_workspace_closed(tmp_path: Path) 
         await manager.remove("ws")
     assert path.is_dir()
     assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+
+
+async def test_sweep_agent_home_follows_the_binding_under_a_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep is a control over one home, so under a pool (#121) it has to be the home of
+    the account this workspace is bound to -- not the pool's first member, and not each of them
+    in turn. `WorkspaceManager` builds its `RunAs` from `session_account`, and the orchestrator
+    narrows the settings before it builds the manager, so the account that gets swept is the
+    one that will run the turn. A pool also changes what the sweep is *for*: the accounts have
+    separate homes, so the session sharing it is the next one bound to this member, not the one
+    running beside it (#101's single-account case)."""
+    swept: list[str] = []
+
+    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
+        swept.append(self.user)
+        return True
+
+    monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", record)
+    pooled = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": [ME, "agent-2", "agent-3"]},
+        }
+    )
+    bound = settings_with_run_as(pooled, "agent-2")
+    manager = WorkspaceManager(bound, gh=object(), environ=base_env())
+    await manager.sweep_agent_home()
+    assert swept == ["agent-2"]
