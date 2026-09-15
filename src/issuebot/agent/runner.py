@@ -948,7 +948,10 @@ class ClaudeRunner:
 
         "eof" at the end of the stream, "timeout" after ``turn_timeout_ms`` of silence, and
         "deadline" once the run's deadline has passed, which every line read is checked
-        against: the silence timer restarts with each line, the deadline never does.
+        against: the silence timer restarts with each line, the deadline never does. The
+        check comes before the read on purpose, so a line already in the pipe at the deadline
+        is not drained first: "still running at the deadline" is the rule, and a result that
+        landed a moment before it is the timed-out run's, the work it pushed intact.
         """
         stdout = process.stdout
         if stdout is None:

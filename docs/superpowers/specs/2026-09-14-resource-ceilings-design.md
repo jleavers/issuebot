@@ -39,8 +39,14 @@ One cap per boundary, at the seam that already owns the operation, never at its 
 - **`GhCliAdapter.count_own_label_additions`** (`github/ghcli.py`, landed by #104 while this
   was in review): the conflict bounce's read of the issue's `LABELED_EVENT` timeline, one
   GraphQL page at a time, under the same rule: at most `MAX_TIMELINE_PAGES` (10) pages, past
-  which it is a `response` error, so `conflict_rework_failed` is logged and the bounce retried
-  next tick rather than a history anyone with triage can lengthen being read to its end.
+  which it is a `response` error, so `conflict_rework_failed` is logged rather than a history
+  anyone with triage can lengthen being read to its end. A cap bounds one read, not how often
+  it is repeated, so the bounce does not simply retry next tick: `conflict_rework` returns
+  `gave_up` for a `response` error (GitHub answered, and the answer is one issuebot refuses:
+  a property of the issue, not of the moment) and the orchestrator keys that to the issue's
+  `updated_at` (`_conflict_gave_up`, logged once as `conflict_rework_abandoned`), skipping the
+  issue until it changes. Every other error (a transport error, a rate limit, a 5xx) is still
+  `failed` and tried again next tick, as before.
 - **The session** (`agent/session.py`, `agent/runner.py`): `agent.run_timeout_ms` (default
   four hours) is a monotonic deadline fixed from `_State.started`, before the clone and the
   `before_run` hook, and handed to every `run_turn(deadline=)`. The reader waits for the

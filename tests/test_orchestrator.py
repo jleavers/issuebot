@@ -2696,6 +2696,68 @@ async def test_a_bounce_failure_is_logged_and_retried_next_tick(
     assert h.github.issue(1).state is StateLabel.REWORK
 
 
+async def test_a_non_retryable_bounce_failure_waits_for_the_issue_to_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounce whose read fails past a cap (#110) is not repeated every poll: the orchestrator
+    remembers the failure against the issue's `updated_at` and tries again only once the
+    issue has changed, since the same bounded read would only fail the same way."""
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+    original = h.github.count_own_label_additions
+    reads = {"count": 0, "refuse": True}
+
+    async def capped(*args: Any, **kwargs: Any) -> int:
+        reads["count"] += 1
+        if reads["refuse"]:
+            raise GitHubError("response", "label history of #1 runs past 1000 events")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(h.github, "count_own_label_additions", capped)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert [entry["event"] for entry in logs if entry["event"].startswith("conflict_rework")] == [
+        "conflict_rework_failed",
+        "conflict_rework_abandoned",
+    ]
+    assert reads["count"] == 1
+    await h.tick()
+    await h.tick()
+    assert reads["count"] == 1  # nothing changed, so nothing was asked again
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    # A human touching the issue moves its updated_at, which is the change that earns another
+    # try (the harness clock is frozen, so it is advanced first: a stamp that does not move is
+    # exactly the "nothing changed" the memory is keyed on).
+    reads["refuse"] = False
+    h.clock.advance(1)
+    h.github.human_add_label(1, "priority")
+    await h.tick()
+    assert reads["count"] == 2
+    assert h.github.issue(1).state is StateLabel.REWORK
+
+
+async def test_a_run_timeout_outside_in_progress_is_retried_not_escaped(tmp_path: Path) -> None:
+    """The escape is for a run that timed out while still holding the issue; one whose label
+    had already moved is an ordinary failure, retried like any other (#110)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.set_state(1, StateLabel.REVIEW)
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        error_category="run_timeout",
+        error="run deadline reached: 14400s of wall clock (agent.run_timeout_ms)",
+        final_state=StateLabel.REVIEW,
+        final_issue=h.github.issue(1),
+        turns=2,
+    )
+    assert list(h.orchestrator.retries) == ["1"]
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert "blocked" not in h.recorder.kinds
+
+
 async def test_the_bounce_skips_an_issue_with_a_queued_retry(tmp_path: Path) -> None:
     """A queued retry is an in-flight decision about the same issue, so the bounce leaves it
     alone until the retry has been fired; the next poll gets it."""

@@ -186,7 +186,9 @@ ignored.
 Every ceiling above names the layer it bounds, and a few more are fixed in the code rather
 than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
 the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
-first, and a longer thread with no workpad in it fails the run rather than reading as "none"; a
+first, and a longer thread with no workpad in it fails the run rather than reading as "none";
+the conflict bounce reads at most the first 1,000 label additions of an issue's history, and a
+bounce that fails past a cap is not tried again until the issue changes; a
 running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,
 and each repository's worker listens on its own channel; and every database connection waits at
 most 10 s for a lock and 60 s for a statement, so a migration blocked on the advisory lock exits

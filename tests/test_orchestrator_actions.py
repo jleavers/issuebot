@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from issuebot.agent import AgentError, WorkspaceManager
 from issuebot.config import Settings
@@ -240,6 +241,25 @@ async def test_conflict_rework_failure_on_the_count_writes_nothing(tmp_path: Pat
     assert h.github.issue(42).state is StateLabel.REVIEW
     assert h.github.comments_for(42) == []
     assert h.recorder.events == []
+
+
+async def test_conflict_rework_gives_up_on_a_non_retryable_failure(tmp_path: Path) -> None:
+    """A read past its cap (#110) is `gave_up`, not `failed`: the orchestrator holds off until
+    the issue changes rather than repeating the same bounded read on every poll. Only a
+    `response` error is: a 5xx or a transport error is the next tick's to retry."""
+    h = Harness(tmp_path)
+    await seed(h)
+    h.github.fail_next("response")
+    with capture_logs() as logs:
+        outcome = await conflict_rework(h.github, h.bus, h.github.issue(42), limit=3, now=NOW)
+    assert outcome == "gave_up"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.github.comments_for(42) == []
+    assert h.recorder.events == []
+    failed = [entry for entry in logs if entry["event"] == "conflict_rework_failed"]
+    assert failed and failed[0]["retryable"] is False
+    h.github.fail_next("transport")
+    assert await conflict_rework(h.github, h.bus, h.github.issue(42), limit=3, now=NOW) == "failed"
 
 
 async def test_conflict_rework_failure_on_set_state_writes_nothing(

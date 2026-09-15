@@ -28,7 +28,12 @@ FinishOutcome = Literal["complete", "no_change", "cancelled", "unchanged", "fail
 
 CANCEL_REASON = "closed without a merged pull request"
 
-ConflictOutcome = Literal["reworked", "limit_reached", "limit_noted", "failed"]
+# ``failed`` is a GitHub error the next tick may not see again (a transport error, a rate
+# limit, a 5xx) and is tried then; ``gave_up`` is a ``response`` error, GitHub answering with
+# something issuebot refuses to read (a page past a cap, #110, a malformed page), which is a
+# property of the issue rather than of the moment, so the orchestrator remembers it until the
+# issue changes rather than repeating the same bounded read on every poll.
+ConflictOutcome = Literal["reworked", "limit_reached", "limit_noted", "failed", "gave_up"]
 
 # The workpad headings the conflict bounce writes: a note for a person, never the count. The
 # bounce number is read from the issue's label history (#104), which only GitHub writes.
@@ -236,8 +241,9 @@ async def conflict_rework(
             issue_identifier=issue.identifier,
             pr_number=pr.number,
             error=str(exc),
+            retryable=exc.retryable,
         )
-        return "failed"
+        return "gave_up" if exc.category == "response" else "failed"
     bus.publish(
         StateChanged(
             issue_number=issue.number,

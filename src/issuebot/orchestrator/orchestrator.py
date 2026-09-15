@@ -308,6 +308,11 @@ class Orchestrator:
         # and the limit it noted (#104): the note's presence in the workpad is the session's
         # to erase, so without this a stripped note would be rewritten on every tick.
         self._conflict_limit_noted: dict[str, int] = {}
+        # Issues whose bounce failed on a `response` error, keyed to the issue's `updated_at`
+        # when it did (#110): the reads the bounce makes are bounded, but a bound repeated
+        # every poll for as long as the answer stays the same is the tick rate set by the
+        # thread's length. The next change to the issue is what earns another try.
+        self._conflict_gave_up: dict[str, datetime] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -784,9 +789,21 @@ class Orchestrator:
                 continue
             if self._conflict_limit_noted.get(issue.id) == limit:
                 continue
+            if self._conflict_gave_up.get(issue.id) == issue.updated_at:
+                continue
             outcome = await actions.conflict_rework(
                 self._adapter, self._bus, issue, limit=limit, now=self._now()
             )
+            if outcome == "gave_up":
+                self._conflict_gave_up[issue.id] = issue.updated_at
+                self._log.warning(
+                    "conflict_rework_abandoned",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    updated_at=issue.updated_at.isoformat(),
+                )
+            else:
+                self._conflict_gave_up.pop(issue.id, None)
             if outcome in ("limit_reached", "limit_noted"):
                 self._conflict_limit_noted[issue.id] = limit
             if outcome == "limit_noted":
