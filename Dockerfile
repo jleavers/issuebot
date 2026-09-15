@@ -159,9 +159,18 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # the more privileged side of the line. The path is the image's own -- the `install -d` below,
 # the VOLUME further down and compose's mount -- so a `workspace.root` pointed elsewhere inside
 # the container would need its own entry.
+# A third account, `web` (uid 1002), for the dashboard (#102). compose builds the `web` service
+# from this image and selects it with `user: web`; nothing in the image runs as it by default,
+# since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP from a
+# browser and needs no privilege transition at all, so it must not carry the worker's: outside
+# group issuebot it cannot execute sudo, let alone use the rule, and it owns nothing either
+# account writes -- its home is closed to both of them and theirs to it, and /app is root's.
+# `nologin` because no shell is ever opened as it: `issuebot web` is the one process, and a
+# `docker compose exec web` still runs whatever command it names.
 RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
  && useradd --create-home --uid 1001 --shell /bin/bash agent \
- && chmod 0750 /home/issuebot /home/agent \
+ && useradd --create-home --uid 1002 --shell /usr/sbin/nologin web \
+ && chmod 0750 /home/issuebot /home/agent /home/web \
  && install -d -m 0755 -o issuebot -g issuebot /workspaces \
  && git config --system --add safe.directory '/workspaces/*' \
  && install -d -m 0700 -o agent -g agent /home/agent/.claude \
