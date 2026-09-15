@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 import pytest
 
 from fakes.database import DB_URL, FakeDatabase
-from issuebot import __version__
+from issuebot import __version__, cli
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import Scrubber
@@ -406,7 +406,11 @@ def test_validate_counts_the_mcp_files_and_documents_it_can_load(
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] claude.mcp_config: 1 file and 1 inline document" in out
+    assert (
+        "[WARN] claude.mcp_config: 1 file and 1 inline document; an inline document is on the "
+        "command line, where `ps` reads it, so a server whose env holds a credential belongs "
+        "in a file beside this one" in out
+    )
 
 
 def test_validate_fails_when_an_mcp_file_is_missing_or_not_a_file(
@@ -456,7 +460,7 @@ def test_validate_asks_the_session_account_whether_it_can_read_an_mcp_file(
 
         def run(self, argv: list[str], environ: object, timeout: float) -> object:
             asked.append(argv)
-            return subprocess.CompletedProcess(argv, 1, "", "")
+            return subprocess.CompletedProcess(argv, 1, "issuebot-unreadable\n", "")
 
     monkeypatch.setattr("issuebot.cli._run_as_factory", _Refuses)
     assert main(["validate", "--workflow", str(path)]) == 1
@@ -465,7 +469,65 @@ def test_validate_asks_the_session_account_whether_it_can_read_an_mcp_file(
         f"[FAIL] claude.mcp_config: {tmp_path / 'servers.json'} is not readable by agent, "
         "the account the session runs as" in out
     )
-    assert asked == [["test", "-r", str(tmp_path / "servers.json")]]
+    assert asked == [["sh", "-c", cli._READ_TEST, "sh", str(tmp_path / "servers.json")]]
+
+
+def test_validate_does_not_blame_the_file_when_sudo_itself_is_refused(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """A `sudo -n` the policy refuses exits non-zero exactly as an unreadable file does, so the
+    delegated test answers in words: reading the status alone would have `validate` send the
+    operator to chmod a file that is fine, on the same run as the `agent.run_as` check that
+    reports the real fault."""
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nagent:\n  run_as: agent\nclaude:\n"
+        "  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+
+    class _SudoRefuses:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
+        def run(self, argv: list[str], environ: object, timeout: float) -> object:
+            return subprocess.CompletedProcess(argv, 1, "", "sudo: a password is required")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _SudoRefuses)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
+
+
+def test_validate_accepts_a_file_the_session_account_can_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nagent:\n  run_as: agent\nclaude:\n"
+        "  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+
+    class _Allows:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
+        def run(self, argv: list[str], environ: object, timeout: float) -> object:
+            return subprocess.CompletedProcess(argv, 0, "issuebot-readable\n", "")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _Allows)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
 
 
 def test_validate_stays_quiet_when_the_delegation_itself_is_broken(

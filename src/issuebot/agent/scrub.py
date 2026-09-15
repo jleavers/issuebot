@@ -70,6 +70,16 @@ _SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         rf"\1{REDACTED}",
     ),
+    # The same name as a JSON key, which is how an MCP server definition spells its `env`
+    # block (`claude.mcp_config`, #109) and how most tools print a config they have loaded.
+    # The `=` rule above cannot see it: there is a colon and two quotes where the `=` was.
+    (
+        re.compile(
+            r"(\"[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)\"\s*:\s*\")([^\"\\]+)(\")",
+            re.IGNORECASE,
+        ),
+        rf"\1{REDACTED}\3",
+    ),
     # An Authorization header, however the scheme is spelt.
     (
         re.compile(rf"\b(authorization:\s*(?:bearer|token|basic)\s+)({_VALUE})", re.IGNORECASE),

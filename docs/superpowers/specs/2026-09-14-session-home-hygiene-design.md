@@ -18,10 +18,14 @@ rule or a memory note that a session working a different issue next week loads a
 
 What `claude.setting_sources` gates, per the SDK's `settingSources` table: the `user` source
 is what loads the user-level `settings.json` and its hooks, `CLAUDE.md`, `rules/`, `skills/`,
-`commands/` and `agents/`, so the shipped workflow's `[project]` already keeps those six out
-of a turn. But the setting defaults to unset, which is every source, an overlay's
-`setting_sources: null` drops the pin by the documented merge rule, and `plugins/`,
-`output-styles/`, `workflows/` and `agent-memory/` are not in that table at all. Two inputs
+`commands/` and `agents/`. When this was written the shipped workflow passed `[project]`,
+which kept those six out of a turn as a side effect. **Amended by #107**, which landed
+afterwards: `claude.setting_sources` is now always passed and defaults to `[user]`, the
+workflow names it no longer, and `setting_sources: null` is a validation error rather than a
+way to drop a pin. So the flag keeps none of these six out at the shipped defaults, which
+makes the sweep below the only thing standing between one session's plant and the next
+session's prompt rather than a second line behind the flag. `plugins/`, `output-styles/`,
+`workflows/` and `agent-memory/` were never in that table at all. Two inputs
 are read whatever the flag says: auto memory (`projects/<project>/memory/MEMORY.md`, loaded
 into the system prompt at session start, keyed by git repository, and excluded from claude's
 own retention sweep so it never ages out) and `~/.claude.json`. And the credential

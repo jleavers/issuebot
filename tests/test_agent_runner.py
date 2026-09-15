@@ -163,9 +163,9 @@ def test_build_argv_always_confines_mcp_to_the_command_line(
     The session account's ``~/.claude.json`` outlives every session in one container, and
     ``claude`` loads ``mcpServers`` from it, so the flag is what stops a planted server being
     offered to the next issue's session. The cases are the settings that might look as though
-    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, and
-    ``[user, project]`` does not -- and each is named, so a failure says which shape broke
-    rather than which loop iteration.
+    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, while
+    ``[user, project]`` does not and neither does the default, which is ``[user]`` since #107 --
+    and each is named, so a failure says which shape broke rather than which loop iteration.
     """
     runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
     argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
@@ -1015,9 +1015,11 @@ async def test_run_turn_scrubs_the_argv_it_logs(workspace: Path) -> None:
             "claude": {
                 "command": str(FAKE_CLAUDE),
                 "turn_timeout_ms": 30_000,
+                # A value no *shape* rule would catch on its own, so what is proved is the
+                # name beside it rather than the accident that MCP credentials often look
+                # like Anthropic keys.
                 "mcp_config": [
-                    '{"mcpServers": {"x": {"env": '
-                    '{"API_KEY": "sk-ant-oat01-0123456789abcdefghijklmnop"}}}}'
+                    '{"mcpServers": {"x": {"env": {"LINEAR_API_KEY": "lin_oo_notakey"}}}}'
                 ],
             },
         }
@@ -1039,7 +1041,7 @@ async def test_run_turn_scrubs_the_argv_it_logs(workspace: Path) -> None:
     records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
     (started,) = [r for r in records if r["event"] == "claude_turn_started"]
     logged = " ".join(started["argv"])
-    assert "sk-ant-oat01-0123456789abcdefghijklmnop" not in logged
+    assert "lin_oo_notakey" not in logged
     assert "***" in logged
     # Scrubbed, not dropped: the flag and the shape of the document are still readable.
     assert "--mcp-config" in started["argv"]

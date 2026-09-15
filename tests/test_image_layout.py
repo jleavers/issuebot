@@ -78,14 +78,14 @@ def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -
 
 
 def test_the_flags_the_sessions_authority_depends_on_are_asserted_at_build() -> None:
-    """#109: a claude release that dropped either flag would widen every session's tool set
-    without a word; the build fails instead."""
+    """#109: a claude release that dropped any of these would widen what a session may do
+    without a word -- its tool set, the servers it loads, or whose files are its configuration
+    (#107) -- and would do it one session at a time. The build fails instead."""
     assert "claude --help | grep -q -- '--disallowedTools'" in DOCKERFILE
     assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE
-    # `--mcp-config` is the only route by which a server reaches a session, so a rename there
-    # would break the deployments that name one, one session at a time.
-    # Matched with its argument, since a bare `--mcp-config` is a substring of
-    # `--strict-mcp-config` and of the `--setting-sources` help text beside it.
+    assert "claude --help | grep -q -- '--setting-sources'" in DOCKERFILE
+    # `--mcp-config` is matched with its argument, since a bare `--mcp-config` is a substring
+    # of `--strict-mcp-config` and of the `--setting-sources` help text beside it.
     assert "claude --help | grep -q -- '--mcp-config <'" in DOCKERFILE
 
 

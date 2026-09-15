@@ -229,13 +229,16 @@ ENV LANG=C.UTF-8 \
 # are passed on every turn and neither is a setting, which is what puts them here rather
 # than in `validate`; --disallowedTools carries the setting that fixes the tool set, and
 # --mcp-config is the only route left by which a server reaches a session, so a rename there
-# would break those deployments one session at a time. The last line is the delegation
+# would break those deployments one session at a time; --setting-sources is what keeps the
+# clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
+# passed on every turn whatever the front matter says. The last line is the delegation
 # itself, as the worker will use it: sudo, the account, and claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && claude --help | grep -q -- '--disallowedTools' \
  && claude --help | grep -q -- '--strict-mcp-config' \
  && claude --help | grep -q -- '--mcp-config <' \
+ && claude --help | grep -q -- '--setting-sources' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version
 

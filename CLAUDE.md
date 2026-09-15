@@ -338,7 +338,7 @@ floor, not the shipped version, and moves by hand.
   so a release that drops any of them fails the build rather than a session. The CI `docker` job proves both
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
-  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  that line precedes the login check. (The volume's own config surfaces are #101, landed in #123: the sweep above.)
   `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list

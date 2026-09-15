@@ -345,7 +345,7 @@ claude:
   allowed_tools: []
   disallowed_tools: []            # amended by #109: ships [WebFetch, WebSearch]
   append_system_prompt: null
-  setting_sources: null         # pass-through to --setting-sources; the dogfood file sets [project]
+  setting_sources: null         # amended by #107: always passed, defaults to [user]
 database:
   url: $DATABASE_URL            # optional; worker runs without it
 notifications:

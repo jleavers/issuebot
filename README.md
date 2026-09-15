@@ -68,7 +68,7 @@ issues that triage is most of the value.
   are what anyone who can merge to the repository can change, and a hook in them is shell run
   at launch with the agent's token. Naming `project` there hands them to every session, and
   `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
-  `--strict-mcp-config` (see "MCP servers" below). `WORKFLOW.md` owns the labels and the
+  `--strict-mcp-config` (see the `claude.mcp_config` row below, which is the only way to name one). `WORKFLOW.md` owns the labels and the
   process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
   those files (and to `.github/` itself) for the same reason; it only blocks a merge under
   branch protection's "Require review from Code Owners".
@@ -248,7 +248,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
-[ OK ] prompt: 11314 characters, renders
+[ OK ] prompt: 21444 characters, renders
 17 checks: 0 failed, 2 warnings
 ```
 

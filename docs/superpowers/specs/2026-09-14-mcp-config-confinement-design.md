@@ -39,11 +39,14 @@ the live home was never touched, and with the worker's own flags:
 | omitted (`claude.setting_sources` defaults to `None`) | user | `[{"name":"probe119","status":"connected"}]`, tool `mcp__probe119__probe_exfiltrate` offered |
 | omitted | project | connected, same tool |
 | `user,project` | user | connected |
-| `project` (what `configs/WORKFLOW.md` passes) | user or project | `[]` |
+| `project` (what `configs/WORKFLOW.md` passed then) | user or project | `[]` |
 
 So: **yes, `claude -p` loads `mcpServers` from `~/.claude.json`**, at the shipped defaults.
-The repository's own workflow suppresses it only as a side effect of a setting that exists for
-other reasons and defaults to `None`.
+The repository's own workflow suppressed it only as a side effect of a setting that exists for
+other reasons. The `--setting-sources` column is as measured: #107 has since made the setting
+always passed and defaulted it to `[user]`, and the workflow names it no longer, so the last
+row is no longer the shipped shape and nothing suppresses the entry but the flag. That
+strengthens the conclusion below rather than changing it.
 
 Two things measured alongside it, because they bound the scope:
 

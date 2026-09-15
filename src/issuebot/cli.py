@@ -584,9 +584,18 @@ def _mcp_config_check(cfg: Settings) -> Check:
     if problems:
         return Check(subject, "fail", "; ".join(problems))
     parts = [_plural(len(paths), "file")] if paths else []
-    if documents:
-        parts.append(_plural(len(documents), "inline document"))
-    return Check(subject, "ok", " and ".join(parts))
+    if not documents:
+        return Check(subject, "ok", " and ".join(parts))
+    parts.append(_plural(len(documents), "inline document"))
+    # An inline document is an argv element, so it is in `ps` and in the turn's start line (the
+    # latter scrubbed, #109), and an MCP server carries its credentials in its own `env` block.
+    # A file is read by `claude` and by nobody watching the process table.
+    return Check(
+        subject,
+        "warn",
+        f"{' and '.join(parts)}; an inline document is on the command line, where `ps` reads "
+        "it, so a server whose env holds a credential belongs in a file beside this one",
+    )
 
 
 def _mcp_path_problem(path: Path, run_as: str | None) -> str | None:
@@ -598,20 +607,33 @@ def _mcp_path_problem(path: Path, run_as: str | None) -> str | None:
     return _mcp_readable_by(path, run_as)
 
 
+# The delegated readability test answers in words rather than in an exit status: a `sudo -n`
+# that the sudoers policy refuses exits non-zero too, and reading that as "the file is not
+# readable" would have `validate` blame a file that is fine, on the same run as the
+# `agent.run_as` check that reports the real fault. Anything but these two lines means the
+# delegation did not run.
+_READABLE = "issuebot-readable"
+_UNREADABLE = "issuebot-unreadable"
+_READ_TEST = f'if test -r "$1"; then echo {_READABLE}; else echo {_UNREADABLE}; fi'
+_READ_TEST_TIMEOUT_S = 10
+
+
 def _mcp_readable_by(path: Path, run_as: str | None) -> str | None:
     """Whether the session's account can read ``path``; ``None`` when it can or cannot be asked.
 
     Delegated through ``RunAs`` rather than read here: the worker's uid reading a file proves
     nothing about the session's, which is the whole point of the split (#75). A delegation that
-    does not work is ``agent.run_as``'s own check to report, so this one stays quiet about it.
+    does not work is ``agent.run_as``'s own check to report, so this one stays quiet about it
+    rather than blaming a file that is fine.
     """
     if run_as is None:
         return None
+    argv = ["sh", "-c", _READ_TEST, "sh", str(path)]
     try:
-        completed = _run_as_factory(run_as).run(["test", "-r", str(path)], os.environ, timeout=10)
+        completed = _run_as_factory(run_as).run(argv, os.environ, timeout=_READ_TEST_TIMEOUT_S)
     except OSError, subprocess.SubprocessError:
         return None
-    if completed.returncode == 0:
+    if completed.stdout.strip() != _UNREADABLE:
         return None
     return f"{path} is not readable by {run_as}, the account the session runs as"
 

@@ -139,7 +139,9 @@ what the session may do within them.
   do").
 - **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare,
   landed in #120 while this was in review: every GitHub-authored value now goes through the
-  same defang) and #107 (the clone's `CLAUDE.md` and `.claude/`, still open) are their own
+  same defang) and #107 (the clone's `CLAUDE.md` and `.claude/`, landed in #131 while this was in
+  rework: `claude.setting_sources` now defaults to `[user]`, so those files reach the session
+  as enveloped data rather than as claude's own configuration) are their own
   bypasses; this change bounds what any of them can reach, which is why it is independent
   of both.
 
@@ -151,5 +153,12 @@ the recorded process); `tests/test_settings.py` the default and its widening;
 `tests/test_agent_prompt.py` the defang across format characters, compatibility spellings and
 padding of any length, that no spelling inside an envelope fails a render, the `Cf` class
 against `unicodedata`, and the structure check on the skeleton; `tests/test_workflow_default.py` the authority paragraph's place and wording and the
-shipped front matter's tool policy; `tests/test_cli.py` the token-reach verdicts;
+shipped front matter's tool policy, MCP set included; `tests/test_resolve.py` an `mcp_config`
+path resolved against the workflow's directory and a JSON document passed through;
+`tests/test_cli.py` the token-reach verdicts (a literal token reporting both halves on one
+line) and the `claude.mcp_config` check -- a missing path, one that is not a regular file, one
+the session's account cannot read, a delegation too broken to ask, and the warning an inline
+document earns for being an argv element; `tests/test_agent_scrub.py` the credential names
+spelled as JSON keys, which is how an MCP `env` block spells them; `tests/test_agent_runner.py`
+again for the turn's start line carrying that argv scrubbed;
 `tests/test_image_layout.py` the Dockerfile's flag assertions.
