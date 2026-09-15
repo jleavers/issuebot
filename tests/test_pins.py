@@ -27,7 +27,9 @@ UNPINNABLE = re.compile(r"^\s*(?:- )?uses: (?:\./|docker://)")
 # <40 hex>  # frozen: <tag>, as `pre-commit autoupdate --freeze` writes it
 REV = re.compile(r"^\s*rev: [0-9a-f]{40}  # frozen: \S+$")
 # Building or running an image: the `docker` verbs and the `docker/...` actions that wrap
-# them. Matched against a step's `uses` and `run` together, so neither spelling escapes it.
+# them, matched against a step's `uses` and `run` together. A guard on what these two
+# workflows actually contain, not a general one -- it knows nothing of `podman`, `nerdctl`,
+# or a `run:` that shells out to a script that builds.
 EXECUTES = re.compile(r"\bdocker(?:/|\s+(?:run|build|buildx|compose)\b)")
 
 
@@ -176,8 +178,16 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
     assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
     assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
-    # ... and the copy may move that one line and nothing else.
+    # ... and the copy may move that one line and nothing else. A reused branch is held to
+    # the same shape against the base, since `build` built the base plus the pin and the
+    # pull request body says so.
     assert "git diff --numstat -- Dockerfile" in opens["run"]
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in opens["run"]
+
+    # The branch name is derived from the validated version rather than carried over from
+    # the job that ran the unreviewed release: it names what gets written to the repository.
+    assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
+    assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
 
     # Dropping the persisted credential also drops git's own access to the remote, and this
     # repository is private: an unauthenticated `git ls-remote` fails outright rather than
@@ -185,5 +195,8 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     # branch" and lose the reuse path. So the lookup asks the API, which still has GH_TOKEN.
     # The invocation, not the word: the line that replaced it says why in a comment.
     check = next(step for step in build["steps"] if step.get("id") == "check")
-    assert 'gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}"' in check["run"]
+    # `matching-refs` answers an absent branch with 200 and an empty list, so absence is a
+    # successful reply and every non-zero exit is a real failure -- no parsing of gh's
+    # English error text to tell "no branch" from "could not ask".
+    assert "git/matching-refs/heads/${branch}" in check["run"]
     assert "git ls-remote" not in _commands(check["run"]), "asks git for a remote ref"

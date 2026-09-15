@@ -43,7 +43,6 @@ jobs:
     outputs:
       current: ${{ steps.check.outputs.current }}
       latest: ${{ steps.check.outputs.latest }}
-      branch: ${{ steps.check.outputs.branch }}
       changed: ${{ steps.check.outputs.changed }}
       reuse: ${{ steps.check.outputs.reuse }}
     steps:
@@ -100,17 +99,20 @@ jobs:
               # fails with "Repository not found" rather than reporting an absent branch.
               # `gh` still has GH_TOKEN, and reading a ref is contents: read.
               #
-              # Only a 404 is "no branch". Anything else -- a 5xx, a rate limit, a token
-              # that lost its scope -- is a question this job could not answer, and the
-              # cost of answering it "no" is the same either way: open-pr would try to
-              # create a branch that is already there and be rejected on push. So an
-              # unreadable ref fails the run instead of guessing.
-              if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent 2>&1)"; then
+              # `matching-refs` answers an absent branch with 200 and an empty list, so
+              # "no branch" is a *successful* reply and every non-zero exit is a real
+              # failure -- no parsing of gh's English error text to tell them apart. It is
+              # a prefix query, hence the exact-ref filter. A failure fails the run: a
+              # 5xx or a rate limit answered "no" would have open-pr try to create a
+              # branch that is already there and be rejected on push.
+              if ! found="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${branch}" \
+                   --jq "[.[] | select(.ref == \"refs/heads/${branch}\")] | length")"; then
+                echo "::error::could not read refs/heads/${branch}"
+                exit 1
+              fi
+              if [ "${found}" != "0" ]; then
                 echo "::notice::${branch} exists with no pull request; reusing it"
                 reuse=true
-              elif ! printf '%s' "${err}" | grep -q 'HTTP 404'; then
-                echo "::error::could not read refs/heads/${branch}: ${err}"
-                exit 1
               fi
             fi
           fi
@@ -194,7 +196,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CURRENT: ${{ needs.build.outputs.current }}
           LATEST: ${{ needs.build.outputs.latest }}
-          BRANCH: ${{ needs.build.outputs.branch }}
           REUSE: ${{ needs.build.outputs.reuse }}
         run: |
           set -euo pipefail
@@ -205,14 +206,29 @@ jobs:
             echo "::error::the resolved version is not a version: ${LATEST}"
             exit 1
           fi
+          # The branch name is *derived* from that version rather than carried over from the
+          # other job, because it names what gets written to this repository: it reaches
+          # `git push` and the pull request's `head`. Deriving it is what makes the sentence
+          # above true of every value this step acts on, and it cannot start with a `-`.
+          BRANCH="claude-code-${LATEST}"
           if [ "${REUSE}" = "true" ]; then
-            git fetch origin "${BRANCH}"
+            git fetch origin "${GITHUB_REF_NAME}" "${BRANCH}"
             git checkout "${BRANCH}"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
             # earlier run, and writable by anyone who can push here -- so it is held to the
-            # same rule as one this job writes: it must already carry the resolved pin.
+            # same rule as one this job writes, and to the same *shape*. `build` built this
+            # branch's base plus the pin and nothing else, and the body below says so, so
+            # that is exactly what the branch has to be for the claim to be true of it.
             if ! grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile; then
-              echo "::error::${BRANCH} is not pinned to ${LATEST}"
+              echo "::error::${BRANCH} is not pinned to ${LATEST}." \
+                "Delete the branch and rerun this workflow to rebuild it."
+              exit 1
+            fi
+            if [ "$(git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}")" \
+                 != "$(printf '1\t1\tDockerfile')" ]; then
+              echo "::error::${BRANCH} differs from ${GITHUB_REF_NAME} by more than the pin," \
+                "so it is not what was built. Delete the branch and rerun this workflow."
+              git diff --stat "origin/${GITHUB_REF_NAME}" "${BRANCH}"
               exit 1
             fi
           else
@@ -238,11 +254,16 @@ jobs:
           # resolved -- which is also the proof that the image installed what the pin asks
           # for. Bytes are dropped rather than cut, so the cap cannot split a character.
           version="$(head -n 1 /tmp/bump/claude-version.txt \
-            | LC_ALL=C tr -d '`' | LC_ALL=C tr -cd '[:print:]' | cut -c1-120)"
-          if ! printf '%s' "${version}" | grep -qF -- "${LATEST}"; then
-            echo "::error::the built image reports '${version}', which does not name ${LATEST}"
-            exit 1
-          fi
+            | LC_ALL=C tr -d '`' | LC_ALL=C tr -cd '[:print:]' | cut -b1-120)"
+          # An exact token, not a substring: an image reporting 2.1.2631 must not satisfy a
+          # pin of 2.1.263. Everything that is not a digit or a dot becomes a separator.
+          case " $(printf '%s' "${version}" | LC_ALL=C tr -c '0-9.' ' ') " in
+            *" ${LATEST} "*) ;;
+            *)
+              echo "::error::the built image reports '${version}', which does not name ${LATEST}"
+              exit 1
+              ;;
+          esac
           if [ "${REUSE}" != "true" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
