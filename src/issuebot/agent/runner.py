@@ -22,6 +22,7 @@ from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.config import Settings
+from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
 
 # The oldest claude carrying `--permission-prompts none`, the flag that makes an
@@ -33,8 +34,25 @@ MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 259)
 CLAUDE_PROBE_TIMEOUT_S = 10
 STREAM_LINE_LIMIT = 10 * 1024 * 1024
 TERMINATE_GRACE_S = 10.0
+# `PROXY_ENV_NAMES` is the third property of the session's authority, after its tools and its
+# token (#126): under compose the session's container has no route off the host except the
+# allow-listing proxy these name, and `claude`, `gh`, `git`, `uv`, `pip`, `npm` and `curl` all
+# read them. Passed through rather than fixed here, because the address is the deployment's
+# (compose sets it) and the host route has none -- where the absence is what `validate` warns
+# about rather than something this allow-list could supply.
 PASSTHROUGH_NAMES: frozenset[str] = frozenset(
-    {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR", "TERM"}
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TMPDIR",
+        "TERM",
+        *PROXY_ENV_NAMES,
+    }
 )
 PASSTHROUGH_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", "GIT_AUTHOR_", "GIT_COMMITTER_")
 FIXED_ENVIRONMENT: dict[str, str] = {
@@ -63,7 +81,13 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # `agent_environment` passes through to configure `claude` itself, and the file's job is to add
 # what the target repository's tests need, not to re-point or re-credential the agent for its
 # next turn. Everything else the agent could already do from inside the workspace anyway.
-PROTECTED_ENV_NAMES: frozenset[str] = frozenset({"GH_TOKEN", "PATH", "HOME", *FIXED_ENVIRONMENT})
+# The proxy variables are here for the same reason `PATH` is, and for no stronger one: what
+# bounds egress is the container's lack of a route, not a variable the session could rewrite,
+# so a hook that emptied them would take `gh`, `git` and the next turn's `claude` off the
+# network rather than let anything off the allow-list (#126).
+PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
+    {"GH_TOKEN", "PATH", "HOME", *FIXED_ENVIRONMENT, *PROXY_ENV_NAMES}
+)
 PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MESSAGE_LIMIT = 500
