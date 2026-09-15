@@ -391,7 +391,14 @@ floor, not the shipped version, and moves by hand.
   caught by the run instead: `classify_result` reads an authentication failure out of claude's
   own words (`is_auth_failure`, `AUTH_FAILURE_MARKERS`) and gives it the `auth_failed`
   category, and a run that ends with it escapes the issue at once, with a blocker naming
-  authentication rather than after `max_attempts` opaque failures. The same exit holds
+  authentication rather than after `max_attempts` opaque failures. What claude's own words
+  are is settled by what it sent, not by the shape the categories expect: a login whose
+  refresh is refused arrives as `subtype: "success"` with `is_error` and status 1, saying
+  `Failed to authenticate: OAuth session expired and could not be refreshed`, so the result
+  text is read for markers whenever claude itself failed — the subtype saying so *or* a
+  non-zero exit — and `oauth session` sits beside `oauth token` in `AUTH_TOKEN_WORDS`. Only
+  the status-0 case is the agent's own final message, which may discuss a credential without
+  one having lapsed, and it stays `turn_failed`. The same exit holds
   dispatch: no issue is claimed (`_dispatch_candidates` is skipped, a due retry requeues as
   kind `auth` at one poll interval) until a probe through the same `claude_auth` seam reports
   a login, which lifts the hold and resumes dispatch with no restart. `logged_out` holds for
