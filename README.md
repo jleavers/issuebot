@@ -178,8 +178,9 @@ ignored.
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings the agent loads (`user`, `project`, `local`) | Claude Code's default |
-| `claude.allowed_tools`, `claude.disallowed_tools` | the session's tool set, passed to `claude` as `--allowedTools` and `--disallowedTools`. The deny list ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[]`; `[WebFetch, WebSearch]` |
-| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account, so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
+| `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
+| `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
+| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account, so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
@@ -224,6 +225,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
 [ OK ] agent.run_as: agent; the session runs as a separate account
+[ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -232,7 +234,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-15 checks: 0 failed, 2 warnings
+16 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in

@@ -213,7 +213,7 @@ floor, not the shipped version, and moves by hand.
   sweeps again); a no-op on the host route (`run_as` unset), where the
   home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
-  its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
+  its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
   `safe.directory` because of this split: the workspace directory is the worker's and the
   clone inside it the session's, and git refuses a worktree owned by another account
@@ -751,7 +751,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (fifteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (sixteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
   App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
@@ -765,7 +765,12 @@ floor, not the shipped version, and moves by hand.
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
   missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
   the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
-  since the session then shares the worker's uid), a `database.url` check that connects and
+  since the session then shares the worker's uid), a `claude.mcp_config` check that stats each
+  path it names and, with `agent.run_as` set, asks that account whether it can read it (#109:
+  the one route by which an MCP server reaches a session, resolved against the workflow's
+  directory and opened at the session's uid, so a file the worker can read and `agent` cannot
+  would fail every turn with claude's own startup error instead of a line here; an inline JSON
+  document is on the command line already and is only counted), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a

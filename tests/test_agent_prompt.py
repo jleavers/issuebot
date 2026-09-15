@@ -3,6 +3,7 @@
 import copy
 import pickle
 import sys
+import time
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -331,8 +332,19 @@ def test_the_gap_and_the_less_than_are_matched_before_the_fold_for_every_code_po
 
 
 def test_a_body_of_nothing_but_less_than_stays_cheap() -> None:
+    """The defang is linear in the text, so a hostile body cannot stall a worker's event loop.
+
+    Wall clock, not a complexity proof, and deliberately loose: the two bodies below are
+    64 KiB of the worst shapes for a backtracking matcher (every character an edge, and every
+    edge padded past the name window with format characters), and take ~10 ms each here. A
+    budget two orders of magnitude above that fails on a rewrite that reintroduces
+    backtracking without failing on a slow or loaded runner.
+    """
+    budget_s = 5.0
+    start = time.perf_counter()
     GitHubText(text="<" * 65536, source="issue #42 description", author="reporter")
     GitHubText(text=("<" + "\u200b" * 63) * 1024, source="issue #42 description", author=None)
+    assert time.perf_counter() - start < budget_s
 
 
 def test_github_text_is_not_html_escaped() -> None:

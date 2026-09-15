@@ -236,7 +236,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("15 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("16 checks: 0 failed, 2 warnings")
     assert "secret-token-value" not in out
 
 
@@ -258,7 +258,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("15 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("16 checks: 0 failed, 2 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -352,11 +352,141 @@ def test_validate_missing_token_fails(
 def test_validate_literal_token_warns(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, executables: object
 ) -> None:
+    """A literal is the more urgent complaint, and #109's reach is the rest of the same line:
+    a classic token committed to the workflow file is the worst case of both, so the operator
+    should not have to move it into a variable and re-run to learn the second half."""
     path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n  token: ghp_literal\n---\nBody")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[WARN] github.token: literal value in WORKFLOW.md; prefer $VAR" in out
+    assert (
+        "[WARN] github.token: literal value in WORKFLOW.md; prefer $VAR; a classic token, "
+        "which reaches every repository its account can, and the session holds it: a "
+        "fine-grained token restricted to o/r is the least it needs" in out
+    )
     assert "0 failed, 3 warnings" in out
+
+
+def test_validate_literal_token_that_names_no_reach_warns_only_about_the_literal(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, executables: object
+) -> None:
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n  token: github_pat_literal\n---\nBody")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.token: literal value in WORKFLOW.md; prefer $VAR\n" in out
+
+
+def test_validate_reports_no_mcp_server_by_default(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    path = _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody")
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: no MCP server configured" in capsys.readouterr().out
+
+
+def test_validate_counts_the_mcp_files_and_documents_it_can_load(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    (tmp_path / "servers.json").write_text('{"mcpServers": {}}')
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nclaude:\n  mcp_config:\n"
+        "    - servers.json\n    - '{\"mcpServers\": {}}'\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] claude.mcp_config: 1 file and 1 inline document" in out
+
+
+def test_validate_fails_when_an_mcp_file_is_missing_or_not_a_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#109: `--mcp-config` is the one route by which a server reaches a session, and the path
+    is resolved against this file's directory, so a typo here would otherwise be claude's own
+    startup error on every turn -- `max_attempts` opaque failures and a blocked escape."""
+    (tmp_path / "a-directory").mkdir()
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nclaude:\n  mcp_config:\n"
+        "    - gone.json\n    - a-directory\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert f"[FAIL] claude.mcp_config: {tmp_path / 'gone.json'} does not exist" in out
+    assert f"{tmp_path / 'a-directory'} is not a regular file" in out
+
+
+def test_validate_asks_the_session_account_whether_it_can_read_an_mcp_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The worker's uid reading the file proves nothing about the session's (#75), which is the
+    case under compose: the entry is resolved against the workflow's directory, and the file is
+    opened by `agent`."""
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nagent:\n  run_as: agent\nclaude:\n"
+        "  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    asked: list[list[str]] = []
+
+    class _Refuses:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
+        def run(self, argv: list[str], environ: object, timeout: float) -> object:
+            asked.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _Refuses)
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert (
+        f"[FAIL] claude.mcp_config: {tmp_path / 'servers.json'} is not readable by agent, "
+        "the account the session runs as" in out
+    )
+    assert asked == [["test", "-r", str(tmp_path / "servers.json")]]
+
+
+def test_validate_stays_quiet_when_the_delegation_itself_is_broken(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """A delegation that does not work is `agent.run_as`'s own check to report; this one has
+    nothing to say about a file it could not ask about."""
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nagent:\n  run_as: agent\nclaude:\n"
+        "  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+
+    def _explode(user: str) -> object:
+        raise OSError("no sudo here")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _explode)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
 
 
 def test_validate_missing_executables_fail(
@@ -435,7 +565,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "15 checks: 0 failed, 2 warnings" in out
+    assert "16 checks: 0 failed, 2 warnings" in out
 
 
 def _validate_with_database(
@@ -459,7 +589,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "15 checks: 1 failed, 1 warnings" in out
+    assert "16 checks: 1 failed, 1 warnings" in out
     assert fake_database.urls == []
 
 
@@ -515,7 +645,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "15 checks: 0 failed, 2 warnings" in out
+    assert "16 checks: 0 failed, 2 warnings" in out
 
 
 # --- validate: github.status (#88) -------------------------------------------------
@@ -556,7 +686,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "15 checks: 0 failed, 3 warnings" in out
+    assert "16 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -571,7 +701,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "15 checks: 0 failed, 3 warnings" in out
+    assert "16 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -587,7 +717,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "15 checks: 0 failed, 3 warnings" in out
+    assert "16 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -611,7 +741,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "15 checks: 0 failed, 3 warnings" in out
+        assert "16 checks: 0 failed, 3 warnings" in out
     finally:
         released.set()
 
@@ -629,7 +759,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "15 checks: 0 failed, 3 warnings" in out
+    assert "16 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -674,7 +804,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "15 checks: 0 failed, 1 warnings" in out
+    assert "16 checks: 0 failed, 1 warnings" in out
     assert "secret" not in out
 
 
@@ -840,7 +970,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("15 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("16 checks: 0 failed, 2 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -2850,7 +2980,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     out = capsys.readouterr().out
     assert "[ OK ] agent.run_as: agent; the session runs as a separate account" in out
     assert probed == ["agent"]
-    assert "15 checks: 0 failed, 1 warnings" in out
+    assert "16 checks: 0 failed, 1 warnings" in out
 
 
 def test_validate_fails_when_the_session_account_cannot_be_reached(
@@ -2865,4 +2995,4 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "15 checks: 1 failed, 1 warnings" in out
+    assert "16 checks: 1 failed, 1 warnings" in out

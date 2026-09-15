@@ -227,13 +227,15 @@ ENV LANG=C.UTF-8 \
 # home holds (#119) -- and one that drops --disallowedTools silently widens the session's
 # tool set (#109), so fail the build instead. --permission-prompts and --strict-mcp-config
 # are passed on every turn and neither is a setting, which is what puts them here rather
-# than in `validate`; --disallowedTools carries the setting that fixes the tool set. The
-# last line is the delegation itself, as the worker will use it: sudo, the account, and
-# claude under it.
+# than in `validate`; --disallowedTools carries the setting that fixes the tool set, and
+# --mcp-config is the only route left by which a server reaches a session, so a rename there
+# would break those deployments one session at a time. The last line is the delegation
+# itself, as the worker will use it: sudo, the account, and claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && claude --help | grep -q -- '--disallowedTools' \
  && claude --help | grep -q -- '--strict-mcp-config' \
+ && claude --help | grep -q -- '--mcp-config <' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version
 

@@ -1001,6 +1001,50 @@ async def test_run_turn_counts_the_applied_keys_on_its_start_line(workspace: Pat
 
 
 @posix
+async def test_run_turn_scrubs_the_argv_it_logs(workspace: Path) -> None:
+    """#109: every other element is a flag, a model name, a tool name or a session id, but
+    `claude.mcp_config` takes a JSON document as well as a path, and an MCP server definition
+    carries its credentials in its own `env` block -- so an operator who inlines one would put
+    it in this line, and from there into whatever ships the worker's logs."""
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo", "token": "ghp_0123456789abcdef"},
+            "workspace": {"root": str(workspace.parent)},
+            "claude": {
+                "command": str(FAKE_CLAUDE),
+                "turn_timeout_ms": 30_000,
+                "mcp_config": [
+                    '{"mcpServers": {"x": {"env": '
+                    '{"API_KEY": "sk-ant-oat01-0123456789abcdefghijklmnop"}}}}'
+                ],
+            },
+        }
+    )
+    runner = ClaudeRunner(
+        cfg,
+        environ={
+            "PATH": os.environ["PATH"],
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "CLAUDE_FAKE_SCENARIO": "success",
+        },
+    )
+    stream = io.StringIO()
+    configure_logging(level="INFO", fmt="json", stream=stream)
+    try:
+        await run(runner, workspace)
+    finally:
+        configure_logging(stream=io.StringIO())
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    (started,) = [r for r in records if r["event"] == "claude_turn_started"]
+    logged = " ".join(started["argv"])
+    assert "sk-ant-oat01-0123456789abcdefghijklmnop" not in logged
+    assert "***" in logged
+    # Scrubbed, not dropped: the flag and the shape of the document are still readable.
+    assert "--mcp-config" in started["argv"]
+    assert "mcpServers" in logged
+
+
+@posix
 async def test_run_turn_rereads_the_workspace_env_file_every_turn(
     workspace: Path, tmp_path: Path
 ) -> None:

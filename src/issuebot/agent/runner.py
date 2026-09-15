@@ -846,7 +846,7 @@ class ClaudeRunner:
         self._log.info(
             "claude_turn_started",
             turn_number=turn_number,
-            argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+            argv=self._logged_argv(argv),
             workspace=str(resolved),
             workspace_env_count=len(workspace_env),
             stdout_path=str(stdout_path),
@@ -924,6 +924,18 @@ class ClaudeRunner:
         else:
             emit(_event("turn_failed", parser, detail=error))
         return finish(category, error, exit_code)
+
+    def _logged_argv(self, argv: Sequence[str]) -> list[str]:
+        """The argv for the turn's log line, scrubbed before it is cut (#109).
+
+        Every other element is a flag, a model name, a tool name or a session id, but
+        ``claude.mcp_config`` takes a JSON document as well as a path, and an MCP server
+        definition carries its credentials in its own ``env`` block -- so an operator who
+        inlines one puts it in this line, and in ``ps``, which is why the README's row says
+        a file is the better spelling. Scrubbed first and cut after, like every other bounded
+        message here: a cut through a credential leaves a fragment the shapes no longer match.
+        """
+        return [self._scrubber.scrub(arg)[:_LOGGED_ARG_LENGTH] for arg in argv]
 
     def _scrub(self, text: str | None) -> str | None:
         return None if text is None else self._scrubber.scrub(text)

@@ -53,7 +53,10 @@ _GAP = re.compile(r"\s*[/\uff0f]?\s*")
 # The name itself, matched against the NFKC form of the next few characters after the gap, so
 # `<` U+FF47 `ithub-text` (a fullwidth g) is the tag, and `github-texture` is not.
 _NAME = re.compile(rf"{GITHUB_TEXT_TAG}\b", re.IGNORECASE)
-# The name is eleven characters and `\b` wants one more; NFKC only ever lengthens.
+# The name is eleven characters and `\b` wants one more. NFKC can shorten a run as well as
+# lengthen it (a base plus a combining mark composes to one), but a composition inside the
+# name destroys the name, so sixteen raw characters is more than any spelling that still
+# folds to `github-text` can need.
 _NAME_WINDOW = 16
 # The envelope's own edges in a rendered prompt: an opening carries `source=` first, so the
 # rule paragraph's bare `<github-text>` is not one.

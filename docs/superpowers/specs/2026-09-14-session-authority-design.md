@@ -59,8 +59,11 @@ what the session may do within them.
   server a session found for itself is gone until the front matter names it. A deny list rather than an allow list, on purpose: an allow list would
   have to name every tool the workflow needs, and tool names move between `claude` releases
   (`Task` became `Agent`), so a hard-coded one would break sessions silently on the weekly
-  version bump, while the deny list names two tools that are not going anywhere and fails
-  safe if one is renamed -- the session would merely hold it. An operator widens the list in
+  version bump, while the deny list names two tools that are not going anywhere. A rename
+  fails *open* -- the session would hold the renamed tool -- and that is the trade taken
+  knowingly: an allow list fails closed on the same rename, by breaking every session, and this
+  list is two entries long, so the cost of the open failure is bounded and the weekly version
+  bump is where a rename would be seen. An operator widens the list in
   the front matter (`disallowed_tools: []`; a list replaces as a whole under the overlay), and
   that is outside the prompt, which is the point: neither the prose nor an issue can. The
   Dockerfile asserts both flags at build beside `--permission-prompts`, since a release that

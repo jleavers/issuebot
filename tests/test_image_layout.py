@@ -82,6 +82,11 @@ def test_the_flags_the_sessions_authority_depends_on_are_asserted_at_build() -> 
     without a word; the build fails instead."""
     assert "claude --help | grep -q -- '--disallowedTools'" in DOCKERFILE
     assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE
+    # `--mcp-config` is the only route by which a server reaches a session, so a rename there
+    # would break the deployments that name one, one session at a time.
+    # Matched with its argument, since a bare `--mcp-config` is a substring of
+    # `--strict-mcp-config` and of the `--setting-sources` help text beside it.
+    assert "claude --help | grep -q -- '--mcp-config <'" in DOCKERFILE
 
 
 def test_ci_proves_the_session_home_sweep() -> None:
