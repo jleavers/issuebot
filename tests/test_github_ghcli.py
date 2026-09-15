@@ -784,3 +784,95 @@ async def test_empty_reads_do_not_probe_the_login() -> None:
     assert await adapter.fetch_issues_by_states([]) == []
     assert await adapter.fetch_issues_by_ids([]) == []
     assert runner.calls == []
+
+
+# --- reads: the label history --------------------------------------------------------------
+
+
+def _timeline_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issue": {
+                        "timelineItems": {
+                            "nodes": nodes,
+                            "pageInfo": {
+                                "hasNextPage": end_cursor is not None,
+                                "endCursor": end_cursor,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+async def test_count_own_label_additions_reads_the_timeline_and_paginates() -> None:
+    """The bounce count comes from GitHub's own record of who added the label (#104)."""
+    runner = StubRunner()
+    runner.on(
+        both(has("LABELED_EVENT"), lacks("cursor=")),
+        stdout=_timeline_page(
+            [
+                {"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}},
+                {"actor": {"login": "reviewer"}, "label": {"name": "issuebot/rework"}},
+                {"actor": {"login": LOGIN.upper()}, "label": {"name": "Issuebot/Rework"}},
+                {"actor": {"login": LOGIN}, "label": {"name": "issuebot/review"}},
+                {"actor": None, "label": {"name": "issuebot/rework"}},  # a deleted account
+                {"actor": {"login": LOGIN}, "label": None},  # a deleted label
+                {},  # not a labeled event at all
+            ],
+            end_cursor="Y3Vyc29yOjE=",
+        ),
+    )
+    runner.on(
+        both(has("LABELED_EVENT"), has("cursor=Y3Vyc29yOjE=")),
+        stdout=_timeline_page(
+            [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}], end_cursor=None
+        ),
+    )
+    adapter = make_adapter(runner)
+    assert await adapter.count_own_label_additions(42, "issuebot/rework") == 3
+    first = runner.argv(0)
+    assert first[:3] == ["api", "graphql", "-f"]
+    assert "timelineItems(itemTypes: [LABELED_EVENT], first: 100, after: $cursor)" in query_of(
+        first
+    )
+    # `-F`, not `-f`: the issue number is an `Int!` and gh has to send it typed.
+    assert first[first.index("number=42") - 1] == "-F"
+    assert first[first.index("owner=example") - 1] == "-f"
+    assert len(runner.calls) == 2
+
+
+async def test_count_own_label_additions_rejects_a_malformed_response() -> None:
+    runner = StubRunner()
+    runner.on(has("LABELED_EVENT"), stdout='{"data": {"repository": {"issue": null}}}')
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).count_own_label_additions(42, "issuebot/rework")
+    assert exc.value.category == "response"
+    runner = StubRunner()
+    runner.on(
+        has("LABELED_EVENT"),
+        stdout='{"data": {"repository": {"issue": {"timelineItems": {"nodes": [], '
+        '"pageInfo": {"hasNextPage": true, "endCursor": null}}}}}}',
+    )
+    with pytest.raises(GitHubError, match="hasNextPage without endCursor"):
+        await make_adapter(runner).count_own_label_additions(42, "issuebot/rework")
+
+
+async def test_count_own_label_additions_probes_the_login_once() -> None:
+    runner = StubRunner()
+    runner.on(has("api", "user"), stdout="Issuebot-Agent\n")
+    runner.on(
+        has("LABELED_EVENT"),
+        stdout=_timeline_page(
+            [{"actor": {"login": "issuebot-agent"}, "label": {"name": "issuebot/rework"}}],
+            end_cursor=None,
+        ),
+    )
+    adapter = make_adapter(runner, login=None)
+    assert await adapter.count_own_label_additions(42, "issuebot/rework") == 1
+    assert await adapter.count_own_label_additions(42, "issuebot/rework") == 1
+    assert sum(argv[:2] == ["api", "user"] for argv, _ in runner.calls) == 1

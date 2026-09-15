@@ -24,6 +24,7 @@ from issuebot.agent.accounts import (
     session_account,
     share_with,
 )
+from issuebot.agent.boundary import SESSION_FILE, Boundary, BoundaryError
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
@@ -43,10 +44,12 @@ POST_CLONE_SCRIPT = (
 # Written last into ``.issuebot`` by the worker: its presence marks a workspace whose creation
 # completed, so a clone whose hooks were cut short is recreated rather than reused.
 CREATED_MARKER = "created"
+STATE_DIR = ".issuebot"
 # Under ``agent.run_as`` (#75) the workspace directory and ``.issuebot`` are the worker's, and
 # sticky: the agent creates what it likes inside them but can neither unlink nor rename the
-# worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own. The
-# mode and the group come from ``share_with`` (#121): the bound account's group and nobody
+# worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own. What
+# the worker reads back out of them is declared, and guarded, in ``issuebot.agent.boundary``.
+# The mode and the group come from ``share_with`` (#121): the bound account's group and nobody
 # else's, so a sibling session at another uid cannot enter the directory at all.
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
@@ -145,6 +148,11 @@ class WorkspaceManager:
         # it builds the manager (#121), so nothing below here has a pool to reason about.
         self._account = session_account(settings)
         self._runas = RunAs(self._account) if self._account else None
+        # The worker's side of the line (#104): every read of what the session leaves in a
+        # workspace goes through it, and the worker's own state is created through it. Its
+        # session uid is the bound account's alone, so under a pool a workspace's boundary
+        # names the one member that may have written in it (#121).
+        self._boundary = Boundary.current(self._account)
         self._log = get_logger(__name__)
 
     # --- paths --------------------------------------------------------------------
@@ -213,8 +221,7 @@ class WorkspaceManager:
                 # Exclusive: under agent.run_as `.issuebot` is shared, and a hostile hook that
                 # pre-created the sentinel would otherwise leave the worker `utime`-ing an
                 # agent-owned file (#75). O_EXCL fails cleanly instead.
-                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                os.close(os.open(path / ".issuebot" / CREATED_MARKER, flags, 0o644))
+                self._boundary.create_marker(path, (STATE_DIR, CREATED_MARKER))
             except OSError as exc:
                 raise AgentError("workspace_error", f"cannot mark {path} created: {exc}") from exc
         except AgentError:
@@ -225,13 +232,21 @@ class WorkspaceManager:
         return Workspace(key=path.name, path=path, created=True)
 
     def _is_complete(self, path: Path) -> bool:
-        """A clone whose creation finished, and under agent.run_as one the worker still owns."""
-        state = path / ".issuebot"
-        if not ((path / ".git").is_dir() and (state / CREATED_MARKER).is_file()):
+        """A clone whose creation finished, in a workspace whose state is still the worker's.
+
+        The clone is the session's (#75) and only has to be there -- but under a pool it has to
+        be *this* workspace's bound account's (#121), since a binding that moved leaves a tree
+        the new account cannot write. The state directory, the run directory and the sentinel
+        are read back through the boundary (#104), so each is a directory or a regular file the
+        worker owns, reached through no symbolic link.
+        """
+        if not (path / ".git").is_dir():
             return False
-        if self._runas is None:
-            return True
-        if not all(_owned_by_me(p) for p in (path, state, state / "runs", state / CREATED_MARKER)):
+        if not (
+            self._boundary.is_own_dir(path, (STATE_DIR,))
+            and self._boundary.is_own_dir(path, (STATE_DIR, "runs"))
+            and self._boundary.is_own_file(path, (STATE_DIR, CREATED_MARKER))
+        ):
             return False
         # And the clone has to belong to the account that will work in it (#121). A binding
         # that moved -- the pool shrank, the setting changed -- leaves a tree the new account
@@ -267,7 +282,9 @@ class WorkspaceManager:
         except OSError:
             return
         for child in children:
-            if child.name != REGISTRY_DIR and child.is_dir() and _owned_by_me(child):
+            # Through the boundary (#104): a workspace is a directory of the worker's, reached
+            # without following a link, so a name a session planted here is not sealed as one.
+            if child.name != REGISTRY_DIR and self._boundary.is_own_dir(self.root, (child.name,)):
                 seal(child)
 
     def _make_state_dir(self, path: Path) -> None:
@@ -359,7 +376,7 @@ class WorkspaceManager:
         # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
         # want the same DSN. `after_create` runs before any file can exist, which is fine.
         base = agent_environment(self._environ, token=self._settings.github.token)
-        env, _ = workspace_environment(base, workspace)
+        env, _ = workspace_environment(base, workspace, boundary=self._boundary)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
             with self._prepared(argv, env) as spawn:
@@ -454,15 +471,29 @@ class WorkspaceManager:
     def read_session(self, workspace: Path) -> SessionRecord | None:
         path = session_path(workspace)
         try:
-            if self._runas is not None and not _owned_by_me(path):
-                # The directory is shared with the agent (#75): a record the worker did not
-                # write is the session's word about itself, and the worker resumes on nothing.
-                self._log.warning("session_file_untrusted", path=str(path))
-                return None
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # Through the boundary (#104): the directory is shared with the agent (#75), and a
+            # record the worker did not write -- or a link, a FIFO, a file past any size a
+            # record could have -- is the session's word about itself, so the worker resumes
+            # on nothing.
+            read = self._boundary.read(workspace, (STATE_DIR, "session.json"), SESSION_FILE)
         except FileNotFoundError:
             return None
-        except (OSError, ValueError) as exc:
+        except BoundaryError as exc:
+            self._log.warning("session_file_untrusted", path=str(path), reason=exc.reason)
+            return None
+        except OSError as exc:
+            self._log.warning("session_file_unreadable", path=str(path), error=str(exc))
+            return None
+        if read.truncated:
+            self._log.warning(
+                "session_file_untrusted",
+                path=str(path),
+                reason=f"larger than {SESSION_FILE.limit} bytes",
+            )
+            return None
+        try:
+            data = json.loads(read.data.decode("utf-8"))
+        except ValueError as exc:
             self._log.warning("session_file_unreadable", path=str(path), error=str(exc))
             return None
         try:
@@ -514,13 +545,6 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"expected an integer, got {value!r}")
     return value
-
-
-def _owned_by_me(path: Path) -> bool:
-    try:
-        return path.lstat().st_uid == os.getuid()
-    except OSError:
-        return False
 
 
 def _owned_by(path: Path, account: str | None) -> bool:

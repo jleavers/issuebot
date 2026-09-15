@@ -349,6 +349,10 @@ class Orchestrator:
         # dashboard and `/healthz` would all read as healthy while nothing was ever claimed.
         self._accounts_block: str | None = None
         self._github_block: str | None = None
+        # Issues whose conflict-bounce limit this process has already noted on the workpad,
+        # and the limit it noted (#104): the note's presence in the workpad is the session's
+        # to erase, so without this a stripped note would be rewritten on every tick.
+        self._conflict_limit_noted: dict[str, int] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -836,9 +840,13 @@ class Orchestrator:
                 continue
             if issue.id in self._running or issue.id in self._retries:
                 continue
+            if self._conflict_limit_noted.get(issue.id) == limit:
+                continue
             outcome = await actions.conflict_rework(
                 self._adapter, self._bus, issue, limit=limit, now=self._now()
             )
+            if outcome in ("limit_reached", "limit_noted"):
+                self._conflict_limit_noted[issue.id] = limit
             if outcome == "limit_noted":
                 self._log.debug(
                     "conflict_rework_limit_noted",
@@ -1169,6 +1177,7 @@ class Orchestrator:
         outcome = await actions.finish_terminal(
             self._adapter, self._bus, self._workspaces_for(issue), issue
         )
+        self._conflict_limit_noted.pop(issue.id, None)
         if outcome in ("complete", "no_change"):
             # A no-fault close is a completion here too: the investigation is the delivered work.
             self._counters = self._counters.bump(issues_completed=1)

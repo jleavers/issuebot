@@ -171,7 +171,7 @@ ignored.
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs before the issue is escalated | `3` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
-| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off | `3` |
+| `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off. Counted from the `issuebot/rework` labels the token's account added to the issue, so under a shared account (your own login as the token) a rework you set by hand counts too; raise the setting to give such an issue more | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
@@ -338,6 +338,15 @@ outside the mounted volume and is recreated with each container. The credential 
 `.claude/.credentials.json`, which *is* in the volume, and it carries a refresh token, so it
 renews itself rather than expiring after a few hours.
 
+That file is also where `claude` keeps `mcpServers`, and it outlives every session in the
+container, so issuebot runs every turn with `--strict-mcp-config` (#119): only servers named
+on the command line are loaded, and issuebot names none. No MCP server in
+`/home/agent/.claude.json`, and no `.mcp.json` in a repository issuebot clones, reaches a
+session — including one an earlier session wrote there. The rest of the file is still read:
+`claude` keeps its account metadata, its trust state and a `projects` map in it. Adding an MCP
+server for the agent is therefore not a matter of `claude mcp add` inside the container; it
+would need a change to the argv issuebot builds.
+
 Because `claude-home` is a named volume there is no directory to open on the host, but you can
 list it from a throwaway container:
 
@@ -424,8 +433,13 @@ claims the issue and runs one session with the logs on your terminal.
   two state labels is ignored until that is fixed). The agent resumes on the same branch and
   PR, reads every comment, addresses each one and returns the issue to review. You need not do
   this for a merge conflict: when a sibling PR merges and yours turns `CONFLICTING`, the worker
-  moves the issue to `issuebot/rework` itself and records each bounce in the workpad, up to
-  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you.
+  moves the issue to `issuebot/rework` itself and notes each bounce in the workpad, up to
+  `agent.max_conflict_reworks` times, after which it leaves a note and waits for you. The
+  bounces are counted from the issue's own label history -- the `issuebot/rework` labels the
+  worker's account added, which nothing edits away -- not from the workpad, whose body the
+  session rewrites. That history is GitHub's word on *who* added the label, so if the token
+  is your own login rather than a bot account's, a rework you set by hand is counted as a
+  bounce as well; a dedicated account keeps the two apart.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
@@ -687,6 +701,12 @@ hook that would truncate it again or append a duplicate per session.
   `[A-Za-z_][A-Za-z0-9_]*`.
 - **Read fresh for every turn and every hook.** `before_run` runs once per session, so a session
   resumed after a retry still gets the file, and a hook may rewrite it between turns.
+- **Only a regular file is read.** issuebot opens the name without following symbolic links and
+  looks at what it found before reading a byte: a link, a FIFO, a device or a directory there
+  is refused with a warning naming the reason, and at most 64 KiB is read, cut at a line
+  boundary. The file sits in a directory the session can write, and under `agent.run_as` the
+  worker's uid can read files the session's cannot, so a link there would otherwise hand the
+  session whatever it pointed at.
 - **Some names are protected**, and a line naming one is dropped with a warning naming the key.
   `PATH`, `HOME`, `GH_TOKEN` and the fixed entries (`GH_PROMPT_DISABLED`,
   `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`) keep `gh` and `claude`

@@ -253,11 +253,15 @@ ENV LANG=C.UTF-8 \
     ISSUEBOT_AGENT_USER=agent \
     PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
-# The flag assertion is the point of pinning: a release that drops --permission-prompts
-# breaks an unattended worker at runtime, so fail the build instead. The last line is the
+# The flag assertion is the point of pinning: a release that drops --permission-prompts or
+# --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting where
+# nobody can answer, the second by loading whatever MCP config the session account's home
+# holds (#119) -- so fail the build instead. Both are passed on every turn and neither is a
+# setting, which is what puts them here rather than in `validate`. The last line is the
 # delegation itself, as the worker will use it: sudo, the account, and claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
+ && claude --help | grep -q -- '--strict-mcp-config' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \
