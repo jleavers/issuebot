@@ -199,8 +199,13 @@ floor, not the shipped version, and moves by hand.
   anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
   `github` dispatch hold and `validate`'s `github.status` check.
 - `issuebot.agent`: `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
-  session runs at a different uid from the worker. With `agent.run_as` set (the image sets
-  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`; a comma-separated
+  session runs at a different uid from the worker. With `agent.run_as` set (it resolves, in
+  order: the front matter or its overlay, then `ISSUEBOT_AGENT_USER`, then the accounts the
+  image's build recorded at `/etc/issuebot/session-accounts` -- `resolve.py`, #142, so a
+  container's default is the pool it actually built and no `ENV` names an account that could
+  outlive it; a list that exists and will not read is `SessionAccountsUnreadable`, a
+  `ConfigError` reported as `[FAIL] workflow:`, never a silent fall back to the host route --
+  and then nothing, which is the host route; a comma-separated
   value or a YAML list is a *pool*, `accounts.py` below), `claude -p`, every
   hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
   `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
@@ -236,8 +241,9 @@ floor, not the shipped version, and moves by hand.
   sharing it is depends on the route (#121), and so does which sweep is load-bearing. With one
   account every session in the container shares that home and re-reads it each turn, so a
   session running beside this one can plant between its turns and *every* sweep is doing work.
-  A pool gives each account its own home (`claude-home` is mounted at `/home/agent/.claude`
-  alone; `agent-1` .. `agent-N` keep the image's own `0700` one), so the only sharing left is
+  A pool gives each account its own home (every account, `agent` and `agent-1` .. `agent-N`
+  alike, keeps the image's own `0700` one; no volume is mounted over any of them since #142),
+  so the only sharing left is
   with the *next* session bound to that account, and the sweep before turn 1 is the one that
   matters: it clears what the previous session left and what this run's `before_run` hook left,
   since the hook runs as the account and runs once, before the loop. The later sweeps are then
@@ -319,11 +325,13 @@ floor, not the shipped version, and moves by hand.
   needs the worker to be a member of that account's group -- `group_complaint` -- and the
   pool's accounts to have groups of their own -- `pool_complaint`, since two sharing one would
   open every workspace to both; `probe_run_as` asks all three and the image arranges them with
-  `usermod --append`. `credential_complaint` is the pool's one extra rule: the accounts
-  share no login, so the credential has to be one `claude` needs no file for
+  `usermod --append`. `credential_complaint` is the rule for *any* `agent.run_as`, one account
+  or a pool (#142): a session account is one nobody logs into, so there is no login in its home
+  to read, and the credential has to be one `claude` needs no file for
   (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, both already through
-  `agent_environment`'s `PASSTHROUGH_PREFIXES`), and a pool without one fails startup and
-  `validate` rather than failing every session's authentication. The record's
+  `agent_environment`'s `PASSTHROUGH_PREFIXES`); without one the worker fails startup and
+  `validate` fails rather than failing every session's authentication. Only the host route,
+  where the home is the operator's own, is exempt. The record's
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
@@ -405,9 +413,9 @@ floor, not the shipped version, and moves by hand.
   its tag is spelled, while a template or an unwrapped value that forges an edge still does.
   `--strict-mcp-config` is unconditional for the reason
   `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
-  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
-  `claude-home` volume, so it is recreated with each container but shared by every session in
-  one -- a server a session plants there is offered to whichever issue runs next. The flag
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than inside the
+  directory the sweep walks, so it is recreated with each container but shared by every session
+  in one -- a server a session plants there is offered to whichever issue runs next. The flag
   names what survives rather than what is removed (only `--mcp-config` servers, which is
   what `claude.mcp_config` names and nothing else does), so it covers a target repository's `.mcp.json` and any MCP location a later
   `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
@@ -712,7 +720,9 @@ floor, not the shipped version, and moves by hand.
   with a fake clock, a scripted `run_session` and a scripted `claude_auth`.
   Two startup choices made on purpose (#17): a definite `logged_out` is a startup failure, so
   under compose's `restart: unless-stopped` a logged-out worker restart-loops until the
-  `claude-home` volume holds a login (visible in `docker compose ps`, costs nothing, heals
+  environment holds a credential (the detail names the container's first: `not logged in; set
+  CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), or run claude auth login on the host`; visible
+  in `docker compose ps`, costs nothing, heals
   itself), rather than claiming issues it cannot work; and only that definite answer fails,
   while `unreadable` and `ambiguous` log `orchestrator_startup_warning` and the worker starts,
   so a slow or wedged `claude` cannot keep a worker down. The verdict is logged on
@@ -1024,11 +1034,15 @@ floor, not the shipped version, and moves by hand.
   that warns when `project` or `local` hands the clone's files to the session as
   configuration (#107), an `agent.run_as` check that probes
   the uid drop, the group membership and the pool's distinct groups through `probe_run_as`
-  (#75, #111, #121: fails when set but unusable or not a different uid from this process's,
-  which the OK line names, when the worker is not in an account's group, when two accounts
-  share one, or when a pool has no environment credential; warns when unset since the session
-  then shares the worker's uid, when one account serves more than one concurrent session, and
-  when the pool is smaller than `agent.max_concurrent_agents`), a `claude.mcp_config` check
+  (#75, #111, #121, #142: fails when set but unusable or not a different uid from this
+  process's, which the OK line names, when the worker is not in an account's group, when two
+  accounts share one, or when any `agent.run_as` -- one account or a pool -- has no environment
+  credential; warns when unset since the session
+  then shares the worker's uid, when one account serves more than one concurrent session, when
+  the pool is smaller than `agent.max_concurrent_agents`, and when a runtime
+  `ISSUEBOT_AGENT_POOL_SIZE` disagrees with the accounts the image recorded at
+  `/etc/issuebot/session-accounts`, naming `docker compose build worker` as the remedy),
+  a `claude.mcp_config` check
   that stats each path it names and, with `agent.run_as` set, asks *every* account in it
   whether it can read the file (#109, #121: the one route by which an MCP server reaches a
   session, resolved against the workflow's directory and opened at the session's uid, so a

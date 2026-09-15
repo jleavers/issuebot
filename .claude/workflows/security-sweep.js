@@ -223,8 +223,9 @@ patterns before they understand the boundaries those patterns depend on. Your qu
 "is this safe for the author" but "what does a reader inherit, and what happens when they
 apply it somewhere the author's assumptions do not hold".
 
-Look at, at minimum: \`--permission-prompts none\` and whatever bounds it; the \`claude-home\`
-volume that holds a login; \`bash -lc\` hooks taking their command text from a configuration
+Look at, at minimum: \`--permission-prompts none\` and whatever bounds it; the session
+account's home and the environment credential it runs on; \`bash -lc\` hooks taking their
+command text from a configuration
 file; \`workspace_environment\` and the \`.issuebot/env\` layering; every value in the dot-env
 example and what it implies; published ports and bind hosts in \`compose.yaml\`; the
 Dockerfile's uid, its pinned \`CLAUDE_CODE_VERSION\` and the opt-in Postgres and Node

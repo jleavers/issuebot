@@ -257,8 +257,8 @@ USER issuebot
 # nothing to install for it. LANG and not LC_ALL: LC_ALL overrides every category, which would
 # stop a target repository's own LC_* settings from taking effect.
 # No HOME here: Docker sets it from /etc/passwd for whichever account runs, so `--user agent`
-# (CI's sweep proof, #101, is what still runs a command as agent) gets /home/agent and the
-# worker /home/issuebot.
+# (CI's image probes, which run `docker run --user agent` against this image) gets /home/agent
+# and the worker /home/issuebot.
 # No ISSUEBOT_AGENT_USER: `agent.run_as` falls back to /etc/issuebot/session-accounts, written
 # by the account loop above, so the image's default is the pool it built rather than a name
 # that could outlive the accounts (#142). The variable still overrides it for an operator who

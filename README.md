@@ -59,7 +59,8 @@ issues that triage is most of the value.
   yourself. Nothing in the tree is a working credential: every one is filled in per
   deployment. Compose refuses to start the database, the worker and the dashboard while the
   database password is missing; an empty `GH_TOKEN` is caught by the worker's own preflight,
-  and an empty `ANTHROPIC_API_KEY` is the log-in-once path.
+  and an empty `ANTHROPIC_API_KEY` is what you want when `CLAUDE_CODE_OAUTH_TOKEN` is the
+  credential instead — the worker refuses to start when neither is set.
 - The agent follows the target repository's own `CLAUDE.md` and `AGENTS.md` for how to run
   tools, commit and open PRs -- as text issuebot reads from the clone and hands to the prompt
   inside the same `<github-text>` envelope as the issue, under the workflow's ground rules,
@@ -96,13 +97,12 @@ issues that triage is most of the value.
    fine-grained token cannot -- and `validate` warns on it, because the session holds the
    token and a classic token's reach is the whole account's, not one repository's (#109).
    The account needs permission to push branches and open PRs in the target repository.
-2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
-   (see step 2 below for the container).
-3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
-   and `claude`, and Compose brings PostgreSQL for history and the dashboard). To run on the
-   host instead you need [uv](https://docs.astral.sh/uv/), `git`, the
-   [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
-   newer on `PATH`.
+2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
+   Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
+   API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
+   credential comes from the environment (see step 2 below).
+3. **Docker with Compose**: the image bundles `git`, `gh` and `claude`, and Compose brings
+   PostgreSQL for history and the dashboard.
 4. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
@@ -114,8 +114,7 @@ issues that triage is most of the value.
    the repository's own client-side JavaScript, set `ISSUEBOT_NODE_VERSION` too (see "Node for
    the target repository's tests").
 
-The commands below are Bash. On Windows the Compose route works as-is under Docker Desktop;
-for the host route use WSL.
+The commands below are Bash, and they work as-is under Docker Desktop on Windows.
 
 ### Step 1: clone and configure
 
@@ -126,7 +125,7 @@ cd issuebot
 cp .env.example .env
 ```
 
-Fill in `.env`: `GH_TOKEN`, `ANTHROPIC_API_KEY` (or leave it empty and log in once, step 2),
+Fill in `.env`: `GH_TOKEN`, one of `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` (step 2),
 `ISSUEBOT_DB_PASSWORD`, `ISSUEBOT_WEB_PASSWORD`, the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
 values, and optionally `SLACK_WEBHOOK_URL`. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only
 matter if 5432 or 8080 is taken on your host.
@@ -238,8 +237,8 @@ without running anything.
 ### Step 2: validate and create the labels
 
 ```bash
-docker compose run --rm worker validate         # on the host: uv run issuebot validate
-docker compose run --rm worker labels ensure    # on the host: uv run issuebot labels ensure
+docker compose run --rm worker validate
+docker compose run --rm worker labels ensure
 ```
 
 `validate` prints one line per check and exits non-zero on any `[FAIL]`:
@@ -250,9 +249,9 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
-[ OK ] claude auth: logged in (claude.ai, max)
+[ OK ] claude auth: logged in (CLAUDE_CODE_OAUTH_TOKEN)
 [ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
-[WARN] agent.run_as: agent (uid 1001); the session runs as a separate account, at a uid other than this process's (1000), but all 2 concurrent sessions share it
+[ OK ] agent.run_as: agent-1 (uid 1011), agent-2 (uid 1012), agent-3 (uid 1013); a pool of 3, one account per concurrent session; each at a uid other than this process's (1000)
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
@@ -262,7 +261,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-17 checks: 0 failed, 3 warnings
+17 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
@@ -271,27 +270,27 @@ The labels warning disappears on the next `validate`.
 
 #### One account per concurrent session
 
-`agent.run_as` above names one account, which is what the image defaults to
-(`ISSUEBOT_AGENT_USER=agent`). One account for the deployment is one account for *every*
-concurrent session, so with `agent.max_concurrent_agents` above 1 a session working one issue
-can write the workspace of a session working another -- which is why `validate` warns about it.
-Anyone may open an issue, so that is a boundary worth having (#121).
+`agent.run_as` above names the accounts a session runs as, and the image's default is the pool
+its own build created: the account loop writes the names it made to
+`/etc/issuebot/session-accounts`, and `agent.run_as` falls back to that list when neither
+`WORKFLOW.md` nor `ISSUEBOT_AGENT_USER` names anything. `ISSUEBOT_AGENT_POOL_SIZE` in this
+checkout's `.env` says how many, three by default and at build time: `docker compose build
+worker` picks a change up, and `validate` warns when the number in `.env` and the accounts in
+the image disagree.
 
-Name a pool instead, and the worker binds one account to each running slot:
-
-```bash
-# in this checkout's .env
-ISSUEBOT_AGENT_USER=agent-1,agent-2,agent-3
-CLAUDE_CODE_OAUTH_TOKEN=...        # or ANTHROPIC_API_KEY
-```
-
-or, in `WORKFLOW.md`, `agent: {run_as: [agent-1, agent-2, agent-3]}`. The image builds three
-such accounts by default (`ISSUEBOT_AGENT_POOL_SIZE` in this checkout's `.env`, at build time;
-`docker compose build worker` to pick a change up); each workspace directory then belongs to
-the worker and to its bound account's group alone (`1770`), so a sibling session cannot enter
-it, and a workspace keeps its account for as long as it exists, which is what lets a rework
-session write the clone the first one made. Dispatch is capped by the pool as well as by
+The worker binds one member of the pool to each running slot, so each workspace directory
+belongs to the worker and to its bound account's group alone (`1770`): a sibling session cannot
+enter it, and a workspace keeps its account for as long as it exists, which is what lets a
+rework session write the clone the first one made. Dispatch is capped by the pool as well as by
 `agent.max_concurrent_agents`, and `validate` says so when the pool is smaller.
+
+To name the accounts yourself — a subset of the built ones, or one account for the whole
+deployment — set `ISSUEBOT_AGENT_USER=agent-1,agent-2,agent-3` in this checkout's `.env`, or
+`agent: {run_as: [agent-1, agent-2, agent-3]}` in `WORKFLOW.md`, which wins over both. One
+account for the deployment is one account for *every* concurrent session, so with
+`agent.max_concurrent_agents` above 1 a session working one issue can write the workspace of a
+session working another -- which is why `validate` warns about it. Anyone may open an issue, so
+that is a boundary worth having (#121).
 
 Turning a pool on over a `/workspaces` volume that already holds clones needs nothing of you:
 a workspace whose clone belongs to another account is re-cloned rather than handed to a
@@ -303,48 +302,41 @@ session it claims for. A `useradd` lifts it on the next poll; a `usermod --appen
 credential added to `.env`, needs the worker restarted, because a process's supplementary
 groups and environment are fixed when it starts -- and the message says so.
 
-**A pool needs a credential in the environment.** Each account has a home of its own, and
-`claude` reads its login from there, so a pool shares no login between its accounts -- on
-purpose: two accounts refreshing one OAuth credential is a race nobody has established is safe
-(`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`). Set
-`CLAUDE_CODE_OAUTH_TOKEN` (mint one with `claude setup-token`) or `ANTHROPIC_API_KEY`; the
-worker refuses to start without one rather than claim issues every session would fail to
-authenticate, and `validate` says the same. A single account is unaffected and keeps using the
-`claude-home` login below.
+**A session account takes its credential from the environment.** Its home is one nobody logs
+into, so there is no login in it for `claude` to read — and a pool shares none between its
+accounts on purpose, since two accounts refreshing one OAuth credential is a race nobody has
+established is safe (`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`). So
+run `claude setup-token` on a machine with a browser and put the value in this checkout's
+`.env` as `CLAUDE_CODE_OAUTH_TOKEN`, or set `ANTHROPIC_API_KEY` there instead. The worker
+refuses to start without one rather than claim issues every session would fail to
+authenticate, and `validate` says the same.
 
-To use a Claude Code login instead of an API key, log in once inside the container **as the
-session's account**: run `docker compose run --rm --user agent --entrypoint claude worker`,
-complete the login, then exit. The login is kept in the `claude-home` volume, which is mounted
-at that account's home (`/home/agent/.claude`), and survives restarts and rebuilds. `--user
-agent` matters: the session authenticates with its own login, not the worker's, so a login
-written as the worker would sit in a home the session cannot read (#75). Alternatively
-run `claude setup-token` on a machine with a browser and put the result in `.env` as
-`CLAUDE_CODE_OAUTH_TOKEN`. On the host, `claude` uses whatever login you already have.
-
-#### Checking that the login took
+#### Checking that the credential took
 
 The `claude auth` line above is the answer: `validate` asks `claude` which credential it would
 use, under the same trimmed environment the agent gets, so it reports what the *agent* will
-authenticate with rather than what your shell can reach. It names the route, so you can tell
-the three apart at a glance:
+authenticate with rather than what your shell can reach. It names the credential, so you can
+tell them apart at a glance:
 
-| Line | What it means |
-|---|---|
-| `logged in (claude.ai, max)` | the login in the `claude-home` volume, on a Max subscription |
-| `logged in (CLAUDE_CODE_OAUTH_TOKEN)` | the token from `claude setup-token` |
-| `logged in (API key from ANTHROPIC_API_KEY)` | an Anthropic API key |
-| `not logged in` | nothing usable — a `[FAIL]`, because the agent cannot run |
+| Line | Route | What it means |
+|---|---|---|
+| `logged in (CLAUDE_CODE_OAUTH_TOKEN)` | container | the token from `claude setup-token` |
+| `logged in (API key from ANTHROPIC_API_KEY)` | container | an Anthropic API key |
+| `logged in (claude.ai, max)` | host, development | the login in your own `~/.claude` |
+| `not logged in` | either | nothing usable — a `[FAIL]`, because the agent cannot run |
 
 Setting both a login and `ANTHROPIC_API_KEY` is a warning rather than an error: it works, but
 which credential gets billed is not obvious from the outside, so unset one. An empty
-`ANTHROPIC_API_KEY=` counts as unset, which is what you want when you have logged in.
+`ANTHROPIC_API_KEY=` counts as unset, which is what you want when `CLAUDE_CODE_OAUTH_TOKEN`
+carries the credential.
 
 The worker runs the same probe at startup, so a worker with no usable credential prints
 `[FAIL] startup: claude auth: not logged in; ...` and exits rather than claiming issues it
-cannot work on. Under Compose that means `docker compose ps` shows the worker restarting until
-the login is in place; `docker compose logs worker` has the line. Only a definite "not logged
-in" stops it: a `claude` that does not answer in time is logged as a warning and the worker
-starts anyway.
+cannot work on. The line names the container's credential first: `not logged in; set
+CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), or run claude auth login on the host`. Under
+Compose that means `docker compose ps` shows the worker restarting until the credential is in
+place; `docker compose logs worker` has the line. Only a definite "not logged in" stops it: a
+`claude` that does not answer in time is logged as a warning and the worker starts anyway.
 
 A session that hits a true external blocker (a credential it does not have, a tool it cannot
 install, a service it cannot reach) writes the brief to the workpad and puts `BLOCKED: <one
@@ -377,10 +369,12 @@ docker compose run --rm --user agent --entrypoint claude worker auth status
 It prints JSON — `"loggedIn": true` with an `authMethod` of `claude.ai`, `oauth_token` or
 `api_key` — and `--text` gives a human-readable line instead. Note that it always exits 0, so
 read the field rather than the exit code. The `email` and `orgName` fields come back null in
-the container even when the login is good: that metadata lives in `/home/agent/.claude.json`, which sits
-outside the mounted volume and is recreated with each container. The credential itself is in
-`.claude/.credentials.json`, which *is* in the volume, and it carries a refresh token, so it
-renews itself rather than expiring after a few hours.
+the container even when the credential is good: that metadata lives in
+`/home/agent/.claude.json`, which is recreated with each container. The credential itself is
+in no file at all — it is the variable from `.env`, handed to the session in its environment —
+so nothing in the image holds it, and a token that eventually lapses is re-minted with `claude
+setup-token` and put back in `.env` rather than refreshed in place. The worker's auth hold,
+above, is the reminder.
 
 That file is also where `claude` keeps `mcpServers`, and it outlives every session in the
 container, so issuebot runs every turn with `--strict-mcp-config` (#119): only servers named
@@ -392,19 +386,6 @@ its trust state and a `projects` map in it. Adding an MCP server for the agent i
 not a matter of `claude mcp add` inside the container; it is a `claude.mcp_config` entry
 (#109), a setting the session cannot write.
 
-Because `claude-home` is a named volume there is no directory to open on the host, but you can
-list it from a throwaway container:
-
-```bash
-docker volume ls | grep claude-home     # Compose prefixes the name with the project
-docker run --rm -v issuebot_claude-home:/v alpine:3 ls -la /v
-```
-
-A logged-in volume has `.credentials.json` in it (write it as `--user agent`, above). Compose names the volume after the directory
-you cloned into, so it is `issuebot_claude-home` here and `issuebot-frontend_claude-home` in a
-checkout called `issuebot-frontend` — hence the `docker volume ls` first. Never `cat` that
-file: it holds the live token.
-
 ### Step 3: start it
 
 ```bash
@@ -415,28 +396,8 @@ docker compose logs -f worker
 That starts PostgreSQL, the worker and the dashboard at http://127.0.0.1:8080 (the browser
 prompts: any username, `ISSUEBOT_WEB_PASSWORD`; see "The dashboard" under Development for the
 rest of its access rules). At startup the worker applies the database migrations, checks the
-`gh` login, the labels and the Claude login, and prints `[FAIL] startup:` lines and exits if
-anything is wrong. From then on it polls the repository every `polling.interval_ms`.
-
-To run on the host instead:
-
-```bash
-uv sync
-set -a && . ./.env && set +a                  # the CLI reads the environment, not .env
-docker compose up -d db                       # optional: history and the dashboard
-export DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot   # optional
-uv run issuebot worker
-DATABASE_URL=postgresql://issuebot:${ISSUEBOT_DB_PASSWORD}@127.0.0.1:${ISSUEBOT_DB_PORT:-5432}/issuebot \
-  uv run issuebot web                         # in a second terminal; it reads that and
-                                              # ISSUEBOT_WEB_PASSWORD (sourced above), nothing else
-```
-
-The two DSNs are built from the `.env` you just sourced; there is no password to type and none
-written down here. The dashboard listens on loopback (`--bind 0.0.0.0` to serve a network) and
-asks for `ISSUEBOT_WEB_PASSWORD` on every request.
-
-On the host set `workspace.root` to a directory you can write, such as `~/issuebot-workspaces`;
-the worker creates it.
+`gh` login, the labels and the Claude credential, and prints `[FAIL] startup:` lines and exits
+if anything is wrong. From then on it polls the repository every `polling.interval_ms`.
 
 ### Step 4: your first issue
 
@@ -446,8 +407,8 @@ the worker creates it.
    it that contradict the workflow.
 2. Add the `issuebot/todo` label. Within one poll interval the worker labels the issue
    `issuebot/in-progress`, clones the repository into the workspace and starts a session.
-   `docker compose exec worker issuebot refresh` (host: `uv run issuebot refresh`) makes it
-   poll right away (at most once every 5 s, however often it is asked). The `NOTIFY` goes to
+   `docker compose exec worker issuebot refresh` makes it poll right away (at most once every
+   5 s, however often it is asked). The `NOTIFY` goes to
    the repository's own channel, so a store shared by several workers wakes only the one the
    issue belongs to -- which also means `refresh` and `worker` must be the same version:
    across a rolling upgrade a new `refresh` prints `[ OK ]` at a channel an old worker is not
@@ -466,8 +427,8 @@ the worker creates it.
    with no PR attached.
 
 To try one issue in the foreground before leaving the worker running:
-`docker compose run --rm worker run-once <number>` (host: `uv run issuebot run-once <number>`)
-claims the issue and runs one session with the logs on your terminal.
+`docker compose run --rm worker run-once <number>` claims the issue and runs one session with
+the logs on your terminal.
 
 ### Step 5: review the pull request
 
@@ -782,7 +743,7 @@ hook that would truncate it again or append a duplicate per session.
 
 One database and one dashboard serve every repository; each repository still gets its own
 worker, in its own checkout, with its own `configs/WORKFLOW.local.md`, workspaces volume
-and Claude login. The checkouts meet on one Docker network.
+and Claude credential. The checkouts meet on one Docker network.
 
 1. Once per host: `docker network create issuebot`.
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
@@ -948,27 +909,15 @@ that matters on your host.
   overlay existed, move those edits into the overlay and `git checkout configs/WORKFLOW.md`
   first. `configs/` is mounted into the container, but the code is baked into the
   image: after pulling a new version of issuebot, run `docker compose build` (or
-  `docker compose up --build -d`) before anything else. Upgrading across the move of
-  `WORKFLOW.md` into `configs/` needs `docker compose up -d --force-recreate worker`
-  once, so the worker picks up the new mount (the web no longer mounts `configs`). Upgrading
-  across the session/worker split (#75) moves the login volume from the worker's home to the
-  session account's: run `docker run --rm -v issuebot_claude-home:/v alpine:3 chown -R 1001:1001
-  /v` once so `agent` owns its own login (the volume's name follows your checkout directory,
-  see `docker volume ls` under "Checking that the login took"), then
-  `docker compose up -d --force-recreate worker`. Upgrading across the dashboard's own account
-  (#102) is the rebuild alone: compose now runs `web` as `web`, an account only the new image
-  has, so against a stale one the container fails to start with `unable to find user web`.
-  Check that your edits followed the rename
-  (`git status`) before starting, and note that `workspace.root` now resolves against
-  `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
-  make it absolute, because `/configs` is mounted read-only. A setting that a newer
+  `docker compose up --build -d`) before anything else. A setting that a newer
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
-  (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
-  worker (`issuebot`, uid 1000) that supervises and credentials it (#75), and -- with a pool
-  configured, see "One account per concurrent session" under step 2 -- at a different uid from
-  every other session running beside it (#121). So the session runs
+  (`claude -p`, every hook, the clone) runs as a session account — by default the pool the
+  image built, `agent-1` .. `agent-N` — a different account from the worker (`issuebot`, uid
+  1000) that supervises and credentials it (#75), and -- with a pool, see "One account per
+  concurrent session" under step 2 -- at a different uid from every other session running
+  beside it (#121). So the session runs
   with no permission prompts and may do as it likes at its own uid, but the worker's code
   (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
   in a hub checkout the dashboard password), its home and the state it keeps inside a
@@ -981,12 +930,12 @@ that matters on your host.
   `--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
   describe what the session may do *within* that authority rather than granting it, and the
   `<github-text>` envelope is a hint to the model, never the boundary (#109). The session's
-  login is its own, in `/home/agent/.claude`. With a single session account that home is a
-  shared volume across every session and repository; with a pool (`agent.run_as` naming more
-  than one account) each member keeps its own `0700` home from the image and the volume is
-  `agent`'s alone, so the sharing is with the next session bound to that same account rather
-  than with the ones running beside it. Either way, before every turn the worker sweeps the
-  config a prior or concurrent session could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
+  home is its own — `/home/<account>/.claude`, `0700` from the image — and holds no credential:
+  it authenticates from the environment, which is why nobody logs into it (#142). With a pool
+  the sharing is with the next session bound to that same account rather than with the ones
+  running beside it; with one account for the deployment every concurrent session shares that
+  home. Either way, before every turn the worker sweeps the config a prior or concurrent
+  session could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
   `agents/`, `workflows/`, `agent-memory/`, `plugins/`, `output-styles/`, `settings.json`,
   `settings.local.json` and each project's auto memory (`projects/<project>/memory/`), the
   surfaces a later `claude -p` loads as instructions or behaviour — and leaves the rest of the
@@ -1000,10 +949,10 @@ that matters on your host.
   plants is not waiting for a session working a different issue next week. What remains: the
   window between one turn's sweep and its `claude -p` start, in which a session running beside
   it at the same uid can still plant -- which a pool closes, since no two concurrent sessions
-  share a home; `/home/agent/.claude.json`, outside the volume, whose `mcpServers` no
-  session loads (`--strict-mcp-config`, #119) while its trust state persists for the container's
-  lifetime; and the account's shell profile, which a login-shell hook sources (#137). The login
-  recipe is unaffected: it writes `.credentials.json`, which the sweep never touches.
+  share a home; the account's `~/.claude.json`, which sits beside the swept directory rather
+  than in it, whose `mcpServers` no session loads (`--strict-mcp-config`, #119) while its trust
+  state persists for the container's lifetime; and the account's shell profile, which a
+  login-shell hook sources (#137).
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
@@ -1022,7 +971,12 @@ that matters on your host.
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and,
-for the container stack, Docker with Compose.
+for the container stack, Docker with Compose. Running the CLI outside a container — the host
+route, which is what `agent.run_as` unset means and how the test suite runs — also wants
+`git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
+2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
+use WSL. It is a development convenience rather than a deployment: the session then runs as
+your own user with none of the container's boundaries, and `validate` warns about it.
 
 ```bash
 uv sync
@@ -1040,6 +994,13 @@ uv run issuebot web               # the dashboard and its JSON API (needs DATABA
 cp .env.example .env              # then fill in GH_TOKEN, ISSUEBOT_DB_PASSWORD, ISSUEBOT_WEB_PASSWORD and Claude auth
 docker compose up --build         # postgres:18 + worker + web (http://127.0.0.1:8080)
 ```
+
+The CLI reads the environment and not `.env`, so source it first
+(`set -a && . ./.env && set +a`), and point `workspace.root` at a directory you can write,
+such as `~/issuebot-workspaces` (the default `/workspaces` is the Compose volume); the worker
+creates it. `issuebot web` in a second terminal reads `DATABASE_URL` and
+`ISSUEBOT_WEB_PASSWORD` and nothing else, listens on loopback (`--bind 0.0.0.0` to serve a
+network) and asks for the password on every request.
 
 History is optional: with `DATABASE_URL` set (compose builds it for the worker from
 `ISSUEBOT_DB_PASSWORD`; on the host export

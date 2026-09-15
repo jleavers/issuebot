@@ -47,9 +47,9 @@ REMOVE_TIMEOUT_S = 120
 
 # The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
 # instructions or behaviour, and that a session must therefore not leave behind for the next
-# one at the same uid (#101). With a single session account that home is a shared volume
-# (``claude-home``) across every session and repository; with a pool (#121) each member keeps
-# its own ``0700`` home and the volume is ``agent``'s alone, so the sharing is with the next
+# one at the same uid (#101). Each account keeps the image's own ``0700`` home and nothing is
+# mounted over it (#142); with a single session account that home is shared by every session in
+# the container, across every repository, and with a pool (#121) the sharing is with the next
 # session bound to that account rather than with the ones running beside it. Either way, a
 # slash command, skill, rule, subagent, workflow, plugin, output style, memory file or
 # settings a hostile issue plants would otherwise be read by an unrelated session next week.
