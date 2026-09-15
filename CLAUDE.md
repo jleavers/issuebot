@@ -1047,12 +1047,13 @@ floor, not the shipped version, and moves by hand.
   (#75, #111, #121, #142, #145: fails when set but unusable or not a different uid from this
   process's, which the OK line names, when the worker is not in an account's group, when two
   accounts share one, when any `agent.run_as` -- one account or a pool -- has no environment
-  credential, or when the list at `/etc/issuebot/session-accounts` is damaged, which this
-  check reads a second time and which since #142 refuses rather than resolving to the host
-  route (the `SessionAccountsUnreadable` above, caught by its own type at that one call so
-  that no other check's bug can be reported as a configuration fault); warns when unset since
-  the session
-  then shares the worker's uid, when one account serves more than one concurrent session, when
+  credential, and -- when nothing above it has already failed, since one check prints one
+  line -- when the list at `/etc/issuebot/session-accounts` is damaged, which this check
+  reads a second time and which since #142 refuses rather than resolving to the host route
+  (the `SessionAccountsUnreadable` above, caught by its own type at that one call so that no
+  other check's bug can be reported as a configuration fault); warns when unset since the
+  session then shares the worker's uid, when one account serves more than one concurrent
+  session, when
   the pool is smaller than `agent.max_concurrent_agents`, and when a runtime
   `ISSUEBOT_AGENT_POOL_SIZE` disagrees with the accounts the image recorded at
   `/etc/issuebot/session-accounts`, naming `docker compose build worker` as the remedy),

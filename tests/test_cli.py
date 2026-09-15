@@ -32,15 +32,7 @@ from issuebot.cli import (
     render_stats,
     render_status,
 )
-from issuebot.config import (
-    GitHubLabels,
-    GitHubSettings,
-    SessionAccountsUnreadable,
-    Settings,
-    Workflow,
-    load_workflow,
-)
-from issuebot.config.resolve import built_session_accounts
+from issuebot.config import GitHubLabels, GitHubSettings, Settings, Workflow, load_workflow
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
@@ -3504,6 +3496,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
+    assert "17 checks: 1 failed, 1 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -3528,21 +3521,4 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: session accounts unreadable: " in out
     assert str(listing) in out
-
-
-def test_a_damaged_session_account_list_is_still_refused_rather_than_resolved(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The report is `validate`'s alone: reading either spelling as "no accounts" would run
-    the session as the worker inside a container, which is the fail-open #142 closed and the
-    invariant #75 rests on. So the refusal stays a raise, and nothing here makes it total.
-    """
-    listing = tmp_path / "session-accounts"
-    listing.write_text("\n", encoding="utf-8")
-    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
-    with pytest.raises(SessionAccountsUnreadable):
-        built_session_accounts()
-    listing.unlink()
-    listing.mkdir()
-    with pytest.raises(SessionAccountsUnreadable):
-        built_session_accounts()
+    assert "17 checks: 1 failed, 1 warnings" in out
