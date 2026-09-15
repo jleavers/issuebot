@@ -10,9 +10,9 @@ it at all.
 
 sudo's environment policy never shapes what the session sees. The worker serialises the
 environment it built (``agent_environment`` plus the workspace's ``.issuebot/env``) into an
-anonymous memory file, passes that one descriptor across the uid change, and the ``exec``
-verb of this module -- run by the worker's own interpreter, root-owned in the image --
-installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
+anonymous file (``anonymous_fd``), passes that one descriptor across the uid change, and the
+``exec`` verb of this module -- run by the worker's own interpreter, root-owned in the image
+-- installs it whole and execs the command. ``HOME``, ``USER`` and ``LOGNAME`` are the target
 account's; everything else is exactly what the worker built. ``python -m
 issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec``,
 ``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
@@ -22,6 +22,7 @@ issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import pwd
@@ -30,6 +31,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +64,67 @@ CLAUDE_HOME_SWEEP: tuple[str, ...] = (
     "settings.json",
     "settings.local.json",
 )
+
+
+# The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
+# it carries -- GH_TOKEN, the Anthropic credential, any DSN a ``before_run`` hook wrote --
+# stays in memory as the memfd's bytes do, rather than in a disk-backed filesystem's freed
+# blocks. A preference only: where there is no writable ``/dev/shm`` the file goes wherever
+# ``tempfile`` puts it, which may well be a disk. The fall-through covers opening the file,
+# not filling it: a tmpfs that runs out mid-write fails the spawn with the ``OSError`` every
+# site catches rather than starting again somewhere else.
+SHM_DIR = "/dev/shm"
+
+
+def anonymous_fd(name: str) -> int:
+    """A read-write descriptor on a file no path names, positioned at its start.
+
+    ``memfd_create`` where the interpreter has it and the kernel answers, and otherwise a
+    temporary file unlinked before anything is written to it -- which is what made the memfd
+    the right choice in the first place: the descriptor is inherited through ``pass_fds`` and
+    survives sudo's ``-C``, and with no directory entry nothing else can open the environment
+    it holds. A pipe would not do; the writer would block on the buffer if the environment
+    ever outgrew it. What the fallback cannot promise is the memfd's other property, that the
+    bytes never reach a filesystem: it prefers ``SHM_DIR`` for that and settles for whatever
+    ``tempfile`` picks, which may be disk-backed.
+
+    The fallback is not theoretical (#115): ``python-build-standalone``, which is what ``uv``
+    installs, configures against a glibc older than the call, so the interpreter a developer
+    runs the suite under is regularly one without it while the image's Debian Python has it.
+    The attribute is what to ask for, not ``sysconfig``'s ``HAVE_MEMFD_CREATE``: that
+    describes the build rather than the runtime, and reads ``0`` on a ``uv`` CPython 3.14.7
+    that does define ``os.memfd_create``.
+
+    ``name`` is a label, not a path: it reaches the fallback as a filename prefix, so pass a
+    bare identifier. Raises ``OSError``, like ``memfd_create`` itself, so every spawn site
+    reports it the way it reports a missing ``claude``.
+    """
+    create = getattr(os, "memfd_create", None)
+    if create is not None:
+        # A present call can still fail: an old kernel, a seccomp profile, a sandbox. The
+        # fallback needs none of those, so try it rather than failing the spawn.
+        with contextlib.suppress(OSError):
+            return create(name)
+    if os.path.isdir(SHM_DIR) and os.access(SHM_DIR, os.W_OK):
+        with contextlib.suppress(OSError):
+            return _unlinked_fd(name, SHM_DIR)
+    return _unlinked_fd(name, None)
+
+
+def _unlinked_fd(name: str, directory: str | None) -> int:
+    """A descriptor on a temporary file in ``directory``, unlinked before it is written to.
+
+    ``mkstemp`` opens it ``0600`` to this uid, and the unlink follows immediately, so the
+    window in which the file has a name is one in which it is empty and unreadable to the
+    account the session runs as.
+    """
+    fd, path = tempfile.mkstemp(prefix=f"{name}-", dir=directory)
+    try:
+        os.unlink(path)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 
 
 class RunAsError(OSError):
@@ -113,9 +176,9 @@ class RunAs:
         reach sudo in the first place.
         """
         payload = json.dumps(self.environment(env)).encode("utf-8")
-        fd = os.memfd_create("issuebot-agent-env")
+        fd = anonymous_fd("issuebot-agent-env")
         try:
-            os.write(fd, payload)
+            _write_all(fd, payload)
             os.lseek(fd, 0, os.SEEK_SET)
             yield Spawn(
                 argv=[
@@ -204,6 +267,17 @@ class RunAs:
         # shadow the real module (#75). No escalation -- the helper is already the agent -- but
         # the interpreter should resolve to the root-owned package under /app regardless.
         return [sys.executable, "-P", "-m", MODULE, *args]
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write every byte. A memfd took the lot in one call; a file on a filesystem that fills
+    mid-write need not, and a truncated environment reaches the helper as unparseable JSON."""
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        if not written:
+            raise OSError(errno.EIO, "wrote no bytes of the session environment")
+        view = view[written:]
 
 
 def _last_line(text: str) -> str:

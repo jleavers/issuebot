@@ -1,19 +1,24 @@
 """Tests for the web app's JSON API and health check against a FakeDatabase (hermetic)."""
 
+import sys
 from collections.abc import Iterator
 from datetime import date, timedelta
 from typing import Any
 
 import pytest
+import structlog
+from fastapi.testclient import TestClient
 
 from fakes.web import (
     API,
     BASE,
     NOW,
+    PASSWORD,
     REFRESH_HEADERS,
     REPO,
     RUN_ID,
     Harness,
+    basic_auth,
     event_row,
     issue_row,
     limits,
@@ -481,6 +486,117 @@ def test_every_response_carries_the_security_headers(h: Harness) -> None:
     assert "'unsafe-eval'" not in SECURITY_HEADERS["Content-Security-Policy"]
 
 
+def _raising_routes(h: Harness) -> None:
+    """Two routes no handler covers, one under the API prefix and one page."""
+
+    @h.app.get("/api/v1/boom")
+    async def boom_api() -> None:
+        raise RuntimeError("detail-only-uvicorn-logs")
+
+    @h.app.get("/r/boom")
+    async def boom_page() -> None:
+        raise RuntimeError("detail-only-uvicorn-logs")
+
+
+def test_an_unhandled_exception_leaves_with_the_security_headers(h: Harness) -> None:
+    """The headers ride the send channel, not the response ``call_next`` returns (#106): a
+    500 Starlette's error middleware would otherwise emit bare gets the same envelope or page,
+    the same headers, and a log line naming the type and the path, never the message."""
+    _raising_routes(h)
+    with structlog.testing.capture_logs() as logs:
+        api = h.client.get("/api/v1/boom")
+        page = h.client.get("/r/boom")
+    for response in (api, page):
+        assert response.status_code == 500
+        for name, value in SECURITY_HEADERS.items():
+            assert response.headers[name] == value, (response.url, name)
+    assert api.json() == {"error": {"code": "internal_error", "message": "internal server error"}}
+    assert page.headers["content-type"].startswith("text/html")
+    assert "500" in page.text and "internal_error" in page.text
+    assert "detail-only-uvicorn-logs" not in api.text + page.text
+    errors = [entry for entry in logs if entry["event"] == "web_unhandled_error"]
+    assert [(entry["path"], entry["error"]) for entry in errors] == [
+        ("/api/v1/boom", "RuntimeError"),
+        ("/r/boom", "RuntimeError"),
+    ]
+    assert "detail-only-uvicorn-logs" not in repr(errors)
+
+
+def test_an_unhandled_exception_is_still_raised_after_it_is_answered(h: Harness) -> None:
+    """Answered, then re-raised: uvicorn logs the traceback and a strict client sees it."""
+    _raising_routes(h)
+    strict = TestClient(h.app, headers=basic_auth(PASSWORD))
+    with pytest.raises(RuntimeError, match="detail-only"):
+        strict.get("/api/v1/boom")
+
+
+def test_an_unhandled_exception_in_the_gate_leaves_with_the_headers(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The header layer wraps the gate, so an exception raised before routing is covered too."""
+
+    def broken(_header: str | None) -> str | None:
+        raise RuntimeError("detail-only-uvicorn-logs")
+
+    monkeypatch.setattr("issuebot.web.app.presented_password", broken)
+    with structlog.testing.capture_logs() as logs:
+        response = h.anonymous.get(f"{API}/state")
+    assert response.status_code == 500
+    for name, value in SECURITY_HEADERS.items():
+        assert response.headers[name] == value
+    assert response.json()["error"]["code"] == "internal_error"
+    assert [entry["path"] for entry in logs if entry["event"] == "web_unhandled_error"] == [
+        f"{API}/state"
+    ]
+
+
+async def test_a_failing_error_renderer_still_leaves_with_the_headers() -> None:
+    """Should ``on_error`` raise too, a plain 500 goes out with the headers, ``on_failure``
+    hears about the renderer's exception, and the original one is what propagates."""
+    from issuebot.web.app import _SecureExit
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        raise RuntimeError("original")
+
+    def on_error(request: Any, exc: Exception) -> Any:
+        raise ValueError("renderer")
+
+    failures: list[tuple[str, str]] = []
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    layer = _SecureExit(
+        app,
+        on_error=on_error,
+        on_failure=lambda request, exc: failures.append((request.url.path, str(exc))),
+    )
+    scope = {"type": "http", "method": "GET", "path": "/r/x", "headers": [], "query_string": b""}
+    with pytest.raises(RuntimeError, match="original"):
+        await layer(scope, receive, send)
+    assert failures == [("/r/x", "renderer")]
+    start = sent[0]
+    assert start["type"] == "http.response.start" and start["status"] == 500
+    headers = {name.decode(): value.decode() for name, value in start["headers"]}
+    for name, value in SECURITY_HEADERS.items():
+        assert headers[name.lower()] == value
+    assert b"".join(message.get("body", b"") for message in sent[1:]) == b"internal server error"
+
+
+def test_an_oversized_window_is_a_400_not_a_500(h: Harness) -> None:
+    """``int`` refuses a digit run past ``sys.get_int_max_str_digits()``; the pattern never
+    lets one through (#106)."""
+    digits = "1" * (sys.get_int_max_str_digits() + 1)
+    response = h.client.get(f"{API}/stats", params={"window": f"{digits}d"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_window"
+    assert h.database.opened == 0
+
+
 def test_each_request_uses_one_connection(h: Harness) -> None:
     h.seed_issue()
     h.client.get(f"{API}/issues/7")
@@ -517,7 +633,22 @@ def test_window_days_accepts(text: str | None, days: int) -> None:
     assert window_days(text) == days
 
 
-@pytest.mark.parametrize("text", ["0d", "366d", "7", "d", "7D", "1.5d", " 7d", "-1d"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0d",
+        "366d",
+        "7",
+        "d",
+        "7D",
+        "1.5d",
+        " 7d",
+        "-1d",
+        "0007d",
+        pytest.param("1" * 4301 + "d", id="past-the-int-digit-limit"),
+        pytest.param("0" * 5000 + "d", id="zeros-past-the-limit"),
+    ],
+)
 def test_window_days_rejects(text: str) -> None:
     assert window_days(text) is None
 
