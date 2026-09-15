@@ -438,6 +438,61 @@ async def test_the_proxy_refuses_a_flood_rather_than_running_out_of_descriptors(
     server.close()
 
 
+@pytest.mark.asyncio
+async def test_saturation_is_logged_once_an_episode_and_not_once_a_refusal() -> None:
+    """A refused connection is the cheapest line in the process to provoke, and compose sets no
+    logging options -- so one line per refusal would be the flood's second payload.
+
+    The clearing rule is what this really pins. At the ceiling a slot frees constantly, so an
+    edge cleared by the *next admitted connection* would re-arm on each one and log per refusal
+    after all; it takes falling back to three quarters of the ceiling to end an episode.
+    """
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.warnings: list[str] = []
+
+        def warning(self, event: str, **_: object) -> None:
+            self.warnings.append(event)
+
+        def debug(self, *_: object, **__: object) -> None: ...
+
+        def exception(self, *_: object, **__: object) -> None: ...
+
+    rules, _ = parse_allow(["allowed.test"])
+    proxy = Proxy(rules, max_connections=4)
+    recorder = Recorder()
+    proxy._log = recorder  # type: ignore[assignment]
+    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=MAX_REQUEST_BYTES)
+    port = server.sockets[0].getsockname()[1]
+
+    def refuse() -> bytes:
+        with socket.create_connection(("127.0.0.1", port), 5) as sock:
+            sock.settimeout(5)
+            return sock.recv(256)
+
+    held = [socket.create_connection(("127.0.0.1", port), 5) for _ in range(4)]
+    try:
+        await asyncio.sleep(0.2)
+        for _ in range(10):
+            assert (await asyncio.to_thread(refuse)).startswith(b"HTTP/1.1 503")
+        assert recorder.warnings.count("egress_connections_exhausted") == 1
+
+        # Free one slot and take it again, ten times over. A single-step edge logged once per
+        # cycle here; the hysteresis never lets the count fall to three of four, so it does not.
+        for _ in range(10):
+            held.pop().close()
+            await asyncio.sleep(0.05)
+            held.append(socket.create_connection(("127.0.0.1", port), 5))
+            await asyncio.sleep(0.05)
+            await asyncio.to_thread(refuse)
+        assert recorder.warnings.count("egress_connections_exhausted") == 1
+    finally:
+        for sock in held:
+            sock.close()
+        server.close()
+
+
 def test_the_connection_bound_sits_above_the_tunnel_bound() -> None:
     """Otherwise the tunnel bound is dead code: no connection could survive to establish one,
     and the 503 an operator saw would never be the one the tunnel limit's message describes."""

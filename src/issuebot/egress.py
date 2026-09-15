@@ -149,8 +149,11 @@ _RELAY_CHUNK = 64 * 1024
 # deployment produces -- a handful of concurrent sessions, each with a turn and a few `gh`
 # calls -- rather than close to it, because a limit tight enough to be reached is a denial of
 # service an attacker gets for free. What it buys is a definite 503 rather than `accept()`
-# failing with EMFILE, which is the worse failure: the event loop retries that hot and the
-# proxy stops serving anyone at all.
+# failing with EMFILE, which is the worse failure: asyncio answers that by removing the reader
+# and re-arming it `ACCEPT_RETRY_DELAY` (1 s) later, so the listener stutters a second at a
+# time and drops the pending backlog -- every client degraded, rather than one refused plainly.
+# That also means 2048 client sockets plus up to MAX_TUNNELS upstreams assumes a descriptor
+# limit well above ~2.3k, which every current Docker default is.
 #
 # The answer to a session that simply wants the proxy down is not this counter, which it can
 # always reach; it is that the session is issuebot's own child, bounded by the run's timeouts,
@@ -360,6 +363,9 @@ class Proxy:
         self._upstream_timeout_s = upstream_timeout_s
         self._max_tunnels = max_tunnels
         self._max_connections = max_connections
+        # Three-quarters of the ceiling: the level the count must fall back to before another
+        # saturation is worth a line of its own.
+        self._recovered_at = max_connections * 3 // 4
         self._open = 0
         self._accepted = 0
         self._saturated = False
@@ -389,8 +395,9 @@ class Proxy:
                 # The edge rather than every refusal. This is the cheapest line in the process
                 # to provoke -- no request sent, no name looked up -- and compose sets no
                 # logging options, so one line per connection would be the flood's second
-                # payload. The next connection admitted clears the flag, so a later episode
-                # says so again.
+                # payload. Cleared with hysteresis below rather than by the next admitted
+                # connection: at the ceiling a slot frees constantly, so a single-step edge
+                # would re-arm on each one and log per refusal after all.
                 self._saturated = True
                 self._log.warning(
                     "egress_connections_exhausted",
@@ -408,7 +415,9 @@ class Proxy:
                 )
             await _close(writer)
             return
-        self._saturated = False
+        if self._saturated and self._accepted < self._recovered_at:
+            # Far enough below the ceiling to call the episode over, so the next one is logged.
+            self._saturated = False
         self._accepted += 1
         try:
             await self._serve(reader, writer)

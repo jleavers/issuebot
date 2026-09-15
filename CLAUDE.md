@@ -201,10 +201,16 @@ floor, not the shipped version, and moves by hand.
   session that reaches it refuses the worker too. Both numbers are therefore set well above
   this deployment's load rather than close to it -- a limit tight enough to be reached is a
   denial of service an attacker gets for free -- and what they buy is a definite 503 rather
-  than `accept()` failing with EMFILE, which the event loop retries hot until the proxy serves
-  nobody. `egress_connections_exhausted` is logged on the saturation *edge*, not per refusal,
-  since that refusal is the cheapest line in the process to provoke. An exception `handle` does
-  not anticipate is swallowed to keep the service up, but logged with its traceback at ERROR. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
+  than `accept()` failing with EMFILE, which asyncio answers by removing the reader and
+  re-arming it a second later (`ACCEPT_RETRY_DELAY`), so the listener stutters and drops its
+  backlog: every client degraded rather than one refused plainly.
+  `egress_connections_exhausted` is logged on the saturation *edge* rather than per refusal,
+  since that refusal is the cheapest line in the process to provoke -- with hysteresis, the
+  count falling to three quarters of the ceiling, because at the ceiling a slot frees
+  constantly and a single-step edge would re-arm on each one and log per refusal after all.
+  An exception `handle` does not anticipate is swallowed to keep the service up, but logged
+  with its traceback at ERROR.
+  `PROXY_ENV_NAMES` is both cases of all three variables, because they are
   not interchangeable: curl deliberately ignores an upper-case `HTTP_PROXY` (a CGI script's
   environment carries the request's `Proxy:` header under that name) while other clients read
   only the upper-case spelling; `configured_proxy` reads `https_proxy` then `HTTPS_PROXY`.

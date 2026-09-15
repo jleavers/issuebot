@@ -45,8 +45,7 @@ from issuebot.db import (
     refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
-from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, allow_rules
-from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
+from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_rules
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
@@ -2876,15 +2875,29 @@ def test_egress_serves_the_default_list_extended_by_the_environment(
 
 
 @pytest.mark.asyncio
-async def test_egress_shutdown_does_not_wait_out_a_connection_it_is_holding() -> None:
+async def test_egress_shutdown_does_not_wait_out_a_connection_it_is_holding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SIGTERM must not be held by a tunnel, which nothing bounds in time.
 
     Since 3.12.1 ``Server.wait_closed()`` waits for every handler task, so the obvious
     ``async with server`` would hold the process until Docker's SIGKILL on every
     ``docker compose up -d egress`` -- the documented way to change the allow-list. The drain
     is bounded instead, and this pins it: a client is parked mid-request, so its handler is
-    still live, and the serve loop still has to return well inside the drain.
+    still live, and the serve loop still has to return inside the drain.
+
+    Both bounds matter. The lower one is what stops the test passing vacuously: if the
+    connection were not accepted before the close, ``wait_closed()`` would return at once
+    having proved nothing. The upper one has to be measured against the *drain*, not against
+    ``REQUEST_TIMEOUT_S``: the handler's timeout starts when the connection is accepted, which
+    is before the clock below, so the un-drained path returns a little *under* the timeout and
+    a bound of "less than ``REQUEST_TIMEOUT_S``" would admit exactly the bug. The drain is
+    shortened here rather than left at its shipped value, which keeps the two an order of
+    magnitude apart and the test off the clock.
     """
+    drain = 0.5
+    assert drain < REQUEST_TIMEOUT_S
+    monkeypatch.setattr(cli, "EGRESS_SHUTDOWN_DRAIN_S", drain)
     stop = asyncio.Event()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -2895,13 +2908,12 @@ async def test_egress_shutdown_does_not_wait_out_a_connection_it_is_holding() ->
 
     held = socket.create_connection(("127.0.0.1", port), 5)
     try:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         started = time.monotonic()
         stop.set()
-        assert await asyncio.wait_for(task, timeout=EGRESS_SHUTDOWN_DRAIN_S + 10) == 0
-        # Bounded by the drain, not by the connection: without it this waits for the handler,
-        # which sits in its request timeout.
-        assert time.monotonic() - started < EGRESS_SHUTDOWN_DRAIN_S + 3
+        assert await asyncio.wait_for(task, timeout=REQUEST_TIMEOUT_S + 10) == 0
+        elapsed = time.monotonic() - started
+        assert drain * 0.8 <= elapsed < drain + 3.0
     finally:
         held.close()
 

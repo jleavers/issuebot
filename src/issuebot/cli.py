@@ -1760,7 +1760,7 @@ async def _run_egress(
     get_logger(__name__).info(
         "egress_started", bind=bind, port=port, allow=[str(rule) for rule in rules]
     )
-    stop = stop or asyncio.Event()
+    stop = asyncio.Event() if stop is None else stop
     loop = asyncio.get_running_loop()
     for signame in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
