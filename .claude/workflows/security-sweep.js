@@ -3,7 +3,7 @@ export const meta = {
   description: 'Sweep the tree for security bugs, cluster them by root cause, check the tracker',
   phases: [
     { title: 'Recon', detail: 'one agent maps entry points, trust boundaries and secrets' },
-    { title: 'Scan', detail: 'four threat-model lanes hunt in parallel' },
+    { title: 'Scan', detail: 'the selected threat-model lanes hunt in parallel' },
     { title: 'Verify', detail: 'an independent refuter per lane, hostile by default' },
     { title: 'Escalate', detail: 'a second refuter for confirmed critical and high findings' },
     { title: 'Triage', detail: 'cluster by root cause and name the invariant; find coverage gaps' },
@@ -15,6 +15,16 @@ if (!args || !args.runDir) {
   throw new Error('security-sweep needs args: {stamp, sha, repo, worktree, runDir, escalationCap}')
 }
 const { stamp, sha, repo, worktree, runDir, escalationCap } = args
+
+// Which lane set to run. `baseline` is the four threat models a first sweep of any tree wants.
+// `gaps` re-aims them at what a previous run's completeness critic said nobody owned -- the
+// lanes stay threat-shaped, because a brief that is only a reading list produces coverage
+// rather than attack paths, and coverage findings are the ones the refuters kill.
+const laneSet = args.lanes || 'baseline'
+
+// Optional prose naming what is already known and filed, so a lane does not spend itself
+// re-deriving an issue that exists. Findings are still welcome where they go beyond it.
+const known = args.known || ''
 
 // --- schemas ---------------------------------------------------------------------------
 
@@ -202,9 +212,9 @@ README.md, CLAUDE.md, AGENTS.md, the dot-env example, .gitignore.
 
 Be exhaustive and terse. This is a map, not an essay.`
 
-// --- phase 2: the four lanes -----------------------------------------------------------
+// --- phase 2: the lanes ----------------------------------------------------------------
 
-const LANES = [
+const BASELINE_LANES = [
   {
     key: 'copycat',
     title: 'what a reader inherits by copying this repository',
@@ -281,15 +291,160 @@ response, error responses included.`,
   },
 ]
 
+// Re-aimed lanes. Each one is a threat model the baseline set did not own, named by the
+// completeness critic of an earlier run. They are still lanes, not reading lists: every brief
+// says who the attacker is before it says which files to open.
+const GAP_LANES = [
+  {
+    key: 'runas',
+    title: 'the uid delegation itself, and whether its tests are vacuous',
+    brief: `\`src/issuebot/agent/runas.py\` is the sandbox the whole tree points at — README
+"Safety" calls the container and the uid the real boundary and everything else a convenience —
+and no previous sweep read its implementation. One earlier run reasoned about \`agent.run_as\`
+as a *setting* and stopped. You read the delegation.
+
+Cover: the memfd that carries the session environment across the uid change and who else could
+open it; the exact \`sudo -n -u <user> -C <fd+1>\` argv and what a sudoers rule would have to
+say for it to work; the \`exec\` verb, which the worker's root-owned interpreter runs, and what
+it installs before it execs; \`kill\` (a process group) and \`remove\` (files under a
+workspace), which are the worker uid's two blind spots; and \`probe\`/\`probe_run_as\`, which
+the orchestrator refuses to start without.
+
+The surface map's own breach list for this boundary is a to-do nobody worked: the helper module
+sitting on an agent-writable path, a writable \`/app\` or venv, the memfd inherited somewhere
+else, sudoers widened beyond the one argv, and \`probe_run_as\` passing while the delegation is
+actually degraded. Work it.
+
+Then \`tests/fakes/sudo\`, which is what proves this boundary in CI. If the fake accepts argv
+shapes real sudo would refuse, the boundary's tests are vacuous and every green run since has
+meant less than it looked. **A vacuous-test finding is in scope for this lane**, and its
+\`attack_path\` is the regression it would let through: name the change that would break the
+delegation, and show that the suite would still pass.`,
+  },
+  {
+    key: 'supply-chain',
+    title: 'what gets built, cached and pulled in',
+    brief: `Nobody has owned build time. The attacker here does not open an issue — they open a
+pull request, or they sit between the build and a registry.
+
+Cover \`.github/workflows/ci.yml\` and \`claude-code-version.yml\` in full: the \`permissions\`
+each job runs with; whether a \`pull_request\` build from a fork can write a \`type=gha\` cache
+scope that a later \`main\` build reads, and what that buys; any interpolation of
+attacker-controllable text (a branch name, a PR title, an issue body) into a \`run:\` step; and
+the scheduled bump-and-open-a-PR job, which fetches a version from npm, builds an image with
+it, pushes a branch and opens a pull request holding a token.
+
+Then the dependency surface: \`uv.lock\` and whether the seven runtime dependencies are pinned
+or floored, \`pyproject.toml\`, \`.pre-commit-config.yaml\` and \`.github/dependabot.yml\` —
+what each does and does not cover. Then the \`Dockerfile\`'s fetches, and \`.dockerignore\`
+against what a working checkout actually holds.
+
+Note before you start, so you do not spend the lane on them: the two vendored front-end digests
+in \`static/vendor/README.md\` were checked by hand and match, and nothing automating that check
+is already filed. The \`Dockerfile\`'s \`claude\` install fetch was raised in an earlier run and
+refuted — its neighbours rest on the same TLS-to-one-host assumption, so "this one step is
+unverified" is not a finding unless you can say what makes it different.`,
+  },
+  {
+    key: 'worker-service',
+    title: 'the worker as a service: scheduling, cost and wedging',
+    brief: `The previous sweep's \`services\` lane was written around the dashboard and the
+database, so nobody owned the worker itself — which is where cost exhaustion, wedging and
+scheduling abuse live. An earlier finding (a FIFO blocking the event loop) showed that class is
+live in this tree, so treat availability and spend as real consequences, not hypotheticals.
+
+Your attacker is whoever can open an issue on the watched repository, or influence what an
+issue's session does once it runs.
+
+Cover \`src/issuebot/orchestrator/orchestrator.py\` and \`state.py\`: the dispatch holds as
+fail-safe gates and whether any path claims work while one is engaged; the orphan resume, which
+trusts \`session.json\`'s \`last_outcome\`; the retry and backoff schedule and what an issue can
+do to it; the stall and terminal sweeps; \`_pinned_mount_complaint\`'s stat logic; and the
+escape path's ordering under a hold.
+
+Then the spend surface: \`agent.max_turns\`, \`--max-budget-usd\`, and the \`budget_exceeded\`
+category, which is the one error the turn loop deliberately does not fail on. Then
+\`src/issuebot/agent/session.py\` — the turn loop, \`issue_moved\` checking, and
+\`blocker_from\`, which reads the first non-empty line of the model's own final message and
+writes it onto a public issue. Then the parser that consumes model-authored bytes on the
+worker's event loop: \`StreamParser\`, the line cap, \`parse_rate_limits\` (an undocumented line
+shape whose reading becomes a number on the operator's dashboard) and the stderr tail.`,
+  },
+  {
+    key: 'store-tenancy',
+    title: 'one cluster, every repository\'s transcripts',
+    brief: `One PostgreSQL cluster now holds every registered repository's issue text, run
+errors and full session transcripts, and every worker on the host's shared external network
+authenticates to it as the same role. A missing predicate is therefore a cross-tenant read, not
+a bug in one page.
+
+Cover \`src/issuebot/db/queries.py\` and \`store.py\` line by line: the f-strings that splice
+module-level column lists; how \`repo\` and \`state\` reach a predicate, bound or interpolated;
+the \`run_turns\` table, which has no \`repo\` column at all and is scoped only through a join;
+and \`load_scope\`, which is supposed to run before every scoped read — check that it does, on
+every route, including the raw turn parts.
+
+Then \`src/issuebot/db/listen.py\`: the \`issuebot_refresh\` payload, where the acceptance rule
+(empty means all, own repo, else dropped) plus a reconnect loop is the only filter on a NOTIFY
+any container reaching the database can send, and an abusive refresh costs unbounded ticks,
+unbounded \`gh\` polling and the rate limit that follows.
+
+Then \`migrate.py\` and \`migrations/*.sql\`, run at the start of \`worker\`, \`run-once\` AND
+\`web\`: whether the advisory lock actually serialises two workers starting together, what a
+partially applied migration leaves behind, and what \`0003_repos.sql\`'s refusal strands — note
+that the remedy it names, \`import\`, does not exist at this commit.`,
+  },
+  {
+    key: 'hostile-issue',
+    title: 'attacker-authored text reaching an unattended agent',
+    brief: `Same lane as the baseline sweep, aimed at what that run did not reach. issuebot
+takes a GitHub issue body — which on a public repository anyone may write — renders it into a
+prompt, and hands it to a \`claude -p\` running unattended with \`GH_TOKEN\` in its environment
+and a shell at its disposal.
+
+**Already filed; do not re-derive these.** The \`.issuebot/env\` read-back with no owner or type
+check, the conflict-bounce counter read out of the workpad body, and concurrent sessions sharing
+one \`agent.run_as\` account are issue #104. Bare \`labels\` outside the \`<github-text>\`
+envelope is #105. The cloned repository's own \`CLAUDE.md\`/\`AGENTS.md\`/\`.claude/\` as a
+second instruction channel is #107. A finding that goes materially beyond one of those is
+welcome; a restatement of one is not.
+
+Go instead at: \`src/issuebot/github/runner.py\` and whether \`GhRunner\` really is the only
+place a process is spawned — the map already records one deliberate exception at
+\`workspace.py:237\` — and whether an issue-derived value can land in an argv position \`gh\`
+reads as a flag, given that the label, model and branch constraints in \`settings.py\` are the
+only thing preventing it. Then \`src/issuebot/config/workflow.py\` and \`resolve.py\`: the
+loader is the mechanism by which a file write becomes worker code execution, and no lane has
+read it — \`yaml.safe_load\` on a file edited live, the front-matter split, the derived overlay
+path, merge rules where null deletes and a list replaces, and \`$VAR\`/\`~\`/relative-path
+expansion over designated fields with hook command strings deliberately left unresolved.
+
+Then provenance of issuebot's own artefacts: the \`own_login\` cache across a token change, a
+stranger's comment carrying the workpad marker (the tree ships
+\`tests/fixtures/gh/comments_impostor.json\` for exactly this and no finding has ever cited it),
+case handling in the author comparison, a missing \`isCrossRepository\` read as own, and
+\`classify_closed\` treating a human's merged pull request as completion.
+
+For this lane, \`attack_path\` must name the specific attacker-controlled field and the specific
+line where it lands.`,
+  },
+]
+
+const LANE_SETS = { baseline: BASELINE_LANES, gaps: GAP_LANES }
+const LANES = LANE_SETS[laneSet]
+if (!LANES) {
+  throw new Error(`unknown lane set ${laneSet}; expected one of ${Object.keys(LANE_SETS).join(', ')}`)
+}
+
 const scanPrompt = (lane) => `${WHERE}
 
 Read ${runDir}/01-surface-map.md before anything else. It is the shared map: use its names for
-entry points and boundaries, so that findings from four lanes can be clustered afterwards.
+entry points and boundaries, so that findings from ${LANES.length} lanes can be clustered afterwards.
 
 Your lane is **${lane.key}** — ${lane.title}. Hunt only here. Another agent owns each of the
 other lanes; a finding outside yours is their job, not a bonus.
 
-${lane.brief}
+${lane.brief}${known ? `\n\nAlready known in this tree, across every lane:\n\n${known}` : ''}
 
 Rules that decide whether something is a finding at all:
 
@@ -391,10 +546,11 @@ Return the JSON object and write nothing else. Do not also write a Markdown vers
 pass renders the prose from exactly what you return, so a second representation written here
 could only drift from it.${writeBack('04-clusters.json')}`
 
-const criticPrompt = (allFindings) => `${WHERE}
+const criticPrompt = (allFindings, judged) => `${WHERE}
 
-You are the completeness critic. Four scanners have finished. Your only question is: **what was
-never looked at?**
+You are the completeness critic. ${LANES.length} scanners have finished, running the
+\`${laneSet}\` lane set (${LANES.map((l) => l.key).join(', ')}). Your only question is: **what
+was never looked at?**
 
 Read ${runDir}/01-surface-map.md, and the raw findings below. Then find the holes:
 
@@ -405,15 +561,35 @@ Read ${runDir}/01-surface-map.md, and the raw findings below. Then find the hole
 - Surfaces that exist in the map but fall between the four lanes, so that nobody owned them.
 
 For each gap give \`surface\` (the file, route or boundary), \`why_it_matters\` (what could be
-there), and \`suggested_lane\` — one of \`copycat\`, \`secrets\`, \`hostile-issue\`,
-\`services\`, or \`new\` if it needs a fifth lane.
+there), and \`suggested_lane\` — one of ${LANES.map((l) => `\`${l.key}\``).join(', ')}, or
+\`new\` if it needs a lane none of these briefs would cover.
+
+A gap that an earlier run already named and that this run still did not reach is worth naming
+again, and worth saying so: a surface nobody has owned across two sweeps is a stronger signal
+than a fresh one.
 
 Do not audit the gaps yourself; naming them is the whole job. Your output seeds the next
 sweep's briefs.
 
-Findings produced this run:
+**Arithmetic you may state, and nothing beyond it.** Every number you put in your prose must
+come from the two lists below or from a command you actually ran against the worktree. There
+were **${allFindings.length}** findings this run, of which
+**${judged.filter((v) => v.refuted).length}** were refuted by their lane's refuter (a separate
+escalation pass may since have killed more, and you are not shown it). Do not recompute those
+figures and do not state any other claim about verdicts: a surface that was examined and cleared is not a gap, and getting that backwards is
+the one way this report misleads the next sweep. If you want a coverage figure, derive it by
+running a command, and say which.
 
-${JSON.stringify(allFindings, null, 2)}
+Findings produced this run, each with the refuter's verdict:
+
+${JSON.stringify(
+    allFindings.map((f) => {
+      const v = judged.find((x) => x.id === f.id)
+      return { ...f, verdict: v ? { refuted: v.refuted, reasoning: v.reasoning } : 'no verdict' }
+    }),
+    null,
+    2,
+  )}
 
 Write your gaps as Markdown to ${runDir}/04-gaps.md and return the JSON object.`
 
@@ -543,7 +719,9 @@ const survivors = confirmed.filter((f) => !killed.has(f.id))
 phase('Triage')
 const [clusterResult, gapResult] = await parallel([
   () => agent(triagePrompt(survivors), { label: 'triage', phase: 'Triage', schema: CLUSTERS }),
-  () => agent(criticPrompt(allFindings), { label: 'critic', phase: 'Triage', schema: GAPS }),
+  () => agent(criticPrompt(allFindings, [...verdictFor.values()]), {
+    label: 'critic', phase: 'Triage', schema: GAPS,
+  }),
 ])
 
 const clusters = clusterResult && clusterResult.clusters ? clusterResult.clusters : []
