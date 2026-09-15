@@ -184,6 +184,14 @@ the credential never lands in a home.
   manager narrowed to *that* workspace's bound account, not the pool's first member. Startup
   probes every member, and `validate` reports the pool in its `agent.run_as` check.
 
+- **A file the operator hands the session is handed to the whole pool.** `claude.mcp_config`
+  (#109) names files resolved against the workflow's directory and opened at the session's
+  uid, so `validate` asks whether they can be read — and under a pool it asks *every* member,
+  not the bound one, because there is no bound one yet: the orchestrator binds whichever
+  account is free when the issue is dispatched. A file one member cannot read would fail
+  whichever issue happened to land there, which is worse than one that fails always, so the
+  check names the accounts that refused it and fails.
+
 ## What this does not do
 
 The worker is still one process at one uid supervising all of them; the boundary added here is
