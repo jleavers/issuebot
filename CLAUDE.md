@@ -213,7 +213,7 @@ floor, not the shipped version, and moves by hand.
   sweeps again); a no-op on the host route (`run_as` unset), where the
   home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
-  its fifteenth check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
+  its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
   `safe.directory` because of this split: the workspace directory is the worker's and the
   clone inside it the session's, and git refuses a worktree owned by another account
@@ -224,9 +224,11 @@ floor, not the shipped version, and moves by hand.
   `created` marker file (the completion sentinel), and `session.json` trusted only when the
   worker owns it. `boundary.py` (#104, spec `2026-09-14-session-boundary-design.md`) is the
   other half of that line: `ARTEFACTS` declares every file the worker reads back out of a
-  workspace after the session has had its uid in it (`.issuebot/env`, the one the session's
-  side writes; `session.json`, the `created` marker and the `runs/<run_id>/turn-N.*` files,
-  the worker's own), each with its writer and the most the worker will ever read of it, and
+  workspace after the session has had its uid in it (`.issuebot/env`, which the session's
+  side writes; the clone's `CLAUDE.md` and `AGENTS.md`, the `instructions` artefact of #107,
+  which the session may own since the clone is cloned as it; `session.json`, the `created`
+  marker and the `runs/<run_id>/turn-N.*` files, the worker's own), each with its writer and
+  the most the worker will ever read of it, and
   `Boundary.read` is the one seam: the path is walked from the workspace one component at a
   time under `O_NOFOLLOW` (a link at the name or above it is refused, not followed), the
   object is checked on the descriptor before a byte is read (`O_NONBLOCK`, so a FIFO cannot
@@ -234,7 +236,8 @@ floor, not the shipped version, and moves by hand.
   writer) and at most the artefact's limit is read, head or tail. `BoundaryError` is an
   `OSError`, so every call site's existing handling reports it as a warning naming the path
   and the reason, never the contents. `read_workspace_env`, `read_session`, `_is_complete`,
-  `capture_turns` and the runner's stderr tail all go through it; `own_dir` creates and
+  `capture_turns`, `read_repository_instructions` and the runner's stderr tail all go through
+  it; `own_dir` creates and
   verifies a run's log directory as the worker's own, closed to others' writes, before a
   turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
   `Boundary.current(run_as)` resolves the session's uid once per runner and manager; unset,
@@ -246,7 +249,27 @@ floor, not the shipped version, and moves by hand.
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
   (Jinja2 `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `workpad`,
-  `attempt`, `turn_number`, `max_turns`, `rework`, `self_review`). `workpad` (#77) is the
+  `attempt`, `turn_number`, `max_turns`, `rework`, `self_review`, `repo_instructions`).
+  `repo_instructions` (#107, spec `2026-09-14-repository-instructions-design.md`) is the
+  clone's `CLAUDE.md` and `AGENTS.md` as `instructions.py` read them after `before_run`, once
+  per run (`REPOSITORY_INSTRUCTION_FILES`, a declared list; through `Boundary.read` as the
+  `instructions` artefact of `boundary.py`, the session among its writers, since under
+  `agent.run_as` the read is the worker's and the clone the session's, so a link, a FIFO or a
+  file of anyone else's is refused rather than read; cut at `INSTRUCTION_FILE_LIMIT`, the
+  artefact's 128 KiB; never a failure), each a `GitHubText` whose source names
+  the file and the repository and whose author is "whoever can merge to" it. That is the
+  declared half of the decision; the other half is that `claude.setting_sources` is always
+  passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
+  `.claude/` (settings, hooks, skills) or `.mcp.json` as configuration -- measured: under
+  claude's default every one of them was in force, a `SessionStart` hook and an MCP server
+  included -- unless the operator names `project` or `local`, which
+  `ClaudeSettings.loads_clone_settings` reports and `validate` warns about; that opt-in
+  hands over `CLAUDE.md` and `.claude/` only, since `.mcp.json` is held off by the
+  unconditional `--strict-mcp-config` (#119) whatever the sources say. The default
+  workflow's rule paragraph covers the working tree, ground rule 5 defers to the files under
+  the ground rules rather than over them, the self-review brief reports a change to those
+  files as Critical, the pull request body names one under `Instruction files`, and this
+  repository's `.github/CODEOWNERS` routes them to a human. `workpad` (#77) is the
   comment issuebot resolved by author before the turn, `{id, url}` or `None`, looked up by
   `_turn_loop` through `find_workpad_comment` every turn (the agent creates it in turn 1; a
   lookup that fails fails the run as `github_error`, since a prompt without it would have the
@@ -735,7 +758,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (fifteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (sixteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), three network probes through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
@@ -744,7 +767,9 @@ floor, not the shipped version, and moves by hand.
   agent would use (`claude.ai`,
   `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and
   `ANTHROPIC_API_KEY` are both set, and warns rather than fails when the subcommand is
-  missing so an older-but-permitted `claude` stays green, an `agent.run_as` check that probes
+  missing so an older-but-permitted `claude` stays green, a `claude.setting_sources` check
+  that warns when `project` or `local` hands the clone's files to the session as
+  configuration (#107), an `agent.run_as` check that probes
   the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
   since the session then shares the worker's uid), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
