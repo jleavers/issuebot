@@ -98,18 +98,31 @@ One cap per boundary, at the seam that already owns the operation, never at its 
 
   The sweep also reads its roles *independently* (`_collect(per_role=True)`), and that is the
   second decision this cap had to make. All-or-nothing is right for the poll, where four roles
-  are not a board; it is wrong here, and dangerously so. The role that can actually reach the
-  ceiling is `complete`, whose issues the sweep classifies `unchanged` and does nothing with,
-  while `terminal_sweep` is the only path to `finish_terminal` -- and so the only thing that
-  closes issues out, removes workspaces and, through `_prune_accounts`, releases session
-  accounts. One overgrown, inert role refusing the whole read would stop all three on a
-  deployment that had merely succeeded often enough, from a warning line: a worse failure than
-  the cost the cap is for, and one the poll's `github` hold does not cover, since the sweep's
-  failure reaches no dispatch hold and no health surface. So a role past its ceiling is an
-  `issue_role_skipped` warning naming it and the other four are still swept, and the sweep
-  repeats, so nothing about it is final. Only a `response` error is isolated that way: a
-  transport error or a 5xx still fails the whole read, as before, since that is the moment
-  rather than the resource.
+  are not a board; it is wrong here, and dangerously so. `terminal_sweep` is the only path to
+  `finish_terminal`, and so the only thing that closes issues out, removes workspaces and,
+  through `_prune_accounts`, releases session accounts -- while the role that can actually
+  reach the ceiling is `complete`, which grows with everything issuebot has ever finished. One
+  overgrown role refusing the whole read would stop all three on a deployment that had merely
+  succeeded often enough, from a warning line: a worse failure than the cost the cap is for,
+  and one the poll's `github` hold does not cover, since the sweep's failures reach no dispatch
+  hold and no health surface. So a role past its ceiling is an `issue_role_skipped` warning
+  naming it, the other four are still swept, and the sweep repeats.
+
+  Skipping a role is not free, and it is worth being exact about what it costs, because the
+  obvious reading -- that a `complete` issue is inert, since `finish_terminal` classifies it
+  `unchanged` -- is wrong: `remove_workspace` runs outside that branch, so re-reading the role
+  is the only thing that ever retries a workspace removal that failed at the time, and an
+  account stays bound while its tree is on disk. That retry is what a skipped role loses, for
+  the issues in that role. It is a far smaller loss than refusing the read, which loses the
+  retry *and* everything else, and #149 -- not re-reading completed issues at all -- is where
+  it is properly answered.
+
+  The isolation is by *type* and not by category. `PageCeilingError` is a `response`
+  `GitHubError` with a name, and `_collect` catches that name alone: the category also covers a
+  GraphQL `errors` payload, which is how a server-side query timeout arrives and what a large
+  label-filtered query is exactly what provokes, and a malformed answer. Isolating the category
+  would have had the sweep work quietly from four roles because GitHub had a bad minute. Those,
+  and transport errors, still fail the whole read as they did before.
 - **The session** (`agent/session.py`, `agent/runner.py`): `agent.run_timeout_ms` (default
   four hours) is a monotonic deadline fixed from `_State.started`, before the clone and the
   `before_run` hook, and handed to every `run_turn(deadline=)`. The reader waits for the

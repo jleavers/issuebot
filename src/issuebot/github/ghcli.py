@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from issuebot.config import GitHubLabels, GitHubSettings
-from issuebot.github.errors import ErrorCategory, GitHubError
+from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.models import (
     AuthStatus,
     Comment,
@@ -468,13 +468,16 @@ class GhCliAdapter:
         ``per_role`` decides what one role over its page ceiling costs the others (#139).
         Off, for the board poll: any role's refusal refuses the whole read, because the answer
         is a board to claim from and four roles of it are not a board. On, for the terminal
-        sweep, where the answer is a list of closed issues to finish one at a time and the
-        role that can actually reach the ceiling -- ``complete``, which grows with everything
-        issuebot has finished -- is the one whose issues the sweep classifies ``unchanged`` and
-        does nothing with. Letting it void the other four would stop the sweep closing issues
-        out, removing workspaces and releasing session accounts, which is a far worse failure
-        than the one the cap is for. A skipped role is a warning naming it, and the sweep
-        repeats, so nothing about it is silent or final.
+        sweep, where the answer is a list of closed issues to finish one at a time, and the
+        role that can actually reach the ceiling is ``complete``, which grows with everything
+        issuebot has ever finished. Letting that one void the other four would stop the sweep
+        closing *any* issue out, removing any workspace and releasing any session account --
+        `terminal_sweep` is the only path to `finish_terminal` -- on a deployment that had
+        merely succeeded often enough, and from a warning line, since the sweep's failures
+        reach no dispatch hold and no health surface. Skipping the one role costs less: the
+        issues in it are already closed and already labelled, and what is lost is
+        `finish_terminal`'s retry of a workspace removal that failed at the time, for issues
+        in that role alone. A skipped role is a warning naming it, and the sweep repeats.
         """
         login = await self.own_login()
         found: dict[int, Issue] = {}
@@ -482,11 +485,13 @@ class GhCliAdapter:
             label = label_name(self.labels, role)
             try:
                 page = await self._issues_with_label(label, query, login, max_pages)
-            except GitHubError as exc:
-                if not per_role or exc.category != "response":
+            except PageCeilingError as exc:
+                if not per_role:
                     raise
-                # Only a `response` error, which is this cap and not the moment: a transport
-                # error or a 5xx is the whole read's to fail on, as it was before.
+                # This cap and nothing else. Not the `response` *category*, which also covers
+                # a GraphQL errors payload -- how a server-side query timeout arrives, which a
+                # large label-filtered query is what provokes -- and a malformed answer: those
+                # are the whole read's to fail on, as they were before.
                 self._log.warning("issue_role_skipped", label=label, reason=exc.message)
                 continue
             for issue in page:
@@ -540,7 +545,7 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
-        raise GitHubError("response", f"more than {max_pages * PAGE_SIZE} issues carry {label}")
+        raise PageCeilingError(f"more than {max_pages * PAGE_SIZE} issues carry {label}")
 
     # --- plumbing ----------------------------------------------------------------
 

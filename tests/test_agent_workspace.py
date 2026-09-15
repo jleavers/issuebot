@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent import workspace as workspace_module
 from issuebot.agent.errors import AgentError
 from issuebot.agent.workspace import (
     MAX_HOOK_OUTPUT_BYTES,
@@ -406,7 +407,7 @@ async def test_hook_output_over_the_cap_kills_the_group(
     assert result.overrun
     assert not result.ok
     assert not result.timed_out  # the cap cut it short, long before the timer would have
-    assert result.summary == f"wrote more than {MAX_HOOK_OUTPUT_BYTES} bytes and was killed"
+    assert result.summary == f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
     await assert_gone(int(pidfile.read_text()))
     records = [json.loads(line) for line in log.getvalue().splitlines() if line]
     failure = next(r for r in records if r.get("event") == "hook_failed")
@@ -462,7 +463,7 @@ async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
     assert result.overrun
     assert not result.timed_out
     assert not result.ok
-    assert result.summary == f"wrote more than {MAX_HOOK_OUTPUT_BYTES} bytes and was killed"
+    assert result.summary == f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
     records = [json.loads(line) for line in log.getvalue().splitlines() if line]
     failure = next(r for r in records if r.get("event") == "hook_failed")
     assert failure["overrun"] is True
@@ -471,6 +472,41 @@ async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
     # Not the manager's to reap: it escaped the group on purpose, so the test cleans up.
     with contextlib.suppress(ProcessLookupError, ValueError):
         os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@posix
+async def test_a_kill_that_cannot_land_is_a_warning_not_an_exception(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.killpg`` raises ``PermissionError`` for a group at another uid -- every hook's
+    group under ``agent.run_as`` where the delegated kill did not take. From the killer task
+    that exception would replace the cancellation the timeout raises, leaving ``_run_argv``
+    to raise where a ``HookResult`` belongs, so it is logged instead (#139)."""
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={"before_run": f"head -c {MAX_HOOK_OUTPUT_BYTES + (1 << 20)} /dev/zero"},
+        timeout_ms=10_000,
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    monkeypatch.setattr(
+        workspace_module, "_kill_group", lambda process: _raise(PermissionError(1, "denied"))
+    )
+
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+
+    assert result is not None
+    assert result.overrun  # the hook still failed for the reason it failed for
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    assert any(r.get("event") == "hook_kill_failed" for r in records)
+
+
+def _raise(exc: BaseException) -> None:
+    raise exc
 
 
 @posix
@@ -484,7 +520,7 @@ async def test_a_flooding_hook_fails_the_run_with_the_overrun_in_the_error(
     with pytest.raises(AgentError) as excinfo:
         await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert str(MAX_HOOK_OUTPUT_BYTES) in excinfo.value.message
-    assert "was killed" in excinfo.value.message
+    assert "output exceeded" in excinfo.value.message
 
 
 # --- session.json -----------------------------------------------------------------------

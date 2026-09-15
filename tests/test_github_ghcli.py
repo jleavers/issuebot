@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from issuebot.config import GitHubSettings
-from issuebot.github.errors import GitHubError
+from issuebot.github.errors import GitHubError, PageCeilingError
 from issuebot.github.ghcli import (
     ID_BATCH_SIZE,
     ISSUE_FIELDS,
@@ -248,6 +248,16 @@ async def test_board_poll_gives_up_past_the_page_cap() -> None:
     assert len(runner.calls) == MAX_ISSUE_PAGES
 
 
+async def test_board_poll_refuses_every_role_when_one_is_over_the_ceiling() -> None:
+    """All or nothing for the poll, which is what ``per_role`` is off for: four roles are not
+    a board, and claiming from them would be claiming from a board with a piece missing."""
+    runner = StubRunner()
+    _endless_board(runner, "issuebot/todo", MAX_ISSUE_PAGES)
+    runner.on(has("label=issuebot/rework"), stdout=_issues_page(9001, end_cursor=None))
+    with pytest.raises(GitHubError):
+        await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO, StateLabel.REWORK])
+
+
 async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
     """The page before the ceiling is still answered: the cap refuses, it does not shorten."""
     runner = StubRunner()
@@ -294,14 +304,28 @@ async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -
     assert str(MAX_TERMINAL_PAGES * PAGE_SIZE) in skipped[0]["reason"]
 
 
-async def test_terminal_sweep_still_fails_on_an_error_that_is_not_the_cap() -> None:
-    """Only a ``response`` error is the cap's: a transport failure is the whole read's to
-    fail on, as it was before, so the sweep does not quietly work from four roles."""
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "returncode"),
+    [
+        ("", "dial tcp: timeout", 1),
+        # A GraphQL errors payload, which is how a server-side query timeout arrives -- and a
+        # large label-filtered query is what provokes one. HTTP 200, a `response` error, and
+        # emphatically not this cap.
+        ('{"errors":[{"message":"Something went wrong while executing your query"}]}', "", 0),
+        ('{"data":{"repository":{}}}', "", 0),
+    ],
+)
+async def test_terminal_sweep_still_fails_on_anything_that_is_not_the_cap(
+    stdout: str, stderr: str, returncode: int
+) -> None:
+    """Only the ceiling is isolated, and it is isolated by *type*: every other refused
+    response is the whole read's to fail on, as it was before, so the sweep never quietly
+    works from four roles because GitHub had a bad minute."""
     runner = StubRunner()
-    runner.on(has("label=issuebot/todo"), stdout="", stderr="dial tcp: timeout", returncode=1)
+    runner.on(has("api"), stdout=stdout, stderr=stderr, returncode=returncode)
     with pytest.raises(GitHubError) as excinfo:
         await make_adapter(runner).fetch_terminal_issues()
-    assert excinfo.value.category != "response"
+    assert not isinstance(excinfo.value, PageCeilingError)
 
 
 async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:

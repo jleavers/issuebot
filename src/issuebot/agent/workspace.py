@@ -117,8 +117,10 @@ class HookResult:
     def summary(self) -> str:
         if self.overrun:
             # Before the timeout: a kill whose pipes then took the rest of the timeout to close
-            # is an overrun, and the cause is what the run's error should quote, not the symptom.
-            return f"wrote more than {MAX_HOOK_OUTPUT_BYTES} bytes and was killed"
+            # is an overrun, and the cause is what the run's error should quote, not the
+            # symptom. It does not claim the kill, which a hook that exited inside the pipe
+            # buffer before the reader caught up never received.
+            return f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
         if self.timed_out:
             return f"timed out after {self.duration_ms} ms"
         lines = [line for line in self.stderr_tail.splitlines() if line.strip()]
@@ -466,6 +468,22 @@ class WorkspaceManager:
             )
         return accounts
 
+    async def _kill_quietly(self, process: asyncio.subprocess.Process) -> None:
+        """``_kill_group`` with the failure logged rather than raised (#139).
+
+        ``os.killpg`` raises ``PermissionError`` for a group at another uid, which is every
+        hook's group under ``agent.run_as`` where the delegated kill did not take, and both
+        callers are places an exception must not reach: the overrun killer runs as a task,
+        whose exception would replace the cancellation the timeout raises, and the timeout
+        branch is building the ``HookResult`` that reports the failure. Either way the hook
+        has already failed and the caller is saying so; a kill that did not land leaves the
+        timeout to bound what it could not, while the reads go on dropping the bytes.
+        """
+        try:
+            await self._kill_group(process)
+        except Exception as exc:
+            self._log.warning("hook_kill_failed", pid=process.pid, error=str(exc))
+
     async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
         # Off the event loop: the delegated kill is a sudo subprocess with its own timeout,
         # and this is the single orchestrator task supervising every concurrent session (#75).
@@ -513,7 +531,7 @@ class WorkspaceManager:
                 self._read_output(process, overrun), timeout=timeout_s
             )
         except TimeoutError:
-            await self._kill_group(process)
+            await self._kill_quietly(process)
             await process.wait()
             result = HookResult(
                 name=name,
@@ -537,7 +555,9 @@ class WorkspaceManager:
             )
             return result
         except BaseException:
-            await self._kill_group(process)
+            # Quietly here too: this is on its way to re-raising something -- a cancellation,
+            # most often -- and a failed kill must not replace it.
+            await self._kill_quietly(process)
             with contextlib.suppress(Exception):
                 await process.wait()
             raise
@@ -589,17 +609,7 @@ class WorkspaceManager:
 
         async def kill_on_overrun() -> None:
             await overrun.wait()
-            try:
-                await self._kill_group(process)
-            except OSError as exc:
-                # Total, because this runs as a task whose exception would otherwise replace
-                # the cancellation the timeout raises and leave ``_run_argv`` with an
-                # ``OSError`` where a ``HookResult`` belongs. It can happen: ``os.killpg``
-                # raises ``PermissionError`` for a group at another uid, which is every group
-                # under ``agent.run_as`` when the delegated kill did not take. The timeout
-                # then bounds what the cap could not, and the reads are dropping the bytes
-                # meanwhile, so the memory is still bounded.
-                self._log.warning("hook_kill_failed", pid=process.pid, error=str(exc))
+            await self._kill_quietly(process)
 
         killer = asyncio.create_task(kill_on_overrun())
         try:

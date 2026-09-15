@@ -192,10 +192,14 @@ floor, not the shipped version, and moves by hand.
   that role grows with everything issuebot has finished rather than with a working set a human
   drains (that it is re-read at all is #149). The sweep's roles are read independently
   (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped` warning and the
-  other four are still swept, since the role that can reach it is `complete`, whose issues the
-  sweep only ever classifies `unchanged`, and voiding the read would stop issues closing out,
-  workspaces being removed and accounts being released. The poll keeps the all-or-nothing
-  rule, and only a `response` error is isolated: a transport error still fails the read);
+  other four are still swept, since `terminal_sweep` is the only path to `finish_terminal` and
+  the role that can reach the ceiling is `complete` -- so voiding the read would stop every
+  issue closing out, every workspace being removed and every account being released, where
+  skipping the one role costs only `finish_terminal`'s retry of a removal that failed at the
+  time, for the issues in it. The poll keeps the all-or-nothing rule. The isolation is by type
+  and not by category: `PageCeilingError` is caught, while every other `response` error -- a
+  GraphQL errors payload, which is how a server-side query timeout arrives, or a malformed
+  answer -- still fails the whole read);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved
