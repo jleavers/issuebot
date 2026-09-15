@@ -20,8 +20,10 @@ docker compose up -d db              # the long-lived db instead, on ISSUEBOT_DB
 uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./configs/WORKFLOW.md and check the environment
-                                     #   (the container runs the session as uid 1001 `agent`, the
-                                     #    worker as uid 1000 `issuebot`; #75, agent.run_as; and
+                                     #   (the container runs the session as a session account --
+                                     #    by default the built pool, `agent-1` .. `agent-N` at
+                                     #    uids 1011 up, else `agent` at 1001 -- and the
+                                     #    worker as uid 1000 `issuebot`; #75, #121, agent.run_as; and
                                      #    compose runs the dashboard as uid 1002 `web`, which
                                      #    cannot invoke sudo at all; #102)
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
@@ -224,8 +226,11 @@ floor, not the shipped version, and moves by hand.
   (`projects/<project>/memory`, walked without following a symlink at either level), the
   surfaces a later `claude -p` loads as instructions or behaviour, per the `claude-directory`
   docs (a test pins the list, so dropping a name is a deliberate edit in both places).
-  A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
-  for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
+  A denylist: everything it does not name stays, `.credentials.json` (a credential
+  authenticates the next session rather than steering it, so it is not one of those surfaces;
+  and `claude` rotates its refresh token in place, so sweeping it would break a login an account
+  does hold -- a container session has none, taking its credential from the environment instead)
+  and claude's own per-session runtime (`projects/<project>/*.jsonl`,
   `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
   among them. `setting_sources` gates none of it: since #107 it defaults to `[user]`, which
   is the source these surfaces *are* (`settings.json`, `CLAUDE.md`, `rules`, `skills`,
@@ -233,7 +238,9 @@ floor, not the shipped version, and moves by hand.
   `agent-memory`) are outside that flag's table altogether, so the sweep is what stands
   between one session's plant and the next session's prompt; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
-  an option: it never reads the OAuth credential the login recipe writes.
+  an option: it skips every one of these surfaces but reads no OAuth login, which is what the
+  host route authenticates with, and whether it honours `CLAUDE_CODE_OAUTH_TOKEN` has never been
+  measured here -- so it was never a flag to rest the sweep on.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
   `session._turn_loop`, and logs `claude_home_sweep_failed` at WARNING when `RunAs.sweep_home`
   reports the helper did not run or exit 0 (the turn still runs; the next sweeps again); a
@@ -427,7 +434,7 @@ floor, not the shipped version, and moves by hand.
   so a release that drops any of them fails the build rather than a session. The CI `docker` job proves both
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
-  that line precedes the login check. (The volume's own config surfaces are #101, landed in #123: the sweep above.)
+  that line precedes the login check. (The rest of the account home's config surfaces are #101, landed in #123: the sweep above.)
   Two timers, and they bound different things (#110):
   `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
   output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`

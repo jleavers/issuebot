@@ -107,7 +107,8 @@ issues that triage is most of the value.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
    things a hook cannot install are a database server and a language runtime, because the
-   session runs as `agent` (uid 1001) with no Docker and no way to invoke `sudo` — so if the
+   session runs as a session account (by default the pool the image built, `agent-1` ..
+   `agent-N` at uids 1011 upwards) with no Docker and no way to invoke `sudo` — so if the
    target repository's
    tests need a PostgreSQL server, set `ISSUEBOT_POSTGRES_VERSION` in `.env` before building
    (see "A PostgreSQL server for the target repository's tests" below), and if they execute
@@ -379,8 +380,8 @@ above, is the reminder.
 That file is also where `claude` keeps `mcpServers`, and it outlives every session in the
 container, so issuebot runs every turn with `--strict-mcp-config` (#119): only servers named
 on the command line are loaded, and the command line names what `claude.mcp_config` in the
-front matter lists, nothing by default. No MCP server in `/home/agent/.claude.json`, and no
-`.mcp.json` in a repository issuebot clones, reaches a session — including one an earlier
+front matter lists, nothing by default. No MCP server in a session account's `~/.claude.json`,
+and no `.mcp.json` in a repository issuebot clones, reaches a session — including one an earlier
 session wrote there. The rest of the file is still read: `claude` keeps its account metadata,
 its trust state and a `projects` map in it. Adding an MCP server for the agent is therefore
 not a matter of `claude mcp add` inside the container; it is a `claude.mcp_config` entry
@@ -505,8 +506,8 @@ both the label and the default.
 
 Some repositories cannot run their suite without a real PostgreSQL: the fixtures fail rather
 than skip, and most of the tests never get to run. The container has no Docker, and the
-session runs as `agent` (uid 1001), which cannot invoke `sudo`, so no hook can install a
-server and no compose sidecar helps — a service
+session runs as a session account (by default `agent-1` .. `agent-N`, uids 1011 upwards), which
+cannot invoke `sudo`, so no hook can install a server and no compose sidecar helps — a service
 on the compose network is reachable by name, not on loopback, and one server shared by every
 concurrent session is one session's `DROP DATABASE` away from wrecking another's run.
 
@@ -579,8 +580,9 @@ Why it is shaped this way:
   `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
 - **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
   nobody else is in.
-- **`initdb` refuses to run as root**, and the session runs as uid 1001, so that is one
-  problem the image does not have.
+- **`initdb` refuses to run as root**, and the session runs as an unprivileged session account
+  (uid 1011 upwards for a pool member, 1001 for `agent`), so that is one problem the image does
+  not have.
 - **`--encoding=UTF8 --locale=C.UTF-8`, even though the image already sets `LANG=C.UTF-8`.**
   Told neither, `initdb` takes the cluster's encoding from the locale, and on a `C` locale that
   is `SQL_ASCII` -- which psycopg then reads back as bytes rather than `str`, so a suite fails
