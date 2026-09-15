@@ -219,8 +219,10 @@ floor, not the shipped version, and moves by hand.
   with the *next* session bound to that account, and the sweep before turn 1 is the one that
   matters: it clears what the previous session left and what this run's `before_run` hook left,
   since the hook runs as the account and runs once, before the loop. The later sweeps are then
-  defence in depth — between two turns the only writer is the session itself — which is why
-  per-turn stays unconditional rather than being narrowed to the first turn on one route.
+  defence in depth — between two turns the writer is the session itself, or at most a
+  `before_remove` hook the worker runs at that uid for another, idle workspace the same account
+  holds — which is why per-turn stays unconditional rather than being narrowed to the first
+  turn on one route.
   `probe`/`probe_run_as` report whether the delegation works, which the
   orchestrator checks at startup for *every* account (refusing to start when it cannot) and
   `validate` reports as its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
@@ -670,9 +672,9 @@ floor, not the shipped version, and moves by hand.
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
-  All three holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
-  `_github_block`) and `_current_hold()` composes the one live hold from them, preflight >
-  auth > github, for the snapshot and the gate alike -- so the reason an operator reads and
+  All four holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
+  `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()` composes the one
+  live hold from them, preflight > auth > accounts > github, for the snapshot and the gate alike -- so the reason an operator reads and
   the reason a caller refuses on can no longer be two different claims. The preflight one used
   to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
   not it: there was nothing to consult (#112).

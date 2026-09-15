@@ -1178,8 +1178,8 @@ class Orchestrator:
         """
         if self._run_as_block is not None:
             # The setting itself is unusable after a reload (#121): no account can be bound,
-            # pool or not, so nothing is claimed until it is put back. `_settle_dispatch_hold`
-            # is already reporting why.
+            # pool or not, so nothing is claimed until it is put back. `_current_hold` is
+            # already reporting why, to the snapshot and to the admission gate alike.
             return None, False
         if self._pool is None:
             return session_account(self._workflow.config), True

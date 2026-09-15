@@ -234,6 +234,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
+[ OK ] claude.setting_sources: project; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
 [WARN] agent.run_as: agent; the session runs as a separate account, but all 3 concurrent sessions share it
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
@@ -243,7 +244,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
-15 checks: 0 failed, 3 warnings
+16 checks: 0 failed, 3 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in

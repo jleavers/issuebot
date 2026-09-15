@@ -227,6 +227,7 @@ class Harness:
         self.model = model
         self.model_labels = model_labels or {}
         self.runner_settings: list[Settings] = []
+        self.workspace_settings: list[Settings] = []
         self.environ = {
             "GH_TOKEN": "fake-token",
             "PATH": os.environ["PATH"],
@@ -305,6 +306,10 @@ class Harness:
         return ClaudeRunner(settings, environ=self.environ)
 
     def make_workspaces(self, settings: Settings) -> WorkspaceManager:
+        # Recorded like `runner_settings`: the manager's own `agent.run_as` is what decides the
+        # account its `~/.claude` sweep clears and whose uid its `Boundary` will accept (#121),
+        # so a test needs to be able to see what the orchestrator narrowed it to.
+        self.workspace_settings.append(settings)
         return WorkspaceManager(
             settings, gh=StubGh(), environ=self.environ, hook_shell=("bash", "-c")
         )
@@ -3350,6 +3355,16 @@ async def test_two_concurrent_sessions_run_as_two_different_accounts(tmp_path: P
         ("agent-2",),
     ]
     assert not any(settings.agent.run_as_pooled for settings in h.runner_settings)
+    # And the workspace manager, which is the half that matters for the files: its account is
+    # the uid its `Boundary` accepts as the session's and the home its `~/.claude` sweep clears
+    # (#101), so a manager left holding the whole pool would sweep and trust the wrong account.
+    # Each session's manager is narrowed to its own account. The orchestrator's own manager is
+    # deliberately not (it is built from the whole config and reads only files whose declared
+    # writer is the worker, `session.json` among them), which is why this is a subset rather
+    # than an equality.
+    assert {("agent-1",), ("agent-2",)} <= {
+        settings.agent.run_as for settings in h.workspace_settings
+    }
 
 
 async def test_a_workspace_is_dispatched_to_the_same_account_for_as_long_as_it_exists(
@@ -3967,9 +3982,15 @@ async def test_an_accounts_hold_refuses_a_due_retry_through_the_gate(
     await h.tick()
     assert orchestrator.snapshot().dispatch_hold is not None
     orchestrator._retries["1"] = replace(_retry_entry(h, 1), due_mono=h.clock.value - 1)
+    before = len(h.calls("fetch_issues_by_ids"))
     await orchestrator.fire_due_retries()
     requeued = orchestrator._retries.get("1")
     assert requeued is not None, "the entry waits rather than being dropped"
     assert requeued.kind == "accounts"
     assert "unusable" in (requeued.error or "")
     assert not orchestrator.running, "and nothing was claimed"
+    # The refusal happened *before* the refresh, which is the observable the gate adds and the
+    # only one that distinguishes it from `_fire`'s own `_bind_account` fallback below: that
+    # fallback reaches the same requeue with the same wording, one GitHub request later. A held
+    # worker must not spend a request per due retry per poll finding out what it may not claim.
+    assert len(h.calls("fetch_issues_by_ids")) == before, "the gate refused before the refresh"
