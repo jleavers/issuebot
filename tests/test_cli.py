@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import pwd
 import signal
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from issuebot.cli import (
     StatsView,
     _deployment_scrubber,
     _turn_capture,
+    _with_uid,
     main,
     not_runnable,
     render_issue_table,
@@ -3201,8 +3203,30 @@ def test_status_and_stats_read_their_own_repository(
 # --- agent.run_as (#75) -----------------------------------------------------------------
 
 
+@pytest.fixture
+def bare_account_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`validate` names an account with its uid where the account resolves, so the line it
+    prints depends on the machine: `agent-1` is uid 1011 inside the worker image and resolves
+    to nothing on a developer's host (#140). A test about the *line* pins the lookup instead
+    of the host; `_with_uid` itself is tested directly below.
+    """
+    monkeypatch.setattr("issuebot.cli._with_uid", lambda account: account)
+
+
+def test_with_uid_names_an_account_that_resolves() -> None:
+    me = pwd.getpwuid(os.getuid()).pw_name
+    assert _with_uid(me) == f"{me} (uid {os.getuid()})"
+
+
+def test_with_uid_falls_back_to_the_bare_name() -> None:
+    assert _with_uid("no-such-account-142") == "no-such-account-142"
+
+
 def test_validate_reports_the_session_account_when_the_delegation_works(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
@@ -3281,7 +3305,10 @@ def _workflow_with(tmp_path: Path, root: Path, accounts: str) -> Workflow:
 
 
 def test_validate_reports_a_pool_of_session_accounts(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
@@ -3298,14 +3325,16 @@ def test_validate_reports_a_pool_of_session_accounts(
     )
     # The pool line carries #111's evidence too: the probe compared every member's uid with
     # this process's, so the line says so rather than leaving the reader to take it on trust.
-    # (No member resolves on this host, so none is named with its uid -- which is the fallback.)
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
     assert "17 checks: 0 failed, 1 warnings" in out
 
 
 def test_validate_fails_a_pool_with_no_credential_in_the_environment(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
 ) -> None:
     """The pool's accounts share no login on purpose (#121), so the credential has to be one
     `claude` needs no file for."""
