@@ -259,9 +259,25 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
-  environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
+  `.issuebot/runs/<run_id>/`). `--strict-mcp-config` is unconditional for the reason
+  `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
+  `claude-home` volume, so it is recreated with each container but shared by every session in
+  one -- a server a session plants there is offered to whichever issue runs next. The flag
+  names what survives rather than what is removed (only `--mcp-config` servers, and issuebot
+  passes none), so it covers a target repository's `.mcp.json` and any MCP location a later
+  `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
+  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
+  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
+  operator's setting is not what the confinement rests on. Both flags are asserted against
+  `claude --help` in the image build, so a release that drops either fails the build rather
+  than a session. The CI `docker` job proves both
+  directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
+  is listed in the init line without the flag and absent with it, no credential needed since
+  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN

@@ -306,6 +306,15 @@ outside the mounted volume and is recreated with each container. The credential 
 `.claude/.credentials.json`, which *is* in the volume, and it carries a refresh token, so it
 renews itself rather than expiring after a few hours.
 
+That file is also where `claude` keeps `mcpServers`, and it outlives every session in the
+container, so issuebot runs every turn with `--strict-mcp-config` (#119): only servers named
+on the command line are loaded, and issuebot names none. No MCP server in
+`/home/agent/.claude.json`, and no `.mcp.json` in a repository issuebot clones, reaches a
+session — including one an earlier session wrote there. The rest of the file is still read:
+`claude` keeps its account metadata, its trust state and a `projects` map in it. Adding an MCP
+server for the agent is therefore not a matter of `claude mcp add` inside the container; it
+would need a change to the argv issuebot builds.
+
 Because `claude-home` is a named volume there is no directory to open on the host, but you can
 list it from a throwaway container:
 
