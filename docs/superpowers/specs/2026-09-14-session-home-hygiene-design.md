@@ -117,7 +117,11 @@ and auto memory is switched off in the session's environment so nothing writes i
 - **The account's shell profile** (#137). `/home/agent` is the account's and writable, only
   `.claude` in it is the volume, and hooks run under `bash -lc`, so a `~/.profile` one session
   writes is sourced by every later session's hooks for the container's lifetime. The same
-  class as this issue, one directory up; filed rather than folded in.
+  class as this issue, one directory up; filed rather than folded in. **Closed by #137**
+  (`2026-09-15-session-shell-profile-design.md`), which aims this sweep at the home rather than
+  at `~/.claude` and runs it before every login shell as well as before every turn: so
+  `RunAs.sweep_home()` now defaults to the account's home, the `sweep` verb takes the home, and
+  `SHELL_STARTUP_SWEEP` sits beside `CLAUDE_HOME_SWEEP` above.
 
 ## Tests
 

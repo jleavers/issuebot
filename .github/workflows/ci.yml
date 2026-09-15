@@ -395,6 +395,11 @@ jobs:
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
             # The next session hook finds nothing planted: it runs its own command and no more.
             test "$(sudo -n -H -u agent bash -lc "echo hook-ran")" = hook-ran
+            # And the account can still do what it is for with its start-up files gone: `claude`
+            # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
+            # from /etc/profile and /etc/profile.d, which belong to root and are not swept.
+            sudo -n -H -u agent claude --version
+            sudo -n -H -u agent bash -lc "claude --version"
             # And the credential, the transcript and the rest of the home remain.
             sudo -n -H -u agent bash -c "
               set -eu

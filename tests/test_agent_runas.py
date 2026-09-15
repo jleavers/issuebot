@@ -623,8 +623,8 @@ async def test_sweep_agent_home_delegates_under_run_as(
 ) -> None:
     calls: list[Path | None] = []
 
-    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
-        calls.append(claude_dir)
+    def record(self: RunAs, home: Path | None = None) -> bool:
+        calls.append(home)
         return True
 
     monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", record)
@@ -638,7 +638,7 @@ async def test_sweep_agent_home_delegates_under_run_as(
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
     with capture_logs() as logs:
         await manager.sweep_agent_home()
-    # No explicit path: the account's own ~/.claude, resolved inside sweep_home.
+    # No explicit path: the account's own home, resolved inside sweep_home.
     assert calls == [None]
     assert [entry["event"] for entry in logs] == ["claude_home_swept"]
 
@@ -980,7 +980,7 @@ async def test_sweep_agent_home_follows_the_binding_under_a_pool(
     """
     swept: list[str] = []
 
-    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
+    def record(self: RunAs, home: Path | None = None) -> bool:
         swept.append(self.user)
         return True
 

@@ -179,6 +179,11 @@ def test_ci_proves_a_planted_shell_profile_does_not_run_for_the_next_sessions_ho
     assert "test ! -e /home/agent/.bashrc" in CI
     assert "test -f /home/agent/.claude.json" in CI
     assert "test -d /home/agent/.npm" in CI
+    # And the account still works with them gone: `claude` for it directly (the login recipe
+    # of the README) and in a login shell, whose PATH is /etc/profile's rather than a profile
+    # the sweep just removed.
+    assert "sudo -n -H -u agent claude --version" in CI
+    assert 'sudo -n -H -u agent bash -lc "claude --version"' in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
