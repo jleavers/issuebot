@@ -265,6 +265,45 @@ async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
     assert len(runner.calls) == MAX_ISSUE_PAGES
 
 
+async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -> None:
+    """One role over its ceiling does not void the sweep's other four (#139).
+
+    The role that can actually reach it is ``complete`` -- it grows with everything issuebot
+    has finished -- and its issues are the ones the sweep classifies ``unchanged`` and does
+    nothing with. Letting it refuse the whole read would stop the sweep closing issues out,
+    removing workspaces and releasing session accounts, which is worse than the cost the cap
+    is for. The board poll keeps the all-or-nothing rule: there, four roles are not a board.
+    """
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    runner = StubRunner()
+    _endless_board(runner, "issuebot/complete", MAX_TERMINAL_PAGES)
+    empty = _issues_page(0, end_cursor=None)
+    for role in ("todo", "in-progress", "review", "rework"):
+        runner.on(has(f"label=issuebot/{role}"), stdout=empty)
+
+    issues = await make_adapter(runner).fetch_terminal_issues()
+
+    assert [issue.number for issue in issues] == [0]
+    skipped = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if json.loads(line)["event"] == "issue_role_skipped"
+    ]
+    assert [record["label"] for record in skipped] == ["issuebot/complete"]
+    assert str(MAX_TERMINAL_PAGES * PAGE_SIZE) in skipped[0]["reason"]
+
+
+async def test_terminal_sweep_still_fails_on_an_error_that_is_not_the_cap() -> None:
+    """Only a ``response`` error is the cap's: a transport failure is the whole read's to
+    fail on, as it was before, so the sweep does not quietly work from four roles."""
+    runner = StubRunner()
+    runner.on(has("label=issuebot/todo"), stdout="", stderr="dial tcp: timeout", returncode=1)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).fetch_terminal_issues()
+    assert excinfo.value.category != "response"
+
+
 async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:
     """The closed read is a different resource, so it is a different number (#139).
 
@@ -273,14 +312,19 @@ async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:
     the open board.
     """
     assert MAX_TERMINAL_PAGES > MAX_ISSUE_PAGES
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
     runner = StubRunner()
     _endless_board(runner, "issuebot/todo", MAX_TERMINAL_PAGES)
-    with pytest.raises(GitHubError) as excinfo:
-        await make_adapter(runner).fetch_terminal_issues()
-    assert excinfo.value.message == (
-        f"more than {MAX_TERMINAL_PAGES * PAGE_SIZE} issues carry issuebot/todo"
-    )
-    assert len(runner.calls) == MAX_TERMINAL_PAGES
+    runner.on(has("label=issuebot/"), stdout=_issues_page(0, end_cursor=None))
+
+    await make_adapter(runner).fetch_terminal_issues()
+
+    # The ceiling was the terminal one and not the board's: it read every page up to it.
+    reason = json.loads(stream.getvalue().splitlines()[0])["reason"]
+    assert reason == f"more than {MAX_TERMINAL_PAGES * PAGE_SIZE} issues carry issuebot/todo"
+    todo_calls = [argv for argv, _ in runner.calls if has("label=issuebot/todo")(argv)]
+    assert len(todo_calls) == MAX_TERMINAL_PAGES
 
 
 # --- reads: by id ------------------------------------------------------------------

@@ -190,7 +190,12 @@ floor, not the shipped version, and moves by hand.
   `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` passes its own,
   looser `MAX_TERMINAL_PAGES` (50), because `complete` rests on a closed issue for ever, so
   that role grows with everything issuebot has finished rather than with a working set a human
-  drains (that it is re-read at all is #149));
+  drains (that it is re-read at all is #149). The sweep's roles are read independently
+  (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped` warning and the
+  other four are still swept, since the role that can reach it is `complete`, whose issues the
+  sweep only ever classifies `unchanged`, and voiding the read would stop issues closing out,
+  workspaces being removed and accounts being released. The poll keeps the all-or-nothing
+  rule, and only a `response` error is isolated: a transport error still fails the read);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved
@@ -360,20 +365,23 @@ floor, not the shipped version, and moves by hand.
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
-  `bash -lc` hooks with timeout *and* a cap on what they hand back -- `_run_argv` reads both
-  pipes through `read_capped` and kills the process group past `MAX_HOOK_OUTPUT_BYTES` (4 MiB
-  each, much smaller than `GhRunner`'s since only `_OUTPUT_TAIL` of either survives), because
-  `hooks.timeout_ms` bounds how long a hook may run and never how much it may write inside
-  that time, and the buffer was the worker's, which supervises every session (#139). The group
-  and through sudo, since the writer is as often a grandchild of the shell as the shell itself
-  and runs at a uid the worker cannot signal; `HookResult.overrun` carries the fact of its own
-  (a hook can exit inside the pipe buffer before the reader catches up, so `returncode` does
-  not say it), makes `ok` false, is `overrun`/`max_output_bytes` in the `hook_failed` line and
-  is what `summary` -- and so the run's error -- says. `hooks.after_create` is where the
-  *target* repository's dependency install runs, so the party growing this is the one the
-  deployment invites --, `.issuebot/session.json`, whose `workpad_comment_id` is the
+  `bash -lc` hooks with a timeout and a cap on what they hand back, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
-  one-turn run that created it still records `null`); `PromptRenderer`
+  one-turn run that created it still records `null`).
+  The hook cap is #139: `_run_argv` reads both pipes through `read_capped` and kills the
+  process *group* past `MAX_HOOK_OUTPUT_BYTES` (4 MiB each, much smaller than `GhRunner`'s
+  since only `_OUTPUT_TAIL` of either survives into `HookResult`), because `hooks.timeout_ms`
+  bounds how long a hook may run and never how much it may write inside that time, and the
+  buffer was the worker's, which supervises every session. The group, and through sudo, since
+  the writer is as often a grandchild of the shell as the shell itself and runs at a uid the
+  worker cannot signal; a kill that does not take is a `hook_kill_failed` warning and the
+  timeout then bounds what the cap could not, the reads dropping the bytes meanwhile.
+  `HookResult.overrun` carries the fact of its own, since a hook can exit inside the pipe
+  buffer before the reader catches up and `returncode` would not say so: it makes `ok` false,
+  it is `overrun`/`max_output_bytes` in the `hook_failed` line, and it is what `summary` --
+  and so the run's error -- says, ahead of `timed_out`. `hooks.after_create` is where the
+  *target* repository's dependency install runs, so the party growing this is the one the
+  deployment invites. `PromptRenderer`
   (Jinja2 `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `workpad`,
   `attempt`, `turn_number`, `max_turns`, `rework`, `self_review`, `repo_instructions`).
   `repo_instructions` (#107, spec `2026-09-14-repository-instructions-design.md`) is the

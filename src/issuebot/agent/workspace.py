@@ -589,7 +589,17 @@ class WorkspaceManager:
 
         async def kill_on_overrun() -> None:
             await overrun.wait()
-            await self._kill_group(process)
+            try:
+                await self._kill_group(process)
+            except OSError as exc:
+                # Total, because this runs as a task whose exception would otherwise replace
+                # the cancellation the timeout raises and leave ``_run_argv`` with an
+                # ``OSError`` where a ``HookResult`` belongs. It can happen: ``os.killpg``
+                # raises ``PermissionError`` for a group at another uid, which is every group
+                # under ``agent.run_as`` when the delegated kill did not take. The timeout
+                # then bounds what the cap could not, and the reads are dropping the bytes
+                # meanwhile, so the memory is still bounded.
+                self._log.warning("hook_kill_failed", pid=process.pid, error=str(exc))
 
         killer = asyncio.create_task(kill_on_overrun())
         try:
@@ -604,6 +614,8 @@ class WorkspaceManager:
                 await asyncio.shield(killer)
             else:
                 killer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await killer
         await process.wait()
         return out, err
 

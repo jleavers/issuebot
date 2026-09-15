@@ -1,10 +1,13 @@
 """Tests for workspaces: keys, containment, clone, hooks, removal and session.json."""
 
 import asyncio
+import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -394,7 +397,10 @@ async def test_hook_output_over_the_cap_kills_the_group(
     manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=60_000)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
 
-    result = await manager.run_hook("before_run", ws.path)
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
 
     assert result is not None
     assert result.overrun
@@ -422,6 +428,49 @@ async def test_hook_output_at_the_cap_is_not_an_overrun(
     assert result.ok
     assert result.returncode == 0
     assert result.stderr_tail == "done\n"
+
+
+@posix
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid to escape the group")
+async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A hook killed for flooding whose pipes then stay open past the timeout reports the
+    cause and not the symptom (#139).
+
+    The group kill is what usually ends the read, but a writer in a session of its own
+    outlives it, and then the timer is what stops the hook. The bytes are bounded either
+    way -- the reads have been dropping them since the cap -- so the run's error should say
+    the hook flooded, not that it was slow.
+    """
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    pidfile = tmp_path / "pid"
+    flood = MAX_HOOK_OUTPUT_BYTES + (1 << 20)
+    escaped = f"echo $$ > {pidfile}; head -c {flood} /dev/zero | tr '\\0' x; sleep 20"
+    manager, _ = make_manager(
+        tmp_path, hooks={"before_run": f"setsid bash -c {shlex.quote(escaped)}"}, timeout_ms=3000
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+
+    assert result is not None
+    assert result.overrun
+    assert not result.timed_out
+    assert not result.ok
+    assert result.summary == f"wrote more than {MAX_HOOK_OUTPUT_BYTES} bytes and was killed"
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    failure = next(r for r in records if r.get("event") == "hook_failed")
+    assert failure["overrun"] is True
+    assert failure["timed_out"] is False
+    assert failure["max_output_bytes"] == MAX_HOOK_OUTPUT_BYTES
+    # Not the manager's to reap: it escaped the group on purpose, so the test cleans up.
+    with contextlib.suppress(ProcessLookupError, ValueError):
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
 
 
 @posix

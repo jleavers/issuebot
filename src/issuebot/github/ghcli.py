@@ -168,7 +168,7 @@ class GhCliAdapter:
     async def fetch_terminal_issues(self) -> list[Issue]:
         self._log.debug("fetch_terminal_issues")
         return await self._collect(
-            list(StateLabel), CLOSED_ISSUES_QUERY, max_pages=MAX_TERMINAL_PAGES
+            list(StateLabel), CLOSED_ISSUES_QUERY, max_pages=MAX_TERMINAL_PAGES, per_role=True
         )
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
@@ -461,13 +461,35 @@ class GhCliAdapter:
             raise GitHubError("response", "unexpected repository response") from exc
 
     async def _collect(
-        self, roles: Sequence[StateLabel], query: str, *, max_pages: int
+        self, roles: Sequence[StateLabel], query: str, *, max_pages: int, per_role: bool = False
     ) -> list[Issue]:
+        """Every issue carrying any of ``roles``, deduplicated and oldest first.
+
+        ``per_role`` decides what one role over its page ceiling costs the others (#139).
+        Off, for the board poll: any role's refusal refuses the whole read, because the answer
+        is a board to claim from and four roles of it are not a board. On, for the terminal
+        sweep, where the answer is a list of closed issues to finish one at a time and the
+        role that can actually reach the ceiling -- ``complete``, which grows with everything
+        issuebot has finished -- is the one whose issues the sweep classifies ``unchanged`` and
+        does nothing with. Letting it void the other four would stop the sweep closing issues
+        out, removing workspaces and releasing session accounts, which is a far worse failure
+        than the one the cap is for. A skipped role is a warning naming it, and the sweep
+        repeats, so nothing about it is silent or final.
+        """
         login = await self.own_login()
         found: dict[int, Issue] = {}
         for role in roles:
             label = label_name(self.labels, role)
-            for issue in await self._issues_with_label(label, query, login, max_pages):
+            try:
+                page = await self._issues_with_label(label, query, login, max_pages)
+            except GitHubError as exc:
+                if not per_role or exc.category != "response":
+                    raise
+                # Only a `response` error, which is this cap and not the moment: a transport
+                # error or a 5xx is the whole read's to fail on, as it was before.
+                self._log.warning("issue_role_skipped", label=label, reason=exc.message)
+                continue
+            for issue in page:
                 found.setdefault(issue.number, issue)
         return sorted(found.values(), key=lambda issue: (issue.created_at, issue.number))
 

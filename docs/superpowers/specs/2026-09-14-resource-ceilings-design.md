@@ -95,6 +95,21 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   a long-lived deployment or leave the poll a ceiling far above what it needs. That the sweep
   re-reads every completed issue at all is its own defect, not this cap's; it is filed
   separately (#149).
+
+  The sweep also reads its roles *independently* (`_collect(per_role=True)`), and that is the
+  second decision this cap had to make. All-or-nothing is right for the poll, where four roles
+  are not a board; it is wrong here, and dangerously so. The role that can actually reach the
+  ceiling is `complete`, whose issues the sweep classifies `unchanged` and does nothing with,
+  while `terminal_sweep` is the only path to `finish_terminal` -- and so the only thing that
+  closes issues out, removes workspaces and, through `_prune_accounts`, releases session
+  accounts. One overgrown, inert role refusing the whole read would stop all three on a
+  deployment that had merely succeeded often enough, from a warning line: a worse failure than
+  the cost the cap is for, and one the poll's `github` hold does not cover, since the sweep's
+  failure reaches no dispatch hold and no health surface. So a role past its ceiling is an
+  `issue_role_skipped` warning naming it and the other four are still swept, and the sweep
+  repeats, so nothing about it is final. Only a `response` error is isolated that way: a
+  transport error or a 5xx still fails the whole read, as before, since that is the moment
+  rather than the resource.
 - **The session** (`agent/session.py`, `agent/runner.py`): `agent.run_timeout_ms` (default
   four hours) is a monotonic deadline fixed from `_State.started`, before the clone and the
   `before_run` hook, and handed to every `run_turn(deadline=)`. The reader waits for the
