@@ -1,6 +1,7 @@
 """Tests for workspaces: keys, containment, clone, hooks, removal and session.json."""
 
 import asyncio
+import io
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import pytest
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.workspace import (
+    MAX_HOOK_OUTPUT_BYTES,
     SessionRecord,
     WorkspaceManager,
     run_log_dir,
@@ -23,6 +25,7 @@ from issuebot.agent.workspace import (
 )
 from issuebot.config import Settings
 from issuebot.github import GhResult, GhRunner, GitHubError, Issue
+from issuebot.log import configure_logging
 
 posix = pytest.mark.skipif(sys.platform == "win32", reason="hooks and git run through bash")
 FAKE_GH = Path(__file__).parent / "fakes" / "gh"
@@ -368,6 +371,71 @@ async def test_hook_output_is_truncated(tmp_path: Path, make_issue: Callable[...
     result = await manager.run_hook("before_run", ws.path)
     assert result is not None
     assert len(result.stdout_tail) == 2000
+
+
+@posix
+@pytest.mark.parametrize("stream", ["1", "2"])
+async def test_hook_output_over_the_cap_kills_the_group(
+    tmp_path: Path, make_issue: Callable[..., Issue], stream: str
+) -> None:
+    """A hook that floods is killed as the bytes arrive, not buffered whole first (#139).
+
+    ``after_create`` is where the target repository's dependency install runs, so the party
+    growing this is the one the deployment invites, and the process holding the buffer is the
+    worker, which supervises every concurrent session.
+    """
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    pidfile = tmp_path / "pid"
+    flood = MAX_HOOK_OUTPUT_BYTES + (1 << 20)
+    # The writer is a grandchild of the hook shell, as a dependency install's own child
+    # processes are: killing the shell alone would leave it holding the pipe.
+    script = f"( head -c {flood} /dev/zero | tr '\\0' x >&{stream} ) & echo $! > {pidfile}; wait"
+    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=60_000)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+
+    result = await manager.run_hook("before_run", ws.path)
+
+    assert result is not None
+    assert result.overrun
+    assert not result.ok
+    assert not result.timed_out  # the cap cut it short, long before the timer would have
+    assert result.summary == f"wrote more than {MAX_HOOK_OUTPUT_BYTES} bytes and was killed"
+    await assert_gone(int(pidfile.read_text()))
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    failure = next(r for r in records if r.get("event") == "hook_failed")
+    assert failure["overrun"] is True
+    assert failure["max_output_bytes"] == MAX_HOOK_OUTPUT_BYTES
+
+
+@posix
+async def test_hook_output_at_the_cap_is_not_an_overrun(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A chatty-but-honest install runs to its end: the cap refuses the byte past it."""
+    script = f"head -c {MAX_HOOK_OUTPUT_BYTES} /dev/zero | tr '\\0' a; echo done >&2"
+    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=60_000)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    result = await manager.run_hook("before_run", ws.path)
+    assert result is not None
+    assert not result.overrun
+    assert result.ok
+    assert result.returncode == 0
+    assert result.stderr_tail == "done\n"
+
+
+@posix
+async def test_a_flooding_hook_fails_the_run_with_the_overrun_in_the_error(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """``after_create``'s failure is an ``AgentError`` quoting the summary, so the overrun
+    reaches the run's error rather than being a log line nobody reads."""
+    script = f"head -c {MAX_HOOK_OUTPUT_BYTES + (1 << 20)} /dev/zero | tr '\\0' x"
+    manager, _ = make_manager(tmp_path, hooks={"after_create": script}, timeout_ms=60_000)
+    with pytest.raises(AgentError) as excinfo:
+        await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert str(MAX_HOOK_OUTPUT_BYTES) in excinfo.value.message
+    assert "was killed" in excinfo.value.message
 
 
 # --- session.json -----------------------------------------------------------------------

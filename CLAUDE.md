@@ -137,6 +137,14 @@ floor, not the shipped version, and moves by hand.
   exactly where a developer working on issuebot keeps their overlay.
 - `issuebot.log`: `configure_logging()` (structlog, JSON to stderr by default),
   `get_logger()`, `bind_issue_context()`, `bind_session_context()`, `clear_context()`.
+- `issuebot.pipes`: `read_capped(stream, limit, on_overrun)`, a leaf module for the same reason
+  `issuebot.dsn` is one: two packages spawn a process whose output an outside party can grow,
+  and both need the same primitive (#110, #139). It reads a child's pipe to its end keeping at
+  most `limit` bytes, firing `on_overrun` once at the first byte past the cap -- while the
+  caller can still kill the writer -- and draining the rest, since a full pipe is what would
+  keep the child from exiting. The read that crosses the cap is dropped whole, so what comes
+  back is at most the limit rather than exactly it. `GhRunner.run` and
+  `WorkspaceManager._run_argv` are its two callers.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports
   `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a
   `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's
@@ -173,7 +181,16 @@ floor, not the shipped version, and moves by hand.
   `count_own_label_additions(number, label)` (#104) is the issue's `LABELED_EVENT` timeline
   items the adapter's own account made, paginated one page at a time and at most
   `MAX_TIMELINE_PAGES` (10) of them, past which it is a `response` error (#110, the same rule
-  as the workpad read), the record the conflict bounce is bounded by);
+  as the workpad read), the record the conflict bounce is bounded by;
+  `_issues_with_label`, the board poll's own GraphQL cursor loop, walks at most
+  `MAX_ISSUE_PAGES` (10) pages per role per tick and *fails* past it with a `response` error
+  rather than returning a short board (#139): the query is oldest first, so a truncated answer
+  would have the worker claim from it believing it had seen everything and silently starve the
+  newest issues, where a refused read is the `github` dispatch hold of #88 and says so on
+  `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` passes its own,
+  looser `MAX_TERMINAL_PAGES` (50), because `complete` rests on a closed issue for ever, so
+  that role grows with everything issuebot has finished rather than with a working set a human
+  drains (that it is re-read at all is #149));
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved
@@ -343,7 +360,18 @@ floor, not the shipped version, and moves by hand.
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
-  `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
+  `bash -lc` hooks with timeout *and* a cap on what they hand back -- `_run_argv` reads both
+  pipes through `read_capped` and kills the process group past `MAX_HOOK_OUTPUT_BYTES` (4 MiB
+  each, much smaller than `GhRunner`'s since only `_OUTPUT_TAIL` of either survives), because
+  `hooks.timeout_ms` bounds how long a hook may run and never how much it may write inside
+  that time, and the buffer was the worker's, which supervises every session (#139). The group
+  and through sudo, since the writer is as often a grandchild of the shell as the shell itself
+  and runs at a uid the worker cannot signal; `HookResult.overrun` carries the fact of its own
+  (a hook can exit inside the pipe buffer before the reader catches up, so `returncode` does
+  not say it), makes `ok` false, is `overrun`/`max_output_bytes` in the `hook_failed` line and
+  is what `summary` -- and so the run's error -- says. `hooks.after_create` is where the
+  *target* repository's dependency install runs, so the party growing this is the one the
+  deployment invites --, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
   (Jinja2 `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `workpad`,

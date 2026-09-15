@@ -15,7 +15,10 @@ from issuebot.github.ghcli import (
     ID_BATCH_SIZE,
     ISSUE_FIELDS,
     MAX_COMMENT_PAGES,
+    MAX_ISSUE_PAGES,
+    MAX_TERMINAL_PAGES,
     MAX_TIMELINE_PAGES,
+    PAGE_SIZE,
     GhCliAdapter,
     by_ids_query,
 )
@@ -178,6 +181,106 @@ async def test_page_without_cursor_raises_response() -> None:
         await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
     assert exc.value.category == "response"
     assert "endCursor" in exc.value.message
+
+
+def _issues_page(number: int, *, end_cursor: str | None) -> str:
+    """One board page carrying one ordinary issue, saying there is always another."""
+    node = {
+        "number": number,
+        "title": "t",
+        "body": "b",
+        "state": "OPEN",
+        "url": f"https://example/{number}",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "closedAt": None,
+        "author": {"login": "someone"},
+        "labels": {"nodes": [{"name": "issuebot/todo"}]},
+        "assignees": {"nodes": []},
+        "closedByPullRequestsReferences": {"nodes": []},
+    }
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [node],
+                        "pageInfo": {
+                            "hasNextPage": end_cursor is not None,
+                            "endCursor": end_cursor,
+                        },
+                    }
+                }
+            }
+        }
+    )
+
+
+def _endless_board(runner: StubRunner, label: str, pages: int) -> None:
+    """``pages`` board pages for ``label``, every one of them saying there is another."""
+    runner.on(
+        both(has(f"label={label}"), lacks("cursor=")), stdout=_issues_page(1, end_cursor="c1")
+    )
+    for page in range(1, pages + 2):
+        runner.on(
+            both(has(f"label={label}"), has(f"cursor=c{page}")),
+            stdout=_issues_page(page + 1, end_cursor=f"c{page + 1}"),
+        )
+
+
+async def test_board_poll_gives_up_past_the_page_cap() -> None:
+    """A board that keeps saying ``hasNextPage`` is a failed read, not a short board (#139).
+
+    The read fails rather than returning what it has: the query is oldest first, so a
+    truncated answer would silently starve the newest issues while the worker claimed from
+    it believing it had seen everything. A ``response`` error is what #88's consecutive-failure
+    counter turns into a ``github`` dispatch hold, which says so where an operator looks.
+    """
+    runner = StubRunner()
+    _endless_board(runner, "issuebot/todo", MAX_ISSUE_PAGES)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
+    assert excinfo.value.category == "response"
+    assert not excinfo.value.retryable
+    assert excinfo.value.message == (
+        f"more than {MAX_ISSUE_PAGES * PAGE_SIZE} issues carry issuebot/todo"
+    )
+    assert len(runner.calls) == MAX_ISSUE_PAGES
+
+
+async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
+    """The page before the ceiling is still answered: the cap refuses, it does not shorten."""
+    runner = StubRunner()
+    runner.on(
+        both(has("label=issuebot/todo"), lacks("cursor=")), stdout=_issues_page(1, end_cursor="c1")
+    )
+    for page in range(1, MAX_ISSUE_PAGES):
+        last = page == MAX_ISSUE_PAGES - 1
+        runner.on(
+            both(has("label=issuebot/todo"), has(f"cursor=c{page}")),
+            stdout=_issues_page(page + 1, end_cursor=None if last else f"c{page + 1}"),
+        )
+    issues = await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
+    assert len(issues) == MAX_ISSUE_PAGES
+    assert len(runner.calls) == MAX_ISSUE_PAGES
+
+
+async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:
+    """The closed read is a different resource, so it is a different number (#139).
+
+    ``complete`` rests on a closed issue for ever, so the sweep's pages grow with everything
+    issuebot has ever finished -- not with a working set a human drains, which is what bounds
+    the open board.
+    """
+    assert MAX_TERMINAL_PAGES > MAX_ISSUE_PAGES
+    runner = StubRunner()
+    _endless_board(runner, "issuebot/todo", MAX_TERMINAL_PAGES)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).fetch_terminal_issues()
+    assert excinfo.value.message == (
+        f"more than {MAX_TERMINAL_PAGES * PAGE_SIZE} issues carry issuebot/todo"
+    )
+    assert len(runner.calls) == MAX_TERMINAL_PAGES
 
 
 # --- reads: by id ------------------------------------------------------------------
