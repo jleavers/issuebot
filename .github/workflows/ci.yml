@@ -291,7 +291,9 @@ jobs:
           docker compose run --rm --no-deps --user agent \
             -e GH_TOKEN -e GITHUB_REPOSITORY --entrypoint bash worker -lc '
             set -eu
-            # The address reached the session, which is the pass-through in agent_environment.
+            # The address is in the container, which is compose. That it survives into a
+            # session and its hooks is agent_environment, which the suite covers: this asserts
+            # the half a unit test cannot, that the service is configured with it at all.
             test "$HTTPS_PROXY" = http://egress:3128
             test "$https_proxy" = http://egress:3128
             # Off the allow-list: the proxy refuses it...

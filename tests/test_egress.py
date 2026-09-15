@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from urllib.parse import urlsplit
 
 import pytest
 
+from issuebot.cli import SLACK_WEBHOOK_HOST
 from issuebot.egress import (
     ALLOW_ENV,
     DEFAULT_ALLOW,
     MAX_REQUEST_BYTES,
+    MAX_TUNNELS,
     PROBE_DENIED_HOST,
     PROXY_ENV_NAMES,
+    Proxy,
     Rule,
     allow_rules,
     allowed,
@@ -32,6 +36,7 @@ from issuebot.egress import (
     serve,
     split_allow,
 )
+from issuebot.github.status import SUMMARY_URL
 
 # --- the allow-list, as text ----------------------------------------------------------
 
@@ -108,18 +113,33 @@ def test_the_default_list_covers_the_workflows_own_needs_and_nothing_else() -> N
     """
     assert DEFAULT_ALLOW == (
         "api.anthropic.com",
-        "statsig.anthropic.com",
+        "platform.claude.com",
+        "claude.ai",
         "github.com",
         "api.github.com",
         "objects.githubusercontent.com",
         "www.githubstatus.com",
+        "hooks.slack.com",
     )
-    assert all(
-        name.endswith((".anthropic.com", ".github.com", ".githubusercontent.com"))
-        or name == "github.com"
-        or name == "www.githubstatus.com"
-        for name in DEFAULT_ALLOW
-    )
+    assert not any("pypi" in name or "npm" in name for name in DEFAULT_ALLOW)
+
+
+def test_the_default_list_carries_every_host_issuebot_itself_reaches() -> None:
+    """The other side of "and nothing else": a name issuebot's *own* code goes to, and that an
+    operator therefore never chose to need, has to be here or the deployment breaks quietly.
+
+    `claude` authenticates against `platform.claude.com` -- `/oauth/authorize` for the login
+    recipe in the README and `/v1/oauth/token` for the refresh of a login already in the
+    volume -- so a default without it works until an access token expires and then fails every
+    session, reporting an allow-list where the fault is a credential. `hooks.slack.com` is
+    worse: `urllib_post` never raises, so a refused webhook costs a deployment every
+    notification with nothing but a log line to say so.
+    """
+    rules, _ = allow_rules({})
+    assert allowed(SLACK_WEBHOOK_HOST, 443, rules)
+    assert allowed(urlsplit(SUMMARY_URL).hostname or "", 443, rules)
+    for host in ("platform.claude.com", "claude.ai", "api.anthropic.com"):
+        assert allowed(host, 443, rules), host
 
 
 def test_the_operator_extends_the_default_and_never_replaces_it() -> None:
@@ -372,3 +392,46 @@ def test_configured_proxy_prefers_the_lower_case_spelling() -> None:
         configured_proxy({"HTTPS_PROXY": "http://a:3128", "https_proxy": "http://b:3128"})
         == "http://b:3128"
     )
+
+
+def test_a_tunnel_survives_a_client_that_half_closes_its_side() -> None:
+    """A client that has said everything it means to say is waiting for an answer, so the
+    *reply* direction is what ends the tunnel -- not whichever of the two finishes first."""
+
+    async def exercise() -> bytes:
+        upstream = _Upstream()
+        await upstream.start()
+        server, url = await _proxy([f"localhost:{upstream.port}"])
+        try:
+
+            def talk() -> bytes:
+                host, _, port = url.removeprefix("http://").rpartition(":")
+                with socket.create_connection((host, int(port)), 5) as sock:
+                    sock.settimeout(5)
+                    sock.sendall(f"CONNECT localhost:{upstream.port} HTTP/1.1\r\n\r\n".encode())
+                    sock.recv(4096)
+                    sock.sendall(b"hello")
+                    sock.shutdown(socket.SHUT_WR)
+                    return sock.recv(4096)
+
+            return await asyncio.to_thread(talk)
+        finally:
+            server.close()
+            await upstream.stop()
+
+    assert asyncio.run(exercise()) == b"pong:hello"
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_refuses_a_flood_rather_than_running_out_of_descriptors() -> None:
+    """A session is the adversary here, and the worker's own GitHub polls go through this same
+    proxy, so a session opening connections without limit would take out the control plane
+    that would otherwise notice it and stop it."""
+    assert MAX_TUNNELS > 0
+    rules, _ = parse_allow(["allowed.test"])
+    proxy = Proxy(rules, max_tunnels=0)
+    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=MAX_REQUEST_BYTES)
+    url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    answer = await asyncio.to_thread(_speak, url, b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\n")
+    assert answer.startswith(b"HTTP/1.1 503 Service Unavailable\r\n")
+    server.close()

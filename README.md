@@ -292,11 +292,18 @@ The shipped list is what the workflow itself needs and nothing else:
 | Host | Reached by |
 |---|---|
 | `api.anthropic.com` | `claude -p`, every turn |
-| `statsig.anthropic.com` | Claude Code's feature flags (a session runs without it) |
+| `platform.claude.com` | where `claude` authenticates: the login recipe below, and the *refresh* of a login already in the volume |
+| `claude.ai` | that same login's origin |
 | `github.com` | `gh repo clone`, and every `git fetch`/`push` in a workspace |
 | `api.github.com` | every `gh api`, `gh issue` and `gh pr` call, the worker's polls included |
 | `objects.githubusercontent.com` | release assets and raw objects `gh` redirects to |
 | `www.githubstatus.com` | the status page the worker reads to annotate a dispatch hold |
+| `hooks.slack.com` | the worker's own notifications, if `SLACK_WEBHOOK_URL` is set |
+
+A Slack-compatible webhook on another host is yours to add, and so is a `claude` that a future
+release points at a host not listed here: a refused webhook is silent apart from a log line,
+and a refused token refresh fails every session with a 403 about an allow-list rather than
+about a credential.
 
 **The target repository's toolchain is yours to add**, because it differs per deployment: the
 registries a `uv sync`, `pip install`, `npm ci` or `go mod download` reaches, in a hook or in a

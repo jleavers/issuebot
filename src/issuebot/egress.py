@@ -35,6 +35,7 @@ import contextlib
 import socket
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from issuebot.log import get_logger
@@ -43,28 +44,40 @@ from issuebot.log import get_logger
 # operator's to add (`ALLOW_ENV`). Every name here is reached by a process issuebot spawns:
 #
 #   api.anthropic.com        `claude -p`, every turn.
-#   statsig.anthropic.com    Claude Code's feature-flag endpoint, on Anthropic's own reference
-#                            firewall list for the product. Same origin owner as the line
-#                            above, so it widens the trust domain by nothing; a session that
-#                            cannot reach it still runs, which is why it is the only
-#                            non-essential name in the list.
+#   platform.claude.com      where `claude` authenticates: `/oauth/authorize` for the login
+#                            recipe in the README, and `/v1/oauth/token` for the *refresh* of
+#                            a login already in the `claude-home` volume. Without it an
+#                            existing deployment keeps working until its access token expires
+#                            and then fails every session, reporting a 403 about an allow-list
+#                            rather than a credential -- which is why it is in the default and
+#                            not left to the operator to discover.
+#   claude.ai                the same login's origin, which the client sends itself with.
 #   github.com               `gh repo clone`, and every `git fetch`/`push` in a workspace.
 #   api.github.com           every `gh api`, `gh issue`, `gh pr` call, the worker's own polls
 #                            among them.
 #   objects.githubusercontent.com   release assets and raw objects `gh` redirects to.
 #   www.githubstatus.com     the Statuspage summary `issuebot.github.status` reads to annotate
 #                            a dispatch hold (#88).
+#   hooks.slack.com          the worker's own notifications (`issuebot.notifications`), which
+#                            go out through `urllib` and so through this proxy. Silent if it
+#                            is refused -- `urllib_post` never raises -- so an upgrade would
+#                            otherwise cost a deployment every `blocked` line with nothing but
+#                            a log entry to say so. A Slack-compatible endpoint on another
+#                            host is the operator's to add, and `validate` says so.
 #
 # Not here on purpose: pypi.org, registry.npmjs.org and the rest. They are the *target*
 # repository's needs rather than the workflow's, they differ per deployment, and a default
-# that carried them would be a default nobody had chosen.
+# that carried them would be a default nobody had chosen. Nor is a telemetry host: the shipped
+# `claude` names none, and one it named would be a name a session could post to.
 DEFAULT_ALLOW: tuple[str, ...] = (
     "api.anthropic.com",
-    "statsig.anthropic.com",
+    "platform.claude.com",
+    "claude.ai",
     "github.com",
     "api.github.com",
     "objects.githubusercontent.com",
     "www.githubstatus.com",
+    "hooks.slack.com",
 )
 # The operator's extension, read from the environment rather than from `WORKFLOW.md`: the proxy
 # is a service of its own with no workflow to load, and the list belongs to the deployment
@@ -114,6 +127,12 @@ REQUEST_TIMEOUT_S = 30.0
 # How long the proxy waits for the allowed host itself.
 UPSTREAM_TIMEOUT_S = 30.0
 _RELAY_CHUNK = 64 * 1024
+# How many tunnels may be open at once. A session is the adversary here, and the worker's own
+# polls of GitHub go through this same proxy, so a session that opened connections without
+# limit would take out the control plane that would otherwise notice it and stop it. Generous
+# for the real load -- a handful of concurrent sessions, each with a turn and a few `gh` calls
+# -- and a definite answer rather than an exhausted descriptor table beyond it.
+MAX_TUNNELS = 256
 # Names a hostname may be made of. Anything else -- a credential in a userinfo part, a path, a
 # space, a byte outside ASCII -- is not a host this proxy will look up.
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-._")
@@ -221,10 +240,16 @@ def normalise_host(host: str) -> str | None:
     comparison that decides whether a connection leaves the host.
     """
     text = host.strip()
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-        # An IPv6 literal, whose colons the allow-list compares verbatim.
-        return text.lower() or None
+    if text.startswith("[") or text.endswith("]"):
+        # Brackets mean an IPv6 literal and nothing else, so what is inside one is held to
+        # `ipaddress` rather than to the name rules below: `[example.com/x]` is not a host,
+        # and this is the one parser that decides whether a connection leaves the container.
+        if not (text.startswith("[") and text.endswith("]")):
+            return None
+        try:
+            return str(ip_address(text[1:-1]).compressed).lower()
+        except ValueError:
+            return None
     text = text.rstrip(".").lower()
     if not text or len(text) > 253:
         return None
@@ -296,10 +321,13 @@ class Proxy:
         *,
         request_timeout_s: float = REQUEST_TIMEOUT_S,
         upstream_timeout_s: float = UPSTREAM_TIMEOUT_S,
+        max_tunnels: int = MAX_TUNNELS,
     ) -> None:
         self._rules = tuple(rules)
         self._request_timeout_s = request_timeout_s
         self._upstream_timeout_s = upstream_timeout_s
+        self._max_tunnels = max_tunnels
+        self._open = 0
         self._log = get_logger(__name__)
 
     @property
@@ -357,6 +385,20 @@ class Proxy:
             await _reply(writer, _response(400, "Bad Request", "not a host:port target\n"))
             return
         host, port = destination
+        if self._open >= self._max_tunnels:
+            # Before the allow-list, so a flood is refused without a name lookup, and logged
+            # once per refusal because this is the shape of a session exhausting the proxy the
+            # worker's own polls depend on.
+            self._log.warning("egress_tunnels_exhausted", open=self._open, limit=self._max_tunnels)
+            await _reply(
+                writer,
+                _response(
+                    503,
+                    "Service Unavailable",
+                    f"the proxy is already relaying {self._max_tunnels} connections\n",
+                ),
+            )
+            return
         if not allowed(host, port, self._rules):
             # The one line an operator goes looking for, and the one a reviewer reads as the
             # record of an attempt: WARNING, with the name that was asked for and nothing else
@@ -382,11 +424,13 @@ class Proxy:
             await _reply(writer, _response(502, "Bad Gateway", f"cannot reach {host}:{port}\n"))
             return
         self._log.debug("egress_allowed", host=host, port=port)
+        self._open += 1
         try:
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
             await writer.drain()
             await _tunnel(reader, writer, upstream_reader, upstream_writer)
         finally:
+            self._open -= 1
             await _close(upstream_writer)
 
 
@@ -417,23 +461,25 @@ async def _tunnel(
     upstream_reader: asyncio.StreamReader,
     upstream_writer: asyncio.StreamWriter,
 ) -> None:
-    """Copy both ways until either end is done, then stop the other.
+    """Copy both ways; the *reply* direction is what says when the tunnel is over.
 
-    Both directions are needed for as long as either is live -- a turn of ``claude -p`` is one
-    long request and a long streamed response -- so this waits for the first to finish and
-    cancels the second rather than waiting for both: a half-closed peer that never reads again
-    would otherwise hold the pair open for as long as the process runs.
+    Not the first of the two to finish. A client that has sent everything it means to send and
+    half-closes its side is waiting for an answer, and cancelling the other direction there
+    would hand it an empty response; ``_relay`` already passes the half-close on as
+    ``write_eof``, so the request direction ending is news for the upstream and not for this.
+    When the upstream closes, the request direction is cancelled with it -- and if the client
+    disappears instead, the write that follows fails and ends this wait anyway.
+
+    Nothing bounds an established tunnel's time: one turn of ``claude -p`` is a single long
+    CONNECT, and an idle timeout on it would be a limit on how long a session may think.
     """
-    tasks = [
-        asyncio.ensure_future(_relay(client_reader, upstream_writer)),
-        asyncio.ensure_future(_relay(upstream_reader, client_writer)),
-    ]
+    to_upstream = asyncio.ensure_future(_relay(client_reader, upstream_writer))
+    to_client = asyncio.ensure_future(_relay(upstream_reader, client_writer))
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        await to_client
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        to_upstream.cancel()
+        await asyncio.gather(to_upstream, to_client, return_exceptions=True)
 
 
 async def serve(

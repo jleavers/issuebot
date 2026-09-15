@@ -41,6 +41,7 @@ from issuebot.db import (
     refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
+from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
@@ -2815,6 +2816,48 @@ def test_web_exits_one_when_uvicorn_cannot_bind(
     assert fake_database.migrations == 1
 
 
+# --- the egress proxy command (#126) --------------------------------------------------
+
+
+def test_egress_rejects_a_port_out_of_range(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["egress", "--port", "70000"]) == 1
+    assert capsys.readouterr().out == "[FAIL] egress: --port must be between 0 and 65535\n"
+
+
+def test_egress_exits_one_when_it_cannot_listen(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def refuse(rules: object, *, bind: str, port: int) -> object:
+        raise OSError("address already in use")
+
+    monkeypatch.setattr("issuebot.cli.serve_egress", refuse)
+    assert main(["egress", "--port", "3128"]) == 1
+    assert capsys.readouterr().out == (
+        "[FAIL] egress: cannot listen on 127.0.0.1:3128: address already in use\n"
+    )
+
+
+def test_egress_serves_the_default_list_extended_by_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry that will not parse is a warning and not a refusal to start: a proxy that will
+    not serve is a worker with no egress at all, which fails every session rather than the one
+    request the typo was about."""
+    served: dict[str, object] = {}
+
+    async def capture(rules: object, *, bind: str, port: int) -> object:
+        served.update(rules=rules, bind=bind, port=port)
+        raise OSError("stop here")  # the loop is not what this test is about
+
+    monkeypatch.setattr("issuebot.cli.serve_egress", capture)
+    monkeypatch.setenv(ALLOW_ENV, "pypi.org, http://nope/, .example.internal:8443")
+    assert main(["egress", "--bind", "0.0.0.0", "--port", "3128"]) == 1
+    names = [str(rule) for rule in served["rules"]]  # type: ignore[union-attr]
+    assert names[: len(DEFAULT_ALLOW)] == [f"{host}:443" for host in DEFAULT_ALLOW]
+    assert names[len(DEFAULT_ALLOW) :] == ["pypi.org:443", ".example.internal:8443"]
+    assert (served["bind"], served["port"]) == ("0.0.0.0", 3128)
+
+
 def test_refresh_notifies_and_reports_failures(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -3373,8 +3416,31 @@ def test_validate_fails_a_proxy_that_admits_a_name_off_the_list(
     _egress(monkeypatch, answers={"egress-probe.invalid": (200, "Connection established")})
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] egress: http://egress:3128 answered 200 for egress-probe.invalid, not 403" in out
-    assert "it is not filtering by name" in out
+    assert (
+        "[FAIL] egress: http://egress:3128 tunnelled to egress-probe.invalid, a name reserved "
+        "by RFC 2606: it is not filtering by name at all" in out
+    )
+
+
+def test_validate_does_not_fail_a_proxy_that_refuses_in_its_own_words(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The README offers the host route an operator's own `HTTPS_PROXY`, and a stock proxy
+    answers a name that will not resolve with a 503 rather than a 403. Only a *tunnel* to the
+    reserved name is definite, so anything else that refuses reads as "not our proxy, and what
+    it filters by is its own business" rather than as a fault in the deployment."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _egress(
+        monkeypatch,
+        answers={
+            "egress-probe.invalid": (503, "Service Unavailable"),
+            "api.github.com": (200, "Connection established"),
+        },
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] egress: http://egress:3128: egress-probe.invalid refused" in out
+    assert "the refusal was 503 rather than 403" in out
 
 
 def test_validate_fails_a_proxy_that_refuses_the_github_api(

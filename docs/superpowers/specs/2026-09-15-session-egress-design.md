@@ -69,11 +69,16 @@ certificate authority, and a filter that cannot read the traffic cannot be blame
 failed to notice in it. The cost is deliberate and stated: plain `http://` is answered `405`
 rather than forwarded, so egress is HTTPS only.
 
-The list is the operator's, over a default that is the workflow's own needs and nothing else --
-Anthropic for `claude`, GitHub for `gh` and `git`, the status page the dispatch hold annotates
-itself from. The *target* repository's registries are not in it: they differ per deployment, and
-a default that carried `pypi.org` would be a default nobody had chosen. `ISSUEBOT_EGRESS_ALLOW`
-in `.env` extends it, never replaces it.
+The list is the operator's, over a default that is every host issuebot's *own* tools reach and
+no other. The test of what belongs in the default is not "is it useful" but "would an operator
+have had to discover it": `platform.claude.com` is where `claude` refreshes a login already in
+the `claude-home` volume, so a list without it works until an access token expires and then
+fails every session, blaming an allow-list for a credential; `hooks.slack.com` is worse, since
+`urllib_post` never raises and a deployment would lose every notification with only a log line
+to say so. The *target* repository's registries are the other side of that test: they differ per
+deployment, and a default that carried `pypi.org` would be a default nobody had chosen.
+`ISSUEBOT_EGRESS_ALLOW` in `.env` extends it, never replaces it. No telemetry host is in it --
+the shipped `claude` names none, and one it named would be a name a session could post to.
 
 Parsing is total. An entry that is not a host name costs its own entry and a `WARNING`, and the
 proxy serves the rest: refusing to start would be a worker with no egress at all, which fails
@@ -127,8 +132,8 @@ and should not be told it has a fault.
 ## What this does not do
 
 - **It does not bound the *worker*'s egress separately from the session's.** Both are in one
-  container and both go through the proxy. The worker's needs are a subset of the session's, so
-  a list that serves the session serves it.
+  container and both go through the proxy, so the default has to carry the worker's own hosts
+  (`hooks.slack.com`, `www.githubstatus.com`) as well as the session's.
 - **It does not filter inside a connection.** The proxy sees a host name. Where a session may
   reach it may also post, which the README says in as many words: the list is a reach, not a
   read.

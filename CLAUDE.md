@@ -161,9 +161,14 @@ floor, not the shipped version, and moves by hand.
   unavoidable -- compose gives `worker` `internal` networks only (`issuebot-internal`, external
   and created `--internal`, for the hub's database; the project-local `egress` for the proxy),
   and a container with no non-internal network has no default route -- and the *allow-list* is
-  what makes the route narrow. `DEFAULT_ALLOW` is what the workflow itself needs
-  (`api.anthropic.com`, `statsig.anthropic.com`, `github.com`, `api.github.com`,
-  `objects.githubusercontent.com`, `www.githubstatus.com`) and the operator extends it with
+  what makes the route narrow. `DEFAULT_ALLOW` is every host issuebot's own
+  tools reach and no other (`api.anthropic.com`; `platform.claude.com` and `claude.ai`, where
+  `claude` authenticates and *refreshes* a login already in the volume, so a list without them
+  works until an access token expires and then fails every session; `github.com`,
+  `api.github.com`, `objects.githubusercontent.com`; `www.githubstatus.com` for #88's
+  annotation; `hooks.slack.com`, since `urllib_post` never raises and a refused webhook would
+  cost a deployment every notification with only a log line to say so), and the operator
+  extends it with
   `ISSUEBOT_EGRESS_ALLOW` (`ALLOW_ENV`; commas or whitespace, `host`, `host:port`, or
   `.domain` for a domain and everything under it). Pure first: `split_allow`, `parse_rule`,
   `parse_allow` (total -- a typo costs its own entry and a complaint, never the service),
@@ -181,7 +186,9 @@ floor, not the shipped version, and moves by hand.
   `probe_proxy` (blocking, stdlib, the status line and nothing more) is what `validate` and the
   compose healthcheck both ask, so the two can never drift; `reachable_directly` is the other
   half, the question the proxy cannot answer -- an allow-list bounds egress only while there is
-  no route round it. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
+  no route round it. `MAX_TUNNELS` (256) bounds concurrent relays and answers 503 past it: a
+  session is the adversary and the worker's own polls go through the same proxy, so unbounded
+  connections would take out the control plane that would otherwise stop it. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
   not interchangeable: curl deliberately ignores an upper-case `HTTP_PROXY` (a CGI script's
   environment carries the request's `Proxy:` header under that name) while other clients read
   only the upper-case spelling; `configured_proxy` reads `https_proxy` then `HTTPS_PROXY`.
@@ -1087,13 +1094,15 @@ floor, not the shipped version, and moves by hand.
   which is worse than one that fails always; an inline JSON
   document is on the command line already and only earns a warning, since `ps` reads it),
   an `egress` check that reads the deployment's proxy out of the environment (#126) and asks
-  it the two questions its contract is made of -- a name reserved by RFC 2606 must come back
-  403, `api.github.com` must come back 200, either failure being a `[FAIL]` since every session
-  and the worker are pointed at it -- and then asks the *network* whether `example.com` answers
-  a direct connection, which is a warning rather than a failure (under compose it means the
-  shared network was created without `--internal`; on the host an operator's own proxy is
-  entitled to sit beside a working route), and warns that egress is unbounded when no proxy is
-  configured at all, as it warns about an unset `agent.run_as`,
+  it three questions, graded by how definite each is about a proxy this project did not write:
+  a *tunnel* to a name reserved by RFC 2606 is a proxy that cannot be filtering by name at all
+  and fails, while a refusal that is not 403 is somebody else's proxy refusing in its own words
+  and only warns; `api.github.com` must come back 200, since every poll and label move goes
+  there; and then the *network* is asked whether `example.com` answers a direct connection,
+  which warns rather than fails (under compose it means the shared network was created without
+  `--internal`; on the host an operator's own proxy is entitled to sit beside a working
+  route). With no proxy configured at all it warns that egress is unbounded, as it warns about
+  an unset `agent.run_as`,
   a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and

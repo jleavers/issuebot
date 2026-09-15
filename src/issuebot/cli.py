@@ -764,14 +764,21 @@ _EGRESS_DIRECT_TIMEOUT_S = 3.0
 def _egress_check(environ: Mapping[str, str]) -> Check:
     """The proxy the session's network egress goes through (#126), or a warning that it has none.
 
-    Two questions, and the second is not the proxy's to answer. *Does the proxy hold its
-    contract* -- a name off the list refused, the API the workflow cannot work without admitted
-    -- is a failure when it does not, since every session and the worker itself are pointed at
-    it and a proxy that answers wrongly breaks or exposes all of them. *Is there a route round
-    it* is a property of the network rather than of the proxy, and reads as a warning: under
-    compose the answer should be no and a yes means the shared network was created without
-    ``--internal``, but a host running with an operator's own proxy in its environment is
-    entitled to reach the rest of the internet and should not be told it has a fault.
+    Three questions, and they are graded differently because only one of them is unambiguous
+    about a proxy this project did not write.
+
+    * **Does it admit a name that resolves nowhere?** ``PROBE_DENIED_HOST`` is reserved by RFC
+      2606, so a ``200`` for it is a proxy that cannot be filtering by name at all -- a
+      failure, since every session and the worker itself are pointed at it. A ``403`` is
+      issuebot's own proxy refusing. Any other refusal is somebody else's proxy refusing in
+      its own words, which says nothing either way: a warning that names the code, rather than
+      a verdict on a deployment that may be perfectly sound.
+    * **Does it admit ``api.github.com``?** Every poll, label move and ``gh`` call goes there,
+      so anything but ``200`` is a deployment that has not started.
+    * **Is there a route round it?** Not the proxy's to answer, and a warning rather than a
+      failure: under compose it means the shared network was created without ``--internal``,
+      but a host running with an operator's own proxy beside a working route is entitled to
+      reach the rest of the internet and should not be told it has a fault.
     """
     subject = "egress"
     proxy = configured_proxy(environ)
@@ -780,18 +787,18 @@ def _egress_check(environ: Mapping[str, str]) -> Check:
             subject,
             "warn",
             "no proxy configured; this process and every session it starts can reach any host "
-            f"the network reaches. The compose worker profile routes egress through the "
+            "the network reaches. The compose worker profile routes egress through the "
             f"`egress` service and sets {'/'.join(PROXY_ENV_NAMES[:2])}",
         )
     refused = probe_proxy(proxy, PROBE_DENIED_HOST, timeout_s=_EGRESS_PROBE_TIMEOUT_S)
     if isinstance(refused, str):
         return Check(subject, "fail", f"{proxy}: {refused}")
-    if refused[0] != 403:
+    if refused[0] == 200:
         return Check(
             subject,
             "fail",
-            f"{proxy} answered {refused[0]} for {PROBE_DENIED_HOST}, not 403: it is not "
-            "filtering by name",
+            f"{proxy} tunnelled to {PROBE_DENIED_HOST}, a name reserved by RFC 2606: it is "
+            "not filtering by name at all",
         )
     admitted = probe_proxy(proxy, PROBE_REQUIRED_HOST, timeout_s=_EGRESS_PROBE_TIMEOUT_S)
     if isinstance(admitted, str):
@@ -804,14 +811,20 @@ def _egress_check(environ: Mapping[str, str]) -> Check:
             f"call would fail. Add it to {ALLOW_ENV}, or check the proxy can reach it",
         )
     detail = f"{proxy}: {PROBE_DENIED_HOST} refused, {PROBE_REQUIRED_HOST} admitted"
-    if reachable_directly(PROBE_DIRECT_HOST, timeout_s=_EGRESS_DIRECT_TIMEOUT_S):
-        return Check(
-            subject,
-            "warn",
-            f"{detail}; but {PROBE_DIRECT_HOST} answered a direct connection, so the "
-            "allow-list bounds only what asks the proxy. Under compose, create the shared "
-            "network with `docker network create --internal issuebot-internal`",
+    concerns = []
+    if refused[0] != 403:
+        concerns.append(
+            f"the refusal was {refused[0]} rather than 403, so this is not issuebot's own "
+            f"`egress` service and what it filters by is its own business"
         )
+    if reachable_directly(PROBE_DIRECT_HOST, timeout_s=_EGRESS_DIRECT_TIMEOUT_S):
+        concerns.append(
+            f"{PROBE_DIRECT_HOST} answered a direct connection, so the allow-list bounds only "
+            "what asks the proxy. Under compose, create the shared network with "
+            "`docker network create --internal issuebot-internal`"
+        )
+    if concerns:
+        return Check(subject, "warn", f"{detail}; but " + "; and ".join(concerns))
     return Check(subject, "ok", f"{detail}; no route round it")
 
 

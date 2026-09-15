@@ -18,6 +18,7 @@ from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
     PROTECTED_ENV_NAMES,
+    PROXY_ENV_NAMES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -245,6 +246,32 @@ def test_agent_environment_passes_only_the_allowed_names() -> None:
         "DISABLE_AUTOUPDATER": "1",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     }
+
+
+def test_agent_environment_carries_the_proxy_to_the_session_and_every_hook() -> None:
+    """#126: the session's one route off the host is the address in these six variables, so
+    `claude`, `gh`, `git`, `uv`, `pip`, `npm` and a session's own `curl` all have to see them.
+
+    Both cases of all three, because they are not interchangeable: curl deliberately ignores an
+    upper-case `HTTP_PROXY`, while other clients read only the upper-case spelling.
+    """
+    parent = {"PATH": "/usr/bin", **dict.fromkeys(PROXY_ENV_NAMES, "http://egress:3128")}
+    env = agent_environment(parent, token=None)
+    assert {name: env.get(name) for name in PROXY_ENV_NAMES} == dict.fromkeys(
+        PROXY_ENV_NAMES, "http://egress:3128"
+    )
+
+
+@pytest.mark.parametrize("key", sorted(PROXY_ENV_NAMES))
+def test_a_workspace_env_line_cannot_take_the_proxy_out_from_under_a_turn(key: str) -> None:
+    """For the reason `PATH` is protected and no stronger one: what bounds egress is the
+    container's lack of a route, so a line emptying these would take `gh`, `git` and the next
+    turn's `claude` off the network without admitting anything off the allow-list."""
+    assert key in PROTECTED_ENV_NAMES
+    base = {key: "http://egress:3128"}
+    merged, refused = merge_workspace_env(base, {key: "", "FOO": "bar"})
+    assert refused == [key]
+    assert merged[key] == "http://egress:3128"
 
 
 def test_agent_environment_turns_auto_memory_off_and_a_hook_cannot_turn_it_back_on() -> None:
