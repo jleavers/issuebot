@@ -206,8 +206,10 @@ floor, not the shipped version, and moves by hand.
   image's build recorded at `/etc/issuebot/session-accounts` -- `resolve.py`, #142, so a
   container's default is the pool it actually built and no `ENV` names an account that could
   outlive it; a list that exists and will not read, or that reads and names no account, is
-  `SessionAccountsUnreadable`, a `ConfigError` reported as `[FAIL] workflow:`, never a silent
-  fall back to the host route --
+  `SessionAccountsUnreadable`, a `ConfigError` `validate` reports as a `[FAIL]` line naming
+  the file and the reason, never a silent fall back to the host route -- `[FAIL] workflow:`
+  from the resolution above, and `[FAIL] agent.run_as:` from the second, independent read
+  `_built_pool_complaint` makes when the field resolved without it (#145) --
   and then nothing, which is the host route; a comma-separated
   value or a YAML list is a *pool*, `accounts.py` below), `claude -p`, every
   hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
@@ -1042,10 +1044,14 @@ floor, not the shipped version, and moves by hand.
   that warns when `project` or `local` hands the clone's files to the session as
   configuration (#107), an `agent.run_as` check that probes
   the uid drop, the group membership and the pool's distinct groups through `probe_run_as`
-  (#75, #111, #121, #142: fails when set but unusable or not a different uid from this
+  (#75, #111, #121, #142, #145: fails when set but unusable or not a different uid from this
   process's, which the OK line names, when the worker is not in an account's group, when two
-  accounts share one, or when any `agent.run_as` -- one account or a pool -- has no environment
-  credential; warns when unset since the session
+  accounts share one, when any `agent.run_as` -- one account or a pool -- has no environment
+  credential, or when the list at `/etc/issuebot/session-accounts` is damaged, which this
+  check reads a second time and which since #142 refuses rather than resolving to the host
+  route (the `SessionAccountsUnreadable` above, caught by its own type at that one call so
+  that no other check's bug can be reported as a configuration fault); warns when unset since
+  the session
   then shares the worker's uid, when one account serves more than one concurrent session, when
   the pool is smaller than `agent.max_concurrent_agents`, and when a runtime
   `ISSUEBOT_AGENT_POOL_SIZE` disagrees with the accounts the image recorded at

@@ -54,6 +54,7 @@ from issuebot.config import (
     ConfigError,
     GitHubLabels,
     GitHubSettings,
+    SessionAccountsUnreadable,
     Settings,
     Workflow,
     count_overrides,
@@ -569,6 +570,10 @@ def _built_pool_complaint() -> str | None:
     passes the operator's copy of it into the container through `env_file`, and a value raised
     without a rebuild names accounts no image has. The list wins the comparison because it is
     the built fact; the variable is only ever the operator's intent.
+
+    Raises `SessionAccountsUnreadable` for a list that exists and will not read, or that reads
+    and names no account, which is `built_session_accounts`'s refusal to resolve either to the
+    host route (#142). The one call site catches it and reports it (#145).
     """
     built = built_session_accounts()
     if built is None:
@@ -641,9 +646,21 @@ def _run_as_check(settings: Settings) -> Check:
         # a uid phrase between the two would read as qualifying that instead.
         detail += f"; each at a uid other than this process's ({os.getuid()})"
         check = Check(subject, status, detail)
+    # `_built_pool_complaint` reads the built list a second time, and since #142 that read is
+    # the one thing in this check that raises: a list that exists and will not read, or that
+    # reads and names no account, is refused rather than resolved to the host route (#145).
+    # `_load_or_report` caught the first read's raise and returned long ago, so without this
+    # the refusal leaves `validate` as a traceback -- the one answer that does not name the
+    # file an operator has to look at, while the exception's own message names exactly that.
+    # Caught by its own type, at the one call that can raise it, rather than around the check
+    # list: a bare catch there would report a genuine bug in any of the seventeen as a
+    # configuration `[FAIL]`.
+    try:
+        stale = _built_pool_complaint()
+    except SessionAccountsUnreadable as exc:
+        return Check(subject, "fail", str(exc))
     # A stale image is never a failure: the accounts named here all exist, so every session
     # will run; what is wrong is that the operator asked for more of them than the build made.
-    stale = _built_pool_complaint()
     if stale is None:
         return check
     return Check(subject, "warn", f"{check.detail}; {stale}")

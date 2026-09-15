@@ -5,6 +5,7 @@ from issuebot.config.errors import (
     FrontMatterNotAMap,
     MissingEnvironmentVariable,
     MissingWorkflowFile,
+    SessionAccountsUnreadable,
     SettingsValidationError,
     WorkflowParseError,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "NotificationsSettings",
     "PermissionMode",
     "PollingSettings",
+    "SessionAccountsUnreadable",
     "SettingSource",
     "Settings",
     "SettingsValidationError",
