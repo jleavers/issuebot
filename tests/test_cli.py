@@ -2995,6 +2995,10 @@ def test_validate_reports_a_pool_of_session_accounts(
         "[ OK ] agent.run_as: agent-1, agent-2, agent-3; a pool of 3, "
         "one account per concurrent session" in out
     )
+    # The pool line carries #111's evidence too: the probe compared every member's uid with
+    # this process's, so the line says so rather than leaving the reader to take it on trust.
+    # (No member resolves on this host, so none is named with its uid -- which is the fallback.)
+    assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
     assert "16 checks: 0 failed, 1 warnings" in out
 

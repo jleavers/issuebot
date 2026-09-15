@@ -510,6 +510,13 @@ def _setting_sources_check(settings: Settings) -> Check:
     return Check(subject, "warn", detail)
 
 
+def _with_uid(account: str) -> str:
+    """``name (uid N)``, or just the name where the account does not resolve on this host."""
+    with contextlib.suppress(OSError, KeyError):
+        return f"{account} (uid {RunAs(account).account().pw_uid})"
+    return account
+
+
 def _run_as_check(settings: Settings) -> Check:
     """The accounts the session runs as (#75, #121), or a warning that it is this process.
 
@@ -519,14 +526,13 @@ def _run_as_check(settings: Settings) -> Check:
     subject = "agent.run_as"
     accounts = settings.agent.run_as
     if not accounts:
-        uid = os.getuid() if hasattr(os, "getuid") else "?"
+        uid = os.getuid()
         detail = (
             f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
             "which shares its environment, code and state with them; the image sets "
             "ISSUEBOT_AGENT_USER=agent"
         )
         return Check(subject, "warn", detail)
-    named = ", ".join(accounts)
     problems = list(_run_as_probe(accounts, os.environ))
     complaint = credential_complaint(settings, os.environ)
     if complaint is not None:
@@ -534,19 +540,16 @@ def _run_as_check(settings: Settings) -> Check:
     if problems:
         return Check(subject, "fail", "; ".join(problems))
     concurrent = settings.agent.max_concurrent_agents
+    # The probe compared each delegated uid with this process's (#111), so the line names both
+    # sides of that comparison and the reader need not take the verdict on trust -- on the pool
+    # path as much as the single one, where the whole point is that no session shares a uid.
+    # Each is looked up without raising, because a check reports and never fails on its own
+    # wording, and a name that will not resolve simply goes without its uid.
+    named = ", ".join(_with_uid(account) for account in accounts)
     if len(accounts) == 1:
-        # The probe compared the delegated uid with this process's (#111), so the line names
-        # both sides of that comparison and the reader need not take the verdict on trust. The
-        # account's uid is the one the delegation answered with, the probe having said so; it
-        # is looked up without raising, because a check reports and never fails on its own
-        # wording.
-        account = None
-        with contextlib.suppress(OSError, KeyError):
-            account = RunAs(accounts[0]).account().pw_uid
-        one = named if account is None else f"{named} (uid {account})"
         shared = concurrent > 1
         detail = (
-            f"{one}; the session runs as a separate account, at a uid other than this "
+            f"{named}; the session runs as a separate account, at a uid other than this "
             f"process's ({os.getuid()})"
         )
         if shared:
@@ -559,6 +562,9 @@ def _run_as_check(settings: Settings) -> Check:
             f", which is fewer than agent.max_concurrent_agents "
             f"({concurrent}): dispatch is capped by the pool"
         )
+    # Last, and behind its own semicolon: the clause above qualifies the pool's *size*, and a
+    # uid phrase between the two would read as qualifying that instead.
+    detail += f"; each at a uid other than this process's ({os.getuid()})"
     return Check(subject, status, detail)
 
 

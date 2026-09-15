@@ -1129,7 +1129,9 @@ class Orchestrator:
         `share_with`'s ``chgrp`` by and is fixed when the process is exec'd, so a
         ``usermod --append`` reaches only the *next* worker -- and the complaint names the
         restart. A credential missing from the environment is the same. Re-probing is still
-        right: it costs one bounded probe a tick, it lifts what can be lifted, and the
+        right: it costs one bounded probe per account per tick (at most
+        ``len(run_as) * SUDO_TIMEOUT_S`` where sudo is wedged rather than merely
+        refusing), it lifts what can be lifted, and the
         alternative is a hold that outlives its cause.
         """
         if not self._run_as_pending and self._run_as_block is None:

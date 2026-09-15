@@ -248,7 +248,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
 [ OK ] claude.setting_sources: project; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
-[WARN] agent.run_as: agent (uid 1001); the session runs as a separate account, at a uid other than this process's (1000), but all 3 concurrent sessions share it
+[WARN] agent.run_as: agent (uid 1001); the session runs as a separate account, at a uid other than this process's (1000), but all 2 concurrent sessions share it
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
