@@ -397,21 +397,29 @@ floor, not the shipped version, and moves by hand.
   is not for `spend`, whose figure never resets.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
   refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
-  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Two separate things
-  keep that round trip from reporting one escalation over and over, and they are separate
-  because the block and the event are two writes with a failure point between them. The block
-  is matched by its *reason*, line-anchored, and not by `BUDGET_HEADING`, which both ceilings
-  share: a bounce runs no session, so it reproduces the reason exactly and writes nothing,
-  while an issue escalated on `attempts` that later runs up `max_issue_cost_usd` -- or one
-  whose operator raised the ceiling and relabelled -- has a new reason and gets its own block,
-  which matters because the first block would name the wrong way out. The `Blocked` event, a
-  Slack line and a count on the dashboard's blocked tile, is announced on
-  `IssueLedger.escalated` instead, which `_handle_refusal` marks (`Ledger.escalate`) only
-  *after* the escape landed and which only `dispatched` clears: an escape whose `set_state`
-  failed has written the block and told nobody, and the tick that retries it must still
-  announce. So `budget_escape` takes `announce=` and returns `applied` exactly when it
-  published; an unannounced one returns `skipped`, which `_record_escape` already ends the
-  chain on, and the label move is published either way because it happened.
+  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
+  ceiling reaches that loop: the escape clears the chain on its way out, so an `attempts`
+  refusal readmits the issue on the next bounce rather than refusing it again. Two separate
+  things keep the round trip from reporting one escalation over and over, and they are
+  separate because the block and the event are two writes with a failure point between them.
+  The block is matched by its *reason*, on a line of its own, and not by `BUDGET_HEADING`,
+  which both ceilings share: a bounce runs no session, so it reproduces the reason exactly
+  (the figures come from the ledger, `:.2f`) and writes nothing, while an issue escalated on
+  `attempts` that later runs up `max_issue_cost_usd` -- or one whose operator raised the
+  ceiling and relabelled -- has a new reason and gets its own block, which matters because the
+  first block would name the wrong way out. The `Blocked` event, a Slack line and a count on
+  the dashboard's blocked tile, is announced on `IssueLedger.escalated` instead, which
+  `_handle_refusal` marks (`Ledger.escalate`) only *after* the escape landed and which only
+  `dispatched` clears: an escape whose `set_state` failed has written the block and told
+  nobody, and the tick that retries it must still announce. So `budget_escape` takes
+  `announce=` and returns `applied` exactly when it published; an unannounced one returns
+  `skipped`, which `_record_escape` already ends the chain on, and the label move is published
+  either way because it happened. The two identities are independent in both directions, which
+  is what makes them safe: an announced escalation whose reason is unchanged leaves no second
+  block, only the first one's stamp, and a suppressed announcement can still leave a block.
+  The mark is the one thing here not seeded from the store, deliberately -- the only durable
+  signal is a `blocked` event, which the run-based escape publishes too, so seeding would
+  swallow a first real announcement to save a duplicate.
   A failed escape is retried by the next tick rather than by a queued entry, since the issue
   is still a candidate. `Ledger` is
   keyed by `Issue.identifier` (the column the store records runs

@@ -173,9 +173,12 @@ def test_an_escalation_is_announced_once_and_only_a_run_makes_it_news_again() ->
     """The conflict bounce moves the label and the escape moves it back; neither is a run.
 
     Nor is `cleared`, which the escape itself triggers -- so if that reset the mark, the very
-    next bounce would announce the same escalation over again.
+    next bounce would announce the same escalation over again. An issue the ledger has never
+    heard of answers `True` every time: that cannot happen (a refusal on either ceiling needs
+    a figure only a run produces), and announcing is the safe direction if it ever did.
     """
     ledger = Ledger()
+    ledger.spent("repo-42", turns=1, cost_usd=1.0)  # the run that put it over the ceiling
     assert ledger.escalate("repo-42") is True
     assert ledger.escalate("repo-42") is False
     ledger.cleared("repo-42")
@@ -184,13 +187,25 @@ def test_an_escalation_is_announced_once_and_only_a_run_makes_it_news_again() ->
     assert ledger.escalate("repo-42") is True
 
 
-def test_an_escalation_is_remembered_for_an_issue_with_no_failures_behind_it() -> None:
-    """Unlike a refusal: the spend ceiling refuses issues whose every run succeeded."""
+def test_a_terminal_issue_forgets_it_was_escalated() -> None:
+    """A reopened issue starts again from nothing, the mark included."""
     ledger = Ledger()
+    ledger.spent("repo-42", turns=1, cost_usd=1.0)
     assert ledger.escalate("repo-42") is True
     assert ledger.get("repo-42").escalated is True
     ledger.forget("repo-42")
-    assert ledger.escalate("repo-42") is True  # a reopened issue starts again from nothing
+    ledger.spent("repo-42", turns=1, cost_usd=1.0)
+    assert ledger.escalate("repo-42") is True
+
+
+def test_marking_an_escalation_does_not_move_the_entry_down_the_eviction_queue() -> None:
+    """Eviction is by least recently *run*, and an escalation is not a run."""
+    ledger = Ledger(limit=2)
+    ledger.dispatched("old", at=NOW)
+    ledger.dispatched("new", at=NOW + timedelta(minutes=1))
+    assert ledger.escalate("old") is True
+    ledger.dispatched("newest", at=NOW + timedelta(minutes=2))
+    assert sorted(ledger.entries()) == ["new", "newest"]  # `old` still went first
 
 
 def test_a_refusal_on_an_issue_with_no_history_is_neither_kept_nor_reported() -> None:

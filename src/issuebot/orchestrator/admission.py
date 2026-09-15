@@ -64,6 +64,14 @@ class IssueLedger:
     run can make the next refusal a new fact -- not ``cleared``, which the escape itself
     triggers, and not a label move, which is what the conflict bounce performs when it returns
     an over-budget issue to ``rework`` for the gate to refuse again.
+
+    Like ``reported_refusal``, and unlike every cumulative figure here, it is *not* seeded from
+    the store: a restart inside a bounce sequence can therefore announce one escalation a
+    second time. That is on purpose. The only durable signal is a ``blocked`` event, which the
+    run-based ``blocked_escape`` publishes too, so seeding from it would mark an issue this
+    escape has never escalated and swallow its first real announcement -- trading a duplicate
+    line, bounded by ``agent.max_conflict_reworks``, for a lost one. The cumulative figures are
+    what a deployment must not reset; a notification is not a ceiling.
     """
 
     failures: int = 0
@@ -216,17 +224,27 @@ class Ledger:
         return True
 
     def escalate(self, identifier: str) -> bool:
-        """Record that a budget escalation has been announced; True when it had not been.
+        """Mark this issue's budget escalation as announced; True when it had not been.
 
-        The caller announces only on the answer ``True``, and calls this only once the escape
-        has actually landed -- an escape GitHub refused has announced nothing, and the tick
-        that retries it must still be able to. Unlike ``refused`` this does insert, since an
-        issue can be refused on cumulative spend with no failures behind it at all.
+        The protocol is not the check-and-set the return value suggests, and cannot be: the
+        caller reads ``escalated`` to decide whether to announce, *awaits* the escape, and
+        marks only if it landed -- because an escape GitHub refused has announced nothing and
+        the tick that retries it must still be able to. That read and this write are therefore
+        separated by a round trip, which is safe only because the orchestrator is one task with
+        one call site. The boolean is informational; the caller discards it.
+
+        Written in place rather than through ``_put``: an escalation is not a run, so it must
+        not move the entry down the eviction queue, where the rule is least recently *run*. An
+        issue with no entry cannot be reached today -- a refusal on either ceiling needs a
+        figure only a run can produce -- and if it ever were, answering ``True`` without
+        remembering errs towards announcing, which is the safe direction here.
         """
-        current = self.get(identifier)
+        current = self._entries.get(identifier)
+        if current is None:
+            return True
         if current.escalated:
             return False
-        self._put(identifier, replace(current, escalated=True))
+        self._entries[identifier] = replace(current, escalated=True)
         return True
 
     def forget(self, identifier: str) -> None:
