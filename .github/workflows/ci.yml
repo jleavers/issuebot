@@ -80,6 +80,11 @@ jobs:
             # worker-only checkout configures without it, and with it every profile does.
             COMPOSE_PROFILES=$profiles ISSUEBOT_DB_PASSWORD=ci-only ISSUEBOT_WEB_PASSWORD=ci-only docker compose config --quiet
           done
+          # The dashboard runs as its own account (#102): the compose side of the choice, that
+          # the service selects `web` rather than inheriting the image's `USER issuebot`. The
+          # image side -- that the account exists and cannot invoke sudo -- is proved below.
+          test "$(COMPOSE_PROFILES=hub ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r .services.web.user)" = web
+          test "$(COMPOSE_PROFILES=worker ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r '.services.worker.user // "none"')" = none
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
@@ -129,9 +134,11 @@ jobs:
           fi
           docker run --rm --user agent --entrypoint sh issuebot:ci -c '
             set -eu
-            test ! -w /app && test ! -w /app/.venv/bin/python
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
             test ! -w "$(readlink -f /usr/local/bin/claude)"
-            test ! -r /home/issuebot && test ! -x /home/issuebot
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
             test ! -r /etc/sudoers.d/issuebot
           '
           docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -w /app; test ! -r /home/agent'
@@ -142,6 +149,48 @@ jobs:
             fi
           '
           docker run --rm --user agent --entrypoint claude issuebot:ci --version
+      # The dashboard is a third account (#102): compose runs the `web` service as `web` (1002),
+      # which takes HTTP from a browser and needs no privilege transition, so it gets none. The
+      # sudo binary is executable by root and group issuebot alone, so as `web` the delegation
+      # fails the way it fails as the session's account -- and `test -x` says why, that it is
+      # not even executable rather than refused. Neither home, the sudoers drop-in nor the
+      # worker's code is reachable from it. One `test` per line throughout: under `set -e` only
+      # the last command of an AND list is enforced, so `test A && test B` asserts B alone.
+      # The last line starts the app under it for real, as far as a database it has none of:
+      # `[FAIL] database: cannot connect:` is the CLI's own line (`not configured` is the same
+      # prefix printed before any attempt, which is why the grep names the connect), printed
+      # after the interpreter, the package
+      # and the web's dependencies have all loaded as uid 1002 and `cmd_web` has run to the
+      # connection attempt, which is the one thing the account has to be able to do. Captured
+      # and grepped rather than piped, since the job's shell has no pipefail.
+      - name: the dashboard's account is a third one and cannot invoke sudo
+        run: |
+          test "$(docker run --rm --user web --entrypoint id issuebot:ci -u)" = 1002
+          test "$(docker run --rm --user web --entrypoint id issuebot:ci -Gn)" = web
+          if docker run --rm --user web --entrypoint sudo issuebot:ci -n -u agent id -u; then
+            echo "the dashboard's account can invoke sudo" >&2; exit 1
+          fi
+          docker run --rm --user web --entrypoint sh issuebot:ci -c '
+            set -eu
+            test ! -x /usr/bin/sudo
+            test ! -r /etc/sudoers.d/issuebot
+            test ! -w /app
+            test ! -w /app/.venv/bin/python
+            test ! -r /home/issuebot
+            test ! -x /home/issuebot
+            test ! -r /home/agent
+            test ! -x /home/agent
+            test "$HOME" = /home/web
+            test -w "$HOME"
+          '
+          docker run --rm --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
+          docker run --rm --user agent --entrypoint sh issuebot:ci -c 'set -eu; test ! -r /home/web; test ! -x /home/web'
+          if docker run --rm --user web -e ISSUEBOT_WEB_PASSWORD=ci-only \
+               -e DATABASE_URL=postgresql://issuebot@127.0.0.1:1/issuebot \
+               issuebot:ci web > /tmp/web-start.txt 2>&1; then
+            echo "the dashboard started against a dead database" >&2; exit 1
+          fi
+          grep -q '^\[FAIL\] database: cannot connect: ' /tmp/web-start.txt
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious
@@ -166,6 +215,59 @@ jobs:
               git config --local --add issuebot.probe 1
             "
           '
+      # `~/.claude.json` is the session account's own, in $HOME beside `.claude/` rather than
+      # inside the `claude-home` volume, so it is recreated with each container and shared by
+      # every session in one -- and `claude` loads `mcpServers` out of it, offering a planted
+      # server's tools to whichever issue runs next. `--strict-mcp-config` is what stops that
+      # (#119), and this runs the claude the image actually ships rather than reading a help
+      # string, so a release that changed the flag's behaviour fails a PR here.
+      # Two-sided on purpose: without the flag the planted server must be *listed*, or the
+      # proof would pass just as well against a claude that never reads the file. No credential
+      # is needed, because the init line is emitted before the login check -- the run ends at
+      # `Not logged in`, which is also what shows the flag leaves a headless `claude -p`
+      # working rather than dying on an unknown argument. `/bin/true` is server enough: one
+      # that fails its handshake is still listed, and being listed is the loading at issue.
+      # Every exit carries claude's own stderr: the likeliest failures here (a flag that no
+      # longer parses, a claude that will not start, the timeout) produce *no* init line at
+      # all, which under `set -e` would otherwise end the step with a bare exit code and throw
+      # away the one thing that says why.
+      - name: a planted MCP server in the session account's ~/.claude.json is not loaded
+        run: |
+          mkdir -p /tmp/mcp-probe
+          cat > /tmp/mcp-probe/probe.sh <<'PROBE'
+          set -eu
+          init() {
+            printf '%s' '{"mcpServers":{"planted":{"type":"stdio","command":"/bin/true"}}}' \
+              > "$HOME/.claude.json"
+            echo hi | timeout 300 claude -p --output-format stream-json --verbose \
+              --permission-prompts none "$@" 2>/tmp/claude-stderr | grep -m1 '"subtype":"init"'
+          }
+          died() {
+            echo "$1" >&2
+            echo "--- claude stderr ---" >&2
+            cat /tmp/claude-stderr >&2 || true
+            exit 1
+          }
+          without=$(init) || died "no init line at all without the flag"
+          case "$without" in
+            *'"planted"'*) ;;
+            *) died "claude did not load the planted server, so this proves nothing: $without" ;;
+          esac
+          with=$(init --strict-mcp-config) \
+            || died "no init line with --strict-mcp-config: the flag did not parse, or claude died"
+          case "$with" in
+            *'"planted"'*) died "--strict-mcp-config still loaded ~/.claude.json: $with" ;;
+          esac
+          # Spacing-tolerant: this pins that the list came back empty, not how claude spells it.
+          case "${with// /}" in
+            *'"mcp_servers":[]'*) ;;
+            *) died "the confined run reported no empty mcp_servers: $with" ;;
+          esac
+          echo "ok: loaded without the flag, gone with it"
+          PROBE
+          chmod a+rX /tmp/mcp-probe /tmp/mcp-probe/probe.sh
+          docker run --rm --user agent -v /tmp/mcp-probe:/mcp-probe:ro \
+            --entrypoint bash issuebot:ci -lc 'bash /mcp-probe/probe.sh'
       # The wrapper is what the worker actually runs (issuebot.agent.runas): the environment
       # crosses the uid change on a descriptor, so what the session sees is the mapping the
       # worker built with the account's own HOME, USER and LOGNAME, and nothing sudo adds or

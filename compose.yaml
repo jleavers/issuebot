@@ -133,6 +133,13 @@ services:
     # 0.0.0.0 is the container's every interface, which is the only way the published port
     # below reaches it; the CLI's own default is loopback.
     command: ["web", "--bind", "0.0.0.0", "--port", "8080"]
+    # Its own account, not the image's default (#102). The image's `USER issuebot` is the
+    # worker, which holds the one sudo rule (issuebot may become agent, #75) and the sudo
+    # binary is executable by that group alone. The dashboard is the process that takes HTTP
+    # from a browser and it needs no privilege transition, so it runs as `web` (uid 1002,
+    # created in the image), which cannot execute sudo at all and shares no home, and no
+    # readable state, with the worker. The CI `docker` job proves both.
+    user: web
     init: true
     restart: unless-stopped
     environment:

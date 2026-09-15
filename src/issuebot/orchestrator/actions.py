@@ -31,8 +31,8 @@ CANCEL_REASON = "closed without a merged pull request"
 
 ConflictOutcome = Literal["reworked", "limit_reached", "limit_noted", "failed"]
 
-# The workpad headings the conflict bounce writes. The count of the first is the bounce
-# number, so the second must not start with it (it ends in "limit (" rather than "(").
+# The workpad headings the conflict bounce writes: a note for a person, never the count. The
+# bounce number is read from the issue's label history (#104), which only GitHub writes.
 CONFLICT_HEADING = "### Issuebot merge conflict ("
 CONFLICT_LIMIT_HEADING = "### Issuebot merge conflict limit ("
 
@@ -64,11 +64,6 @@ def conflict_limit_block(pr_number: int, limit: int, now: datetime, labels: GitH
         f"moved this issue to `{labels.rework}` {limit} {times} for it and will not again. "
         f"A human resolves the conflict on the branch, or moves the issue."
     )
-
-
-def count_conflict_bounces(body: str) -> int:
-    """How many times the issue has been bounced, read back from its workpad."""
-    return sum(1 for line in body.split("\n") if line.startswith(CONFLICT_HEADING))
 
 
 async def claim(adapter: GitHubAdapter, bus: EventBus, issue: Issue) -> Issue | None:
@@ -223,7 +218,7 @@ def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubL
 
 
 def _has_budget_block(body: str) -> bool:
-    """Line-anchored, like the conflict count: a quoted heading is not a block."""
+    """Line-anchored: a heading quoted in the session's own prose is not a block."""
     return any(line.startswith(BUDGET_HEADING) for line in body.split("\n"))
 
 
@@ -307,9 +302,11 @@ async def conflict_rework(
 ) -> ConflictOutcome:
     """Move a review issue whose pull request conflicts to ``rework``, at most ``limit`` times.
 
-    The workpad is the counter: each bounce leaves a ``CONFLICT_HEADING`` block, so the count
-    survives a restart and a person can read it. Label first, note second: a note without
-    the label would be counted again on the next tick, while a label without the note still
+    The bound is read from a record only issuebot writes and nobody edits (#104): the issue's
+    label history, where every ``rework`` the adapter's own account added is one bounce.
+    The workpad block is the note a person reads, not the count -- the session rewrites the
+    workpad's body in full, so a count kept there was the session's to zero. Label first,
+    note second: the label is what the next tick counts, and a label without the note still
     gets the conflict resolved by the rework session (Step 6 of the prompt). The transition is
     published between the label and the note, so the Slack line goes out even when the note
     fails.
@@ -325,9 +322,9 @@ async def conflict_rework(
         )
         return "failed"
     try:
+        bounces = await adapter.count_own_label_additions(issue.number, adapter.labels.rework)
         workpad = await adapter.find_workpad_comment(issue.number)
         body = workpad.body if workpad is not None else ""
-        bounces = count_conflict_bounces(body)
         if bounces >= limit:
             if CONFLICT_LIMIT_HEADING in body:
                 return "limit_noted"
@@ -373,7 +370,8 @@ async def conflict_rework(
         block = conflict_block(pr.number, bounces + 1, limit, now, adapter.labels)
         await _append_workpad(adapter, issue.number, workpad, block)
     except GitHubError as exc:
-        # The label moved, so the session will resolve it; only the count is short by one.
+        # The label moved, so the session will resolve it and the bounce is counted; only
+        # the note a person would read is missing.
         log.warning(
             "conflict_rework_note_failed",
             issue_number=issue.number,

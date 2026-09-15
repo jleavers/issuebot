@@ -8,6 +8,7 @@ from typing import Any
 from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db import DatabaseError, MigrationResult, Probe
+from issuebot.db.connection import NOT_A_URL, is_postgres_url
 from issuebot.db.queries import (
     DailyPoint,
     EventRow,
@@ -231,6 +232,9 @@ class FakeDatabase:
         self.queries_error: DatabaseError | None = None
 
     def factory(self, url: str) -> FakeDatabase:
+        # The real facade refuses anything but a postgresql:// URL before it records it (#105).
+        if not is_postgres_url(url):
+            raise DatabaseError(NOT_A_URL)
         self.urls.append(url)
         return self
 
