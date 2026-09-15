@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -3434,6 +3435,38 @@ async def test_a_retry_whose_account_is_busy_is_requeued_rather_than_dropped(
     assert [run.issue.number for run in h.sessions.runs] == [1, 2, 3], (
         "issue 1 was dispatched again while its own account was still running"
     )
+
+
+async def test_a_repaired_record_stops_blaming_the_accounts_under_another_hold(
+    tmp_path: Path,
+) -> None:
+    """`_read_accounts` runs in `tick`, not in the candidate loop a preflight or auth hold
+    skips (#121). Read there, the reason survives the repair for as long as the other hold
+    lasts, and a retry firing in the meantime is requeued as `accounts` quoting a fault that
+    is already fixed -- so the snapshot's `retrying` row blames the record while the worker is
+    really waiting for `claude`.
+    """
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    (h.root / ".issuebot").mkdir()
+    (h.root / ".issuebot" / "accounts.json").write_text("{not json")
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    # The record is repaired, and preflight fails in the same tick, so the candidate loop -- the
+    # old home of the re-read -- never runs again to notice.
+    (h.root / ".issuebot" / "accounts.json").unlink()
+    h.which = lambda name: None if name == "claude" else f"/usr/bin/{name}"
+    orchestrator._which = h.which
+    h.add_issue(1, "todo")
+    orchestrator._retries["1"] = replace(_retry_entry(h, 1), due_mono=h.clock.value - 1)
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "preflight", "preflight still outranks accounts"
+    await orchestrator.fire_due_retries()
+    requeued = orchestrator._retries.get("1")
+    assert requeued is None or requeued.kind != "accounts", requeued
 
 
 async def test_an_unreadable_account_record_holds_dispatch_rather_than_idling_quietly(
