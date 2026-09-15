@@ -641,7 +641,8 @@ async def test_startup_fails_when_claude_is_logged_out(tmp_path: Path) -> None:
     with pytest.raises(OrchestratorStartupError) as exc:
         await h.orchestrator.startup()
     assert exc.value.problems == [
-        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        "claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host"
     ]
     # Nothing was fetched or claimed: the probe ran after the gh probes and before any tick.
     assert [name for name, _ in h.github.calls] == ["auth_status", "missing_labels"]
@@ -710,7 +711,8 @@ async def test_startup_fails_on_preflight_auth_or_labels(
         await h.orchestrator.startup()
     assert exc.value.problems == [
         "labels missing: issuebot/review; run issuebot labels ensure",
-        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+        "claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host",
     ]
 
 
@@ -2130,8 +2132,8 @@ async def test_an_authentication_hold_is_carried_in_the_snapshot(tmp_path: Path)
     assert hold is not None
     assert (hold.kind, hold.since) == ("auth", h.now())
     assert hold.reason == (
-        "claude authentication unavailable: not logged in; "
-        "run claude auth login or set ANTHROPIC_API_KEY"
+        "claude authentication unavailable: not logged in; set CLAUDE_CODE_OAUTH_TOKEN "
+        "(claude setup-token), or run claude auth login on the host"
     )
     h.claude_auth_output = LOGGED_IN
     await h.tick()
@@ -3459,8 +3461,10 @@ async def test_startup_fails_when_one_account_in_the_pool_cannot_be_reached(
 async def test_a_pool_refuses_to_start_without_a_credential_in_the_environment(
     tmp_path: Path,
 ) -> None:
-    """The accounts share no login on purpose (#121), so every session would fail to
-    authenticate: that is a startup failure, the way a definite logged-out is."""
+    """Any `agent.run_as` account has a home nobody logs into, so its credential comes
+    from the environment whatever the count (#121, #142) -- a pool is the case this test
+    exercises, not the reason for the rule. Missing one would fail every session's
+    authentication: that is a startup failure, the way a definite logged-out is."""
     h = Harness(tmp_path)
     orchestrator = _with_pool(h, environ={})
     with pytest.raises(OrchestratorStartupError) as exc:

@@ -263,7 +263,10 @@ def describe_claude_auth(output: str | None) -> ClaudeAuth:
         reason = "no output" if not output else f"unparseable output {output.strip()[:40]!r}"
         return ClaudeAuth("unreadable", f"could not read auth status ({reason})")
     if not status.get("loggedIn"):
-        detail = "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        detail = (
+            "not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+            "or run claude auth login on the host"
+        )
         return ClaudeAuth("logged_out", detail)
     method = _auth_method_text(status)
     source = status.get("apiKeySource")

@@ -433,7 +433,8 @@ def test_minimum_version_is_the_permission_prompts_release() -> None:
             '{"loggedIn": false, "authMethod": "none"}',
             ClaudeAuth(
                 "logged_out",
-                "not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+                "not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+                "or run claude auth login on the host",
                 "unknown",
             ),
         ),
@@ -441,7 +442,8 @@ def test_minimum_version_is_the_permission_prompts_release() -> None:
             "{}",
             ClaudeAuth(
                 "logged_out",
-                "not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+                "not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+                "or run claude auth login on the host",
                 "unknown",
             ),
         ),
@@ -478,6 +480,17 @@ def test_minimum_version_is_the_permission_prompts_release() -> None:
 )
 def test_describe_claude_auth(output: str | None, expected: ClaudeAuth) -> None:
     assert describe_claude_auth(output) == expected
+
+
+def test_a_logged_out_probe_names_the_container_route_first() -> None:
+    """The container has no interactive login since #142, so the line that tells an operator
+    what to do names the variable; `claude auth login` is the host route and says so."""
+    auth = describe_claude_auth('{"loggedIn": false}')
+    assert auth.verdict == "logged_out"
+    assert auth.detail == (
+        "not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host"
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stub is a POSIX script")

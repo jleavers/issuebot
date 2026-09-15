@@ -1177,7 +1177,8 @@ def test_validate_logged_out_claude_fails(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert (
-        "[FAIL] claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY" in out
+        "[FAIL] claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host" in out
     )
 
 
@@ -2229,15 +2230,16 @@ def test_worker_reports_startup_failures(
     stub_orchestrator.next_problems = [
         "'gh' not found on PATH",
         "labels missing: a",
-        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+        "claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host",
     ]
     assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     out = capsys.readouterr().out.splitlines()
     assert out == [
         "[FAIL] startup: 'gh' not found on PATH",
         "[FAIL] startup: labels missing: a",
-        "[FAIL] startup: claude auth: not logged in; run claude auth login or set "
-        "ANTHROPIC_API_KEY",
+        "[FAIL] startup: claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN "
+        "(claude setup-token), or run claude auth login on the host",
     ]
 
 
