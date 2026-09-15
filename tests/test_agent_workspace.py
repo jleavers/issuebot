@@ -522,13 +522,12 @@ def test_a_path_already_gone_is_not_a_removal_failure(tmp_path: Path) -> None:
 
 
 @posix
-def test_the_tolerance_for_a_vanished_tree_does_not_cover_a_remnant(
+def test_an_enoent_inside_a_surviving_tree_is_still_a_removal_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#143's tolerance is ENOENT *and* nothing left at the path -- not `ignore_errors`, which
-    would leave a session's files on disk with nothing said. Two things it must not swallow:
-    an ENOENT raised for an entry inside a tree that is still there, and the EACCES on a
-    remnant the worker cannot unlink, which is the failure this path exists to report."""
+    """#143's tolerance is ENOENT *and* nothing left at the path, not `ignore_errors`. An entry
+    that vanished from under `rmtree` leaves the directory on disk, so the removal did not
+    happen and saying it did would lose a session's files quietly."""
     remnant = tmp_path / "remnant"
     remnant.mkdir()
 
@@ -536,12 +535,17 @@ def test_the_tolerance_for_a_vanished_tree_does_not_cover_a_remnant(
         raise FileNotFoundError(2, "No such file or directory", str(remnant / "inner"))
 
     monkeypatch.setattr(shutil, "rmtree", vanished_entry)
-    with pytest.raises(AgentError) as gone_inside:
+    with pytest.raises(AgentError) as exc:
         _remove_path(remnant, "cannot remove workspace")
-    assert gone_inside.value.category == "workspace_error"
+    assert exc.value.category == "workspace_error"
     assert remnant.is_dir()
 
-    monkeypatch.undo()
+
+@posix
+@pytest.mark.skipif(os.geteuid() == 0, reason="root unlinks anything")
+def test_a_remnant_the_worker_cannot_unlink_is_still_a_removal_failure(tmp_path: Path) -> None:
+    """The EACCES half: the failure this whole path exists to report (#143). A session's files
+    the worker cannot remove must be said out loud, not tolerated along with a vanished tree."""
     closed = tmp_path / "closed"
     (closed / "inner").mkdir(parents=True)
     (closed / "inner" / "file").write_text("x")
@@ -549,9 +553,9 @@ def test_the_tolerance_for_a_vanished_tree_does_not_cover_a_remnant(
     # it can and then fails, exactly as it does on another account's remnant.
     os.chmod(closed, 0o500)
     try:
-        with pytest.raises(AgentError) as refused:
+        with pytest.raises(AgentError) as exc:
             _remove_path(closed, "cannot remove workspace")
-        assert refused.value.category == "workspace_error"
+        assert exc.value.category == "workspace_error"
         assert closed.is_dir()
     finally:
         os.chmod(closed, 0o700)
