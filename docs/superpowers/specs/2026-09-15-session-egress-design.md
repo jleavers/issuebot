@@ -71,8 +71,9 @@ rather than forwarded, so egress is HTTPS only.
 
 The list is the operator's, over a default that is every host issuebot's *own* tools reach and
 no other. The test of what belongs in the default is not "is it useful" but "would an operator
-have had to discover it": `platform.claude.com` is where `claude` refreshes a login already in
-the `claude-home` volume, so a list without it works until an access token expires and then
+have had to discover it": `platform.claude.com` is where `claude` exchanges and refreshes the
+OAuth credential it runs with -- the `CLAUDE_CODE_OAUTH_TOKEN` a container session is handed,
+or the host route's own login -- so a list without it works until an access token expires and then
 fails every session, blaming an allow-list for a credential; `hooks.slack.com` is worse, since
 `urllib_post` never raises and a deployment would lose every notification with only a log line
 to say so. The *target* repository's registries are the other side of that test: they differ per

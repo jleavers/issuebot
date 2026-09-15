@@ -312,7 +312,16 @@ jobs:
             # And the hub database, the one thing the internal network is there to carry.
             /app/.venv/bin/python -c "import socket; socket.create_connection((\"db\", 5432), 10).close()"
           '
-          docker compose down -v --remove-orphans
+      # Always, so a failing assertion above still gives the runner its stack back and the next
+      # step a clean project, rather than leaving both to the job's own teardown.
+      - name: tear the worker-profile stack down
+        if: always()
+        env:
+          COMPOSE_PROJECT_NAME: ci
+          COMPOSE_PROFILES: hub,worker
+          ISSUEBOT_DB_PASSWORD: ci-only
+          ISSUEBOT_WEB_PASSWORD: ci-only
+        run: docker compose down -v --remove-orphans
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious

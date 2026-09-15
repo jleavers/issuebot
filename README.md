@@ -270,7 +270,7 @@ docker compose run --rm worker labels ensure
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-18 checks: 0 failed, 3 warnings
+18 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
@@ -1000,10 +1000,12 @@ that matters on your host.
   joins that one instead of `issuebot` and compose refuses a network it did not create. Then
   `docker compose up -d` in the hub checkout (which recreates `db` onto both networks) and in
   every worker checkout. Until the hub has been recreated, a worker on the new network cannot
-  resolve `db` and restarts with `[FAIL] database:`. If a hook of yours reaches a registry, put
-  it in `ISSUEBOT_EGRESS_ALLOW` in the same pass: after the upgrade the session reaches
-  Anthropic and GitHub and nothing else, so an unlisted registry fails the hook rather than the
-  network (see "What a session may reach"). A setting that a newer
+  resolve `db` and restarts with `[FAIL] database:`. If anything in a session reaches a registry, put it
+  in `ISSUEBOT_EGRESS_ALLOW` in the same pass -- a hook's `uv sync` or `npm ci`, and equally the
+  `uv run pytest` or `pip install` the session runs in its own shell to validate a change.
+  After the upgrade the session reaches Anthropic and GitHub and nothing else, so an unlisted
+  registry surfaces as a failing hook or a failing test mid-run rather than as a configuration
+  error (see "What a session may reach"). A setting that a newer
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The enforced boundary is the container, its **network**, and inside it the uid:

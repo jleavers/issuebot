@@ -45,8 +45,10 @@ from issuebot.log import get_logger
 #
 #   api.anthropic.com        `claude -p`, every turn.
 #   platform.claude.com      where `claude` authenticates: `/oauth/authorize` for the login
-#                            recipe in the README, and `/v1/oauth/token` for the *refresh* of
-#                            a login already in the `claude-home` volume. Without it an
+#                            recipe in the README, and `/v1/oauth/token` for the exchange and
+#                            *refresh* of the OAuth credential it runs with -- the
+#                            CLAUDE_CODE_OAUTH_TOKEN a container session is handed, or the host
+#                            route's own login. Without it an
 #                            existing deployment keeps working until its access token expires
 #                            and then fails every session, reporting a 403 about an allow-list
 #                            rather than a credential -- which is why it is in the default and
@@ -127,12 +129,29 @@ REQUEST_TIMEOUT_S = 30.0
 # How long the proxy waits for the allowed host itself.
 UPSTREAM_TIMEOUT_S = 30.0
 _RELAY_CHUNK = 64 * 1024
-# How many tunnels may be open at once. A session is the adversary here, and the worker's own
-# polls of GitHub go through this same proxy, so a session that opened connections without
-# limit would take out the control plane that would otherwise notice it and stop it. Generous
-# for the real load -- a handful of concurrent sessions, each with a turn and a few `gh` calls
-# -- and a definite answer rather than an exhausted descriptor table beyond it.
+# How many tunnels may be established at once, and how many connections may be accepted at
+# once. Both are needed, and the second is the one that bounds the descriptor table: a tunnel
+# is only counted once its upstream is open, so a peer that connects and then says nothing
+# holds a socket for REQUEST_TIMEOUT_S while counting towards nothing. MAX_CONNECTIONS is
+# checked before a byte is read, so that shape is refused rather than accumulated.
+#
+# A session is the adversary here, and the worker's own polls of GitHub go through this same
+# proxy. What these bound is the descriptor table, so the proxy answers 503 instead of failing
+# to accept at all; they are deliberately *not* a reservation for the worker, which is not
+# something this process can offer -- the session and the worker share a container, so two
+# connections arriving here are indistinguishable. A session may still fill the table with
+# allowed connections, and the answer to that is the allow-list and the session's own timeouts,
+# not this counter. Generous for the real load: a handful of concurrent sessions, each with a
+# turn and a few `gh` calls.
 MAX_TUNNELS = 256
+MAX_CONNECTIONS = 512
+# How long the proxy waits for its established tunnels on the way out. Since 3.12.1
+# `Server.wait_closed()` waits for every handler task, and nothing bounds a tunnel's time -- one
+# turn of `claude -p` is a single long CONNECT -- so waiting for them outright would hold the
+# process until Docker's SIGKILL on every `docker compose up -d egress`, which is the documented
+# way to change the allow-list. The listening socket closes at once either way; this is only how
+# long the relays get, and the container is going away with them.
+SHUTDOWN_DRAIN_S = 5.0
 # Names a hostname may be made of. Anything else -- a credential in a userinfo part, a path, a
 # space, a byte outside ASCII -- is not a host this proxy will look up.
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-._")
@@ -322,12 +341,15 @@ class Proxy:
         request_timeout_s: float = REQUEST_TIMEOUT_S,
         upstream_timeout_s: float = UPSTREAM_TIMEOUT_S,
         max_tunnels: int = MAX_TUNNELS,
+        max_connections: int = MAX_CONNECTIONS,
     ) -> None:
         self._rules = tuple(rules)
         self._request_timeout_s = request_timeout_s
         self._upstream_timeout_s = upstream_timeout_s
         self._max_tunnels = max_tunnels
+        self._max_connections = max_connections
         self._open = 0
+        self._accepted = 0
         self._log = get_logger(__name__)
 
     @property
@@ -338,13 +360,40 @@ class Proxy:
         """One client connection, from its request line to the end of its tunnel.
 
         Never raises: a proxy is the only way out of the worker's network, so a connection that
-        fails in a way nobody anticipated must cost that connection and not the service.
+        fails in a way nobody anticipated must cost that connection and not the service. That
+        is why the catch below is `Exception` and not the three types this function expects --
+        the contract is the service surviving, and an unanticipated error is exactly the case
+        it is for. `CancelledError` is a `BaseException` and so still propagates, which is what
+        lets the server shut down.
+
+        The accept-time bound is here rather than in `_serve` because it is about the
+        descriptor, which this connection is already holding: past it the answer is 503 and the
+        socket closes at once, without a read, a name lookup or a timeout to wait out.
         """
+        if self._accepted >= self._max_connections:
+            self._log.warning(
+                "egress_connections_exhausted",
+                accepted=self._accepted,
+                limit=self._max_connections,
+            )
+            with contextlib.suppress(OSError):
+                await _reply(
+                    writer,
+                    _response(
+                        503,
+                        "Service Unavailable",
+                        f"the proxy is already holding {self._max_connections} connections\n",
+                    ),
+                )
+            await _close(writer)
+            return
+        self._accepted += 1
         try:
             await self._serve(reader, writer)
-        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
+        except Exception as exc:
             self._log.debug("egress_connection_failed", error=f"{type(exc).__name__}: {exc}")
         finally:
+            self._accepted -= 1
             await _close(writer)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

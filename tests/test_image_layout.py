@@ -234,6 +234,22 @@ def test_the_worker_has_no_route_off_the_host_but_the_proxy() -> None:
     assert SERVICES["web"]["networks"] == ["issuebot"]
 
 
+def test_the_worker_waits_for_the_proxy_it_has_no_route_without() -> None:
+    """#126: `docker compose run --rm worker validate` is the README's step 2, and it runs
+    before anything is up. The worker is on internal networks alone, so without the proxy
+    started first it has no GitHub, no Anthropic and a failing `validate` rather than a
+    degraded one -- and `run` starts only the service named and its dependencies.
+
+    `egress` is project-local and in the same profile, so compose can order it; the database
+    deliberately has no such entry, since it may live in another checkout's project.
+    """
+    assert SERVICES["worker"]["depends_on"] == {"egress": {"condition": "service_healthy"}}
+    # Waiting on health means the health check has to become healthy promptly, or the first
+    # `compose run` sits through a whole interval before its first probe.
+    health = SERVICES["egress"]["healthcheck"]
+    assert "start_period" in health and "start_interval" in health
+
+
 def test_the_worker_points_every_client_at_the_proxy() -> None:
     """Both cases of all three names: curl deliberately ignores an upper-case ``HTTP_PROXY``,
     while other clients read only the upper-case spelling."""

@@ -183,15 +183,22 @@ floor, not the shipped version, and moves by hand.
   off it (logged `egress_denied` at WARNING, the record of an attempt), 405 for any other
   method (`CONNECT` only, so egress is HTTPS only and the proxy never sees a URL, a header or
   a body -- and so never needs a certificate authority), 400, 408, 431 and 502 for the rest.
-  `_tunnel` waits for the *first* direction to finish rather than both, since a half-closed
-  peer would otherwise hold the pair open for the life of the process; nothing bounds an
-  established tunnel's time, because one turn of `claude -p` is a single long CONNECT.
+  `_tunnel` waits on the *reply* direction and cancels the request direction with it, rather
+  than on the first of the two to finish: a client that half-closes after its request is
+  waiting for an answer, and ending the pair there would hand it an empty response. Nothing
+  bounds an established tunnel's time, because one turn of `claude -p` is a single long
+  CONNECT.
   `probe_proxy` (blocking, stdlib, the status line and nothing more) is what `validate` and the
   compose healthcheck both ask, so the two can never drift; `reachable_directly` is the other
   half, the question the proxy cannot answer -- an allow-list bounds egress only while there is
-  no route round it. `MAX_TUNNELS` (256) bounds concurrent relays and answers 503 past it: a
-  session is the adversary and the worker's own polls go through the same proxy, so unbounded
-  connections would take out the control plane that would otherwise stop it. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
+  no route round it. `MAX_TUNNELS` (256) bounds established relays and
+  `MAX_CONNECTIONS` (512) bounds accepted sockets, both answering 503 past it. The second is
+  what bounds the descriptor table: a tunnel counts only once its upstream is open, so a peer
+  that connects and says nothing would otherwise hold a descriptor for the request timeout
+  against no limit at all. Neither is a reservation for the worker, which this process cannot
+  offer -- the session shares its container, so two connections arriving here cannot be told
+  apart; what answers a session filling the table with *allowed* connections is the allow-list,
+  not the counter. `PROXY_ENV_NAMES` is both cases of all three variables, because they are
   not interchangeable: curl deliberately ignores an upper-case `HTTP_PROXY` (a CGI script's
   environment carries the request's `Proxy:` header under that name) while other clients read
   only the upper-case spelling; `configured_proxy` reads `https_proxy` then `HTTPS_PROXY`.

@@ -18,6 +18,7 @@ from issuebot.cli import SLACK_WEBHOOK_HOST
 from issuebot.egress import (
     ALLOW_ENV,
     DEFAULT_ALLOW,
+    MAX_CONNECTIONS,
     MAX_REQUEST_BYTES,
     MAX_TUNNELS,
     PROBE_DENIED_HOST,
@@ -434,4 +435,52 @@ async def test_the_proxy_refuses_a_flood_rather_than_running_out_of_descriptors(
     url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     answer = await asyncio.to_thread(_speak, url, b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\n")
     assert answer.startswith(b"HTTP/1.1 503 Service Unavailable\r\n")
+    server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_connection_that_says_nothing_is_bounded_before_it_is_read() -> None:
+    """The descriptor bound has to be the *accepted* socket, not the established tunnel.
+
+    A tunnel is counted only once its upstream is open, so a peer that connects and then says
+    nothing holds a descriptor for the whole request timeout while counting towards
+    ``max_tunnels`` not at all. That is the cheapest possible flood -- no request, no name to
+    look up -- so the refusal is asked for here without sending a single byte.
+    """
+    assert MAX_CONNECTIONS >= MAX_TUNNELS
+    rules, _ = parse_allow(["allowed.test"])
+    proxy = Proxy(rules, max_connections=0)
+    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=MAX_REQUEST_BYTES)
+    port = server.sockets[0].getsockname()[1]
+
+    def listen() -> bytes:
+        with socket.create_connection(("127.0.0.1", port), 5) as sock:
+            sock.settimeout(5)
+            return sock.recv(4096)
+
+    answer = await asyncio.to_thread(listen)
+    assert answer.startswith(b"HTTP/1.1 503 Service Unavailable\r\n")
+    server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_silent_connection_is_released_and_does_not_leak_the_bound() -> None:
+    """The accept counter comes back down, so a closed connection is not a permanent cost."""
+    rules, _ = parse_allow(["allowed.test"])
+    proxy = Proxy(rules, max_connections=1)
+    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=MAX_REQUEST_BYTES)
+    port = server.sockets[0].getsockname()[1]
+
+    def connect_and_close() -> None:
+        with socket.create_connection(("127.0.0.1", port), 5):
+            pass
+
+    for _ in range(3):
+        await asyncio.to_thread(connect_and_close)
+        await asyncio.sleep(0.05)
+
+    # The bound is 1, so this only gets an answer if all three above were released.
+    url = f"http://127.0.0.1:{port}"
+    answer = await asyncio.to_thread(_speak, url, b"CONNECT denied.test:443 HTTP/1.1\r\n\r\n")
+    assert answer.startswith(b"HTTP/1.1 403 Forbidden\r\n")
     server.close()

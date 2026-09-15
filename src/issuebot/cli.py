@@ -84,6 +84,7 @@ from issuebot.egress import (
 )
 from issuebot.egress import DEFAULT_BIND as EGRESS_DEFAULT_BIND
 from issuebot.egress import DEFAULT_PORT as EGRESS_DEFAULT_PORT
+from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
 from issuebot.egress import serve as serve_egress
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import (
@@ -1757,8 +1758,13 @@ async def _run_egress(rules: Sequence[Rule], *, bind: str, port: int) -> int:
     for signame in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signame, stop.set)
-    async with server:
-        await stop.wait()
+    await stop.wait()
+    # Stop accepting at once, then give the established tunnels a bounded moment rather than
+    # `async with server`, which would wait for every one of them (see SHUTDOWN_DRAIN_S).
+    server.close()
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(EGRESS_SHUTDOWN_DRAIN_S):
+            await server.wait_closed()
     return 0
 
 
