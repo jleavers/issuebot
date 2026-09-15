@@ -82,7 +82,7 @@ def test_settings_narrow_to_one_account_and_back_to_the_host_route() -> None:
 # --- the credential rule -------------------------------------------------------------------
 
 
-def test_a_pool_needs_a_credential_in_the_environment_and_one_account_does_not() -> None:
+def test_a_pool_needs_a_credential_in_the_environment() -> None:
     pooled = settings(run_as=POOL)
     complaint = credential_complaint(pooled, {})
     assert complaint is not None
@@ -90,8 +90,23 @@ def test_a_pool_needs_a_credential_in_the_environment_and_one_account_does_not()
     assert credential_complaint(pooled, {"CLAUDE_CODE_OAUTH_TOKEN": "t"}) is None
     assert credential_complaint(pooled, {"ANTHROPIC_API_KEY": "k"}) is None
     assert credential_complaint(pooled, {"CLAUDE_CODE_OAUTH_TOKEN": ""}) is not None
-    assert credential_complaint(settings(run_as="agent"), {}) is None
-    assert credential_complaint(settings(), {}) is None
+
+
+def test_a_single_session_account_also_needs_an_environment_credential() -> None:
+    """#142: the container has no interactive login, so one account is the same rule as N."""
+    complaint = credential_complaint(settings(run_as="agent"), environ={})
+    assert complaint is not None
+    assert "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY" in complaint
+
+
+def test_a_single_session_account_with_a_credential_is_silent() -> None:
+    environ = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+    assert credential_complaint(settings(run_as="agent"), environ) is None
+
+
+def test_the_host_route_needs_no_environment_credential() -> None:
+    """`run_as` unset is the operator's own account, which has its own login (#142)."""
+    assert credential_complaint(settings(), environ={}) is None
 
 
 # --- the wall -----------------------------------------------------------------------------

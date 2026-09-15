@@ -84,23 +84,22 @@ def settings_with_run_as(settings: Settings, account: str | None) -> Settings:
 
 
 def credential_complaint(settings: Settings, environ: Mapping[str, str]) -> str | None:
-    """Why a pool cannot run under this environment, or ``None`` when it can.
+    """Why a session account could not authenticate under this environment, or ``None``.
 
-    A pool means N accounts and N homes, and `claude` reads its login from `$HOME`. Sharing
-    one OAuth login between them -- copied in, or pointed at through `CLAUDE_CONFIG_DIR` --
-    makes every account refresh the same credential independently, which nobody has
-    established is safe and no session can test. So the pool takes the credential that has no
-    file to share: one the deployment puts in the environment, which `agent_environment`
-    already passes through to every account. One account keeps its own login and is unaffected.
+    A session runs as an account nobody logs into: the container has had no interactive login
+    since #142, and a pool never had one, since N accounts are N homes and sharing one OAuth
+    login between them is a refresh race nobody has established is safe. So the credential is
+    the one with no file to share -- one the deployment puts in the environment, which
+    `agent_environment` already passes through to every account. The host route (`run_as`
+    unset) is the operator's own account, with its own login, and is unaffected.
     """
-    if not settings.agent.run_as_pooled:
+    if not settings.agent.run_as:
         return None
     if any(environ.get(name) for name in ENV_CREDENTIAL_NAMES):
         return None
     return (
-        "a pool of session accounts needs a credential in the environment, since each account "
-        f"has its own home and no login is shared between them: set one of "
-        f"{' or '.join(ENV_CREDENTIAL_NAMES)}, or name a single account"
+        "a session account has a home nobody logs into, so its credential comes from the "
+        f"environment: set {' or '.join(ENV_CREDENTIAL_NAMES)}"
     )
 
 

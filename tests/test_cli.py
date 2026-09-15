@@ -518,6 +518,7 @@ def test_validate_does_not_blame_the_file_when_sudo_itself_is_refused(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "session-credential")
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     class _SudoRefuses:
@@ -545,6 +546,7 @@ def test_validate_accepts_a_file_the_session_account_can_read(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "session-credential")
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     class _Allows:
@@ -614,6 +616,7 @@ def test_validate_stays_quiet_when_the_delegation_itself_is_broken(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "session-credential")
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     def _explode(user: str) -> object:
@@ -3230,6 +3233,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "session-credential")
     probed: list[str] = []
     monkeypatch.setattr(
         "issuebot.cli._run_as_probe", lambda accounts, environ: probed.extend(accounts) or []
@@ -3238,14 +3242,14 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     out = capsys.readouterr().out
     uid = os.getuid()
     # One account and three concurrent sessions is the sharing #121 is about, so it warns --
-    # and it still names both sides of the uid comparison the probe made (#111). The account's
-    # own uid is named when it resolves on this host and left out when it does not, so the
-    # assertion is on the parts that do not depend on /etc/passwd.
-    assert "[WARN] agent.run_as: agent" in out
+    # and it still names both sides of the uid comparison the probe made (#111).
+    # `bare_account_names` (#140) pins `_with_uid` to the bare name, so the assertion below
+    # can pin the whole phrase exactly, including the boundary where a resolved account's
+    # uid would otherwise land.
     assert (
-        f"the session runs as a separate account, at a uid other than this process's ({uid})"
-        ", but all 3 concurrent sessions share it" in out
-    )
+        "[WARN] agent.run_as: agent; the session runs as a separate account, at a uid "
+        f"other than this process's ({uid}), but all 3 concurrent sessions share it"
+    ) in out
     assert probed == ["agent"]
     assert "17 checks: 0 failed, 2 warnings" in out
 
@@ -3330,14 +3334,13 @@ def test_validate_reports_a_pool_of_session_accounts(
     assert "17 checks: 0 failed, 1 warnings" in out
 
 
-def test_validate_fails_a_pool_with_no_credential_in_the_environment(
+def test_validate_fails_session_accounts_with_no_credential_in_the_environment(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     executables: object,
-    bare_account_names: None,
 ) -> None:
-    """The pool's accounts share no login on purpose (#121), so the credential has to be one
-    `claude` needs no file for."""
+    """A session account's home has no login (#142), whether it is one account or a pool of
+    them, so the credential has to be one `claude` needs no file for."""
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -3345,8 +3348,11 @@ def test_validate_fails_a_pool_with_no_credential_in_the_environment(
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] agent.run_as: a pool of session accounts needs a credential" in out
-    assert "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY" in out
+    assert (
+        "[FAIL] agent.run_as: a session account has a home nobody logs into, so its "
+        "credential comes from the environment: set CLAUDE_CODE_OAUTH_TOKEN or "
+        "ANTHROPIC_API_KEY" in out
+    )
 
 
 def test_validate_fails_when_the_worker_cannot_give_a_workspace_to_the_account(
