@@ -241,6 +241,13 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] github.repo access: example/repo (default branch main)" in out
     assert "[ OK ] github.labels: 5 state labels and 1 marker label present" in out
     assert (
+        "[WARN] agent.run_as: not set; the session, its hooks and the clone run as this "
+        f"process (uid {os.getuid()}), which shares its environment, code and state with "
+        "them; a container built from the image resolves its session accounts from the "
+        "list the build writes at /etc/issuebot/session-accounts, and ISSUEBOT_AGENT_USER "
+        "is an operator override" in out
+    )
+    assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
     assert out.rstrip().endswith("17 checks: 0 failed, 2 warnings")
@@ -3398,3 +3405,42 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
     assert "17 checks: 1 failed, 1 warnings" in out
+
+
+def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
+    tmp_path: Path,
+) -> None:
+    """The failure #142 was filed for: the variable says five, the image built three."""
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\nagent-3\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
+    monkeypatch.setenv("ISSUEBOT_AGENT_POOL_SIZE", "5")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] agent.run_as:" in out
+    assert "ISSUEBOT_AGENT_POOL_SIZE=5 but this image was built with 3 session accounts" in out
+    assert "docker compose build worker" in out
+
+
+def test_validate_says_nothing_about_a_built_pool_on_a_host(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
+    monkeypatch.setenv("ISSUEBOT_AGENT_POOL_SIZE", "5")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "docker compose build worker" not in out
