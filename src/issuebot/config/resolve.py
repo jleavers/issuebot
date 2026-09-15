@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from issuebot.config.errors import MissingEnvironmentVariable
+from issuebot.config.errors import MissingEnvironmentVariable, SessionAccountsUnreadable
 
 ENV_REF = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
 
@@ -59,17 +59,26 @@ def resolve_env_value(
 
 
 def built_session_accounts() -> list[str] | None:
-    """The session accounts this image was built with, or ``None`` outside one.
+    """The session accounts this image was built with, ``None`` outside one, or a raise.
 
     The built fact rather than a number to re-derive from: compose passes the operator's own
     ``ISSUEBOT_AGENT_POOL_SIZE`` into the container through ``env_file``, so a runtime copy of
     the size describes the file they just edited and not the image they are running (#142).
     Read at call time, never at import, so a test can point the constant at a file of its own.
+
+    A missing file is the normal case outside the image and is the host route, silently. A
+    file that exists and will not read -- a permission fault, a directory where a file should
+    be -- is neither that nor the image's declared list, and folding it into the host route
+    would have a container whose account file it cannot read silently run every session as
+    the worker instead: exactly the privilege-separation regression #75 and #121 exist to
+    rule out. So this one is loud rather than quiet.
     """
     try:
         text = SESSION_ACCOUNTS_FILE.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise SessionAccountsUnreadable(f"session accounts unreadable: {exc}") from exc
     accounts = [line.strip() for line in text.splitlines() if line.strip()]
     return accounts or None
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.config.errors import MissingEnvironmentVariable
+from issuebot.config.errors import MissingEnvironmentVariable, SessionAccountsUnreadable
 from issuebot.config.resolve import resolve_config, resolve_env_value
 
 BASE = Path("/srv/workflows")
@@ -204,3 +204,14 @@ def test_a_blank_built_account_list_is_the_host_route(
     monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
     out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
     assert "agent" not in out
+
+
+def test_an_unreadable_accounts_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "as-a-dir"
+    listing.mkdir()
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    with pytest.raises(SessionAccountsUnreadable) as exc:
+        resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert exc.value.code == "session_accounts_unreadable"
