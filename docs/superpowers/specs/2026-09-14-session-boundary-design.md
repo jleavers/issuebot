@@ -43,6 +43,7 @@ with its writer and the most the worker will ever read of it:
 | `turn stream` | `.issuebot/runs/<run_id>/turn-N.jsonl` | the worker | 64 MiB, head |
 | `turn prompt` | `.issuebot/runs/<run_id>/turn-N.prompt.md` | the worker | 4 MiB, head |
 | `turn stderr` | `.issuebot/runs/<run_id>/turn-N.stderr.log` | the worker | 16 MiB, tail |
+| `instructions` | `CLAUDE.md`, `AGENTS.md` at the clone's root | the session (the clone is its) | 128 KiB, head, cut for the prompt (#107) |
 
 What crosses *into* the session (the prompt on stdin, the environment on a memory file, the
 clone, the hook scripts) needs no guard. What comes back over a pipe (claude's stdout and
@@ -70,7 +71,8 @@ components under it, and:
 A refusal is `BoundaryError`, an `OSError` carrying the path and a reason, so every call
 site's existing `except OSError` reports it as a warning naming the path and the reason and
 never the contents, and no task ends on it. `read_workspace_env`, `read_session`,
-`_is_complete`, `capture_turns` and the runner's stderr tail all go through it.
+`_is_complete`, `capture_turns`, the runner's stderr tail and `read_repository_instructions`
+(#107) all go through it.
 
 The worker's own state is created through the same object. `own_dir` makes a run's log
 directory, every missing component of it, and verifies the last is the worker's and closed

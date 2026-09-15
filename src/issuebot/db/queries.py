@@ -12,6 +12,12 @@ from issuebot.github import StateLabel
 BOARD_LIMIT = 5
 ISSUE_LIST_LIMIT = 200
 MAX_WINDOW_DAYS = 365
+# What the worker's admission ledger is seeded with at startup (#112): the issues this
+# repository has run recently, and how much of their budget is already spent. Bounded on both
+# axes because this is one query on the way up and the ledger it fills is itself bounded --
+# an issue nobody has run for three months is not one whose chain of failures is still live.
+LEDGER_SEED_LIMIT = 500
+LEDGER_WINDOW_DAYS = 90
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -52,6 +58,27 @@ class RunRow:
     duration_s: float | None
     workspace_path: str | None
     log_dir: str | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class LedgerRow:
+    """One issue's durable run history, as the orchestrator's admission ledger reads it.
+
+    ``failures`` is the live chain: runs that failed since the last one that succeeded and
+    since the last blocked escape, whichever is later, because an escape ends a chain by
+    handing the issue to a human. It counts ``failed``, ``timed_out`` and ``stalled`` and not
+    ``cancelled``, which is a release -- a shutdown, a move, a closed issue -- rather than a
+    fault of the issue's. Where the two readings differ the store's is the looser one, which
+    is the right way for a seed to be wrong: a budget read too high would refuse an issue
+    that should run.
+    """
+
+    identifier: str
+    failures: int
+    runs: int
+    turns: int
+    cost_usd: float
+    last_run_at: datetime | None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -160,6 +187,42 @@ SELECT coalesce(sum(input_tokens), 0) AS input_tokens,
        coalesce(sum(output_tokens), 0) AS output_tokens,
        coalesce(sum(cost_usd), 0) AS cost_usd
 FROM runs WHERE repo = %(repo)s AND started_at >= now() - %(window)s
+"""
+
+ISSUE_LEDGERS = """
+WITH escapes AS (
+    SELECT issue_number, max(at) AS escaped_at
+    FROM events
+    WHERE repo = %(repo)s AND kind = 'blocked' AND at >= now() - %(window)s
+    GROUP BY issue_number
+),
+ended AS (
+    SELECT r.issue_identifier,
+           r.outcome,
+           r.started_at,
+           r.turns,
+           r.cost_usd,
+           greatest(
+               max(r.started_at) FILTER (WHERE r.outcome = 'succeeded')
+                   OVER (PARTITION BY r.issue_identifier),
+               max(e.escaped_at) OVER (PARTITION BY r.issue_identifier)
+           ) AS chain_start
+    FROM runs r LEFT JOIN escapes e ON e.issue_number = r.issue_number
+    WHERE r.repo = %(repo)s AND r.ended_at IS NOT NULL AND r.started_at >= now() - %(window)s
+)
+SELECT issue_identifier,
+       count(*) AS runs,
+       coalesce(sum(turns), 0) AS turns,
+       coalesce(sum(cost_usd), 0) AS cost_usd,
+       max(started_at) AS last_run_at,
+       count(*) FILTER (
+           WHERE outcome IN ('failed', 'timed_out', 'stalled')
+             AND (chain_start IS NULL OR started_at > chain_start)
+       ) AS failures
+FROM ended
+GROUP BY issue_identifier
+ORDER BY max(started_at) DESC
+LIMIT %(limit)s
 """
 
 DAILY_SERIES = """
@@ -315,6 +378,31 @@ class RepoQueries(_Reader):
             output_tokens=int(row["output_tokens"]),
             cost_usd=float(row["cost_usd"]),
         )
+
+    async def issue_ledgers(
+        self, *, limit: int = LEDGER_SEED_LIMIT, days: int = LEDGER_WINDOW_DAYS
+    ) -> list[LedgerRow]:
+        """What each recently-run issue has already spent, for the worker's admission ledger.
+
+        The orchestrator deliberately does not import ``db``, so this is read by ``cli`` and
+        handed in at construction, the way ``initial_rate_limits`` is. Without it every
+        deployment would hand every issue a fresh ``agent.max_attempts``, and restarting is
+        how this worker is deployed.
+        """
+        rows = await self._rows(
+            ISSUE_LEDGERS, self._params(limit=limit, window=timedelta(days=days))
+        )
+        return [
+            LedgerRow(
+                identifier=row["issue_identifier"],
+                failures=int(row["failures"]),
+                runs=int(row["runs"]),
+                turns=int(row["turns"]),
+                cost_usd=float(row["cost_usd"]),
+                last_run_at=row["last_run_at"],
+            )
+            for row in rows
+        ]
 
     async def daily_series(self, days: int) -> list[DailyPoint]:
         """One point per UTC day for the last ``days`` days, today last, zero-filled."""

@@ -802,12 +802,16 @@ async def test_sweep_agent_home_follows_the_binding_under_a_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The sweep is a control over one home, so under a pool (#121) it has to be the home of
-    the account this workspace is bound to -- not the pool's first member, and not each of them
-    in turn. `WorkspaceManager` builds its `RunAs` from `session_account`, and the orchestrator
-    narrows the settings before it builds the manager, so the account that gets swept is the
-    one that will run the turn. A pool also changes what the sweep is *for*: the accounts have
-    separate homes, so the session sharing it is the next one bound to this member, not the one
-    running beside it (#101's single-account case)."""
+    the account this workspace is bound to.
+
+    What this pins is the composition, since that is where it could go wrong: the manager
+    sweeps through `session_account`, which answers with the *first* member of whatever pool
+    its settings carry, so it is the caller's narrowing that decides. Bound to `agent-2`, the
+    second member, it sweeps `agent-2`; built from the un-narrowed pool -- the shape a caller
+    that skipped `settings_with_run_as` would produce -- the same manager sweeps `agent-1`,
+    someone else's home. The orchestrator narrows before it builds either a manager or a
+    runner, which is what makes the first case the real one.
+    """
     swept: list[str] = []
 
     def record(self: RunAs, claude_dir: Path | None = None) -> bool:
@@ -819,10 +823,15 @@ async def test_sweep_agent_home_follows_the_binding_under_a_pool(
         {
             "github": {"repo": "example/repo"},
             "workspace": {"root": str(tmp_path / "workspaces")},
-            "agent": {"run_as": [ME, "agent-2", "agent-3"]},
+            "agent": {"run_as": ["agent-1", "agent-2", "agent-3"]},
         }
     )
-    bound = settings_with_run_as(pooled, "agent-2")
-    manager = WorkspaceManager(bound, gh=object(), environ=base_env())
-    await manager.sweep_agent_home()
+    bound = WorkspaceManager(
+        settings_with_run_as(pooled, "agent-2"), gh=object(), environ=base_env()
+    )
+    await bound.sweep_agent_home()
     assert swept == ["agent-2"]
+
+    swept.clear()
+    await WorkspaceManager(pooled, gh=object(), environ=base_env()).sweep_agent_home()
+    assert swept == ["agent-1"], "un-narrowed, the sweep lands on the pool's first member"

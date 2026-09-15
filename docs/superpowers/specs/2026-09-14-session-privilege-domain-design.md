@@ -80,7 +80,7 @@ image's uid layout and the compose mounts.
 - **Startup and validation.** The worker probes the delegation at startup and refuses to start
   when `agent.run_as` is set but cannot be established, the same shape as the `claude auth`
   probe: a boundary that does not work would otherwise fail every run. `validate` reports the
-  account as a fifteenth check, and warns when `agent.run_as` is unset (the host route, where
+  account in its own `agent.run_as` check, and warns when `agent.run_as` is unset (the host route, where
   the session runs as the operator's own user).
 
 - **The host route is unchanged.** `agent.run_as` unset — the default, the tests, `uv run` on

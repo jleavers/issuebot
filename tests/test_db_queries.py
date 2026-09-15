@@ -739,3 +739,113 @@ async def test_repos_lists_registrations_by_name_and_snapshots_by_repo(
         snapshots = await queries.snapshots()
         assert set(snapshots) == {REPO}  # only the worker that wrote one, not every registration
         assert snapshots[REPO].data == {"tick_count": 3}
+
+
+# --- the admission ledger's seed (#112) ---------------------------------------------------
+
+
+@pytest.fixture
+async def with_ledger_history(db_url: str) -> AsyncIterator[Database]:
+    """Run histories of every shape the seed has to read, plus two it has to skip."""
+    await migrate(db_url)
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    await store.connect()
+
+    async def run(
+        run_id: str, number: int, ago: timedelta, outcome: str | None, **overrides: Any
+    ) -> None:
+        await store.apply_event(
+            RunStarted(
+                issue_number=number,
+                issue_identifier=f"repo-{number}",
+                run_id=run_id,
+                attempt=1,
+                session_id="s",
+                workspace_path="/w",
+                at=NOW - ago,
+            )
+        )
+        if outcome is not None:
+            await store.apply_event(
+                run_ended(
+                    run_id,
+                    number,
+                    NOW - ago + timedelta(minutes=1),
+                    outcome=outcome,
+                    **overrides,
+                )
+            )
+
+    # 20: three failures in a row, and nothing has cleared them.
+    for n, ago in enumerate((5 * HOUR, 4 * HOUR, 3 * HOUR)):
+        await run(f"a{n}", 20, ago, "failed", turns=2, cost_usd=0.5)
+    # 21: a failure, then a run that succeeded, then one more failure.
+    await run("b0", 21, 5 * HOUR, "failed")
+    await run("b1", 21, 4 * HOUR, "succeeded")
+    await run("b2", 21, 3 * HOUR, "failed")
+    # 22: two failures, then the escape that handed it to a human, then one more failure.
+    await run("c0", 22, 5 * HOUR, "failed")
+    await run("c1", 22, 4 * HOUR, "failed")
+    await store.apply_event(
+        Blocked(issue_number=22, issue_identifier="repo-22", reason="stuck", at=NOW - 3 * HOUR)
+    )
+    await run("c2", 22, 2 * HOUR, "failed")
+    # 23: a release, not a fault of the issue's -- a shutdown, a move, a closed issue.
+    await run("d0", 23, HOUR, "cancelled")
+    # 24: still running, so it has not cost anything yet that anybody can count.
+    await run("e0", 24, HOUR, None)
+    # 25: older than the window the seed reads.
+    await run("f0", 25, timedelta(days=120), "failed")
+    await store.close()
+
+    other = PostgresStore(db_url, repo="example/other", labels=GitHubLabels())
+    await other.connect()
+    await other.apply_event(
+        RunStarted(
+            issue_number=20,
+            issue_identifier="other-20",
+            run_id="x0",
+            attempt=1,
+            session_id="s",
+            workspace_path="/w",
+            at=NOW - HOUR,
+        )
+    )
+    await other.apply_event(run_ended("x0", 20, NOW, outcome="failed"))
+    await other.close()
+    yield Database(db_url)
+
+
+async def test_issue_ledgers_reads_the_chain_and_what_it_cost(
+    with_ledger_history: Database,
+) -> None:
+    async with scoped(with_ledger_history) as queries:
+        rows = {row.identifier: row for row in await queries.issue_ledgers()}
+    assert set(rows) == {"repo-20", "repo-21", "repo-22", "repo-23"}
+    assert (rows["repo-20"].failures, rows["repo-20"].runs) == (3, 3)
+    assert (rows["repo-20"].turns, rows["repo-20"].cost_usd) == (6, 1.5)
+    # A run that succeeded ends the chain; the runs before it are still spend.
+    assert (rows["repo-21"].failures, rows["repo-21"].runs) == (1, 3)
+    # So does the blocked escape, which is how the README's "fix it, then relabel" works.
+    assert (rows["repo-22"].failures, rows["repo-22"].runs) == (1, 3)
+    # A cancelled run is a release, not a fault: it costs the budget but not the chain.
+    assert (rows["repo-23"].failures, rows["repo-23"].runs) == (0, 1)
+    assert rows["repo-20"].last_run_at is not None
+
+
+async def test_issue_ledgers_is_bounded_by_repository_window_and_limit(
+    with_ledger_history: Database,
+) -> None:
+    async with scoped(with_ledger_history) as queries:
+        assert [row.identifier for row in await queries.issue_ledgers(limit=1)] == ["repo-23"]
+        # A run older than the window is not live history.
+        assert "repo-25" not in {row.identifier for row in await queries.issue_ledgers()}
+        assert "repo-25" in {row.identifier for row in await queries.issue_ledgers(days=365)}
+    async with scoped(with_ledger_history, "example/other") as queries:
+        assert [row.identifier for row in await queries.issue_ledgers()] == ["other-20"]
+
+
+async def test_issue_ledgers_on_an_empty_store_is_empty(db_url: str) -> None:
+    await migrate(db_url)
+    async with scoped(Database(db_url)) as queries:
+        assert await queries.issue_ledgers() == []

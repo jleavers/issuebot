@@ -14,6 +14,7 @@ from issuebot.agent.boundary import (
     ARTEFACTS,
     CREATED_MARKER,
     ENV_FILE,
+    INSTRUCTION_FILE,
     SESSION_FILE,
     TURN_PROMPT,
     TURN_STDERR,
@@ -54,10 +55,12 @@ def test_every_artefact_names_its_writer_and_its_bound() -> None:
         TURN_STREAM,
         TURN_PROMPT,
         TURN_STDERR,
+        INSTRUCTION_FILE,
     )
     assert len({artefact.name for artefact in ARTEFACTS}) == len(ARTEFACTS)
-    # The session's hooks write exactly one of them; everything else is the worker's own.
-    assert [a.name for a in ARTEFACTS if a.writer == "session"] == ["env"]
+    # The session's side writes two of them: its hooks' env file, and the clone's own
+    # instruction files (#107), since the clone is the session's; the rest is the worker's own.
+    assert [a.name for a in ARTEFACTS if a.writer == "session"] == ["env", "instructions"]
     assert all(a.limit > 0 for a in ARTEFACTS if a is not CREATED_MARKER)
     assert CREATED_MARKER.limit == 0  # read for its existence, never its contents
 
@@ -70,6 +73,9 @@ def test_the_boundary_knows_who_may_write_what() -> None:
     assert split.split
     assert split.writers(ENV_FILE) == frozenset({1000, 1001})
     assert split.writers(SESSION_FILE) == frozenset({1000})
+    # The clone is `gh repo clone`d as the session (#107), so its instruction files are its.
+    assert split.writers(INSTRUCTION_FILE) == frozenset({1000, 1001})
+    assert same.writers(INSTRUCTION_FILE) == frozenset({1000})
 
 
 def test_current_resolves_the_account_or_leaves_the_session_unset() -> None:

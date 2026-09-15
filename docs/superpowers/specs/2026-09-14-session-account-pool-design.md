@@ -182,7 +182,7 @@ the credential never lands in a home.
 - **`remove`, `kill` and the probes run per account.** They already ran through `RunAs`; what
   changed is which account the orchestrator hands them. A terminal removal goes through a
   manager narrowed to *that* workspace's bound account, not the pool's first member. Startup
-  probes every member, and `validate` reports the pool as its fifteenth check.
+  probes every member, and `validate` reports the pool in its `agent.run_as` check.
 
 ## What this does not do
 

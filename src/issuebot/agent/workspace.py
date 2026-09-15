@@ -155,6 +155,11 @@ class WorkspaceManager:
         self._boundary = Boundary.current(self._account)
         self._log = get_logger(__name__)
 
+    @property
+    def boundary(self) -> Boundary:
+        """The worker's side of the line, for a read of a workspace made outside this class."""
+        return self._boundary
+
     # --- paths --------------------------------------------------------------------
 
     def path_for(self, identifier: str) -> Path:
@@ -331,7 +336,13 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear the loadable config a prior or concurrent session may have left in the
-        account's shared ``~/.claude``, immediately before each of this session's turns (#101).
+        account's ``~/.claude``, immediately before each of this session's turns (#101).
+
+        Which session that is depends on the route (#121): one account is shared by everything
+        running in the container, while a pool leaves only the next session bound to this
+        member -- so under a pool the sweep before turn 1 is the load-bearing one, and it is
+        also what clears this run's own ``before_run`` hook, which runs as the account before
+        the loop starts.
 
         Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
         left untouched, and the container is the boundary regardless. Off the event loop, since
