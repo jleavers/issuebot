@@ -123,6 +123,31 @@ $ docker exec -u agent issuebot-arrowbot-worker-1 claude auth status --json
 So a deployment that has set the variable is already on this route, and removing the volume
 changes nothing it does at runtime.
 
+## Documentation: the README is the setup guide
+
+The README is read by an operator with nothing running yet, so it documents **one** way to run
+issuebot -- Docker -- and a route that is not that one is either a development detail or noise.
+Three consequences beyond removing the login recipe:
+
+- **The setup path (Steps 1-5) is Docker alone.** Step 3's "To run on the host instead" block
+  goes, as do the `# on the host: uv run issuebot ...` parentheticals beside `validate`,
+  `labels ensure`, `run-once` and `refresh`, the host entries under "Prerequisites", and the
+  `workspace.root` note that follows the host block. Most of what they say is already in
+  `## Development`, where `uv run` lives; what is not moves there rather than being lost.
+- **The credential table says which route each row belongs to.** `logged in (claude.ai, max)`
+  is the development answer on a host, not a third way to credential a deployment;
+  `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are the container's.
+- **"Upgrades" is pruned to its evergreen half** -- overrides live in `WORKFLOW.local.md`,
+  rebuild after pulling -- and the three version-to-version notes go, including the #75 note
+  telling operators to `chown` a volume this change deletes. They survive in git history and
+  in the pull requests that added them.
+
+The host route keeps its code, its tests and its `validate` answers. What it loses is its
+place in a guide for getting the app running, which is a claim about the README rather than
+about the route: the route is how `uv run pytest` runs at all (`conftest.py` strips
+`ISSUEBOT_AGENT_USER` so the suite never reaches a real `sudo`), and eight small branches in
+`src/` are the whole of its cost.
+
 ## Testing
 
 - `test_the_login_volume_is_the_sessions_home` inverts: no login volume is mounted, and the
@@ -139,18 +164,19 @@ changes nothing it does at runtime.
   overlaps this area and should be fixed in the same pass rather than around it.
 - CI's sweep proof needs no change: it plants in the image's own `/home/agent/.claude`, never
   in the volume.
+- Two couplings constrain the README edits, and neither is obvious from the prose. CI parses
+  the cluster recipe out of `README.md` by regex and runs it in the image, so the PostgreSQL
+  section is not to be reflowed in passing; and `test_compose_credentials.py` holds
+  `README.md` to the rule that every DSN carries `${ISSUEBOT_DB_PASSWORD}` in its password
+  position, so a DSN moved into `## Development` keeps that spelling rather than being
+  simplified on the way.
 
 ## Migration
 
 A runtime no-op for both deployments on this host, which authenticate with
 `CLAUDE_CODE_OAUTH_TOKEN` today: rebuild, recreate, then `docker volume rm` the two
-`claude-home` volumes at leisure. The steps belong in the PR body, not the README, which
-should read for an operator starting fresh rather than for one upgrading from a version nobody
-runs any more. For the same reason this change prunes the README's "Upgrades" section to its
-evergreen half -- overrides live in `WORKFLOW.local.md`, rebuild after pulling -- and drops
-the three version-to-version notes, including the #75 note telling operators to `chown` a
-volume this change deletes. They survive in git history and in the pull requests that added
-them.
+`claude-home` volumes at leisure. The steps go in the pull request body rather than the
+README, for the reason above: a reader of the setup guide has nothing to upgrade from.
 
 ## Out of scope
 
