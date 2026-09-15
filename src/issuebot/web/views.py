@@ -34,7 +34,9 @@ REPO_COOKIE = "issuebot-repo"
 
 WorkerStatus = Literal["ok", "held", "stale", "none"]
 
-_WINDOW = re.compile(r"^(\d+)d$")
+# The digit run is bounded by the maximum's width: ``int`` refuses a run past
+# ``sys.get_int_max_str_digits()`` with a ``ValueError``, and this function is total (#106).
+_WINDOW = re.compile(rf"^(\d{{1,{len(str(MAX_WINDOW_DAYS))}}})d$")
 _WORKER_KEYS = (
     "tick_count",
     "last_tick_at",
@@ -262,7 +264,8 @@ def worker_status(row: SnapshotRow | None, now: datetime) -> WorkerStatus:
 
 
 def window_days(text: str | None) -> int | None:
-    """``<N>d`` with 1 <= N <= MAX_WINDOW_DAYS as N; the default when absent; None when bad."""
+    """``<N>d`` with 1 <= N <= MAX_WINDOW_DAYS as N; the default when absent; None when bad,
+    however long: the pattern admits no more digits than the maximum has."""
     if not text:
         return DEFAULT_WINDOW_DAYS
     match = _WINDOW.match(text)

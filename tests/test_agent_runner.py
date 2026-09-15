@@ -291,7 +291,7 @@ def test_read_workspace_env_caps_the_file_at_a_line_boundary(tmp_path: Path) -> 
     filler = "".join(f"K{n}=x\n" for n in range(WORKSPACE_ENV_LIMIT // 6))
     (tmp_path / ".issuebot" / "env").write_text(filler + "LAST=kept\n")
     env, warnings = read_workspace_env(tmp_path)
-    assert warnings[0] == f"longer than {WORKSPACE_ENV_LIMIT} characters: the rest was ignored"
+    assert warnings[0] == f"longer than {WORKSPACE_ENV_LIMIT} bytes: the rest was ignored"
     assert "LAST" not in env
     # Cut at a line boundary, so no half-written value survives.
     assert all(value == "x" for value in env.values())
@@ -641,6 +641,27 @@ def test_classify_result_reads_stderr_for_a_credential_that_stopped_working() ->
     assert message is not None and "Please run /login" in message
 
 
+def test_classify_result_names_the_login_whose_refresh_was_refused() -> None:
+    """The shape a lapsed login actually arrives in, captured from a live worker's
+    ``run_turns`` row on 2026-09-14: ``subtype: "success"`` with ``is_error`` and status 1,
+    carrying claude's own sentence. Reading the subtype alone made this ``turn_failed``, so
+    every issue on the board burned ``max_attempts`` and dispatch was never held (#20).
+
+    The agent's own final message is still not mined for markers: that is status 0, which
+    ``test_classify_result`` pins as ``turn_failed`` with the same words in it.
+    """
+    result = {
+        "subtype": "success",
+        "is_error": True,
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }
+    category, message = classify_result(result, 1, "")
+    assert category == "auth_failed"
+    assert message == (
+        "success: Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
+
+
 def test_classify_result_stderr_makes_a_failing_result_an_auth_failure() -> None:
     result = {"subtype": "error_during_execution", "is_error": True, "result": "stopped"}
     category, _ = classify_result(result, 1, "OAuth token has expired")
@@ -709,6 +730,9 @@ def test_classify_result_still_reads_the_raw_stderr_tail_for_an_auth_failure() -
         ("API Error: 401 authentication_error", True),
         ("Invalid API key \u00b7 Please run /login", True),
         ("your OAuth token has expired", True),
+        # What a login whose refresh is refused actually says (a live worker, 2026-09-14).
+        ("Failed to authenticate: OAuth session expired and could not be refreshed", True),
+        ("the OAuth session is invalid", True),
         ("run claude auth login to fix it", True),
         ("AUTHENTICATION FAILED", True),
         ("tool execution failed", False),
@@ -1283,3 +1307,112 @@ async def test_preset_cancel_spawns_nothing(workspace: Path, tmp_path: Path) -> 
     assert not record.exists()
     assert not log_dir.exists()
     assert recorder.kinds == []
+
+
+# --- the boundary (#104): what may sit at `.issuebot/env` -----------------------------------
+
+
+@posix
+def test_read_workspace_env_refuses_a_fifo_without_blocking(tmp_path: Path) -> None:
+    """A FIFO at the name used to block the event loop for good; now it is refused unread."""
+    import threading
+
+    (tmp_path / ".issuebot").mkdir()
+    os.mkfifo(tmp_path / ".issuebot" / "env")
+    results: list[tuple[dict[str, str], list[str]]] = []
+    thread = threading.Thread(target=lambda: results.append(read_workspace_env(tmp_path)))
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "read_workspace_env blocked on the fifo"
+    env, warnings = results[0]
+    assert env == {}
+    assert warnings == [f"refused {tmp_path / '.issuebot' / 'env'}: not a regular file (a fifo)"]
+
+
+@posix
+def test_read_workspace_env_refuses_a_symbolic_link(tmp_path: Path) -> None:
+    """A link is not followed, so a file the worker's uid can read never reaches the session."""
+    outside = tmp_path / "operator.env"
+    outside.write_text("ISSUEBOT_DB_PASSWORD=hunter2\n")
+    (tmp_path / "ws" / ".issuebot").mkdir(parents=True)
+    os.symlink(outside, tmp_path / "ws" / ".issuebot" / "env")
+    env, warnings = read_workspace_env(tmp_path / "ws")
+    assert env == {}
+    assert warnings == [f"refused {tmp_path / 'ws' / '.issuebot' / 'env'}: a symbolic link"]
+
+
+def test_read_workspace_env_refuses_a_directory_by_reason(tmp_path: Path) -> None:
+    (tmp_path / ".issuebot" / "env").mkdir(parents=True)
+    env, warnings = read_workspace_env(tmp_path)
+    assert env == {}
+    assert warnings == [
+        f"refused {tmp_path / '.issuebot' / 'env'}: not a regular file (a directory)"
+    ]
+
+
+def test_read_workspace_env_refuses_a_file_nobody_declared_wrote(tmp_path: Path) -> None:
+    from issuebot.agent.boundary import Boundary
+
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text("FOO=bar\n")
+    me = os.getuid()
+    stranger = Boundary(worker_uid=me + 1, session_uid=me + 2)
+    env, warnings = read_workspace_env(tmp_path, boundary=stranger)
+    assert env == {}
+    assert warnings == [f"refused {tmp_path}: owned by uid {me}, not by the worker"]
+
+
+def test_read_workspace_env_bounds_the_bytes_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound is on the read, not on a string built after the whole file came in."""
+    from issuebot.agent import boundary as boundary_module
+
+    calls: list[int] = []
+    real_read = os.read
+
+    def counting_read(fd: int, size: int) -> bytes:
+        calls.append(size)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(boundary_module.os, "read", counting_read)
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_bytes(b"K=v\n" * (WORKSPACE_ENV_LIMIT // 2))
+    env, warnings = read_workspace_env(tmp_path)
+    assert sum(calls) <= WORKSPACE_ENV_LIMIT + boundary_module._READ_CHUNK
+    assert env == {"K": "v"}
+    assert warnings == [f"longer than {WORKSPACE_ENV_LIMIT} bytes: the rest was ignored"]
+
+
+@posix
+async def test_run_turn_survives_a_fifo_at_the_workspace_env_file(workspace: Path) -> None:
+    """The turn runs, logs the refusal, and the fake claude never sees a variable from it."""
+    (workspace / ".issuebot").mkdir(parents=True)
+    os.mkfifo(workspace / ".issuebot" / "env")
+    runner = runner_for(workspace)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        turn = await asyncio.wait_for(run(runner, workspace), timeout=30)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert turn.ok, turn.error
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [f"refused {workspace / '.issuebot' / 'env'}: not a regular file (a fifo)"]
+
+
+@posix
+async def test_run_turn_refuses_a_log_directory_that_is_not_the_workers(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """A directory the session placed at the run's log path is not written through."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (workspace / ".issuebot" / "runs").mkdir(parents=True)
+    os.symlink(elsewhere, workspace / ".issuebot" / "runs" / "planted")
+    runner = runner_for(workspace)
+    turn = await run(runner, workspace, log_dir=workspace / ".issuebot" / "runs" / "planted")
+    assert turn.error_category == "invalid_workspace_cwd"
+    assert turn.error is not None and "a symbolic link" in turn.error
+    assert list(elsewhere.iterdir()) == []

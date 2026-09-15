@@ -847,7 +847,11 @@ def _database_or_report(settings: Settings) -> Database | None:
     if settings.database.url is None:
         print(_NOT_CONFIGURED)
         return None
-    return _database_factory(settings.database.url.get_secret_value())
+    try:
+        return _database_factory(settings.database.url.get_secret_value())
+    except DatabaseError as exc:  # not a postgresql:// URL (#105)
+        print(f"[FAIL] database: {exc.message}")
+        return None
 
 
 # --- run-once --------------------------------------------------------------------------
