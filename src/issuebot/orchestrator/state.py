@@ -13,7 +13,7 @@ from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
 
-RetryKind = Literal["continuation", "failure", "escape", "slots", "auth", "github"]
+RetryKind = Literal["continuation", "failure", "escape", "slots", "auth", "github", "preflight"]
 DispatchHoldKind = Literal["preflight", "auth", "github"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 

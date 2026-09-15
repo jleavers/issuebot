@@ -411,7 +411,77 @@ floor, not the shipped version, and moves by hand.
   transcript. `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7) as the
   scrubber wrote it -- its home was `/home/jleavers` -- and a test proves it is the scrubber's
   fixed point; pre-commit excludes it because the tests pin its sizes.
-- `issuebot.orchestrator`: one asyncio task owns the schedule. `state.py` (pure): `RunningEntry`,
+- `issuebot.orchestrator`: one asyncio task owns the schedule. `admission.py` (pure, #112) is
+  the one gate every claim goes through: `admit(AdmissionRequest)` answers, in the order the
+  preconditions outrank each other -- shutdown, the `Hold` in force, the free slots, whether
+  the issue is already running or retrying, whether it is in a state this worker claims, the
+  issue's failure chain, its cumulative spend -- with `Admitted(attempt)` or `Refused(kind,
+  reason, wait)`, `wait` being how a caller that can wait requeues (`None` means waiting will
+  not change it). `_dispatch_candidates` and `_fire` both go through it and neither derives a
+  precondition of its own; `_fire` asks twice, once before its refresh (a worker that may not
+  claim should not spend a request finding out which issue it may not claim, and a GitHub hold
+  means it has just failed to read the board it would be writing to) and again with the issue
+  in hand, since the awaited fetch can cost it a slot. `IssueLedger` is the durable half:
+  `failures` is the chain `agent.max_attempts` bounds, and `runs`/`turns`/`cost_usd` are
+  cumulative and never reset, so the attempt number comes from history rather than from the
+  live label -- before #112 both call sites read `attempt = 1` unless the issue was
+  `in_progress`, so a move of that label broke the chain before it ever reached the escape.
+  Only a run that succeeded, or the blocked escape that ends a chain by handing the issue to a
+  human (`_record_escape`, on `applied` or `skipped`), clears it; that second one is what makes
+  the README's documented recovery -- fix the cause, then relabel -- still work.
+  `agent.max_issue_cost_usd` (default `0`, off) is the gate's cumulative spend ceiling, the
+  bound on an issue relabelled again and again. A budget refusal is never silent, because a
+  board that stops moving for an issue with nothing said about it anywhere a human looks is
+  worse than no ceiling at all: `_handle_refusal` logs `dispatch_refused` and takes
+  `actions.budget_escape`, the one escalation with no run behind it. It accepts the issue in
+  any of `ACTIVE_STATES`, including the orphaned `in_progress` one the gate meets before
+  `_resume_plan`, because what keeps it off a *running* issue is `admit` answering `busy` long
+  before it reaches the budget, not the state. Its block names the way out, which differs by
+  ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
+  is not for `spend`, whose figure never resets.
+  The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
+  refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
+  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
+  ceiling reaches that loop: the escape clears the chain on its way out, so an `attempts`
+  refusal readmits the issue on the next bounce rather than refusing it again. Two separate
+  things keep the round trip from reporting one escalation over and over, and they are
+  separate because the block and the event are two writes with a failure point between them.
+  The block is matched by its *reason*, on a line of its own, and not by `BUDGET_HEADING`,
+  which both ceilings share: a bounce runs no session, so it reproduces the reason exactly
+  (the figures come from the ledger, `:.2f`) and writes nothing, while an issue escalated on
+  `attempts` that later runs up `max_issue_cost_usd` -- or one whose operator raised the
+  ceiling and relabelled -- has a new reason and gets its own block, which matters because the
+  first block would name the wrong way out. The `Blocked` event, a Slack line and a count on
+  the dashboard's blocked tile, is announced on `IssueLedger.escalated` instead, which
+  `_handle_refusal` marks (`Ledger.escalate`) only *after* the escape landed and which only
+  `dispatched` clears: an escape whose `set_state` failed has written the block and told
+  nobody, and the tick that retries it must still announce. So `budget_escape` takes
+  `announce=` and returns `applied` exactly when it published; an unannounced one returns
+  `skipped`, which `_record_escape` already ends the chain on, and the label move is published
+  either way because it happened. The two identities are independent in both directions, which
+  is what makes them safe: an announced escalation whose reason is unchanged leaves no second
+  block, only the first one's stamp, and a suppressed announcement can still leave a block.
+  The mark is the one thing here not seeded from the store, deliberately -- the only durable
+  signal is a `blocked` event, which the run-based escape publishes too, so seeding would
+  swallow a first real announcement to save a duplicate.
+  A failed escape is retried by the next tick rather than by a queued entry, since the issue
+  is still a candidate. `Ledger` is
+  keyed by `Issue.identifier` (the column the store records runs
+  under), bounded at `LEDGER_LIMIT` with the least recently run entry evicted and logged (a
+  seed is sorted by `last_run_at` on the way in rather than trusted: the store answers newest
+  first, and eviction is a budget reset, so taking that order as given would drop the issues
+  that ran minutes before the restart), and
+  seeded at construction (`initial_ledger=`, `cli._initial_ledger` over
+  `RepoQueries.issue_ledgers`) the way `initial_rate_limits` is, since restarting is how this
+  worker is deployed and a budget a deployment resets is not a ceiling. Every chain that comes
+  from outside this process -- the store's seed, and the workspace `session.json` that
+  `_resume_plan` folds in for an orphan -- goes through `seeded_chain`, which caps it one short
+  of `max_attempts`: the escape is something a *run* does, so a chain seeded *at* the ceiling
+  would refuse an issue for ever without ever escalating it, and a dropped `Blocked` write, a
+  `run-once` session, a worker killed before its escape retry fired, or a lowered
+  `max_attempts` can all produce one. `reported_refusal`
+  lives on the entry so `dispatch_refused` is logged once per issue per reason and is forgotten
+  with the rest of it. `state.py` (pure): `RunningEntry`,
   `RetryEntry`, `DispatchHold`, `RuntimeSnapshot`, `backoff_ms` (`min(10000 * 2^(attempt-1), max_retry_backoff_ms)`,
   attempt being the one about to run), `sort_candidates` (orphaned `in_progress`, then `rework`,
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
@@ -524,6 +594,12 @@ floor, not the shipped version, and moves by hand.
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
+  All three holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
+  `_github_block`) and `_current_hold()` composes the one live hold from them, preflight >
+  auth > github, for the snapshot and the gate alike -- so the reason an operator reads and
+  the reason a caller refuses on can no longer be two different claims. The preflight one used
+  to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
+  not it: there was nothing to consult (#112).
   Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
   builds), `auth` (`claude authentication unavailable: <the probe's detail>`) or `github`
@@ -547,7 +623,9 @@ floor, not the shipped version, and moves by hand.
   and one failure is a blip, since `gh` retries a transport error before issuebot sees it.
   Nothing skips `_dispatch_candidates` for it, unlike the auth hold: the claim comes from the
   poll, so a failed poll offers nothing to claim, and the reported hold is therefore always
-  derived from a fetch that failed on that very tick rather than from a remembered verdict.
+  derived from a fetch that failed on that very tick rather than from a remembered verdict
+  (the gate refuses on it all the same, which is what makes "a hold at one door is a hold at
+  both" true rather than incidental).
   `_refresh_running`'s failures are not counted, though they fail in an outage too: the hold is
   about whether the board can be claimed from, which is the poll's question, and one threshold
   over two call sites would mean two different things.
@@ -555,9 +633,11 @@ floor, not the shipped version, and moves by hand.
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
   goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
-  (preflight > auth > github) *after* the fetch, from a `_Hold` the branches return rather than
-  by recording as they go: releasing and re-holding within a tick would restart `since` on a
-  hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
+  *after* the fetch, from `_current_hold()` rather than by recording as it goes: releasing and
+  re-holding within a tick would restart `since` on a hold that never lifted, and
+  `GITHUB_HOLD_KEY` keys one outage however it rewords itself. The gate reads the same three
+  fields rather than the settled `dispatch_hold`, which is a tick behind: a GitHub hold this
+  tick's successful fetch has just lifted must not refuse the claim that fetch produced.
   `_probe_github_status` annotates the hold once, when it engages, through the
   `github_status` seam (default `fetch_status_summary`) in a thread under
   `GITHUB_STATUS_DEADLINE_S` (the fetch's socket timeout does not bound the name lookup, and
@@ -623,7 +703,12 @@ floor, not the shipped version, and moves by hand.
   `issues_for_state` (one column in full up to `ISSUE_LIST_LIMIT = 200`, or every column
   when the state is `None`; an unknown role lists nothing, as it sits on no column),
   `issue`, `runs_for_issue`, `events_for_issue`, `turn_summaries_for_issue`, `turn`,
-  `recent_events`, `snapshot`) returning the frozen row types the dashboard renders;
+  `recent_events`, `snapshot`, and `issue_ledgers` -- per-issue run history for the worker's
+  admission ledger (#112), bounded by `LEDGER_SEED_LIMIT` and `LEDGER_WINDOW_DAYS`, whose
+  `failures` counts the runs since the later of the last `succeeded` one and the last `blocked`
+  event, skipping `cancelled` (a release, not a fault), so where it and the in-process count
+  differ the store's is the looser reading -- which is the right way for a seed to be wrong)
+  returning the frozen row types the dashboard renders;
   `MAX_WINDOW_DAYS = 365` bounds `--days` and the API window. `database.py`: the `Database`
   facade the CLI and the web app go through (`migrate`, `probe`, `queries`, `register_repo`,
   `store(labels, repo)`, `listener(on_notify, repo=)`, `notify_refresh(repo)`);
