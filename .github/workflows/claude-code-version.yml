@@ -96,14 +96,15 @@ jobs:
             else
               changed=true
               # Asked of the API, not of `git ls-remote`: this checkout persists no
-              # credential, so an unauthenticated ls-remote against a private repository
-              # fails with "Repository not found" and the `if` reads that as "no branch" --
-              # which would have open-pr try to create a branch that is already there and
-              # be rejected on push. `gh` has GH_TOKEN, and reading a ref is contents: read.
+              # credential, so against a private repository an unauthenticated ls-remote
+              # fails with "Repository not found" rather than reporting an absent branch.
+              # `gh` still has GH_TOKEN, and reading a ref is contents: read.
+              #
               # Only a 404 is "no branch". Anything else -- a 5xx, a rate limit, a token
-              # that lost its scope -- is a question this job could not answer, and
-              # answering it "no" would have open-pr try to create a branch that is
-              # already there and be rejected on push. So it fails the run instead.
+              # that lost its scope -- is a question this job could not answer, and the
+              # cost of answering it "no" is the same either way: open-pr would try to
+              # create a branch that is already there and be rejected on push. So an
+              # unreadable ref fails the run instead of guessing.
               if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent 2>&1)"; then
                 echo "::notice::${branch} exists with no pull request; reusing it"
                 reuse=true
