@@ -136,7 +136,8 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 
 # The worker and the session are different accounts (#75), and so is one session from the
 # next (#121). `issuebot` (uid 1000) is the worker: it holds GH_TOKEN, the database URL and
-# the Slack webhook, parses what the session writes and decides every label move. `agent` (uid 1001) is the session: `claude -p`, every hook, the clone and
+# the Slack webhook, parses what the session writes and decides every label move. `agent`
+# (uid 1001) is the session: `claude -p`, every hook, the clone and
 # the post-clone setup run as it, and the login it authenticates with lives in its own home
 # (compose mounts `claude-home` at /home/agent/.claude). Nothing the session can read or
 # write at its own uid is an input to the worker: /app is root's and writable by neither,

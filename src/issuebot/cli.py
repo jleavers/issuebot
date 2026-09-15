@@ -505,17 +505,13 @@ def _run_as_check(settings: Settings) -> Check:
         problems.append(complaint)
     if problems:
         return Check(subject, "fail", "; ".join(problems))
+    concurrent = settings.agent.max_concurrent_agents
     if len(accounts) == 1:
-        return Check(
-            subject,
-            "warn" if settings.agent.max_concurrent_agents > 1 else "ok",
-            f"{named}; the session runs as a separate account"
-            + (
-                f", but all {settings.agent.max_concurrent_agents} concurrent sessions share it"
-                if settings.agent.max_concurrent_agents > 1
-                else ""
-            ),
-        )
+        shared = concurrent > 1
+        detail = f"{named}; the session runs as a separate account"
+        if shared:
+            detail += f", but all {concurrent} concurrent sessions share it"
+        return Check(subject, "warn" if shared else "ok", detail)
     status: CheckStatus = "warn" if len(accounts) < settings.agent.max_concurrent_agents else "ok"
     detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
     if status == "warn":
@@ -1059,14 +1055,23 @@ def _with_bound_account(workflow: Workflow, issue: Issue) -> Workflow:
     key = workspace_key(issue.identifier)
     busy = pool.busy_accounts()
     account = pool.bound(key) or pool.allocate(key, busy=busy)
-    if account is None or account in busy:
-        # A worker may be running beside this command, and an open workspace is the one signal
-        # of that another process can read (#121). Refusing beats putting two sessions at one
-        # uid, which is the whole point of the pool.
+    # A worker may be running beside this command, and an open workspace is the one signal of
+    # that another process can read (#121). Refusing beats putting two sessions at one uid,
+    # which is the whole point of the pool -- and the two refusals are different facts, so
+    # they say different things: `allocate` already skips the busy accounts, so it answers
+    # `None` only when every one of them is in use, while a *bound* account that is busy is
+    # this one workspace waiting for the session already running in it.
+    if account is None:
         raise AgentError(
             "workspace_error",
             f"every session account is busy ({', '.join(sorted(busy))}); "
             "a worker is running one, so wait for it or stop the worker",
+        )
+    if account in busy:
+        raise AgentError(
+            "workspace_error",
+            f"this workspace is bound to {account}, which a session is already running as; "
+            "wait for it or stop the worker",
         )
     return replace(workflow, config=settings_with_run_as(settings, account))
 

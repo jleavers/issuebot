@@ -253,11 +253,19 @@ CLAUDE_CODE_OAUTH_TOKEN=...        # or ANTHROPIC_API_KEY
 ```
 
 or, in `WORKFLOW.md`, `agent: {run_as: [agent-1, agent-2, agent-3]}`. The image builds three
-such accounts by default (`ISSUEBOT_AGENT_POOL_SIZE` at build time); each workspace directory
-then belongs to the worker and to its bound account's group alone (`1770`), so a sibling
-session cannot enter it, and a workspace keeps its account for as long as it exists, which is
-what lets a rework session write the clone the first one made. Dispatch is capped by the pool
-as well as by `agent.max_concurrent_agents`, and `validate` says so when the pool is smaller.
+such accounts by default (`ISSUEBOT_AGENT_POOL_SIZE` in this checkout's `.env`, at build time;
+`docker compose build worker` to pick a change up); each workspace directory then belongs to
+the worker and to its bound account's group alone (`1770`), so a sibling session cannot enter
+it, and a workspace keeps its account for as long as it exists, which is what lets a rework
+session write the clone the first one made. Dispatch is capped by the pool as well as by
+`agent.max_concurrent_agents`, and `validate` says so when the pool is smaller.
+
+Turning a pool on over a `/workspaces` volume that already holds clones needs nothing of you:
+a workspace whose clone belongs to another account is re-cloned rather than handed to a
+session git would refuse, and the removal runs as whichever account owns what is there. The
+setting is re-checked on a reload too -- a pool named in `WORKFLOW.md` with an account that
+does not exist, a missing group membership or no credential holds dispatch and says so in
+`issuebot status` and on the dashboard, rather than failing every session it claims for.
 
 **A pool needs a credential in the environment.** Each account has a home of its own, and
 `claude` reads its login from there, so a pool shares no login between its accounts -- on

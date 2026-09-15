@@ -106,12 +106,13 @@ the credential never lands in a home.
   "busy": it stops every candidate, so it holds dispatch as a fourth `DispatchHold` kind
   (`accounts`, #29) rather than leaving a worker that looks healthy and claims nothing.
 
-- **The wall.** A workspace is open to exactly one account, and only while that account's
-  session is running in it. `share_with` makes the directory `1770`, owner the worker (sticky,
-  so `session.json` and `runs/` stay the worker's, as #75 established) and group the bound
-  account's own: a sibling session's uid is in neither, so it cannot enter, list or write.
-  `seal` puts it back to `0700` when the run ends, and a worker seals every workspace at
-  startup, since the only way one stays open is a worker killed outright. The root above stays
+- **The wall.** A workspace is open to exactly one account, and only while that account is
+  working in it — a session running, or a removal unlinking what one left. `share_with` makes
+  the directory `1770`, owner the worker (sticky, so `session.json` and `runs/` stay the
+  worker's, as #75 established) and group the bound account's own: a sibling session's uid is
+  in neither, so it cannot enter, list or write. `seal` puts it back to `0700` when the run
+  ends, again if a removal fails partway, and for every workspace at startup, since the only
+  way one stays open across a restart is a worker killed outright. The root above stays
   `0755`.
 
   Both halves are needed, because a workspace outlives its run. An issue sitting in `review`
@@ -136,6 +137,25 @@ the credential never lands in a home.
   that moved — the pool shrank, the setting changed, a pool was turned on over an existing
   `/workspaces` volume — re-clones rather than handing the session a tree git will refuse every
   command in.
+
+  Re-cloning means removing what is there, and that is the account's own unlink: the tree
+  belongs to the *previous* binding, which neither the new account (it owns nothing in it) nor
+  the worker (it owns the workspace, but not the directories inside the clone) can remove. So
+  `_remove_tree` runs a delegated pass for every account that owns an entry at the top of the
+  workspace as well as for the bound one, opening the directory to each in turn — the only
+  thing derived from the directory is which *removals* to attempt, never the binding, and the
+  sudo rule still refuses anything outside the pool. A removal the worker's own pass then fails
+  re-seals, so a tree that stays on disk is never left wider than it arrived, and the account
+  it belongs to does not read as busy for ever after.
+
+- **A reloaded setting is checked again.** `agent.run_as` is a setting like any other, so a
+  reload can introduce exactly what startup refuses: a delegation that does not work, a worker
+  outside an account's group, two accounts sharing one, a pool with no credential in the
+  environment. The probes therefore run again whenever the setting changes, and a failure holds
+  dispatch as `accounts` rather than ending the process — putting the file back lifts it on the
+  next reload, which is what a running deployment wants of a typo. Nothing is sealed on a
+  reload, unlike at startup: sessions are running, and their workspaces are open to the
+  accounts they are running as.
 
 - **The image.** `agent-1` .. `agent-N` (uids 1011 upwards, `ISSUEBOT_AGENT_POOL_SIZE`,
   default 3) beside `agent`, all in group `agents`, and the sudo rule becomes

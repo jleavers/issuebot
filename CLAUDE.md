@@ -244,7 +244,13 @@ floor, not the shipped version, and moves by hand.
   Both halves are needed: a workspace outlives its run, accounts are fewer than workspaces, so
   without the seal a hostile session would eventually be handed an account holding an honest,
   idle workspace. `_is_complete` also requires `.git` to belong to the bound account, so a
-  binding that moved re-clones rather than handing the session a tree git refuses. The `1770`
+  binding that moved re-clones rather than handing the session a tree git refuses -- and
+  re-cloning is a removal of the *previous* account's files, which neither the new account nor
+  the worker owns, so `_remove_tree` delegates one pass per account owning an entry at the top
+  of the workspace (`_removers`, `_top_level_owners`) with the directory opened to each in
+  turn, and re-seals when the worker's own pass then fails. Only which removals to attempt is
+  read off the directory; the binding never is, and the sudo rule still refuses anything
+  outside the pool. The `1770`
   needs the worker to be a member of that account's group -- `group_complaint` -- and the
   pool's accounts to have groups of their own -- `pool_complaint`, since two sharing one would
   open every workspace to both; `probe_run_as` asks all three and the image arranges them with
@@ -449,13 +455,22 @@ floor, not the shipped version, and moves by hand.
   that session's model, and then from `settings_with_run_as`, so a pooled `agent.run_as` picks
   that session's account (#121): `_bind_account` runs *before* the claim, so an issue whose
   account is busy is left on the board rather than moved to `in-progress` to wait there, and
-  `_workspaces_for` narrows a terminal removal to the account that owns the files.
+  `_workspaces_for` narrows a terminal removal to the account that owns the files -- never to
+  *no* account under a pool, since the host route would skip the delegated unlink and leave a
+  tree the worker cannot remove either, so an unknown binding falls back to the pool's first
+  member and the manager finds the real owner from the tree.
   `_prune_accounts` runs on the terminal sweep, and a record that will not read holds
   dispatch as a fourth `DispatchHold` kind, `accounts`: `_read_accounts` re-derives it from
   the record once a tick, so it is a statement about the file rather than about a candidate
   and can neither stick after a fix nor vanish on a tick whose only work was a retry; a due
   retry in that position requeues as kind `accounts`, and one merely waiting for a busy
-  account as `slots`.
+  account as `slots`. `agent.run_as` is a setting like any other, so a reload can introduce
+  exactly what startup refuses: `_settle_run_as` re-runs `probe_run_as` and
+  `credential_complaint` once per change and holds dispatch as `accounts` on a failure
+  (`_run_as_block`, which `_accounts_hold` puts ahead of the record's own complaint and
+  `_bind_account` refuses on) rather than ending the process, so putting the file back lifts
+  it on the next reload. Nothing is sealed on a reload, unlike at startup: sessions are
+  running, and their workspaces are open to the accounts they are running as.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's

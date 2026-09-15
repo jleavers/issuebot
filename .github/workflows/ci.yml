@@ -256,7 +256,16 @@ jobs:
           test "$(docker run --rm --entrypoint git issuebot:ci config --system --get-all safe.directory)" = '/workspaces/*'
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
-            mkdir -m 1777 /workspaces/probe
+            # Built by the shipped `share_with`, not a hand-written mode: the shape this step
+            # proves git against has to be the shape the worker actually creates (#121).
+            python - <<'"'"'PY'"'"'
+          from pathlib import Path
+          from issuebot.agent.accounts import share_with
+          path = Path("/workspaces/probe")
+          path.mkdir(mode=0o700)
+          share_with(path, "agent")
+          PY
+            test "$(stat -c "%u %g %a" /workspaces/probe)" = "1000 $(id -g agent) 1770"
             sudo -n -H -u agent git -C /workspaces/probe init -q
             test "$(stat -c %u /workspaces/probe)" = 1000
             test "$(stat -c %u /workspaces/probe/.git)" = 1001

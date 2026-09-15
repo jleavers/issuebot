@@ -3093,7 +3093,8 @@ def _with_pool(
         **(POOL_ENV if environ is None else environ),
     }
     workflow = load_workflow(h.path, environ=env)
-    assert workflow.config.agent.run_as_pooled
+    # One account is allowed here too: a reload *into* a pool is a case worth driving.
+    assert workflow.config.agent.run_as == tuple(a.strip() for a in accounts.split(","))
     h.orchestrator = Orchestrator(
         workflow,
         bus=h.bus,
@@ -3111,6 +3112,86 @@ def _with_pool(
         on_snapshot=h.snapshots.append,
     )
     return h.orchestrator
+
+
+def _pool_workflow(h: Harness, accounts: str) -> None:
+    """Rewrite the workflow with ``agent.run_as`` spelled out, so a reload can change it: the
+    environment fallback is fixed for the life of the orchestrator."""
+    h.write_workflow(
+        text=WORKFLOW_TEMPLATE.format(
+            interval_ms=30_000,
+            root=h.root,
+            max_concurrent=2,
+            max_turns=3,
+            max_attempts=3,
+            max_retry_backoff_ms=300_000,
+            max_conflict_reworks=3,
+            claude=h.claude,
+            claude_extra=h.claude_extra(),
+            stall_timeout_ms=300_000,
+            hooks="",
+            prompt="Task {{ issue.identifier }}",
+        ).replace("agent:\n", f"agent:\n  run_as: [{accounts}]\n", 1)
+    )
+
+
+async def test_a_reload_into_an_unusable_pool_holds_dispatch_instead_of_claiming(
+    tmp_path: Path,
+) -> None:
+    """`agent.run_as` is a setting like any other, so a reload can introduce exactly what
+    startup refuses (#121). The probe runs again and the fault holds dispatch."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a == "agent-3"
+        ],
+    )
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-3")
+    await orchestrator.tick()
+    assert h.github.issue(1).state is StateLabel.TODO, "nothing is claimed for a broken pool"
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "agent-3: cannot run as 'agent-3'" in hold.reason
+
+
+async def test_a_reload_that_repairs_the_pool_lifts_the_hold_and_dispatches(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a == "agent-3"
+        ],
+    )
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-3")
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is not None
+    _pool_workflow(h, "agent-1, agent-2")
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is None
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_a_reload_into_a_pool_without_a_credential_holds_dispatch(tmp_path: Path) -> None:
+    """The one rule a pool adds beyond #75's: no shared login, so the credential has to be one
+    `claude` needs no file for. Startup refuses it; a reload holds instead of failing every
+    session's authentication."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(h, accounts="agent-1", environ={})
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-2")
+    await orchestrator.tick()
+    assert h.github.issue(1).state is StateLabel.TODO
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in hold.reason
 
 
 async def test_startup_probes_every_account_in_the_pool(tmp_path: Path) -> None:

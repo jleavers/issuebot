@@ -188,6 +188,10 @@ class WorkspaceManager:
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
             self._log.warning("workspace_remnant_removed", workspace=str(path))
+            # A remnant is a workspace whose creation did not finish, or one whose binding
+            # moved (#121): either way `_remove_tree` opens it to each account that owns
+            # something in it, which a sealed or re-bound directory otherwise refuses.
+            self._log.warning("workspace_remnant_removed", workspace=str(path))
             await self._remove_tree(path, "cannot remove remnant")
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -355,10 +359,48 @@ class WorkspaceManager:
         return await self._run_script(name, script, workspace)
 
     async def _remove_tree(self, path: Path, what: str) -> None:
-        """Delete a workspace: the agent's files as the agent (#75), then the worker's own."""
-        if self._runas is not None:
-            await asyncio.to_thread(self._runas.remove_tree, path)
-        _remove_path(path, what)
+        """Delete a workspace: the agent's files as the agent (#75), then the worker's own.
+
+        Under a pool the files inside may be a *previous* binding's (#121): turning a pool on
+        over a live ``/workspaces``, or shrinking one, leaves a clone whose directories belong
+        to an account this manager is not. Neither the new account (it owns nothing there) nor
+        the worker (it owns the workspace but not the directories inside the clone) could then
+        unlink it, and the issue would fail every attempt on a remnant nothing removes. So the
+        delegated remove runs as every account that owns something at the top of the tree as
+        well as as this workspace's own. Only the removal is derived from the directory; the
+        *binding* never is, and cannot be widened by this: the sudo rule names the pool's group
+        and refuses anything else, exactly as it does today. ``remove_tree`` is uid-scoped,
+        idempotent and swallows its own failures, so the extra passes cost a ``sudo`` each.
+
+        Each pass needs the directory *open to the account it delegates to*, and a workspace
+        arriving here is usually closed to all of them: sealed (``0700``) after its run, or
+        after ``seal_idle``, and open to the current binding's group at best, which is the one
+        account that owns nothing in a tree a previous binding made. So it is re-shared per
+        pass, and sealed again if the worker's own removal then fails, so a tree that stays on
+        disk is never left wider than it arrived.
+        """
+        for account in self._removers(path):
+            with contextlib.suppress(AgentError):
+                share_with(path, account)
+            await asyncio.to_thread(RunAs(account).remove_tree, path)
+        try:
+            _remove_path(path, what)
+        except AgentError:
+            self.seal(path)
+            raise
+
+    def _removers(self, path: Path) -> list[str]:
+        """This workspace's account first, then any other that owns an entry at the top of it.
+
+        Empty on the host route, where there is no delegation and the files are the worker's.
+        """
+        if self._account is None:
+            return []
+        accounts = [self._account]
+        for owner in _top_level_owners(path):
+            if owner not in accounts:
+                accounts.append(owner)
+        return accounts
 
     async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
         # Off the event loop: the delegated kill is a sudo subprocess with its own timeout,
@@ -545,6 +587,29 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"expected an integer, got {value!r}")
     return value
+
+
+def _top_level_owners(path: Path) -> list[str]:
+    """The accounts owning ``path`` and its direct children, the worker's own uid aside.
+
+    A clone made by another account is ``.git`` and a working tree that account owns, so one
+    level is enough to name it; deeper entries cannot belong to a uid this misses, since a
+    session can only create files as itself. Unresolvable owners are skipped: the answer is a
+    list of extra removal passes, never a decision.
+    """
+    me = os.getuid()
+    owners: list[str] = []
+    entries = [path]
+    with contextlib.suppress(OSError):
+        entries.extend(sorted(path.iterdir()))
+    for entry in entries:
+        try:
+            uid = entry.lstat().st_uid
+            if uid != me:
+                owners.append(pwd.getpwuid(uid).pw_name)
+        except OSError, KeyError:
+            continue
+    return owners
 
 
 def _owned_by(path: Path, account: str | None) -> bool:

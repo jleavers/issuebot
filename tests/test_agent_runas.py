@@ -413,6 +413,97 @@ async def test_workspace_creation_and_removal_run_as_the_account(
     )
 
 
+async def test_a_removal_runs_as_every_account_that_owns_something_in_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-cloning a workspace whose binding moved means removing the *previous* account's
+    files, which neither the new account nor the worker can unlink (#121). Each pass therefore
+    delegates to an account that owns something there, with the directory opened to it first:
+    a sealed workspace is one nothing but the worker can enter, and one opened to the current
+    binding is closed to the one whose files are actually inside.
+    """
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    passes: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        runas_module.RunAs,
+        "remove_tree",
+        lambda self, target: passes.append((self.user, stat.S_IMODE(target.stat().st_mode))),
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    manager.seal(path)
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+    # `nobody` exists everywhere this runs and owns nothing here: it stands for the previous
+    # binding, whose files the current account could not unlink. Sharing with it fails (the
+    # worker is in no group of its), which is suppressed -- the pass is still attempted.
+    monkeypatch.setattr("issuebot.agent.workspace._top_level_owners", lambda target: ["nobody", ME])
+    await manager._remove_tree(path, "cannot remove remnant")
+    # The bound account first, then the other owner, each named once; and no pass sees the
+    # sealed directory it arrived as.
+    assert passes == [(ME, WORKSPACE_DIR_MODE), ("nobody", WORKSPACE_DIR_MODE)]
+    assert not path.exists()
+
+
+def test_the_owners_a_removal_delegates_to_come_from_the_tree_not_the_binding(
+    tmp_path: Path,
+) -> None:
+    """One level is enough to name a clone's account, and the worker's own entries are not
+    accounts to delegate to (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    # Everything here is this process's, so there is nothing to add to the bound account.
+    assert manager._removers(path) == [ME]
+    host = Settings.model_validate(
+        {"github": {"repo": "example/repo"}, "workspace": {"root": str(root)}}
+    )
+    hosted = WorkspaceManager(host, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    # The host route delegates nothing: the files are the worker's and it removes them itself.
+    assert hosted._removers(path) == []
+
+
+async def test_a_removal_that_fails_seals_the_workspace_it_leaves_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open workspace the removal could not delete would be readable by the next session
+    bound to the same account, and would read as busy for ever after (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    monkeypatch.setattr(runas_module.RunAs, "remove_tree", lambda self, target: None)
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._remove_path",
+        lambda target, what: (_ for _ in ()).throw(AgentError("workspace_error", what)),
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    with pytest.raises(AgentError):
+        await manager._remove_tree(path, "cannot remove remnant")
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+
+
 def test_a_clone_owned_by_another_account_is_not_a_workspace_to_reuse(tmp_path: Path) -> None:
     """A binding that moved -- the pool shrank, the setting changed -- leaves a tree the new
     account cannot write, and git would fail every command in it rather than say so (#121)."""

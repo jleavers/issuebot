@@ -83,6 +83,12 @@ services:
         # own client-side code (README, "Node for the target repository's tests"). Empty bakes
         # nothing; `docker compose build worker` to pick a change up.
         NODE_VERSION: "${ISSUEBOT_NODE_VERSION:-}"
+        # How many session accounts the image builds (#121): `agent-1` .. `agent-N`, which is
+        # what `agent.run_as` may then name as a pool. The image's own default is 3, matching
+        # `agent.max_concurrent_agents`; raise both together, and `docker compose build worker`
+        # to pick a change up. The web service builds from the same context without it, since
+        # the dashboard runs no session.
+        ISSUEBOT_AGENT_POOL_SIZE: "${ISSUEBOT_AGENT_POOL_SIZE:-3}"
     profiles: ["worker"]
     networks: [issuebot]
     # The worker applies pending database migrations when it starts (issuebot migrate is the

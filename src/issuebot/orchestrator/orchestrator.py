@@ -348,6 +348,11 @@ class Orchestrator:
         # which is a hold rather than a silent skip -- without it `issuebot status`, the
         # dashboard and `/healthz` would all read as healthy while nothing was ever claimed.
         self._accounts_block: str | None = None
+        # Why the pool `agent.run_as` now names would not work (#121). Startup refuses one that
+        # does not, but a reload can introduce the same faults, so a changed setting is probed
+        # again and a failure holds dispatch rather than failing every session it claims for.
+        self._run_as_block: str | None = None
+        self._run_as_pending = False
         self._github_block: str | None = None
         # Issues whose conflict-bounce limit this process has already noted on the workpad,
         # and the limit it noted (#104): the note's presence in the workpad is the session's
@@ -667,6 +672,7 @@ class Orchestrator:
         """Symphony §8.1: reconcile, reload, preflight, fetch, dispatch, snapshot."""
         await self.reconcile()
         self._reload_workflow()
+        await self._settle_run_as()
         dispatched = 0
         hold: _Hold | None = None
         problems = preflight(self._workflow.config, which=self._which)
@@ -713,8 +719,9 @@ class Orchestrator:
         something the operator can fix on this host, and a ``gh`` that will not run is why the
         fetch failed rather than a second, independent fault.
         """
-        if hold is None and self._accounts_block is not None:
-            hold = _Hold("accounts", self._accounts_block, key=ACCOUNTS_HOLD_KEY)
+        accounts = self._accounts_hold()
+        if hold is None and accounts is not None:
+            hold = _Hold("accounts", accounts, key=ACCOUNTS_HOLD_KEY)
         if hold is None and self._github_block is not None:
             hold = _Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
         if hold is None:
@@ -789,6 +796,7 @@ class Orchestrator:
             self._report_reload_failure(str(exc))
             return
         changed = _changed_sections(self._workflow, workflow)
+        self._run_as_pending = workflow.config.agent.run_as != self._workflow.config.agent.run_as
         self._workflow = workflow
         self._config_error = None
         self._reported_reload_error = None
@@ -912,6 +920,40 @@ class Orchestrator:
             return record.attempt, record.session_id
         return 1, None
 
+    async def _settle_run_as(self) -> None:
+        """Re-run the pool's admission checks when a reload changed ``agent.run_as`` (#121).
+
+        Startup refuses a delegation that does not work, a worker outside a session account's
+        group, two accounts sharing one, and a pool with no credential in the environment,
+        because each of those fails every run rather than one. `agent.run_as` is a setting like
+        any other, so a reload can introduce all four -- and a worker that reloaded into one
+        would go on claiming issues no session could work. The same checks therefore run again,
+        once per change, and a failure holds dispatch as ``accounts`` instead of ending the
+        process: putting the file back lifts it on the next reload, which is what a running
+        deployment wants of a typo. Nothing is sealed here, unlike at startup: sessions are
+        running, and their workspaces are open to the accounts they are running as.
+        """
+        if not self._run_as_pending:
+            return
+        self._run_as_pending = False
+        settings = self._workflow.config
+        problems: list[str] = []
+        if settings.agent.run_as:
+            problems.extend(
+                await asyncio.to_thread(self._run_as_probe, settings.agent.run_as, self._environ)
+            )
+        complaint = credential_complaint(settings, self._environ)
+        if complaint is not None:
+            problems.append(complaint)
+        self._run_as_block = f"agent.run_as: {'; '.join(problems)}" if problems else None
+        if problems:
+            self._log.error("dispatch_run_as_unusable", problems=problems)
+
+    def _accounts_hold(self) -> str | None:
+        """Why no workspace can be bound to a session account: the setting first, then the
+        record, since a pool that cannot be used at all makes the record's state moot."""
+        return self._run_as_block or self._accounts_block
+
     def _read_accounts(self) -> None:
         """Re-derive the accounts hold from the record itself, once a tick (#121).
 
@@ -951,6 +993,11 @@ class Orchestrator:
         derived from the directory: that would let whoever writes an issue choose which
         honest session it sits beside.
         """
+        if self._run_as_block is not None:
+            # The setting itself is unusable after a reload (#121): no account can be bound,
+            # pool or not, so nothing is claimed until it is put back. `_settle_dispatch_hold`
+            # is already reporting why.
+            return None, False
         if self._pool is None:
             return session_account(self._workflow.config), True
         key = workspace_key(issue.identifier)
@@ -1200,19 +1247,26 @@ class Orchestrator:
             self._log.warning("accounts_prune_failed", error=exc.message)
 
     def _workspaces_for(self, issue: Issue) -> WorkspaceManager:
-        """A manager narrowed to the account this issue's workspace belongs to."""
+        """A manager narrowed to the account this issue's workspace belongs to.
+
+        A pool never narrows to *no* account: the removal this is built for is a delegated
+        unlink of files a session owns, and the host route would skip it and leave a tree the
+        worker cannot remove either (#121). An unknown binding -- pruned, or a record that
+        will not read -- therefore falls back to the pool's first member, which the manager
+        uses as the starting point for a removal that also runs as whoever owns what is
+        actually there.
+        """
         settings = self._workflow.config
         account = session_account(settings)
         if self._pool is not None:
             try:
-                account = self._pool.bound(workspace_key(issue.identifier))
+                account = self._pool.bound(workspace_key(issue.identifier)) or account
             except AgentError as exc:
-                # The record is unreadable, so the account is unknown: the worker removes what
-                # it owns and logs the rest, which is what it already does for a failed remove.
+                # The record is unreadable, so the binding is unknown; the first member still
+                # delegates, and the manager finds the files' real owner from the tree.
                 self._log.warning(
                     "account_lookup_failed", issue_number=issue.number, error=exc.message
                 )
-                account = None
         return self._workspaces_factory(settings_with_run_as(settings, account))
 
     # --- worker exits and retries -----------------------------------------------------
@@ -1545,7 +1599,7 @@ class Orchestrator:
             # A slot is free but this workspace's account is not, or the record that would name
             # it will not read (#121). Requeued rather than dropped: `_dispatch` would only
             # refuse it, and the attempt count would go with it.
-            blocked = self._accounts_block
+            blocked = self._accounts_hold()
             self._requeue(
                 entry,
                 kind="accounts" if blocked else "slots",

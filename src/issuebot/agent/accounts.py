@@ -13,11 +13,12 @@ the two halves of that:
   the workspace root that only the worker can write, never a fact derived from the directory.
   Deriving it would hand the choice to whoever writes the issue the key is built from, which
   is exactly the account a hostile session would want to be given.
-- **The wall.** A workspace is open to exactly one account and only while that account's
-  session is running in it. `share_with` makes the directory `1770`, owner the worker and
-  group the bound account's own, so the worker keeps its sticky state and the bound session
-  works inside; `seal` puts it back to `0700` when the run ends, so nothing but the worker can
-  even traverse into an idle one. The root above it stays `0755`.
+- **The wall.** A workspace is open to exactly one account, and only while that account is
+  working in it -- a session running, or a removal unlinking what one left. `share_with` makes
+  the directory `1770`, owner the worker and group the bound account's own, so the worker keeps
+  its sticky state and the bound session works inside; `seal` puts it back to `0700` when the
+  run ends, and again if a removal fails partway, so nothing but the worker can even traverse
+  into an idle one. The root above it stays `0755`.
 
   Both halves are needed, because a workspace outlives its run: an issue sitting in `review`
   keeps its clone for days, accounts are fewer than workspaces, and without the seal a hostile

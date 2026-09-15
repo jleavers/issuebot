@@ -72,7 +72,7 @@ _ACCOUNT_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
 def _split_accounts(value: str) -> list[str]:
     """``"agent"`` -> one account, ``"agent-1,agent-2"`` -> two: the spelling an environment
     variable can carry, since ``ISSUEBOT_AGENT_USER`` is a string and a pool is a list."""
-    return [part.strip() for part in value.split(",") if part.strip()] or [value.strip()]
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 class WorkspaceSettings(_Model):
@@ -129,7 +129,7 @@ class AgentSettings(_Model):
         pool = [str(name).strip() for name in names]
         if not pool or not all(_ACCOUNT_NAME.fullmatch(name) for name in pool):
             raise ValueError("agent.run_as must be an account name or a list of them")
-        if len({name for name in pool}) != len(pool):
+        if len(set(pool)) != len(pool):
             raise ValueError("agent.run_as must not name the same account twice")
         return tuple(pool)
 
