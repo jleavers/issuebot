@@ -73,6 +73,9 @@ def built_session_accounts() -> list[str] | None:
     the worker instead: exactly the privilege-separation regression #75 and #121 exist to
     rule out. So this one is loud rather than quiet.
 
+    A file whose bytes are not UTF-8 is the same kind of fault by a third route, and the one
+    that arrives as a `UnicodeDecodeError` rather than an `OSError` (#145).
+
     A file that exists and names no account takes the same exit, for the same reason. The
     order is "the baked list, *when the file exists*", and then "the host route, where no
     such file does": a list declaring nothing is neither, it is a corrupt list, and reading
@@ -85,6 +88,17 @@ def built_session_accounts() -> list[str] | None:
         return None
     except OSError as exc:
         raise SessionAccountsUnreadable(f"session accounts unreadable: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # A third way to be a file that exists and will not read, and the one that is not an
+        # `OSError`: bytes that are not UTF-8 -- a truncated write, or a hand-edit saved as
+        # UTF-16, whose byte-order mark is the first thing to fail. It takes the same exit as
+        # the other two, since guessing an encoding for a list of account names is how a
+        # container ends up running its sessions as accounts nobody built. The path is named
+        # here because `UnicodeDecodeError` describes the bytes and not the file they came
+        # from, unlike `OSError`.
+        raise SessionAccountsUnreadable(
+            f"session accounts unreadable: {SESSION_ACCOUNTS_FILE}: {exc}"
+        ) from exc
     accounts = [line.strip() for line in text.splitlines() if line.strip()]
     if not accounts:
         raise SessionAccountsUnreadable(

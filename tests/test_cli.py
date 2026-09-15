@@ -3473,7 +3473,6 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     executables: object,
-    bare_account_names: None,
     tmp_path: Path,
 ) -> None:
     """#145: the second read of the built list is the one non-total call in the check list.
@@ -3503,7 +3502,6 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     executables: object,
-    bare_account_names: None,
     tmp_path: Path,
 ) -> None:
     """The other spelling of a damaged list, and the half that predates #142: a name that
@@ -3519,6 +3517,55 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
-    assert "[FAIL] agent.run_as: session accounts unreadable: " in out
-    assert str(listing) in out
+    prefix = "[FAIL] agent.run_as: session accounts unreadable: "
+    # The errno text between the prefix and the path is the platform's, so the line is read
+    # back and checked whole rather than pinned as one string: what matters is that the path
+    # is on *this* line, which is what sends the operator to the right file.
+    reported = [line for line in out.splitlines() if line.startswith(prefix)]
+    assert len(reported) == 1
+    assert str(listing) in reported[0]
     assert "17 checks: 1 failed, 1 warnings" in out
+
+
+def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    tmp_path: Path,
+) -> None:
+    """The spelling of "will not read" that arrives as a `UnicodeDecodeError` (#145)."""
+    listing = tmp_path / "session-accounts"
+    listing.write_bytes(b"agent-1\n\xff\xfeagent-2\n")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
+    assert "17 checks: 1 failed, 1 warnings" in out
+
+
+def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    tmp_path: Path,
+) -> None:
+    """The other half of the same refusal, for the same damaged file (#142, #145).
+
+    With nothing naming `agent.run_as`, the list is what resolves it, so the raise comes out
+    of `resolve_config` inside `load_workflow` and `_load_or_report` reports it as the
+    workflow's own -- exit 2, `validate`'s code for a workflow it could not load, rather than
+    the 1 a failed check uses. Pinned here because it is the line an operator meets on the
+    host route, and because it is what tells the two reports apart.
+    """
+    listing = tmp_path / "session-accounts"
+    listing.write_text("\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    assert main(["validate", "--workflow", str(GOOD)]) == 2
+    out = capsys.readouterr().out
+    assert "[FAIL] workflow: " in out
+    assert f"session accounts empty: {listing} exists and names no account" in out

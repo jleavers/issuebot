@@ -224,3 +224,24 @@ def test_an_unreadable_accounts_file_fails_closed(
     with pytest.raises(SessionAccountsUnreadable) as exc:
         resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
     assert exc.value.code == "session_accounts_unreadable"
+
+
+def test_an_accounts_file_that_is_not_utf8_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one spelling of "will not read" that is not an `OSError` (#145).
+
+    A truncated write, or a hand-edit saved as UTF-16 whose byte-order mark is the first thing
+    to fail, is a damaged list like any other -- and `UnicodeDecodeError` is a `ValueError`, so
+    it escaped the guard beside it and every `except ConfigError` above. Guessing an encoding
+    instead would be the fail-open the other two spellings exist to rule out.
+    """
+    listing = tmp_path / "session-accounts"
+    listing.write_bytes(b"agent-1\n\xff\xfeagent-2\n")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    with pytest.raises(SessionAccountsUnreadable) as exc:
+        resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert exc.value.code == "session_accounts_unreadable"
+    # `UnicodeDecodeError` describes the bytes, not the file they came from, so the message
+    # has to name it: an operator reading this line needs to know which file to open.
+    assert str(listing) in exc.value.message
