@@ -324,7 +324,18 @@ async def _turn_loop(
 ) -> None:
     settings = workflow.config
     max_turns = settings.agent.max_turns
+    # The run's wall clock (#110): fixed when the session started, before the clone and the
+    # before_run hook, and handed to every turn. Nothing the session prints moves it.
+    run_timeout_s = settings.agent.run_timeout_ms / 1000
+    deadline = state.started + run_timeout_s
     for turn_number in range(1, max_turns + 1):
+        if time.monotonic() >= deadline:
+            state.fail(
+                "run_timeout",
+                f"run deadline reached before turn {turn_number}: {run_timeout_s:.0f}s of "
+                "wall clock (agent.run_timeout_ms)",
+            )
+            return
         # The workpad is resolved here, by author, and handed to the prompt (#77): the agent
         # follows this id rather than finding the comment by a first line anyone can write.
         # Every turn, not once: the agent creates it in turn 1 and a resumed session's is
@@ -369,6 +380,7 @@ async def _turn_loop(
             log_dir=run_log_dir(workspace, state.run_id),
             observer=observer,
             cancel=cancel,
+            deadline=deadline,
         )
         state.record_turn(turn)
         _save(workspaces, workspace, state.session_record(turn_number, None))

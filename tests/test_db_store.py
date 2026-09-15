@@ -168,7 +168,14 @@ def test_insert_turn_placeholders_match_turncapture_fields() -> None:
     """Hermetic (no DATABASE_URL needed): pins INSERT_TURN's bound parameters against
     TurnCapture so a future field cannot be silently dropped from the write."""
     placeholders = set(re.findall(r"%\((\w+)\)s", INSERT_TURN))
-    assert {f.name for f in fields(TurnCapture)} | {"run_id"} == placeholders
+    assert {f.name for f in fields(TurnCapture)} | {"run_id", "repo"} == placeholders
+
+
+def test_stamp_forces_the_store_repository_over_a_row_that_carries_one() -> None:
+    """Hermetic: the repository is the store's, never the row's (#111)."""
+    store = PostgresStore("postgresql://x@127.0.0.1:1/x", repo=REPO, labels=GitHubLabels())
+    assert store._stamp({"repo": "theirs/repo", "number": 1}) == {"repo": REPO, "number": 1}
+    assert store._stamp({"number": 1}) == {"repo": REPO, "number": 1}
 
 
 async def test_run_ended_with_captures_writes_run_turns(store: PostgresStore, db_url: str) -> None:
@@ -205,6 +212,35 @@ async def test_run_turns_are_idempotent_on_a_retried_event(
     (row,) = await rows(db_url, "SELECT result_text FROM run_turns")
     assert row["result_text"] == "Done again."
     assert len(await rows(db_url, "SELECT id FROM events")) == 2
+
+
+async def test_turns_carry_the_store_repository_and_a_shared_run_id_is_two_runs(
+    store: PostgresStore, db_url: str
+) -> None:
+    """A run_id is unique per repository, not across them (#111): two workers whose ids
+    collide keep two runs and two sets of turns, each stamped with its own repository."""
+    other = PostgresStore(db_url, repo="other/repo", labels=GitHubLabels())
+    await other.connect()
+    try:
+        await store.apply_event(started())
+        await store.apply_event(ended(), turns=[capture(1)])
+        await other.apply_event(started(issue_number=9, issue_identifier="other-9"))
+        await other.apply_event(
+            ended(issue_number=9, issue_identifier="other-9"),
+            turns=[capture(1, result_text="Theirs.")],
+        )
+    finally:
+        await other.close()
+    runs = await rows(db_url, "SELECT repo, run_id, issue_number FROM runs ORDER BY repo")
+    assert [(r["repo"], r["run_id"], r["issue_number"]) for r in runs] == [
+        (REPO, "run-1", 42),
+        ("other/repo", "run-1", 9),
+    ]
+    turns = await rows(db_url, "SELECT repo, run_id, result_text FROM run_turns ORDER BY repo")
+    assert [(t["repo"], t["run_id"], t["result_text"]) for t in turns] == [
+        (REPO, "run-1", "Done."),
+        ("other/repo", "run-1", "Theirs."),
+    ]
 
 
 async def test_run_ended_without_captures_writes_no_turns(

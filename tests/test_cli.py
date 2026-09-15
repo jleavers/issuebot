@@ -38,6 +38,7 @@ from issuebot.db import (
     Probe,
     StoreError,
     StoreUnavailableError,
+    refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
 from issuebot.events import Event, StateChanged
@@ -2756,7 +2757,9 @@ def test_refresh_notifies_and_reports_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert capsys.readouterr().out == (
+        f"[ OK ] refresh: notified {refresh_channel('example/repo')} for example/repo\n"
+    )
     assert fake_database.notified == 1
     fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
     assert main(["refresh", "--workflow", str(path)]) == 1
@@ -3114,7 +3117,9 @@ def test_refresh_names_its_repository(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert capsys.readouterr().out == (
+        f"[ OK ] refresh: notified {refresh_channel('example/repo')} for example/repo\n"
+    )
     assert fake_database.notified_repos == ["example/repo"]
 
 
@@ -3139,7 +3144,13 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
-    assert "[ OK ] agent.run_as: agent; the session runs as a separate account" in out
+    uid = os.getuid()
+    # The account's own uid is named when it resolves on this host and left out when it does
+    # not, so the assertion is on the two parts that do not depend on /etc/passwd.
+    assert "[ OK ] agent.run_as: agent" in out
+    assert (
+        f"the session runs as a separate account, at a uid other than this process's ({uid})" in out
+    )
     assert probed == ["agent"]
     assert "17 checks: 0 failed, 1 warnings" in out
 

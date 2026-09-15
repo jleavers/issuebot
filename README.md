@@ -173,19 +173,21 @@ ignored.
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.todo|in_progress|review|rework|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
+| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 32 MiB per response, and the workpad is looked for in an issue's first 1,000 comments | `30000` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
 | `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs for one issue before it is escalated; the count is the issue's, so no label change resets it | `3` |
+| `agent.run_timeout_ms` | a run's wall clock, from the moment its session starts: a turn still running then is killed, no further turn starts, and the issue is escalated at once like one that reaches `agent.max_turns` (a retry never resumes a session, so it would spend the same clock again). The one timer the session's own output cannot reset | 4 hours |
 | `agent.max_issue_cost_usd` | what one issue may cost in total, across every label it wears and every time it is relabelled; `0` turns it off | `0` |
 | `agent.self_review` | the agent reviews its own diff before opening the PR | `true` |
 | `agent.max_conflict_reworks` | times the worker may move one issue from `issuebot/review` to `issuebot/rework` because its PR conflicts with the default branch; `0` turns it off. Counted from the `issuebot/rework` labels the token's account added to the issue, so under a shared account (your own login as the token) a rework you set by hand counts too; raise the setting to give such an issue more | `3` |
 | `claude.model` | `opus`, `sonnet` or a full model id; omit for Claude Code's default | none |
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
-| `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
+| `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | both bound *silence*, not time: a turn is killed after this long without a line of output on its stream, or after this long without a turn event reaching the worker. A session that keeps printing resets both, so a run's length is `agent.run_timeout_ms`'s to bound | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
 | `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
@@ -193,6 +195,17 @@ ignored.
 | `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
+
+Each timer above says which layer it bounds, and a few more ceilings are fixed in the code
+rather than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
+the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
+first, and a longer thread with no workpad in it fails the run rather than reading as "none";
+the conflict bounce reads at most the first 1,000 label additions of an issue's history, and a
+bounce that fails past a cap is not tried again until the issue changes; a
+running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,
+and each repository's worker listens on its own channel; and every database connection waits at
+most 10 s for a lock and 60 s for a statement, so a migration blocked on the advisory lock exits
+with `[FAIL] database:` instead of hanging inside the restart policy.
 
 Leave the prompt below the front matter as it is for your first runs. It tells the agent about
 the labels, the single "workpad" comment it keeps on the issue, the `issuebot/<number>-<slug>`
@@ -239,14 +252,14 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
 [ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
-[ OK ] agent.run_as: agent; the session runs as a separate account
+[ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other than this process's (1000)
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
 [ OK ] github.status: All Systems Operational
-[ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
+[ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
 17 checks: 0 failed, 2 warnings
@@ -391,7 +404,11 @@ the worker creates it.
 2. Add the `issuebot/todo` label. Within one poll interval the worker labels the issue
    `issuebot/in-progress`, clones the repository into the workspace and starts a session.
    `docker compose exec worker issuebot refresh` (host: `uv run issuebot refresh`) makes it
-   poll right away.
+   poll right away (at most once every 5 s, however often it is asked). The `NOTIFY` goes to
+   the repository's own channel, so a store shared by several workers wakes only the one the
+   issue belongs to -- which also means `refresh` and `worker` must be the same version:
+   across a rolling upgrade a new `refresh` prints `[ OK ]` at a channel an old worker is not
+   listening on, and that issue waits out the poll interval instead.
 3. Watch it work: the dashboard shows the Kanban, the running agents and, per issue, every
    turn's transcript; `docker compose logs -f worker` shows the events; on GitHub the agent
    keeps one workpad comment on the issue with its plan, checklist and notes, edited in
@@ -772,9 +789,16 @@ that matters on your host.
 ### When things go wrong
 
 - **Blocked.** If the agent hits a true external blocker (a missing tool, credential or
-  permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
-  the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
-  label it `issuebot/rework` or `issuebot/todo` to retry.
+  permission), or a run exhausts `agent.max_turns`, `agent.run_timeout_ms` or
+  `agent.max_attempts`, the worker moves the issue to `issuebot/review` with a Blockers
+  section in the workpad. Fix the cause, then label it `issuebot/rework` or `issuebot/todo`
+  to retry.
+
+  `agent.run_timeout_ms` escapes like `agent.max_turns` rather than counting against
+  `agent.max_attempts`: a retry never resumes a session, so it would re-read the repository
+  from cold and spend the same wall clock over again. The workpad block says `Wall clock
+  exhausted: N turns in attempt 1 ...`, so an issue that needs longer needs the setting
+  raised, not another attempt.
 
   `agent.max_attempts` counts *the issue's* failed runs, not one unbroken chain of them: the
   worker keeps the count itself, so a label move between a failure and the retry that follows
@@ -976,6 +1000,16 @@ PostgreSQL and `status`, `stats` and `refresh` work; without it the worker runs 
 before. The worker applies pending migrations when it starts and fails fast if the database
 is configured but unreachable; `validate` reports the schema version. The tests that need a
 database read `DATABASE_URL` and are skipped when it is unset.
+
+Everything the tree executes from outside it is pinned to a commit digest, not a name (#111):
+`uv.lock` hashes every Python artefact, every `uses:` in `.github/workflows/` and every `rev:`
+in `.pre-commit-config.yaml` is a 40-hex commit with its tag beside it, and
+`tests/test_pins.py` refuses a tag. A tag is a name its owner can repoint, and the hooks run on
+this host with `GH_TOKEN` and the store's DSN in the environment. Dependabot moves the action
+pins; the `pre-commit hooks version` workflow moves the hook pins weekly with `pre-commit
+autoupdate --freeze` and opens a pull request, like the `Claude Code version` workflow does
+for the `claude` pin in the Dockerfile. Bump a hook by hand the same way:
+`uv run pre-commit autoupdate --freeze`.
 
 Upgrading an existing worker to a version that adds a label — `issuebot/no-fault` is the most
 recent — needs `issuebot labels ensure` run once against the target repository first. The worker

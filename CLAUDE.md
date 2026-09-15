@@ -32,7 +32,8 @@ uv run issuebot worker               # the long-running orchestrator; SIGTERM or
 uv run issuebot migrate              # apply pending .sql migrations (worker and run-once do it too)
 uv run issuebot status               # the worker's last runtime snapshot, read from the database
 uv run issuebot stats [--days N]     # issues closed and runs started: 1d, 7d and per day
-uv run issuebot refresh              # NOTIFY issuebot_refresh: a running worker polls at once
+uv run issuebot refresh              # NOTIFY the repository's channel: its worker polls at once
+                                     #   (at most one refresh-driven tick every 5 s)
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL and
                                      #   ISSUEBOT_WEB_PASSWORD, reads no workflow; binds 127.0.0.1 by default)
 docker compose build                 # image: git, gh, claude, app venv
@@ -90,6 +91,17 @@ session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `ba
 image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
 catches that rather than the variable that happens to produce it.
 Dependabot covers uv, Docker and Actions weekly.
+Every `uses:` in the workflows and every `rev:` in `.pre-commit-config.yaml` is a commit
+digest with its tag beside it (#111; `tests/test_pins.py` refuses a tag): a tag is a name its
+owner can repoint, and these run in CI and on any host that runs `pre-commit`, with `GH_TOKEN`
+and the store's DSN ambient. Dependabot's `github-actions` ecosystem moves the digest pins
+(it rewrites the digest and the comment); `pre-commit-version.yml` is the same weekly bump
+job for the hook pins that `claude-code-version.yml` is for the claude pin -- `pre-commit
+autoupdate --freeze`, the hooks over the tree as the proof, one PR from a branch named for
+the config's blob hash so a rerun finds its own. Both bump jobs recognise their own pull
+request by provenance and never by the branch name, which any fork can carry: REST
+`pulls?head=<owner>:<branch>`, kept only when `head.repo.full_name` is this repository and
+`user.login` is `github-actions[bot]`.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
 Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
 new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
@@ -149,11 +161,17 @@ floor, not the shipped version, and moves by hand.
   login, `None` for a deleted account; `LinkedPr.mergeable` is GitHub's `MergeableState`
   lowercased, `unknown` when absent); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
-  `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
+  `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary,
+  and the one cap on a response's size (#110): it reads stdout and stderr incrementally and
+  kills `gh` past `MAX_OUTPUT_BYTES` (32 MiB, sized in bytes: GitHub's 65,536-character body
+  ceiling is 256 KiB of UTF-8 at four bytes a character) with a non-retryable `response` error, since
+  `github.request_timeout_ms` bounds only how long the process may run, not how much it may
+  hand back inside that time;
   `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given;
   `count_own_label_additions(number, label)` (#104) is the issue's `LABELED_EVENT` timeline
-  items the adapter's own account made, paginated, the record the conflict bounce is bounded
-  by);
+  items the adapter's own account made, paginated one page at a time and at most
+  `MAX_TIMELINE_PAGES` (10) of them, past which it is a `response` error (#110, the same rule
+  as the workpad read), the record the conflict bounce is bounded by);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved
@@ -170,7 +188,10 @@ floor, not the shipped version, and moves by hand.
   issuebot's pull request. `find_workpad_comment` returns the account's own marker comment,
   lowest id first, and logs `workpad_comment_ignored` (id, author) for anyone else's, so the
   blocked escape's run-marker idempotence and the conflict bounce's count only ever read a
-  comment that account wrote;
+  comment that account wrote; it asks for the pages one at a time (`per_page=100&page=N`),
+  returns at the first match, and gives up after `MAX_COMMENT_PAGES` (10) with a `response`
+  error rather than `None` (#110): the thread's length past the workpad is anyone's to grow,
+  and "no workpad" would have the session open a second one;
   `status.py` (`fetch_status_summary`, `parse_status_summary` → `GitHubStatus`), the
   githubstatus.com Statuspage summary read as annotation and never as a gate (#88). The one
   place in the package that is not `gh`: it is not the GitHub API, it decides nothing, and it
@@ -212,7 +233,11 @@ floor, not the shipped version, and moves by hand.
   hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
   `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
   sweeps again); a no-op on the host route (`run_as` unset), where the
-  home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
+  home is the operator's own. `probe`/`probe_run_as` report whether the delegation *separates*,
+  not only whether it works (#111): the delegated `id -u` must answer the target's uid and that
+  uid must differ from the invoking `os.getuid()`, so an account that is the worker's own is
+  refused before sudo is asked and a sudo that ran the command at the worker's uid reads `no
+  separation`, apart from a refusal; the affirmative is what the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
@@ -339,6 +364,15 @@ floor, not the shipped version, and moves by hand.
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
   that line precedes the login check. (The volume's own config surfaces are #101, landed in #123: the sweep above.)
+  Two timers, and they bound different things (#110):
+  `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
+  output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`
+  `_turn_loop` fixes from `_State.started` and hands to every `run_turn(deadline=)`. The
+  reader waits for the shorter of the two, a turn still running at the deadline is
+  terminated with category `run_timeout` (outcome `timed_out`, the `turn_timeout` turn
+  event, a message naming the setting), and no turn starts past it. The orchestrator escapes
+  a `run_timeout` while `in_progress` at once, as it does `max_turns`: a retry never resumes
+  the session, so the issue's ceiling is the setting and not `max_attempts` times it;
   `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
@@ -517,10 +551,18 @@ floor, not the shipped version, and moves by hand.
   count kept there was the session's to zero, while a label event is GitHub's record and an
   added one only tightens the bound (a note that fails after the label moved logs
   `conflict_rework_note_failed` and the bounce is still counted; a failure before it logs
-  `conflict_rework_failed` and is retried next tick). At `agent.max_conflict_reworks`
+  `conflict_rework_failed`, which names the `outcome` it chose, and is retried next tick --
+  unless the error's category is `response`, when the outcome is `gave_up` (#110): a cap
+  bounds one read, not how often it is repeated, so a bounce that fails on a page past
+  `MAX_TIMELINE_PAGES` or `MAX_COMMENT_PAGES` is remembered against the issue's `updated_at`
+  (`_conflict_gave_up`, `conflict_rework_abandoned` logged once) and not tried again until the
+  issue changes, rather than costing twenty pages and a warning on every poll for the life of
+  the process. Only that category: a 5xx is the next tick's to retry). At
+  `agent.max_conflict_reworks`
   (default 3, `0` off) it writes one `... conflict limit` block and stays in `review`, and
   the orchestrator remembers per issue and limit that it did (`_conflict_limit_noted`), so
-  a note the session strips is rewritten once per process, not per tick. `_bounce_conflicts`
+  a note the session strips is rewritten once per process, not per tick. `_finish` drops both
+  memos with the issue, so neither grows with the worker's uptime. `_bounce_conflicts`
   runs after every fetch, observer or not (`fetch_states`), skipping issues in `_running` or
   `_retries`.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
@@ -534,7 +576,9 @@ floor, not the shipped version, and moves by hand.
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is
   published before any release; `max_turns` or `blocked` while `in_progress`, or `max_attempts`
   failures → the blocked escape, a `blocked` stop's block carrying the agent's own `BLOCKED:`
-  line; no retry, since an external blocker does not clear by retrying). `_escape` scrubs
+  line; no retry, since an external blocker does not clear by retrying; and a `run_timeout`
+  failure while `in_progress`, #110, since a retry would spend the same wall clock again).
+  `_escape` scrubs
   the `BlockedContext`'s `reason` and `log_dir` through the orchestrator's `scrubber` (a
   constructor argument, `DEFAULT_SCRUBBER` unless `cli` passes the deployment's) before
   `blocked_escape` writes them on the public issue (#91): the reason quotes the run's error,
@@ -578,7 +622,10 @@ floor, not the shipped version, and moves by hand.
   how `issuebot status`, `/api/v1/repos/<owner>/<name>/state` and the dashboard answer "is the
   worker running my overrides?".
   `request_refresh()`, `request_stop()`, `snapshot()`; SIGTERM shutdown waits for `after_run`
-  and publishes a final snapshot. `on_snapshot` (every tick and at shutdown) and `on_issues`
+  and publishes a final snapshot. `_wait_for_next_tick` admits a refresh only
+  `MIN_REFRESH_INTERVAL_S` (5 s) after the last tick ended (#110): one asked for inside the
+  interval brings the wait's deadline forward to it and the loop keeps waiting, so a burst
+  is one tick, never dropped, and the NOTIFY rate cannot set the tick rate. `on_snapshot` (every tick and at shutdown) and `on_issues`
   (every successful fetch) are how polled data reaches the database sink without the
   orchestrator importing `db`.
   Orphans resume from `session.json` when its `last_outcome` is `null` or `cancelled`; retries
@@ -677,16 +724,27 @@ floor, not the shipped version, and moves by hand.
   webhook or allow-list change needs a worker restart.
 - `issuebot.db`: the observability store, imported by `cli` and `web`; imports `config`,
   `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-  `0002_run_turns`, `0003_repos`; schema version 3) applied by `migrate.py` in one transaction
+  `0002_run_turns`, `0003_repos`, `0004_run_turns_repo`; schema version 4) applied by
+  `migrate.py` in one transaction
   under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
   files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
   workflow path and first/last-seen times) and a `repo` column, `NOT NULL` with no default, on
-  `issues`, `runs`, `events` and `runtime_snapshot` (`run_turns` has none, and is reached
-  through `runs`), so it refuses to apply against a database that already holds `issues`,
+  `issues`, `runs`, `events` and `runtime_snapshot` (`run_turns` gets its own in
+  `0004_run_turns_repo`, #111, backfilled from its run's row -- the one legitimate use of the
+  join -- with `runs` re-keyed `(repo, run_id)`, `run_turns` `(repo, run_id, turn_number)` and
+  a foreign key spanning both, so the tenancy check is the write's and not the read's join,
+  and a `run_id` shared by two repositories is two runs), so it refuses to apply against a database that already holds `issues`,
   `runs` or `events` rows -- a migration cannot know which repository they belong to -- naming
   the import command as the remedy; it also drops and recreates `runtime_snapshot` keyed by
   `repo` instead of as a single row.
-  `connection.py`: `connect` (autocommit, 5 s connect timeout, UTC session), `describe`/`redact`
+  `connection.py`: `connect` (autocommit, 5 s connect timeout, then `session_statements()`: the
+  UTC session, `lock_timeout` `LOCK_TIMEOUT_S` (10 s) and `statement_timeout`
+  `STATEMENT_TIMEOUT_S` (60 s), as `SET`s rather than a libpq `options` keyword, which would
+  replace the `options` a URL carries of its own -- the connect timeout bounds the handshake
+  alone, and without these a migration blocked on the advisory lock hung with no log line and
+  no exit (#110); now it is a `MigrationError`. The statement timeout applies to each
+  statement of a migration too, so a future backfill over a large table should `SET LOCAL
+  statement_timeout` inside its own transaction), `describe`/`redact`
   (the DSN's password never reaches a log or a line: `describe` and `is_postgres_url` are
   `issuebot.dsn`'s, and `redact` masks what `dsn_secrets` finds, so both fail closed on a
   spelling that is not a URL, #105), `NOT_A_URL` (the message `Database.__init__` refuses a
@@ -695,9 +753,12 @@ floor, not the shipped version, and moves by hand.
   path `worker`, `web` and `migrate` take), `reconnect_delay` (1, 2, 4, 8, 16, then
   30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
   appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
-  turns into `run_turns` in the `run_ended` transaction (idempotent per `(run_id, turn_number)`),
+  turns into `run_turns` in the `run_ended` transaction (idempotent per `(repo, run_id,
+  turn_number)`),
   or updates `issues` on `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`;
-  `write_snapshot`), every write stamped with its `repo`; every `issues` write is also guarded
+  `write_snapshot`), every write stamped with its `repo` by `_stamp`, which *forces* the
+  store's over anything a row carries and is the only way a row is built, `INSERT_TURN`
+  included (#111); every `issues` write is also guarded
   by `seen_at`, so write order never matters. `sink.py`:
   `PostgresSink` (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots
   into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
@@ -707,10 +768,14 @@ floor, not the shipped version, and moves by hand.
   deployment's from `cli`) so `runs.log_dir` and the event's payload, which the dashboard's
   issue page renders, carry the home directory as `~` while the capture read the real path
   (#91); statement failures are dropped and counted; `close()` drains for
-  up to 10 s). `listen.py`: `RefreshListener` (`LISTEN issuebot_refresh` on its own connection,
-  callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload -- every worker
-  wakes -- or one matching its own repository, logs another repository's at debug
-  (`db_refresh_other_repo`) and drops anything else with a `refresh_payload_ignored` warning).
+  up to 10 s). `listen.py`: `refresh_channel(repo)`, `issuebot_refresh_<sha256(repo)[:16]>`: one channel per
+  repository (#110), so a NOTIFY reaches the one worker it is for and never every worker on
+  the store; the bare `issuebot_refresh` is a listener's without a repository, which no worker
+  is. `RefreshListener` (`LISTEN` on that channel on its own connection,
+  callback per NOTIFY, reconnects; with a `repo`, it accepts an empty payload or one naming its
+  own repository, logs another repository's at debug (`db_refresh_other_repo`, a NOTIFY on the
+  wrong channel) and drops anything else with a `refresh_payload_ignored` warning; nothing
+  issuebot ships wakes every worker at once any more).
   `queries.py`: `Queries` over one connection, repository-free (`repos` -- every registration,
   what the dropdown lists -- `repo`, `snapshots` -- every worker's latest snapshot, keyed by
   repository, for `/healthz` -- and `scoped(repo)`, which returns a `RepoQueries` with that
@@ -876,13 +941,15 @@ floor, not the shipped version, and moves by hand.
   missing so an older-but-permitted `claude` stays green, a `claude.setting_sources` check
   that warns when `project` or `local` hands the clone's files to the session as
   configuration (#107), an `agent.run_as` check that probes
-  the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
+  the uid drop through `probe_run_as` (#75, #111: fails when set but unusable or not a
+  different uid from this process's, which the OK line names; warns when unset
   since the session then shares the worker's uid), a `claude.mcp_config` check that stats each
   path it names and, with `agent.run_as` set, asks that account whether it can read it (#109:
   the one route by which an MCP server reaches a session, resolved against the workflow's
   directory and opened at the session's uid, so a file the worker can read and `agent` cannot
   would fail every turn with claude's own startup error instead of a line here; an inline JSON
-  document is on the command line already and is only counted), a `database.url` check that connects and
+  document is on the command line already and only earns a warning, since `ps` reads it),
+  a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a
@@ -898,9 +965,8 @@ floor, not the shipped version, and moves by hand.
   `status` (through `queries.scoped(repo)`: the snapshot as text, its `workflow:` line reading
   `<base> + <overlay>` when one is in force, with a `dispatch: held (<kind>) since ...` line
   while dispatch is held), `stats [--days N]` (also `scoped(repo)`; `by_state` from
-  `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs with the workflow's `github.repo` as
-  the payload, so only that repository's worker wakes; `[ OK ] refresh: notified
-  issuebot_refresh for <repo>`) and
+  `state_counts`; `--days` 1 to 365), `refresh` (NOTIFYs the repository's channel, `refresh_channel(github.repo)`, with the
+  repository as the payload; `[ OK ] refresh: notified issuebot_refresh_<digest> for <repo>`) and
   `web [--bind HOST] [--port N]` (reads `DATABASE_URL` and `ISSUEBOT_WEB_PASSWORD` — no
   `--workflow`, no other setting, and no workflow file to fail loading — `[FAIL] database: not
   configured; export DATABASE_URL` without the first, distinct from every other command's

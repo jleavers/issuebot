@@ -4,8 +4,10 @@ import psycopg
 import pytest
 
 from issuebot.db import (
+    LOCK_TIMEOUT_S,
     RECONNECT_DELAYS_S,
     REDACTED,
+    STATEMENT_TIMEOUT_S,
     StoreError,
     StoreUnavailableError,
     classify,
@@ -14,6 +16,7 @@ from issuebot.db import (
     is_postgres_url,
     reconnect_delay,
     redact,
+    session_statements,
 )
 
 URL = "postgresql://issuebot:s3cret@db.example:5433/issuebot?sslmode=require"
@@ -88,3 +91,13 @@ def test_classify_separates_connection_failures_from_statement_failures() -> Non
 @pytest.mark.parametrize("exc", [psycopg.OperationalError("x"), psycopg.DataError("y")])
 def test_classify_never_leaks_the_url(exc: psycopg.Error) -> None:
     assert "s3cret" not in classify(exc, URL).message
+
+
+def test_every_connection_bounds_its_lock_and_statement_waits() -> None:
+    """The connect timeout bounds the handshake; these bound what comes after it (#110)."""
+    assert session_statements() == (
+        "SET TIME ZONE 'UTC'",
+        f"SET lock_timeout = '{LOCK_TIMEOUT_S}s'",
+        f"SET statement_timeout = '{STATEMENT_TIMEOUT_S}s'",
+    )
+    assert 0 < LOCK_TIMEOUT_S < STATEMENT_TIMEOUT_S

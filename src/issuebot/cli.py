@@ -60,6 +60,7 @@ from issuebot.db import (
     PostgresSink,
     RefreshListener,
     is_postgres_url,
+    refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
@@ -551,7 +552,7 @@ def _run_as_check(run_as: str | None) -> Check:
     """The account the session runs as (#75), or a warning that it is this process."""
     subject = "agent.run_as"
     if run_as is None:
-        uid = os.getuid() if hasattr(os, "getuid") else "?"
+        uid = os.getuid()
         detail = (
             f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
             "which shares its environment, code and state with them; the image sets "
@@ -561,7 +562,20 @@ def _run_as_check(run_as: str | None) -> Check:
     error = _run_as_probe(run_as, os.environ)
     if error is not None:
         return Check(subject, "fail", error)
-    return Check(subject, "ok", f"{run_as}; the session runs as a separate account")
+    # The probe compared the delegated uid with this process's (#111), so the line names
+    # both sides of that comparison and the reader need not take the verdict on trust. The
+    # account's uid is the one the delegation answered with, the probe having said so; it is
+    # looked up without raising, because a check reports and never fails on its own wording.
+    account = None
+    with contextlib.suppress(OSError, KeyError):
+        account = RunAs(run_as).account().pw_uid
+    named = run_as if account is None else f"{run_as} (uid {account})"
+    return Check(
+        subject,
+        "ok",
+        f"{named}; the session runs as a separate account, at a uid other than this "
+        f"process's ({os.getuid()})",
+    )
 
 
 def _mcp_config_check(cfg: Settings) -> Check:
@@ -1426,7 +1440,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
+    print(f"[ OK ] refresh: notified {refresh_channel(repo)} for {repo}")
     return 0
 
 

@@ -1031,6 +1031,35 @@ async def test_max_turns_while_in_progress_escapes_at_once(tmp_path: Path) -> No
     assert h.recorder.of(StateChanged)[1].actor == "issuebot"
 
 
+async def test_run_timeout_while_in_progress_escapes_at_once(tmp_path: Path) -> None:
+    """A run over its wall clock is not retried (#110): a retry never resumes the session, so
+    it would spend the same clock again from cold, max_attempts times over."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.comment(1, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    await h.exit(
+        h.run_for(1),
+        outcome="timed_out",
+        stop_reason="failure",
+        error_category="run_timeout",
+        error="run deadline reached: 14400s of wall clock (agent.run_timeout_ms)",
+        final_state=StateLabel.IN_PROGRESS,
+        final_issue=h.github.issue(1),
+        turns=2,
+    )
+    assert h.orchestrator.retries == {}
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    comments = h.github.comments_for(1)
+    assert len(comments) == 1
+    assert (
+        "Wall clock exhausted: 2 turns in attempt 1 without reaching `issuebot/review` "
+        "(run deadline reached: 14400s of wall clock (agent.run_timeout_ms))."
+    ) in comments[0].body
+    assert h.recorder.kinds == ["state_changed", "state_changed", "blocked"]
+    assert h.orchestrator.snapshot().counters.blocked == 1
+
+
 async def test_a_blocked_stop_while_in_progress_escapes_with_the_agents_reason(
     tmp_path: Path,
 ) -> None:
@@ -2373,7 +2402,10 @@ async def wait_until(condition: Any, *, timeout: float = 10.0) -> None:
     raise AssertionError("condition not met in time")
 
 
-async def test_run_ticks_refreshes_and_stops(tmp_path: Path) -> None:
+async def test_run_ticks_refreshes_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.0)
     h = Harness(tmp_path, interval_ms=60_000)
     h.orchestrator._clock = __import__("time").monotonic
     task = asyncio.create_task(h.orchestrator.run())
@@ -2386,6 +2418,30 @@ async def test_run_ticks_refreshes_and_stops(tmp_path: Path) -> None:
     h.orchestrator.request_stop()
     await asyncio.wait_for(task, timeout=5)
     assert h.orchestrator.stopping is True
+
+
+async def test_a_refresh_inside_the_interval_is_admitted_when_it_is_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NOTIFY rate does not set the tick rate (#110): a burst inside the interval is one
+    tick when the interval is up, never dropped; one after it is admitted at once."""
+    monkeypatch.setattr(orchestrator_module, "MIN_REFRESH_INTERVAL_S", 0.3)
+    h = Harness(tmp_path, interval_ms=60_000)
+    o = h.orchestrator
+    for _ in range(5):  # a burst, coalesced into one message by _refresh_pending
+        o.request_refresh()
+    waiter = asyncio.create_task(o._wait_for_next_tick())
+    await asyncio.sleep(0.1)
+    assert not waiter.done()  # inside the interval: deferred, not returned
+    h.clock.advance(0.3)  # the admissible moment; the loop is asleep until its deadline
+    await asyncio.wait_for(waiter, timeout=2.0)  # and returns then, with nothing else queued
+
+    waiter = asyncio.create_task(o._wait_for_next_tick())
+    await asyncio.sleep(0.1)
+    assert not waiter.done()  # the burst was one tick: nothing is left to admit
+    h.clock.advance(0.3)
+    o.request_refresh()  # past the interval: admitted at once
+    await asyncio.wait_for(waiter, timeout=0.5)
 
 
 async def test_shutdown_cancels_workers_and_leaves_the_label(tmp_path: Path) -> None:
@@ -2646,6 +2702,68 @@ async def test_a_bounce_failure_is_logged_and_retried_next_tick(
     assert any(entry["event"] == "conflict_rework_failed" for entry in logs)
     await h.tick()
     assert h.github.issue(1).state is StateLabel.REWORK
+
+
+async def test_a_non_retryable_bounce_failure_waits_for_the_issue_to_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounce whose read fails past a cap (#110) is not repeated every poll: the orchestrator
+    remembers the failure against the issue's `updated_at` and tries again only once the
+    issue has changed, since the same bounded read would only fail the same way."""
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+    original = h.github.count_own_label_additions
+    reads = {"count": 0, "refuse": True}
+
+    async def capped(*args: Any, **kwargs: Any) -> int:
+        reads["count"] += 1
+        if reads["refuse"]:
+            raise GitHubError("response", "label history of #1 runs past 1000 events")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(h.github, "count_own_label_additions", capped)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert [entry["event"] for entry in logs if entry["event"].startswith("conflict_rework")] == [
+        "conflict_rework_failed",
+        "conflict_rework_abandoned",
+    ]
+    assert reads["count"] == 1
+    await h.tick()
+    await h.tick()
+    assert reads["count"] == 1  # nothing changed, so nothing was asked again
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    # A human touching the issue moves its updated_at, which is the change that earns another
+    # try (the harness clock is frozen, so it is advanced first: a stamp that does not move is
+    # exactly the "nothing changed" the memory is keyed on).
+    reads["refuse"] = False
+    h.clock.advance(1)
+    h.github.human_add_label(1, "priority")
+    await h.tick()
+    assert reads["count"] == 2
+    assert h.github.issue(1).state is StateLabel.REWORK
+
+
+async def test_a_run_timeout_outside_in_progress_is_retried_not_escaped(tmp_path: Path) -> None:
+    """The escape is for a run that timed out while still holding the issue; one whose label
+    had already moved is an ordinary failure, retried like any other (#110)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.github.set_state(1, StateLabel.REVIEW)
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        error_category="run_timeout",
+        error="run deadline reached: 14400s of wall clock (agent.run_timeout_ms)",
+        final_state=StateLabel.REVIEW,
+        final_issue=h.github.issue(1),
+        turns=2,
+    )
+    assert list(h.orchestrator.retries) == ["1"]
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert "blocked" not in h.recorder.kinds
 
 
 async def test_the_bounce_skips_an_issue_with_a_queued_retry(tmp_path: Path) -> None:
@@ -3131,6 +3249,35 @@ async def test_a_stripped_limit_note_is_rewritten_once_per_process_not_per_tick(
     await h.tick()
     assert h.calls("count_own_label_additions") == [(1, "issuebot/rework")]
     assert "### Issuebot merge conflict limit (" in h.github.comments_for(1)[0].body
+
+
+async def test_closing_an_issue_drops_what_the_bounce_remembered_about_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `gave_up` memo is a memo, not a leak: the terminal sweep drops it with the issue.
+
+    A cap bounds one read, and the memo bounds how often that read is repeated -- but a memo
+    kept for the life of the worker would be one more thing an outsider grows, one entry per
+    issue they take past a cap, which is the shape #110 is about. `_finish` drops it with the
+    conflict-limit memo it sits beside.
+    """
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+
+    async def capped(*args: Any, **kwargs: Any) -> int:
+        raise GitHubError("response", "label history of #1 runs past 1000 events")
+
+    monkeypatch.setattr(h.github, "count_own_label_additions", capped)
+    await h.tick()
+    assert h.orchestrator._conflict_gave_up  # the memory under test
+    # merge_pr closes the issue; the terminal sweep is what finishes it (tick 1 already ran
+    # this tick's sweep, over an issue that was still open, so it is asked for directly).
+    h.github.merge_pr(7)
+    await h.orchestrator.terminal_sweep()
+    await h.drain()
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.orchestrator._conflict_gave_up == {}
+    assert h.orchestrator._conflict_limit_noted == {}
 
 
 # --- the admission gate (#112) ------------------------------------------------------------

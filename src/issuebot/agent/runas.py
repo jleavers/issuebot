@@ -229,18 +229,47 @@ class RunAs:
             )
 
     def probe(self, env: Mapping[str, str]) -> str | None:
-        """None when the account answers ``id -u`` with its own uid; else why not."""
+        """None when the delegation runs ``id -u`` as the account *and* that uid is not this
+        process's; else why not.
+
+        The referent is the invoking uid (#111). Comparing the delegated answer with the
+        target's uid alone proves that the delegation works, which is not the same as
+        proving that it separates: a delegation that ran the command at this process's own
+        uid has set up no boundary, whatever account it was asked for, and an account whose
+        uid *is* this process's would answer correctly with nothing separated. So the
+        target must differ from the invoker before sudo is asked anything, and an answer
+        that is the invoker's is reported as no separation, apart from a refusal.
+        """
+        me = os.getuid()
         try:
-            expected = str(self.account().pw_uid)
-            completed = self.run(["id", "-u"], env, timeout=SUDO_TIMEOUT_S)
+            account = self.account()
         except RunAsError as exc:
             return str(exc)
+        if account.pw_uid == me:
+            return (
+                f"agent.run_as names {self.user!r}, this process's own account (uid {me}); "
+                "the session would run with no separation"
+            )
+        try:
+            completed = self.run(["id", "-u"], env, timeout=SUDO_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             return f"{self.sudo} did not answer within {SUDO_TIMEOUT_S}s"
         except OSError as exc:
             return f"cannot run {self.sudo!r}: {exc}"
-        if completed.returncode == 0 and completed.stdout.strip() == expected:
+        answer = completed.stdout.strip()
+        if completed.returncode == 0 and answer == str(account.pw_uid):
             return None
+        if completed.returncode == 0 and answer == str(me):
+            return (
+                f"{self.sudo} ran the command as this process (uid {me}), not as "
+                f"{self.user!r} (uid {account.pw_uid}): no separation"
+            )
+        if completed.returncode == 0 and answer.isdigit():
+            # Separated, but not as asked: a rule that maps the account elsewhere.
+            return (
+                f"{self.sudo} ran the command as uid {answer}, not as {self.user!r} "
+                f"(uid {account.pw_uid})"
+            )
         detail = _last_line(completed.stderr) or _last_line(completed.stdout)
         return f"cannot run as {self.user!r}: {detail or f'exit status {completed.returncode}'}"
 
