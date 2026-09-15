@@ -9,8 +9,17 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from issuebot.config import GitHubLabels
-from issuebot.db.connection import Connector, classify, connect, describe, error_text, redact
-from issuebot.db.errors import StoreUnavailableError
+from issuebot.db.connection import (
+    NOT_A_URL,
+    Connector,
+    classify,
+    connect,
+    describe,
+    error_text,
+    is_postgres_url,
+    redact,
+)
+from issuebot.db.errors import DatabaseError, StoreUnavailableError
 from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
 from issuebot.db.migrate import MigrationResult, discover_migrations, migrate, schema_version
 from issuebot.db.queries import Queries
@@ -33,9 +42,17 @@ class Probe:
 
 
 class Database:
-    """One URL; migrate, probe, read, and build the sink's store and the refresh listener."""
+    """One URL; migrate, probe, read, and build the sink's store and the refresh listener.
+
+    The URL is checked here, on the path every command takes (#105): psycopg would also accept
+    libpq's keyword/value conninfo, but ``describe`` can only take the URL spelling apart
+    without its password, so a value in any other spelling is refused before a connection is
+    attempted, with a ``DatabaseError`` that names the rule and never the value.
+    """
 
     def __init__(self, url: str, *, connect: Connector = connect) -> None:
+        if not is_postgres_url(url):
+            raise DatabaseError(NOT_A_URL)
         self._url = url
         self._connect = connect
 

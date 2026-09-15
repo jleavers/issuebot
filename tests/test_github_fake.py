@@ -317,3 +317,24 @@ def test_explicit_numbers_and_shared_numbering(fake: FakeGitHub) -> None:
     assert fake.add_issue("B").number == 12
     with pytest.raises(ValueError, match="already exists"):
         fake.add_issue("C", number=10)
+
+
+async def test_the_fake_keeps_a_label_history_credited_to_its_actor(fake: FakeGitHub) -> None:
+    """``count_own_label_additions`` counts the account's own additions of a label (#104)."""
+    issue = fake.add_issue("A", labels=("issuebot/review",))
+    assert await fake.count_own_label_additions(issue.number, "issuebot/rework") == 0
+    await fake.set_state(issue.number, StateLabel.REWORK)
+    fake.human_set_state(issue.number, StateLabel.REVIEW)
+    await fake.set_state(issue.number, StateLabel.REWORK)
+    fake.human_set_state(issue.number, StateLabel.REWORK, actor="reviewer")
+    fake.human_add_label(issue.number, "issuebot/rework", actor="reviewer")  # already there
+    assert await fake.count_own_label_additions(issue.number, "issuebot/rework") == 2
+    assert await fake.count_own_label_additions(issue.number, "ISSUEBOT/REWORK") == 2
+    assert await fake.count_own_label_additions(issue.number, "issuebot/review") == 0
+    # The history is GitHub's: rewriting the workpad, or removing the label, changes nothing.
+    fake.human_remove_label(issue.number, "issuebot/rework")
+    assert await fake.count_own_label_additions(issue.number, "issuebot/rework") == 2
+    assert fake.calls[-1] == ("count_own_label_additions", (issue.number, "issuebot/rework"))
+    with pytest.raises(GitHubError) as exc:
+        await fake.count_own_label_additions(999, "issuebot/rework")
+    assert exc.value.category == "not_found"

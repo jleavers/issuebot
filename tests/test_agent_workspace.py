@@ -503,3 +503,110 @@ async def test_remove_failure_is_workspace_error(
     assert exc.value.category == "workspace_error"
     assert "refused" in exc.value.message
     assert ws.path.is_dir()
+
+
+# --- the boundary (#104): what the worker reads back ---------------------------------------
+
+
+@posix
+def test_read_session_refuses_a_link_and_an_oversized_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from issuebot.agent import workspace as workspace_module
+    from issuebot.agent.boundary import SESSION_FILE
+
+    manager, _ = make_manager(tmp_path)
+    ws = manager.root / "example-42"
+    (ws / ".issuebot").mkdir(parents=True)
+    record = SessionRecord(
+        issue_number=42,
+        issue_identifier="example-42",
+        run_id="r1",
+        session_id="s1",
+        attempt=1,
+        turn_number=1,
+        last_outcome=None,
+        updated_at=datetime(2026, 9, 3, 8, 0, tzinfo=UTC),
+    )
+    elsewhere = tmp_path / "elsewhere.json"
+    manager.write_session(tmp_path / "other", record)
+    shutil.move(session_path(tmp_path / "other"), elsewhere)
+    os.symlink(elsewhere, session_path(ws))
+    assert manager.read_session(ws) is None
+    os.unlink(session_path(ws))
+    manager.write_session(ws, record)
+    assert manager.read_session(ws) == record
+    monkeypatch.setattr(
+        workspace_module, "SESSION_FILE", replace(SESSION_FILE, limit=16), raising=True
+    )
+    assert manager.read_session(ws) is None
+
+
+@posix
+async def test_a_workspace_whose_marker_is_a_link_is_not_reused(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    from issuebot.agent.workspace import CREATED_MARKER
+
+    manager, gh = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert ws.created
+    marker = ws.path / ".issuebot" / CREATED_MARKER
+    real = tmp_path / "real-marker"
+    marker.rename(real)
+    os.symlink(real, marker)
+    calls = len(gh.calls)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert ws.created  # recreated, not reused
+    assert len(gh.calls) == calls + 1
+    assert marker.is_file() and not marker.is_symlink()
+
+
+@posix
+async def test_a_pre_placed_marker_fails_creation_cleanly(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    from issuebot.agent.workspace import CREATED_MARKER
+
+    manager, _ = make_manager(
+        tmp_path, hooks={"after_create": f"ln -s /etc/hostname .issuebot/{CREATED_MARKER}"}
+    )
+    with pytest.raises(AgentError) as exc:
+        await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert exc.value.category == "workspace_error"
+    assert "cannot mark" in exc.value.message
+    assert not (manager.root / "example-42").exists()
+
+
+def test_hooks_read_the_env_file_through_the_managers_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under agent.run_as the hook that wrote `.issuebot/env` ran as the session, so the file
+    is the session's; the manager's boundary, not a default one, is what admits it (#104)."""
+    import stat as stat_module
+
+    from issuebot.agent import boundary as boundary_module
+    from issuebot.agent.boundary import Boundary
+    from issuebot.agent.runner import agent_environment, workspace_environment
+
+    manager, _ = make_manager(tmp_path)
+    ws = manager.root / "example-42"
+    (ws / ".issuebot").mkdir(parents=True)
+    (ws / ".issuebot" / "env").write_text("DSN=postgresql:///x\n")
+    me = os.getuid()
+    real_fstat = os.fstat
+
+    def fstat_as_session(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if stat_module.S_ISREG(st.st_mode):
+            return os.stat_result((*st[:4], me + 1, *st[5:]))
+        return st
+
+    monkeypatch.setattr(boundary_module.os, "fstat", fstat_as_session)
+    split = Boundary(worker_uid=me, session_uid=me + 1)
+    monkeypatch.setattr(manager, "_boundary", split)
+    base = agent_environment({"PATH": "/usr/bin"}, token=None)
+    # The default boundary (the worker alone) refuses the session-owned file...
+    assert workspace_environment(base, ws)[1] == []
+    # ...and the manager's admits it, which is what its hooks read through.
+    assert workspace_environment(base, ws, boundary=manager._boundary)[1] == ["DSN"]

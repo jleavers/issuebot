@@ -448,6 +448,23 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert fake_database.urls == []
 
 
+KEYWORD_DSN = "host=db.example port=5432 user=issuebot password=s3cretpassword dbname=issuebot"
+
+
+def test_validate_rejects_a_keyword_value_dsn_without_echoing_it(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    assert _validate_with_database(tmp_path, monkeypatch, KEYWORD_DSN) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] database.url: not a postgresql:// URL" in out
+    assert "s3cretpassword" not in out
+    assert fake_database.urls == []
+
+
 def test_validate_reports_an_unreachable_database_without_the_url(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -2035,6 +2052,24 @@ def test_database_commands_exit_two_on_an_unloadable_workflow(
     assert "[FAIL] workflow:" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("command", [["migrate"], ["status"], ["stats"], ["refresh"]])
+def test_a_keyword_value_dsn_is_refused_on_every_database_command(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_database: FakeDatabase,
+    command: list[str],
+) -> None:
+    """#105: the shape check ``validate`` performs now sits on the path the other commands take,
+    in the facade, and the line that reports it names neither the DSN nor its password."""
+    path = _db_workflow(tmp_path, monkeypatch, url=KEYWORD_DSN)
+    assert main([*command, "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
+    assert "s3cretpassword" not in out and "db.example" not in out
+    assert fake_database.urls == [] and fake_database.migrations == 0
+
+
 def test_migrate_reports_what_it_applied(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -2342,6 +2377,21 @@ def test_web_migrates_then_serves_on_the_defaults(
     assert getattr(app, "title", None) == "issuebot"
     err = capsys.readouterr().err
     assert "web_started" in err and "s3cret" not in err and WEB_PASSWORD not in err
+
+
+def test_web_refuses_a_keyword_value_dsn_before_serving(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    assert main(["web"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
+    assert "s3cretpassword" not in captured.out + captured.err
+    assert fake_serve.calls == [] and fake_database.urls == []
 
 
 def test_web_gates_the_app_with_the_password_from_the_environment(
@@ -2683,6 +2733,40 @@ def test_worker_without_a_database_passes_no_callbacks(
     assert (kwargs["on_snapshot"], kwargs["on_issues"]) == (None, None)
     assert fake_database.urls == []
     assert fake_database.listeners == []
+
+
+def test_run_once_refuses_a_keyword_value_dsn_before_claiming(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
+    assert "s3cretpassword" not in out
+    assert stub_session.calls == [] and fake_database.urls == []
+    assert fake_github.issue(42).state is StateLabel.TODO
+
+
+def test_worker_refuses_a_keyword_value_dsn_before_the_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
+    assert "s3cretpassword" not in out
+    assert stub_orchestrator.instances == [] and fake_database.urls == []
 
 
 def test_worker_fails_before_the_orchestrator_when_migration_fails(
