@@ -241,7 +241,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("17 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
     assert "secret-token-value" not in out
 
 
@@ -263,7 +263,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("17 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -368,7 +368,7 @@ def test_validate_literal_token_warns(
         "which reaches every repository its account can, and the session holds it: a "
         "fine-grained token restricted to o/r is the least it needs" in out
     )
-    assert "0 failed, 3 warnings" in out
+    assert "0 failed, 4 warnings" in out
 
 
 def test_validate_literal_token_that_names_no_reach_warns_only_about_the_literal(
@@ -637,7 +637,7 @@ def test_validate_missing_executables_fail(
     assert "[WARN] github.repo access: skipped (gh not found)" in out
     assert "[WARN] github.labels: skipped (gh not found)" in out
     assert "[WARN] claude auth: skipped (claude not found)" in out
-    assert "2 failed, 6 warnings" in out
+    assert "2 failed, 7 warnings" in out
 
 
 def test_validate_custom_claude_command_is_looked_up(
@@ -698,7 +698,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "17 checks: 0 failed, 2 warnings" in out
+    assert "18 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_warns_when_the_clones_files_are_claudes_configuration(
@@ -747,7 +747,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "17 checks: 1 failed, 1 warnings" in out
+    assert "18 checks: 1 failed, 2 warnings" in out
     assert fake_database.urls == []
 
 
@@ -803,7 +803,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "17 checks: 0 failed, 2 warnings" in out
+    assert "18 checks: 0 failed, 3 warnings" in out
 
 
 # --- validate: github.status (#88) -------------------------------------------------
@@ -844,7 +844,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "17 checks: 0 failed, 3 warnings" in out
+    assert "18 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -859,7 +859,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "17 checks: 0 failed, 3 warnings" in out
+    assert "18 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -875,7 +875,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "17 checks: 0 failed, 3 warnings" in out
+    assert "18 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -899,7 +899,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "17 checks: 0 failed, 3 warnings" in out
+        assert "18 checks: 0 failed, 4 warnings" in out
     finally:
         released.set()
 
@@ -917,7 +917,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "17 checks: 0 failed, 3 warnings" in out
+    assert "18 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -962,7 +962,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "17 checks: 0 failed, 1 warnings" in out
+    assert "18 checks: 0 failed, 2 warnings" in out
     assert "secret" not in out
 
 
@@ -977,7 +977,7 @@ def test_validate_slack_empty_events_is_ok_without_a_webhook(
     assert main(["validate", "--workflow", str(_write(tmp_path, text))]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: not configured (events: [])" in out
-    assert "0 failed, 1 warnings" in out
+    assert "0 failed, 2 warnings" in out
 
 
 def test_validate_slack_empty_events_with_a_webhook_warns(
@@ -1116,7 +1116,7 @@ def test_validate_unknown_claude_version_warns(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] claude.command: /usr/bin/claude (version unknown: no output)" in out
-    assert "0 failed, 3 warnings" in out
+    assert "0 failed, 4 warnings" in out
 
 
 def test_validate_reports_a_claude_ai_login(
@@ -1128,7 +1128,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("17 checks: 0 failed, 2 warnings")
+    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -1405,7 +1405,7 @@ def test_validate_warns_about_missing_labels(
         "[WARN] github.labels: missing: issuebot/rework, issuebot/complete; "
         "run issuebot labels ensure" in out
     )
-    assert "0 failed, 3 warnings" in out
+    assert "0 failed, 4 warnings" in out
 
 
 def test_validate_warns_about_missing_model_labels(
@@ -3223,7 +3223,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
         ", but all 3 concurrent sessions share it" in out
     )
     assert probed == ["agent"]
-    assert "17 checks: 0 failed, 2 warnings" in out
+    assert "18 checks: 0 failed, 3 warnings" in out
 
 
 def test_run_once_takes_the_workspaces_own_account_from_the_pool(
@@ -3301,7 +3301,123 @@ def test_validate_reports_a_pool_of_session_accounts(
     # (No member resolves on this host, so none is named with its uid -- which is the fallback.)
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
-    assert "17 checks: 0 failed, 1 warnings" in out
+    assert "18 checks: 0 failed, 2 warnings" in out
+
+
+# --- validate: the session's network egress (#126) ------------------------------------
+
+
+def _never_called(*args: object, **kwargs: object) -> object:
+    raise AssertionError("the egress check probed a proxy it was not given")
+
+
+def _egress(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    answers: dict[str, object] | None = None,
+    direct: bool = False,
+) -> list[str]:
+    """Point the egress check at a scripted proxy; return the hosts it asked about."""
+    asked: list[str] = []
+    replies: dict[str, object] = answers or {
+        "egress-probe.invalid": (403, "Forbidden"),
+        "api.github.com": (200, "Connection established"),
+    }
+
+    def probe(url: str, host: str, port: int = 443, *, timeout_s: float = 10.0) -> object:
+        asked.append(host)
+        return replies[host]
+
+    monkeypatch.setattr("issuebot.cli.probe_proxy", probe)
+    monkeypatch.setattr(
+        "issuebot.cli.reachable_directly", lambda host, port=443, *, timeout_s: direct
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://egress:3128")
+    return asked
+
+
+def test_validate_warns_that_egress_is_unbounded_with_no_proxy(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The host route, where the session shares this process's network as it shares its uid.
+
+    A warning and not a failure, for the reason `agent.run_as` unset is one: running on the
+    host without compose is supported, and the line is there to say what it costs.
+    """
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setattr("issuebot.cli.probe_proxy", _never_called)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] egress: no proxy configured; this process and every session it starts" in out
+    assert "can reach any host the network reaches" in out
+
+
+def test_validate_reports_a_proxy_that_holds_its_contract(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    asked = _egress(monkeypatch)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] egress: http://egress:3128: egress-probe.invalid refused, api.github.com "
+        "admitted; no route round it" in out
+    )
+    assert asked == ["egress-probe.invalid", "api.github.com"]
+
+
+def test_validate_fails_a_proxy_that_admits_a_name_off_the_list(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _egress(monkeypatch, answers={"egress-probe.invalid": (200, "Connection established")})
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] egress: http://egress:3128 answered 200 for egress-probe.invalid, not 403" in out
+    assert "it is not filtering by name" in out
+
+
+def test_validate_fails_a_proxy_that_refuses_the_github_api(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """Every poll, label move and `gh` call a session makes goes there, so a list without it
+    is a deployment that has not started rather than one that is merely narrow."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _egress(
+        monkeypatch,
+        answers={
+            "egress-probe.invalid": (403, "Forbidden"),
+            "api.github.com": (403, "Forbidden"),
+        },
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] egress: http://egress:3128 answered 403 for api.github.com, not 200" in out
+    assert "ISSUEBOT_EGRESS_ALLOW" in out
+
+
+def test_validate_fails_a_proxy_that_does_not_answer(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _egress(monkeypatch, answers={"egress-probe.invalid": "egress:3128 did not answer (OSError)"})
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] egress: http://egress:3128: egress:3128 did not answer (OSError)" in out
+
+
+def test_validate_warns_when_there_is_a_route_round_the_proxy(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The half the proxy cannot speak for: an allow-list bounds egress only while there is no
+    way past it, and under compose that is the shared network's `--internal` flag."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _egress(monkeypatch, direct=True)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] egress: http://egress:3128: egress-probe.invalid refused" in out
+    assert "example.com answered a direct connection" in out
+    assert "docker network create --internal issuebot-internal" in out
 
 
 def test_validate_fails_a_pool_with_no_credential_in_the_environment(
@@ -3362,4 +3478,4 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "17 checks: 1 failed, 1 warnings" in out
+    assert "18 checks: 1 failed, 2 warnings" in out

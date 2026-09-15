@@ -70,6 +70,21 @@ from issuebot.db import (
     refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
+from issuebot.egress import (
+    ALLOW_ENV,
+    PROBE_DENIED_HOST,
+    PROBE_DIRECT_HOST,
+    PROBE_REQUIRED_HOST,
+    PROXY_ENV_NAMES,
+    Rule,
+    allow_rules,
+    configured_proxy,
+    probe_proxy,
+    reachable_directly,
+)
+from issuebot.egress import DEFAULT_BIND as EGRESS_DEFAULT_BIND
+from issuebot.egress import DEFAULT_PORT as EGRESS_DEFAULT_PORT
+from issuebot.egress import serve as serve_egress
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import (
     GhCliAdapter,
@@ -295,6 +310,26 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"listen address (default: {WEB_DEFAULT_BIND}; 0.0.0.0 to serve a network)",
     )
     web.set_defaults(func=cmd_web)
+
+    egress = subparsers.add_parser(
+        "egress",
+        help=(
+            "serve the allow-listing CONNECT proxy the worker's egress goes through "
+            "(reads ISSUEBOT_EGRESS_ALLOW; no workflow)"
+        ),
+    )
+    egress.add_argument(
+        "--port",
+        type=int,
+        default=EGRESS_DEFAULT_PORT,
+        help=f"listen port (default: {EGRESS_DEFAULT_PORT})",
+    )
+    egress.add_argument(
+        "--bind",
+        default=EGRESS_DEFAULT_BIND,
+        help=f"listen address (default: {EGRESS_DEFAULT_BIND}; 0.0.0.0 to serve a network)",
+    )
+    egress.set_defaults(func=cmd_egress)
     return parser
 
 
@@ -361,6 +396,7 @@ def run_checks(
         _setting_sources_check(cfg),
         _run_as_check(cfg),
         _mcp_config_check(cfg),
+        _egress_check(os.environ),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -716,6 +752,67 @@ def _probe_status_page() -> str | None:
     finally:
         # Never `wait=True`: a thread stuck in `getaddrinfo` is the case this exists for.
         executor.shutdown(wait=False)
+
+
+# What the egress probes may spend. Two proxy round trips and, on a confined container, one
+# TCP connection that never completes: a name with no route takes the whole of its budget,
+# which is why the direct one is the short of the three.
+_EGRESS_PROBE_TIMEOUT_S = 10.0
+_EGRESS_DIRECT_TIMEOUT_S = 3.0
+
+
+def _egress_check(environ: Mapping[str, str]) -> Check:
+    """The proxy the session's network egress goes through (#126), or a warning that it has none.
+
+    Two questions, and the second is not the proxy's to answer. *Does the proxy hold its
+    contract* -- a name off the list refused, the API the workflow cannot work without admitted
+    -- is a failure when it does not, since every session and the worker itself are pointed at
+    it and a proxy that answers wrongly breaks or exposes all of them. *Is there a route round
+    it* is a property of the network rather than of the proxy, and reads as a warning: under
+    compose the answer should be no and a yes means the shared network was created without
+    ``--internal``, but a host running with an operator's own proxy in its environment is
+    entitled to reach the rest of the internet and should not be told it has a fault.
+    """
+    subject = "egress"
+    proxy = configured_proxy(environ)
+    if proxy is None:
+        return Check(
+            subject,
+            "warn",
+            "no proxy configured; this process and every session it starts can reach any host "
+            f"the network reaches. The compose worker profile routes egress through the "
+            f"`egress` service and sets {'/'.join(PROXY_ENV_NAMES[:2])}",
+        )
+    refused = probe_proxy(proxy, PROBE_DENIED_HOST, timeout_s=_EGRESS_PROBE_TIMEOUT_S)
+    if isinstance(refused, str):
+        return Check(subject, "fail", f"{proxy}: {refused}")
+    if refused[0] != 403:
+        return Check(
+            subject,
+            "fail",
+            f"{proxy} answered {refused[0]} for {PROBE_DENIED_HOST}, not 403: it is not "
+            "filtering by name",
+        )
+    admitted = probe_proxy(proxy, PROBE_REQUIRED_HOST, timeout_s=_EGRESS_PROBE_TIMEOUT_S)
+    if isinstance(admitted, str):
+        return Check(subject, "fail", f"{proxy}: {admitted}")
+    if admitted[0] != 200:
+        return Check(
+            subject,
+            "fail",
+            f"{proxy} answered {admitted[0]} for {PROBE_REQUIRED_HOST}, not 200: every `gh` "
+            f"call would fail. Add it to {ALLOW_ENV}, or check the proxy can reach it",
+        )
+    detail = f"{proxy}: {PROBE_DENIED_HOST} refused, {PROBE_REQUIRED_HOST} admitted"
+    if reachable_directly(PROBE_DIRECT_HOST, timeout_s=_EGRESS_DIRECT_TIMEOUT_S):
+        return Check(
+            subject,
+            "warn",
+            f"{detail}; but {PROBE_DIRECT_HOST} answered a direct connection, so the "
+            "allow-list bounds only what asks the proxy. Under compose, create the shared "
+            "network with `docker network create --internal issuebot-internal`",
+        )
+    return Check(subject, "ok", f"{detail}; no route round it")
 
 
 def _github_status_check() -> Check:
@@ -1576,6 +1673,47 @@ async def _run_web(url: str, *, password: str, port: int, bind: str) -> int:
         await _serve(create_app(database, password=password), host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
+    return 0
+
+
+# --- egress --------------------------------------------------------------------------
+
+
+def cmd_egress(args: argparse.Namespace) -> int:
+    """Serve the allow-listing CONNECT proxy until SIGTERM or SIGINT.
+
+    Reads no workflow and holds no credential: the list is the deployment's
+    (``ISSUEBOT_EGRESS_ALLOW``), and the service exists to see host names and nothing else.
+    """
+    if not 0 <= args.port <= 65535:
+        print("[FAIL] egress: --port must be between 0 and 65535")
+        return 1
+    rules, complaints = allow_rules(os.environ)
+    log = get_logger(__name__)
+    for complaint in complaints:
+        # A typo costs its own entry, never the service: a proxy that refused to start would
+        # be a worker with no egress at all, which fails every session rather than the one
+        # request the typo was about.
+        log.warning("egress_allow_entry_ignored", complaint=complaint)
+    return asyncio.run(_run_egress(rules, bind=args.bind, port=args.port))
+
+
+async def _run_egress(rules: Sequence[Rule], *, bind: str, port: int) -> int:
+    try:
+        server = await serve_egress(rules, bind=bind, port=port)
+    except OSError as exc:
+        print(f"[FAIL] egress: cannot listen on {bind}:{port}: {exc}")
+        return 1
+    get_logger(__name__).info(
+        "egress_started", bind=bind, port=port, allow=[str(rule) for rule in rules]
+    )
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signame in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signame, stop.set)
+    async with server:
+        await stop.wait()
     return 0
 
 
