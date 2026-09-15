@@ -11,7 +11,14 @@ from pydantic import SecretStr
 
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError
-from issuebot.github.ghcli import ID_BATCH_SIZE, ISSUE_FIELDS, GhCliAdapter, by_ids_query
+from issuebot.github.ghcli import (
+    ID_BATCH_SIZE,
+    ISSUE_FIELDS,
+    MAX_COMMENT_PAGES,
+    MAX_TIMELINE_PAGES,
+    GhCliAdapter,
+    by_ids_query,
+)
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
 from issuebot.github.runner import GhResult
 from issuebot.github.state import LabelStyle
@@ -487,35 +494,71 @@ async def test_comment_posts_json_body_and_parses_response() -> None:
     assert comment.created_at == datetime(2026, 9, 2, 11, 0, tzinfo=UTC)
 
 
-async def test_find_workpad_comment_paginates_and_returns_marker_comment_or_none() -> None:
+def comment_page(ids: range, *, workpad_at: int | None = None) -> str:
+    """A page of comments by a stranger, one of them the account's workpad when asked."""
+    items = []
+    for comment_id in ids:
+        own = comment_id == workpad_at
+        items.append(
+            {
+                "id": comment_id,
+                "body": f"{WORKPAD_MARKER}\n\nstate" if own else f"comment {comment_id}",
+                "html_url": f"https://github.com/example/repo/issues/42#issuecomment-{comment_id}",
+                "user": {"login": LOGIN if own else "someone"},
+                "created_at": "2026-09-02T10:00:00Z",
+                "updated_at": "2026-09-02T10:00:00Z",
+            }
+        )
+    return json.dumps(items)
+
+
+async def test_find_workpad_comment_reads_one_page_and_returns_the_marker_comment_or_none() -> None:
     runner = StubRunner()
-    runner.on(has("issues/42/comments?per_page=100"), stdout=fixture("comments_paged.json"))
-    runner.on(has("issues/43/comments?per_page=100"), stdout="[[]]")
+    runner.on(has("issues/42/comments?per_page=100&page=1"), stdout=fixture("comments.json"))
+    runner.on(has("issues/43/comments?per_page=100&page=1"), stdout="[]")
     adapter = make_adapter(runner)
-    # An earlier comment by someone else opens with the marker; it is not the workpad (#77).
     found = await adapter.find_workpad_comment(42)
     assert found is not None and found.author == LOGIN
-    runner.calls.clear()
-    found = await adapter.find_workpad_comment(42)
-    assert found is not None
     assert found.id == 1002
     assert found.body.startswith(WORKPAD_MARKER)
     assert found.updated_at == datetime(2026, 9, 2, 10, 30, tzinfo=UTC)
-    assert await adapter.find_workpad_comment(43) is None
-    assert runner.argv(0) == [
-        "api",
-        "repos/example/repo/issues/42/comments?per_page=100",
-        "--paginate",
-        "--slurp",
+    # A page shorter than PAGE_SIZE is the last one: no second request.
+    assert [argv for argv, _ in runner.calls if "comments" in argv[1]] == [
+        ["api", "repos/example/repo/issues/42/comments?per_page=100&page=1"]
     ]
+    assert await adapter.find_workpad_comment(43) is None
 
 
-async def test_find_workpad_comment_accepts_a_single_wrapped_page() -> None:
+async def test_find_workpad_comment_pages_until_the_marker_and_no_further() -> None:
     runner = StubRunner()
-    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    runner.on(has("comments?per_page=100&page=1"), stdout=comment_page(range(1, 101)))
+    runner.on(
+        has("comments?per_page=100&page=2"), stdout=comment_page(range(101, 201), workpad_at=150)
+    )
+    runner.on(has("comments?per_page=100&page=3"), stdout=comment_page(range(201, 205)))
     found = await make_adapter(runner).find_workpad_comment(42)
-    assert found is not None
-    assert found.id == 1002
+    assert found is not None and found.id == 150
+    pages = [argv[1].rsplit("=", 1)[1] for argv, _ in runner.calls if "comments" in argv[1]]
+    assert pages == ["1", "2"]
+
+
+async def test_find_workpad_comment_stops_at_the_page_cap_with_an_error_not_none() -> None:
+    runner = StubRunner()
+    for page in range(1, MAX_COMMENT_PAGES + 2):
+        first = (page - 1) * 100 + 1
+        runner.on(
+            has(f"comments?per_page=100&page={page}"),
+            stdout=comment_page(range(first, first + 100)),
+        )
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).find_workpad_comment(42)
+    assert exc.value.category == "response"
+    assert not exc.value.retryable
+    assert exc.value.message == (
+        f"no workpad comment by {LOGIN} among the first {MAX_COMMENT_PAGES * 100} comments of #42"
+    )
+    pages = [argv for argv, _ in runner.calls if "comments" in argv[1]]
+    assert len(pages) == MAX_COMMENT_PAGES
 
 
 async def test_find_workpad_comment_skips_a_marker_comment_by_anyone_else() -> None:
@@ -546,14 +589,20 @@ async def test_find_workpad_comment_skips_a_marker_comment_by_anyone_else() -> N
 
 async def test_find_workpad_comment_matches_the_login_case_insensitively() -> None:
     runner = StubRunner()
-    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    runner.on(has("issues/42/comments"), stdout=fixture("comments.json"))
     found = await make_adapter(runner, login="Issuebot-Agent").find_workpad_comment(42)
     assert found is not None and found.id == 1002
 
 
-async def test_find_workpad_comment_rejects_unwrapped_pages() -> None:
+async def test_find_workpad_comment_rejects_a_wrapped_page() -> None:
+    """``--slurp`` wrapped the pages in a list; a page is a list of comments, nothing else."""
     runner = StubRunner()
-    runner.on(has("issues/42/comments"), stdout=fixture("comments.json"))
+    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).find_workpad_comment(42)
+    assert exc.value.category == "response"
+    runner = StubRunner()
+    runner.on(has("issues/42/comments"), stdout='{"comments": []}')
     with pytest.raises(GitHubError) as exc:
         await make_adapter(runner).find_workpad_comment(42)
     assert exc.value.category == "response"
@@ -737,7 +786,7 @@ async def test_own_login_is_probed_once_and_remembered() -> None:
     runner = StubRunner()
     runner.on(has("api", "user"), stdout="Issuebot-Agent\n")
     runner.on(has("graphql"), stdout=fixture("by_ids.json"))
-    runner.on(has("issues/42/comments"), stdout="[" + fixture("comments.json") + "]")
+    runner.on(has("issues/42/comments"), stdout=fixture("comments.json"))
     adapter = make_adapter(runner, login=None)
     issues = await adapter.fetch_issues_by_ids(["7"])
     assert runner.argv(0) == ["api", "user", "--jq", ".login"]
@@ -844,6 +893,32 @@ async def test_count_own_label_additions_reads_the_timeline_and_paginates() -> N
     assert first[first.index("number=42") - 1] == "-F"
     assert first[first.index("owner=example") - 1] == "-f"
     assert len(runner.calls) == 2
+
+
+async def test_count_own_label_additions_gives_up_past_the_page_cap() -> None:
+    """A label history longer than ``MAX_TIMELINE_PAGES`` is an error, not a longer read (#110)."""
+    runner = StubRunner()
+    runner.on(
+        both(has("LABELED_EVENT"), lacks("cursor=")),
+        stdout=_timeline_page(
+            [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}], end_cursor="c1"
+        ),
+    )
+    for page in range(1, MAX_TIMELINE_PAGES + 2):
+        runner.on(
+            both(has("LABELED_EVENT"), has(f"cursor=c{page}")),
+            stdout=_timeline_page(
+                [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}],
+                end_cursor=f"c{page + 1}",
+            ),
+        )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).count_own_label_additions(42, "issuebot/rework")
+    assert excinfo.value.category == "response"
+    assert str(excinfo.value).endswith(
+        f"label history of #42 runs past {MAX_TIMELINE_PAGES * 100} events"
+    )
+    assert len(runner.calls) == MAX_TIMELINE_PAGES
 
 
 async def test_count_own_label_additions_rejects_a_malformed_response() -> None:

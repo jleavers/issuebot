@@ -16,6 +16,7 @@ def test_agent_error_carries_category_and_message() -> None:
     ("category", "outcome"),
     [
         ("turn_timeout", "timed_out"),
+        ("run_timeout", "timed_out"),
         ("cancelled", "cancelled"),
         ("process_exit", "failed"),
         ("workspace_error", "failed"),

@@ -6,6 +6,7 @@ import psycopg
 import pytest
 
 from issuebot.db import (
+    ADVISORY_LOCK_KEY,
     Migration,
     MigrationError,
     apply_migrations,
@@ -275,3 +276,31 @@ async def test_0003_ignores_a_stored_snapshot(db_url: str) -> None:
         ] == 0
     finally:
         await conn.close()
+
+
+async def test_every_connection_carries_the_lock_and_statement_timeouts(db_url: str) -> None:
+    conn = await connect(db_url)
+    try:
+        lock = await (await conn.execute("SHOW lock_timeout")).fetchone()
+        statement = await (await conn.execute("SHOW statement_timeout")).fetchone()
+    finally:
+        await conn.close()
+    assert lock == ("10s",)
+    assert statement == ("1min",)
+
+
+async def test_a_migration_blocked_on_the_advisory_lock_fails_instead_of_hanging(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock wait is bounded (#110): a holder that never lets go is a MigrationError, so
+    the worker exits and the restart policy shows it, rather than a silent hang."""
+    monkeypatch.setattr("issuebot.db.connection.LOCK_TIMEOUT_S", 1)
+    holder = await connect(db_url)
+    try:
+        async with holder.transaction():
+            await holder.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK_KEY,))
+            with pytest.raises(MigrationError) as exc:
+                await migrate(db_url)
+            assert "lock" in exc.value.message.lower()
+    finally:
+        await holder.close()

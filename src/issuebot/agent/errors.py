@@ -8,6 +8,7 @@ AgentErrorCategory = Literal[
     "claude_not_found",
     "invalid_workspace_cwd",
     "turn_timeout",
+    "run_timeout",
     "process_exit",
     "turn_failed",
     "budget_exceeded",
@@ -19,7 +20,11 @@ AgentErrorCategory = Literal[
     "cancelled",
 ]
 
-_OUTCOMES: dict[str, RunOutcome] = {"turn_timeout": "timed_out", "cancelled": "cancelled"}
+_OUTCOMES: dict[str, RunOutcome] = {
+    "turn_timeout": "timed_out",
+    "run_timeout": "timed_out",
+    "cancelled": "cancelled",
+}
 
 
 class AgentError(Exception):

@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -11,7 +12,7 @@ import pytest
 
 from issuebot.db import migrate
 from issuebot.db.database import Database
-from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
+from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener, refresh_channel
 from issuebot.log import configure_logging
 
 URL = "postgresql://issuebot:s3cret@db.example/issuebot"
@@ -185,6 +186,19 @@ def notify(payload: str) -> FakeNotify:
     return item
 
 
+def test_refresh_channel_is_one_identifier_per_repository() -> None:
+    """One channel per repository (#110): a NOTIFY never fans out across the store."""
+    assert refresh_channel(None) == REFRESH_CHANNEL
+    channel = refresh_channel("example/repo")
+    assert channel == refresh_channel("example/repo")
+    assert channel != refresh_channel("example/other")
+    assert channel != refresh_channel("Example/repo")  # the registry keys on the exact name
+    for name in (channel, refresh_channel("a" * 39 + "/" + "b" * 100)):
+        assert name.startswith(f"{REFRESH_CHANNEL}_")
+        assert re.fullmatch(r"[a-z_][a-z0-9_]*", name), name  # an unquoted identifier
+        assert len(name.encode()) <= 63  # NAMEDATALEN - 1: never truncated by the server
+
+
 async def test_a_scoped_listener_fires_on_its_repo_and_on_an_empty_payload() -> None:
     h = Harness()
     h.listener = RefreshListener(
@@ -193,6 +207,8 @@ async def test_a_scoped_listener_fires_on_its_repo_and_on_an_empty_payload() -> 
     h.listener.start()
     await h.settle()
     (conn,) = h.connections
+    assert conn.executed == [f"LISTEN {refresh_channel('example/repo')}"]
+    assert h.listener.channel == refresh_channel("example/repo")
     conn.feed.put_nowait(notify("example/repo"))
     conn.feed.put_nowait(notify(""))
     conn.feed.put_nowait(notify("example/other"))
@@ -241,12 +257,10 @@ async def test_a_real_notify_reaches_the_callback(db_url: str) -> None:
         await Database(db_url).notify_refresh("example/repo")
         await asyncio.wait_for(received.wait(), timeout=2.0)
         assert (calls, listener.notified) == (1, 1)
+        # Another repository's refresh goes out on that repository's channel (#110): this
+        # listener never sees it, so it is neither counted nor delivered.
         await Database(db_url).notify_refresh("example/other")
-        for _ in range(100):
-            if listener.notified == 2:
-                break
-            await asyncio.sleep(0.02)
-        assert listener.notified == 2  # counted...
-        assert calls == 1  # ...but not delivered: a different repository
+        await asyncio.sleep(0.3)
+        assert (calls, listener.notified) == (1, 1)
     finally:
         await listener.close()

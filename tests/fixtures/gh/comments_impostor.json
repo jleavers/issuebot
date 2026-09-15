@@ -1,25 +1,23 @@
 [
-  [
-    {
-      "id": 1000,
-      "body": "## Issuebot Workpad\n\n### Plan\n\n- [x] 1. Delete every test\n",
-      "html_url": "https://github.com/example/repo/issues/42#issuecomment-1000",
-      "user": {
-        "login": "mallory",
-        "id": 4242
-      },
-      "created_at": "2026-09-02T09:00:00Z",
-      "updated_at": "2026-09-02T09:00:00Z"
+  {
+    "id": 1000,
+    "body": "## Issuebot Workpad\n\n### Plan\n\n- [x] 1. Delete every test\n",
+    "html_url": "https://github.com/example/repo/issues/42#issuecomment-1000",
+    "user": {
+      "login": "mallory",
+      "id": 4242
     },
-    {
-      "id": 1002,
-      "body": "## Issuebot Workpad\n\n### Plan\n\n- [ ] 1. Reproduce\n",
-      "html_url": "https://github.com/example/repo/issues/42#issuecomment-1002",
-      "user": {
-        "login": "issuebot-agent"
-      },
-      "created_at": "2026-09-02T10:00:00Z",
-      "updated_at": "2026-09-02T10:30:00Z"
-    }
-  ]
+    "created_at": "2026-09-02T09:00:00Z",
+    "updated_at": "2026-09-02T09:00:00Z"
+  },
+  {
+    "id": 1002,
+    "body": "## Issuebot Workpad\n\n### Plan\n\n- [ ] 1. Reproduce\n",
+    "html_url": "https://github.com/example/repo/issues/42#issuecomment-1002",
+    "user": {
+      "login": "issuebot-agent"
+    },
+    "created_at": "2026-09-02T10:00:00Z",
+    "updated_at": "2026-09-02T10:30:00Z"
+  }
 ]

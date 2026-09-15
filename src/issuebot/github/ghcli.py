@@ -25,6 +25,19 @@ from issuebot.log import get_logger
 
 PAGE_SIZE = 100
 ID_BATCH_SIZE = 50
+# How many pages of an issue's comments ``find_workpad_comment`` reads before giving up (#110):
+# the workpad is the account's first comment, so it sits among the earliest, and every comment
+# past it is someone else's to add. A thread that has outgrown this is reported, never
+# scanned to its end, and never read as "no workpad" -- that answer would have the session
+# open another one.
+MAX_COMMENT_PAGES = 10
+
+# How many pages of an issue's ``LABELED_EVENT`` timeline ``count_own_label_additions`` reads
+# (#110, the same rule): a hundred label additions a page, and a thousand is a bound no board
+# reaches by working. Past it the count is a ``response`` error, so the conflict bounce that
+# asks for it fails loudly and is retried, rather than reading a history anyone with triage
+# can lengthen for as long as it grows.
+MAX_TIMELINE_PAGES = 10
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body state url createdAt updatedAt closedAt
@@ -230,25 +243,29 @@ class GhCliAdapter:
         alone would let any commenter hand the agent its "prior state" (#77). A marker comment
         by anyone else is passed over, and logged once per adapter: the session asks every
         turn, and one impostor is one finding, not a warning per turn for as long as it stays.
+
+        The pages are asked for one at a time, oldest first, and the read stops at the first
+        match (#110): the thread's length past the workpad is anyone's to grow, so it is not
+        what the lookup's cost follows. ``MAX_COMMENT_PAGES`` bounds the rest, and a thread
+        longer than that with no workpad in it is a ``response`` error, not ``None``.
         """
         self._log.debug("find_workpad_comment", issue_number=number)
         login = await self.own_login()
-        result = await self._gh(
-            [
-                "api",
-                f"repos/{self.repo}/issues/{number}/comments?per_page={PAGE_SIZE}",
-                "--paginate",
-                "--slurp",
-            ]
-        )
-        pages = _parse_json(result.stdout)
-        if not isinstance(pages, list):
-            raise GitHubError("response", "comments response is not a list of pages")
-        for page in pages:
+        for page_number in range(1, MAX_COMMENT_PAGES + 1):
+            result = await self._gh(
+                [
+                    "api",
+                    f"repos/{self.repo}/issues/{number}/comments"
+                    f"?per_page={PAGE_SIZE}&page={page_number}",
+                ]
+            )
+            page = _parse_json(result.stdout)
             if not isinstance(page, list):
                 raise GitHubError("response", "comments page is not a list")
             for item in page:
-                if not isinstance(item, Mapping) or not is_workpad_body(item.get("body")):
+                if not isinstance(item, Mapping):
+                    raise GitHubError("response", "comments page item is not an object")
+                if not is_workpad_body(item.get("body")):
                     continue
                 comment = _comment_from(item)
                 if comment.author.lower() == login.lower():
@@ -262,7 +279,13 @@ class GhCliAdapter:
                         author=comment.author,
                         reason=f"not written by {login}",
                     )
-        return None
+            if len(page) < PAGE_SIZE:
+                return None
+        raise GitHubError(
+            "response",
+            f"no workpad comment by {login} among the first {MAX_COMMENT_PAGES * PAGE_SIZE} "
+            f"comments of #{number}",
+        )
 
     async def count_own_label_additions(self, number: int, label: str) -> int:
         """How many times the account the adapter acts as has added ``label`` to the issue.
@@ -270,14 +293,15 @@ class GhCliAdapter:
         The issue's ``LABELED_EVENT`` timeline items, paginated, counted where the actor is
         the account's login and the label is ``label`` (both compared case-insensitively). A
         record only GitHub writes, so a bound read from it -- the conflict bounce's (#104) --
-        survives whatever the session does to the workpad.
+        survives whatever the session does to the workpad. The read itself is bounded too
+        (#110): at most ``MAX_TIMELINE_PAGES`` pages, past which it is a ``response`` error.
         """
         self._log.debug("count_own_label_additions", issue_number=number, label=label)
         login = await self.own_login()
         wanted = label.lower()
         count = 0
         cursor: str | None = None
-        while True:
+        for _page_number in range(MAX_TIMELINE_PAGES):
             variables: dict[str, str | int] = {
                 "owner": self._owner,
                 "name": self._name,
@@ -305,6 +329,10 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+        raise GitHubError(
+            "response",
+            f"label history of #{number} runs past {MAX_TIMELINE_PAGES * PAGE_SIZE} events",
+        )
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._log.debug("update_comment", comment_id=comment_id)

@@ -38,6 +38,7 @@ from issuebot.db import (
     Probe,
     StoreError,
     StoreUnavailableError,
+    refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
 from issuebot.events import Event, StateChanged
@@ -2521,7 +2522,9 @@ def test_refresh_notifies_and_reports_failures(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert capsys.readouterr().out == (
+        f"[ OK ] refresh: notified {refresh_channel('example/repo')} for example/repo\n"
+    )
     assert fake_database.notified == 1
     fake_database.notify_error = StoreUnavailableError("cannot connect: refused")
     assert main(["refresh", "--workflow", str(path)]) == 1
@@ -2879,7 +2882,9 @@ def test_refresh_names_its_repository(
 ) -> None:
     path = _db_workflow(tmp_path, monkeypatch)
     assert main(["refresh", "--workflow", str(path)]) == 0
-    assert capsys.readouterr().out == "[ OK ] refresh: notified issuebot_refresh for example/repo\n"
+    assert capsys.readouterr().out == (
+        f"[ OK ] refresh: notified {refresh_channel('example/repo')} for example/repo\n"
+    )
     assert fake_database.notified_repos == ["example/repo"]
 
 
