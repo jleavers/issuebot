@@ -126,7 +126,8 @@ class RunAsProbe(Protocol):
 
 
 def probe_run_as(user: str, environ: Mapping[str, str]) -> str | None:
-    """None when the worker can run a command as ``user`` (#75), else why not."""
+    """None when the delegation runs as ``user`` at a uid other than this process's (#75,
+    #111), else why not: a refusal, or a delegation that works without separating."""
     return RunAs(user).probe(agent_environment(environ, token=None))
 
 

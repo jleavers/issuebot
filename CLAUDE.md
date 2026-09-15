@@ -90,6 +90,17 @@ session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `ba
 image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
 catches that rather than the variable that happens to produce it.
 Dependabot covers uv, Docker and Actions weekly.
+Every `uses:` in the workflows and every `rev:` in `.pre-commit-config.yaml` is a commit
+digest with its tag beside it (#111; `tests/test_pins.py` refuses a tag): a tag is a name its
+owner can repoint, and these run in CI and on any host that runs `pre-commit`, with `GH_TOKEN`
+and the store's DSN ambient. Dependabot's `github-actions` ecosystem moves the digest pins
+(it rewrites the digest and the comment); `pre-commit-version.yml` is the same weekly bump
+job for the hook pins that `claude-code-version.yml` is for the claude pin -- `pre-commit
+autoupdate --freeze`, the hooks over the tree as the proof, one PR from a branch named for
+the config's blob hash so a rerun finds its own. Both bump jobs recognise their own pull
+request by provenance and never by the branch name, which any fork can carry: REST
+`pulls?head=<owner>:<branch>`, kept only when `head.repo.full_name` is this repository and
+`user.login` is `github-actions[bot]`.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, it compares the
 Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, builds the image with the
 new version, and opens a PR. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility
@@ -211,7 +222,11 @@ floor, not the shipped version, and moves by hand.
   hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
   `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
   sweeps again); a no-op on the host route (`run_as` unset), where the
-  home is the operator's own. `probe`/`probe_run_as` report whether the delegation works, which the
+  home is the operator's own. `probe`/`probe_run_as` report whether the delegation *separates*,
+  not only whether it works (#111): the delegated `id -u` must answer the target's uid and that
+  uid must differ from the invoking `os.getuid()`, so an account that is the worker's own is
+  refused before sudo is asked and a sudo that ran the command at the worker's uid reads `no
+  separation`, apart from a refusal; the affirmative is what the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
@@ -659,12 +674,16 @@ floor, not the shipped version, and moves by hand.
   webhook or allow-list change needs a worker restart.
 - `issuebot.db`: the observability store, imported by `cli` and `web`; imports `config`,
   `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-  `0002_run_turns`, `0003_repos`; schema version 3) applied by `migrate.py` in one transaction
+  `0002_run_turns`, `0003_repos`, `0004_run_turns_repo`; schema version 4) applied by
+  `migrate.py` in one transaction
   under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
   files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
   workflow path and first/last-seen times) and a `repo` column, `NOT NULL` with no default, on
-  `issues`, `runs`, `events` and `runtime_snapshot` (`run_turns` has none, and is reached
-  through `runs`), so it refuses to apply against a database that already holds `issues`,
+  `issues`, `runs`, `events` and `runtime_snapshot` (`run_turns` gets its own in
+  `0004_run_turns_repo`, #111, backfilled from its run's row -- the one legitimate use of the
+  join -- with `runs` re-keyed `(repo, run_id)`, `run_turns` `(repo, run_id, turn_number)` and
+  a foreign key spanning both, so the tenancy check is the write's and not the read's join,
+  and a `run_id` shared by two repositories is two runs), so it refuses to apply against a database that already holds `issues`,
   `runs` or `events` rows -- a migration cannot know which repository they belong to -- naming
   the import command as the remedy; it also drops and recreates `runtime_snapshot` keyed by
   `repo` instead of as a single row.
@@ -677,9 +696,12 @@ floor, not the shipped version, and moves by hand.
   path `worker`, `web` and `migrate` take), `reconnect_delay` (1, 2, 4, 8, 16, then
   30 s). `store.py`: `PostgresStore(url, *, repo, labels)` (`apply_event(event, turns=())`
   appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the captured
-  turns into `run_turns` in the `run_ended` transaction (idempotent per `(run_id, turn_number)`),
+  turns into `run_turns` in the `run_ended` transaction (idempotent per `(repo, run_id,
+  turn_number)`),
   or updates `issues` on `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`;
-  `write_snapshot`), every write stamped with its `repo`; every `issues` write is also guarded
+  `write_snapshot`), every write stamped with its `repo` by `_stamp`, which *forces* the
+  store's over anything a row carries and is the only way a row is built, `INSERT_TURN`
+  included (#111); every `issues` write is also guarded
   by `seen_at`, so write order never matters. `sink.py`:
   `PostgresSink` (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots
   into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
@@ -855,7 +877,8 @@ floor, not the shipped version, and moves by hand.
   missing so an older-but-permitted `claude` stays green, a `claude.setting_sources` check
   that warns when `project` or `local` hands the clone's files to the session as
   configuration (#107), an `agent.run_as` check that probes
-  the uid drop through `probe_run_as` (#75: fails when set but unusable, warns when unset
+  the uid drop through `probe_run_as` (#75, #111: fails when set but unusable or not a
+  different uid from this process's, which the OK line names; warns when unset
   since the session then shares the worker's uid), a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and

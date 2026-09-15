@@ -16,8 +16,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
       - run: uv python install
@@ -46,8 +46,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://issuebot@localhost:5432/issuebot
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
       - run: uv python install
@@ -57,7 +57,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: compose config under each profile
         run: |
           docker network create issuebot
@@ -85,8 +85,8 @@ jobs:
           # image side -- that the account exists and cannot invoke sudo -- is proved below.
           test "$(COMPOSE_PROFILES=hub ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r .services.web.user)" = web
           test "$(COMPOSE_PROFILES=worker ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r '.services.worker.user // "none"')" = none
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: false
@@ -330,7 +330,7 @@ jobs:
       # uid, not about the two arguments interacting. Its own cache scope: writing mode=max to
       # the default one would replace the cache the build above depends on.
       - name: build with the optional toolchain
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: false

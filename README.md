@@ -234,13 +234,13 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
-[ OK ] agent.run_as: agent; the session runs as a separate account
+[ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other than this process's (1000)
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
 [ OK ] github.status: All Systems Operational
-[ OK ] database.url: connected (PostgreSQL 18.1); schema version 3
+[ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 11314 characters, renders
 15 checks: 0 failed, 2 warnings
@@ -963,6 +963,16 @@ PostgreSQL and `status`, `stats` and `refresh` work; without it the worker runs 
 before. The worker applies pending migrations when it starts and fails fast if the database
 is configured but unreachable; `validate` reports the schema version. The tests that need a
 database read `DATABASE_URL` and are skipped when it is unset.
+
+Everything the tree executes from outside it is pinned to a commit digest, not a name (#111):
+`uv.lock` hashes every Python artefact, every `uses:` in `.github/workflows/` and every `rev:`
+in `.pre-commit-config.yaml` is a 40-hex commit with its tag beside it, and
+`tests/test_pins.py` refuses a tag. A tag is a name its owner can repoint, and the hooks run on
+this host with `GH_TOKEN` and the store's DSN in the environment. Dependabot moves the action
+pins; the `pre-commit hooks version` workflow moves the hook pins weekly with `pre-commit
+autoupdate --freeze` and opens a pull request, like the `Claude Code version` workflow does
+for the `claude` pin in the Dockerfile. Bump a hook by hand the same way:
+`uv run pre-commit autoupdate --freeze`.
 
 Upgrading an existing worker to a version that adds a label — `issuebot/no-fault` is the most
 recent — needs `issuebot labels ensure` run once against the target repository first. The worker
