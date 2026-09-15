@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -23,10 +24,12 @@ _ENV_VARS = (
     "SLACK_WEBHOOK_URL",
     "ISSUEBOT_WORKSPACE_ROOT",
     "ISSUEBOT_WORKFLOW",
-    # The image sets this one (``ENV ISSUEBOT_AGENT_USER=agent``), so a suite run inside the
-    # container -- or on a host that exports it -- would otherwise resolve `agent.run_as` for
-    # every workflow that does not name it, and the checks that shell out to `sudo` would
-    # reach a real delegation. A test that wants an account sets it itself.
+    # ``ISSUEBOT_AGENT_USER`` is the operator's own override, which a host or a container may
+    # export, so a suite run under either would otherwise resolve `agent.run_as` for every
+    # workflow that does not name it, and the checks that shell out to `sudo` would reach a
+    # real delegation. The image's own built account list (#142) is the same hazard one layer
+    # down -- see `unbuilt_session_accounts` below. A test that wants an account sets one
+    # itself.
     "ISSUEBOT_AGENT_USER",
     "ISSUEBOT_LOG_LEVEL",
     "ISSUEBOT_LOG_FORMAT",
@@ -38,6 +41,19 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every test independent of the developer's shell environment."""
     for name in _ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def unbuilt_session_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker image writes ``/etc/issuebot/session-accounts`` (#142) and the suite runs
+    inside that image as well as on a host, so a test that says nothing about accounts must
+    not pick the image's up: `agent.run_as` falls back to the host route unless a test points
+    the constant at a list of its own.
+    """
+    monkeypatch.setattr(
+        "issuebot.config.resolve.SESSION_ACCOUNTS_FILE",
+        Path("/nonexistent/issuebot/session-accounts"),
+    )
 
 
 @pytest.fixture(autouse=True)

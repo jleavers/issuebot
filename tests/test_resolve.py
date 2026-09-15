@@ -150,3 +150,57 @@ def test_mcp_config_unusable_entries_are_left_for_validation() -> None:
     assert out["claude"]["mcp_config"] == "mcp.json"
     out = resolve_config({"claude": {}}, environ={}, base_dir=BASE)
     assert "mcp_config" not in out["claude"]
+
+
+def test_run_as_falls_back_to_the_accounts_the_image_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\nagent-3\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert out["agent"]["run_as"] == ["agent-1", "agent-2", "agent-3"]
+
+
+def test_the_environment_variable_wins_over_the_built_accounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config(
+        {"github": {"repo": "o/r"}}, environ={"ISSUEBOT_AGENT_USER": "agent"}, base_dir=BASE
+    )
+    assert out["agent"]["run_as"] == "agent"
+
+
+def test_an_explicit_run_as_wins_over_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config(
+        {"github": {"repo": "o/r"}, "agent": {"run_as": ["chosen"]}},
+        environ={"ISSUEBOT_AGENT_USER": "agent"},
+        base_dir=BASE,
+    )
+    assert out["agent"]["run_as"] == ["chosen"]
+
+
+def test_no_built_accounts_is_the_host_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "issuebot.config.resolve.SESSION_ACCOUNTS_FILE", tmp_path / "does-not-exist"
+    )
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert "agent" not in out
+
+
+def test_a_blank_built_account_list_is_the_host_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("\n  \n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert "agent" not in out

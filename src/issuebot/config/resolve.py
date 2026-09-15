@@ -24,6 +24,11 @@ WORKSPACE_ROOT_FALLBACK = "ISSUEBOT_WORKSPACE_ROOT"
 WORKSPACE_ROOT_DEFAULT = "/workspaces"
 AGENT_RUN_AS_FIELD: tuple[str, ...] = ("agent", "run_as")
 AGENT_RUN_AS_FALLBACK = "ISSUEBOT_AGENT_USER"
+# The accounts the worker image built, written by the same ``useradd`` loop that creates them
+# (#142). Below the variable and above the host route, so the image's default is the accounts
+# it actually has and a pool raised at build time cannot disagree with the names the worker
+# resolves at run time.
+SESSION_ACCOUNTS_FILE = Path("/etc/issuebot/session-accounts")
 MCP_CONFIG_FIELD: tuple[str, ...] = ("claude", "mcp_config")
 
 
@@ -51,6 +56,22 @@ def resolve_env_value(
             raise MissingEnvironmentVariable(variable=name, field=field)
         return resolved
     return value
+
+
+def built_session_accounts() -> list[str] | None:
+    """The session accounts this image was built with, or ``None`` outside one.
+
+    The built fact rather than a number to re-derive from: compose passes the operator's own
+    ``ISSUEBOT_AGENT_POOL_SIZE`` into the container through ``env_file``, so a runtime copy of
+    the size describes the file they just edited and not the image they are running (#142).
+    Read at call time, never at import, so a test can point the constant at a file of its own.
+    """
+    try:
+        text = SESSION_ACCOUNTS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    accounts = [line.strip() for line in text.splitlines() if line.strip()]
+    return accounts or None
 
 
 def resolve_path(value: str, *, base_dir: Path) -> Path:
@@ -105,18 +126,18 @@ def resolve_config(
         root = str(resolve_path(root, base_dir=base_dir))
     _set(config, WORKSPACE_ROOT_FIELD, root)
 
-    # The image sets the variable; the host route leaves it unset and runs the session as the
-    # worker (#75). An explicit ``agent.run_as`` in WORKFLOW.md wins over it, as for the root.
-    _set(
-        config,
-        AGENT_RUN_AS_FIELD,
-        resolve_env_value(
-            _get(config, AGENT_RUN_AS_FIELD),
-            field=".".join(AGENT_RUN_AS_FIELD),
-            fallback=AGENT_RUN_AS_FALLBACK,
-            environ=environ,
-        ),
+    # The image writes its account list; the variable and the front matter both win over it,
+    # and a host has neither (#75, #142). An explicit ``agent.run_as`` in WORKFLOW.md wins over
+    # everything, as for the root.
+    run_as = resolve_env_value(
+        _get(config, AGENT_RUN_AS_FIELD),
+        field=".".join(AGENT_RUN_AS_FIELD),
+        fallback=AGENT_RUN_AS_FALLBACK,
+        environ=environ,
     )
+    if run_as is None:
+        run_as = built_session_accounts()
+    _set(config, AGENT_RUN_AS_FIELD, run_as)
 
     entries = _get(config, MCP_CONFIG_FIELD)
     if isinstance(entries, list):
