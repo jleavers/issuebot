@@ -266,7 +266,9 @@ floor, not the shipped version, and moves by hand.
   `2026-09-14-session-authority-design.md`): `claude.disallowed_tools` ships
   `DEFAULT_DISALLOWED_TOOLS` (`WebFetch`, `WebSearch`) and `build_argv` emits it, `[]` widens
   it, `--strict-mcp-config` is unconditional, so the clone's `.mcp.json` adds nothing, and
-  `claude.mcp_config` (`--mcp-config`, paths or JSON strings, default none) is the one route
+  `claude.mcp_config` (`--mcp-config`, paths or JSON strings, default none; a path is resolved
+  against the workflow's directory in `resolve.py`, never read relative to the clone, which is
+  the session's cwd and the session's to write) is the one route
   in; the Dockerfile asserts both flags at build. The `<github-text>` envelope is therefore a hint to
   the model, not the boundary: `_defang` neutralises a `<` (or the fullwidth and small forms
   NFKC folds to it) that is followed, on the text's skeleton (`tag_skeleton`: Unicode format

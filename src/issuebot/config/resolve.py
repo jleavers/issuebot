@@ -24,6 +24,7 @@ WORKSPACE_ROOT_FALLBACK = "ISSUEBOT_WORKSPACE_ROOT"
 WORKSPACE_ROOT_DEFAULT = "/workspaces"
 AGENT_RUN_AS_FIELD: tuple[str, ...] = ("agent", "run_as")
 AGENT_RUN_AS_FALLBACK = "ISSUEBOT_AGENT_USER"
+MCP_CONFIG_FIELD: tuple[str, ...] = ("claude", "mcp_config")
 
 
 def resolve_env_value(
@@ -58,6 +59,23 @@ def resolve_path(value: str, *, base_dir: Path) -> Path:
     if not path.is_absolute():
         path = base_dir / path
     return path.resolve(strict=False)
+
+
+def resolve_mcp_config_entry(value: Any, *, base_dir: Path) -> Any:
+    """Resolve one ``claude.mcp_config`` entry that names a file; pass a JSON document through.
+
+    ``claude -p`` runs with the clone as its working directory, and the clone is the session's
+    to write, so a relative path handed to ``--mcp-config`` verbatim would be read from there:
+    turn one could rewrite it and turn two would load the rewritten server set (#109). Resolved
+    against the workflow's directory instead, like ``workspace.root``, so the file named is the
+    operator's. A JSON string (``{`` or ``[`` first) is the servers themselves and is left as
+    written; anything that is not a string is left for validation to report.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value
+    if value.lstrip()[0] in "{[":
+        return value
+    return str(resolve_path(value, base_dir=base_dir))
 
 
 def resolve_config(
@@ -99,6 +117,14 @@ def resolve_config(
             environ=environ,
         ),
     )
+
+    entries = _get(config, MCP_CONFIG_FIELD)
+    if isinstance(entries, list):
+        _set(
+            config,
+            MCP_CONFIG_FIELD,
+            [resolve_mcp_config_entry(entry, base_dir=base_dir) for entry in entries],
+        )
     return config
 
 

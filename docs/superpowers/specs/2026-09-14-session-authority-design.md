@@ -51,7 +51,8 @@ what the session may do within them.
   argv now carries `--disallowedTools WebFetch WebSearch`, and always emits
   `--strict-mcp-config`, so no MCP server from the clone's `.mcp.json`, the project's settings
   or the account's home joins the set; `claude.mcp_config`, a list of what `--mcp-config`
-  takes and empty by default, is the one route in, so a deployment that used a server from
+  takes (a path resolved against the workflow's directory, never relative to the clone, which
+  is the session's cwd and the session's to write) and empty by default, is the one route in, so a deployment that used a server from
   its home names it in the front matter and gets it back. That is a change on upgrade: a
   server a session found for itself is gone until the front matter names it. A deny list rather than an allow list, on purpose: an allow list would
   have to name every tool the workflow needs, and tool names move between `claude` releases
@@ -91,7 +92,8 @@ what the session may do within them.
   padding left as data. It is total over the same skeleton `check_envelopes` walks, so text
   inside an envelope can never fail the render however its tag is spelled -- a deterministic
   failure would be retried `max_attempts` times and escalated blaming the template -- while a
-  template that cut a tag, or a value no envelope wraps (#105), still does. The `Cf` class is
+  template that cut a tag, or a value no envelope wraps (what #105 closed for labels and
+  logins), still does. The `Cf` class is
   written as ranges, since a table walk at import is 1.1 M code points, and a test pins it
   against `unicodedata`, so a Unicode update that adds a format character fails a test rather
   than a sweep.
@@ -130,9 +132,11 @@ what the session may do within them.
   decision rather than a default; filed as #127.
 - **The Claude credential.** It is the session's own and stays so (#75, "What this does not
   do").
-- **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare) and
-  #107 (the clone's `CLAUDE.md` and `.claude/`) are their own bypasses; this change bounds
-  what any of them can reach, which is why it goes first.
+- **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare,
+  landed in #120 while this was in review: every GitHub-authored value now goes through the
+  same defang) and #107 (the clone's `CLAUDE.md` and `.claude/`, still open) are their own
+  bypasses; this change bounds what any of them can reach, which is why it is independent
+  of both.
 
 ## Tests
 

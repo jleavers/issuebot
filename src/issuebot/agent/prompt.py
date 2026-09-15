@@ -45,8 +45,11 @@ _FORMAT_SET = frozenset(chr(c) for lo, hi in _FORMAT_RANGES for c in range(lo, h
 _LESS_THAN = re.compile("[<\uff1c\ufe64]")
 # What may sit between a `<` and the tag name and still read as the tag: whitespace, and a `/`
 # for a closing tag. Always matches, possibly empty. Unbounded, as the literal regex's `\s*`
-# was; linear all the same, since a run of whitespace follows one `<` and no other.
-_GAP = re.compile(r"\s*/?\s*")
+# was; linear all the same, since a run of whitespace follows one `<` and no other. Matched on
+# the stripped text before any folding, so it names the fullwidth solidus itself: U+FF0F is the
+# one character NFKC folds to `/`, and every character it folds to whitespace `\s` already
+# matches (tests/test_agent_prompt.py pins both against `unicodedata`).
+_GAP = re.compile(r"\s*[/\uff0f]?\s*")
 # The name itself, matched against the NFKC form of the next few characters after the gap, so
 # `<` U+FF47 `ithub-text` (a fullwidth g) is the tag, and `github-texture` is not.
 _NAME = re.compile(rf"{GITHUB_TEXT_TAG}\b", re.IGNORECASE)

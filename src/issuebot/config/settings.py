@@ -132,7 +132,9 @@ class ClaudeSettings(_Model):
     # The MCP servers a session may use, as `claude --mcp-config` takes them: paths to JSON
     # files, or JSON strings. Every session runs with `--strict-mcp-config`, so this list is
     # the whole set; empty -- the default -- is no server at all, whatever the clone's
-    # `.mcp.json` or a settings file says. A path is read by the session's account.
+    # `.mcp.json` or a settings file says. A path is resolved against the workflow's directory
+    # (`resolve.py`; the clone is the session's cwd and the session's to write, so a relative
+    # one must not be read from there) and is read by the session's account.
     mcp_config: list[NonEmptyStr] = Field(default_factory=list)
     append_system_prompt: str | None = None
     setting_sources: list[SettingSource] | None = None
