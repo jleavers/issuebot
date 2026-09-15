@@ -14,6 +14,7 @@ import structlog
 
 from fakes.web import API, BASE, PASSWORD, REFRESH_HEADERS, RUN_ID, Harness, basic_auth
 from issuebot.web import SECURITY_HEADERS, create_app
+from issuebot.web.app import LIVENESS_CACHE_S
 from issuebot.web.auth import (
     CHALLENGE,
     PROOF_HEADER,
@@ -256,6 +257,84 @@ def test_healthz_anonymous_hides_the_database_error(h: Harness) -> None:
 def test_healthz_with_a_wrong_credential_is_a_challenge_not_liveness(h: Harness) -> None:
     response = h.anonymous.get("/healthz", headers=basic_auth("wrong"))
     assert response.status_code == 401
+
+
+def test_healthz_anonymous_opens_one_connection_per_interval(h: Harness) -> None:
+    """The exemption inherits the gate's obligation (#106): a flood of anonymous probes is
+    answered from the verdict the process holds, and one probe refreshes it once it has aged."""
+    for _ in range(50):
+        assert h.anonymous.get("/healthz").status_code == 200
+    assert h.database.opened == 1
+    h.clock.mono += LIVENESS_CACHE_S - 1
+    assert h.anonymous.get("/healthz").status_code == 200
+    assert h.database.opened == 1
+    h.clock.mono += 1
+    assert h.anonymous.get("/healthz").status_code == 200
+    assert h.database.opened == 2
+
+
+def test_healthz_anonymous_holds_a_failure_too(h: Harness) -> None:
+    """A failure repeated is a connection attempt repeated, so the 503 is held for the same
+    interval; the next probe after it sees the recovery."""
+    from issuebot.db import StoreUnavailableError
+
+    h.database.queries_error = StoreUnavailableError("cannot connect: db.internal refused")
+    for _ in range(20):
+        assert h.anonymous.get("/healthz").status_code == 503
+    assert h.database.opened == 1
+    h.database.queries_error = None
+    assert h.anonymous.get("/healthz").status_code == 503
+    h.clock.mono += LIVENESS_CACHE_S
+    assert h.anonymous.get("/healthz").status_code == 200
+    assert h.database.opened == 2
+
+
+def test_healthz_credential_probes_live_and_refreshes_the_anonymous_answer(h: Harness) -> None:
+    """The credential's probe is never cached, and what it sees is the next anonymous answer."""
+    from issuebot.db import StoreUnavailableError
+
+    assert h.anonymous.get("/healthz").status_code == 200
+    assert h.database.opened == 1
+    for _ in range(3):
+        assert h.client.get("/healthz").status_code == 200
+    # One anonymous probe, then three live ones.
+    assert h.database.opened == 4
+    h.database.queries_error = StoreUnavailableError("cannot connect: db.internal refused")
+    assert h.client.get("/healthz").status_code == 503
+    assert h.database.opened == 5
+    # Within the interval, but the credential's probe just saw the outage.
+    assert h.anonymous.get("/healthz").status_code == 503
+    assert h.database.opened == 5
+
+
+async def test_liveness_shares_one_probe_between_concurrent_callers() -> None:
+    """Every anonymous caller that arrives during a probe waits for that one (#106)."""
+    import asyncio
+
+    from issuebot.web.app import _Liveness
+
+    clock = [0.0]
+    probes = 0
+    release = asyncio.Event()
+
+    async def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        await release.wait()
+        return True
+
+    liveness = _Liveness(lambda: clock[0])
+    callers = [asyncio.ensure_future(liveness.verdict(probe)) for _ in range(25)]
+    await asyncio.sleep(0)
+    assert probes == 1
+    release.set()
+    assert await asyncio.gather(*callers) == [True] * 25
+    assert probes == 1
+    assert await liveness.verdict(probe) is True
+    assert probes == 1
+    clock[0] += LIVENESS_CACHE_S
+    assert await liveness.verdict(probe) is True
+    assert probes == 2
 
 
 # --- the refresh route: credential and proof ---------------------------------------------------

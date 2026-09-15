@@ -23,7 +23,8 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Self
-from urllib.parse import unquote, urlsplit
+
+from issuebot.dsn import dsn_secrets
 
 if TYPE_CHECKING:
     from issuebot.config import Settings
@@ -119,7 +120,7 @@ class Scrubber:
         if settings.github.token is not None:
             secrets.append(settings.github.token.get_secret_value())
         if settings.database.url is not None:
-            secrets.extend(_url_password(settings.database.url.get_secret_value()))
+            secrets.extend(dsn_secrets(settings.database.url.get_secret_value()))
         if settings.notifications.slack.webhook_url is not None:
             secrets.append(settings.notifications.slack.webhook_url.get_secret_value())
         secrets.extend(value for name, value in environ.items() if SECRET_NAME.search(name))
@@ -148,14 +149,3 @@ class Scrubber:
 # `capture_turns`, `classify_result`, the sink and the orchestrator default to, so no caller can
 # get raw text back; the worker replaces it with `for_deployment`, which knows the values too.
 DEFAULT_SCRUBBER = Scrubber()
-
-
-def _url_password(url: str) -> list[str]:
-    """The password of a URL's userinfo as written and as decoded; nothing when it has none."""
-    try:
-        password = urlsplit(url).password
-    except ValueError:
-        return []
-    if not password:
-        return []
-    return list({password, unquote(password)})
