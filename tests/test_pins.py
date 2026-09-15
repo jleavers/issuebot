@@ -11,7 +11,9 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+WORKFLOWS = sorted(
+    path for ext in ("*.yml", "*.yaml") for path in (ROOT / ".github" / "workflows").glob(ext)
+)
 PRE_COMMIT = ROOT / ".pre-commit-config.yaml"
 
 # owner/repo[/path]@<40 hex> # <tag>

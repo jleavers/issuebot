@@ -2805,7 +2805,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
-    uid = os.getuid() if hasattr(os, "getuid") else "?"
+    uid = os.getuid()
     assert (
         "[ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other "
         f"than this process's ({uid})"

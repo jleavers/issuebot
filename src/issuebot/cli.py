@@ -490,7 +490,7 @@ def _run_as_check(run_as: str | None) -> Check:
     if error is not None:
         return Check(subject, "fail", error)
     # The probe compared the delegated uid with this process's (#111); the line says so.
-    uid = os.getuid() if hasattr(os, "getuid") else "?"
+    uid = os.getuid()
     return Check(
         subject,
         "ok",
