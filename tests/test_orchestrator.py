@@ -3251,6 +3251,35 @@ async def test_a_stripped_limit_note_is_rewritten_once_per_process_not_per_tick(
     assert "### Issuebot merge conflict limit (" in h.github.comments_for(1)[0].body
 
 
+async def test_closing_an_issue_drops_what_the_bounce_remembered_about_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `gave_up` memo is a memo, not a leak: the terminal sweep drops it with the issue.
+
+    A cap bounds one read, and the memo bounds how often that read is repeated -- but a memo
+    kept for the life of the worker would be one more thing an outsider grows, one entry per
+    issue they take past a cap, which is the shape #110 is about. `_finish` drops it with the
+    conflict-limit memo it sits beside.
+    """
+    h = Harness(tmp_path)
+    h.add_conflicting_review(1, pr_number=7)
+
+    async def capped(*args: Any, **kwargs: Any) -> int:
+        raise GitHubError("response", "label history of #1 runs past 1000 events")
+
+    monkeypatch.setattr(h.github, "count_own_label_additions", capped)
+    await h.tick()
+    assert h.orchestrator._conflict_gave_up  # the memory under test
+    # merge_pr closes the issue; the terminal sweep is what finishes it (tick 1 already ran
+    # this tick's sweep, over an issue that was still open, so it is asked for directly).
+    h.github.merge_pr(7)
+    await h.orchestrator.terminal_sweep()
+    await h.drain()
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.orchestrator._conflict_gave_up == {}
+    assert h.orchestrator._conflict_limit_noted == {}
+
+
 # --- the admission gate (#112) ------------------------------------------------------------
 
 

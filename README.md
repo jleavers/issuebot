@@ -192,8 +192,8 @@ ignored.
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
-Every ceiling above names the layer it bounds, and a few more are fixed in the code rather
-than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
+Each timer above says which layer it bounds, and a few more ceilings are fixed in the code
+rather than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
 the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
 first, and a longer thread with no workpad in it fails the run rather than reading as "none";
 the conflict bounce reads at most the first 1,000 label additions of an issue's history, and a
@@ -397,7 +397,11 @@ the worker creates it.
 2. Add the `issuebot/todo` label. Within one poll interval the worker labels the issue
    `issuebot/in-progress`, clones the repository into the workspace and starts a session.
    `docker compose exec worker issuebot refresh` (host: `uv run issuebot refresh`) makes it
-   poll right away (at most once every 5 s, however often it is asked).
+   poll right away (at most once every 5 s, however often it is asked). The `NOTIFY` goes to
+   the repository's own channel, so a store shared by several workers wakes only the one the
+   issue belongs to -- which also means `refresh` and `worker` must be the same version:
+   across a rolling upgrade a new `refresh` prints `[ OK ]` at a channel an old worker is not
+   listening on, and that issue waits out the poll interval instead.
 3. Watch it work: the dashboard shows the Kanban, the running agents and, per issue, every
    turn's transcript; `docker compose logs -f worker` shows the events; on GitHub the agent
    keeps one workpad comment on the issue with its plan, checklist and notes, edited in
@@ -778,9 +782,16 @@ that matters on your host.
 ### When things go wrong
 
 - **Blocked.** If the agent hits a true external blocker (a missing tool, credential or
-  permission), or a run exhausts `agent.max_turns` or `agent.max_attempts`, the worker moves
-  the issue to `issuebot/review` with a Blockers section in the workpad. Fix the cause, then
-  label it `issuebot/rework` or `issuebot/todo` to retry.
+  permission), or a run exhausts `agent.max_turns`, `agent.run_timeout_ms` or
+  `agent.max_attempts`, the worker moves the issue to `issuebot/review` with a Blockers
+  section in the workpad. Fix the cause, then label it `issuebot/rework` or `issuebot/todo`
+  to retry.
+
+  `agent.run_timeout_ms` escapes like `agent.max_turns` rather than counting against
+  `agent.max_attempts`: a retry never resumes a session, so it would re-read the repository
+  from cold and spend the same wall clock over again. The workpad block says `Wall clock
+  exhausted: N turns in attempt 1 ...`, so an issue that needs longer needs the setting
+  raised, not another attempt.
 
   `agent.max_attempts` counts *the issue's* failed runs, not one unbroken chain of them: the
   worker keeps the count itself, so a label move between a failure and the retry that follows

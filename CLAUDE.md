@@ -518,10 +518,18 @@ floor, not the shipped version, and moves by hand.
   count kept there was the session's to zero, while a label event is GitHub's record and an
   added one only tightens the bound (a note that fails after the label moved logs
   `conflict_rework_note_failed` and the bounce is still counted; a failure before it logs
-  `conflict_rework_failed` and is retried next tick). At `agent.max_conflict_reworks`
+  `conflict_rework_failed`, which names the `outcome` it chose, and is retried next tick --
+  unless the error's category is `response`, when the outcome is `gave_up` (#110): a cap
+  bounds one read, not how often it is repeated, so a bounce that fails on a page past
+  `MAX_TIMELINE_PAGES` or `MAX_COMMENT_PAGES` is remembered against the issue's `updated_at`
+  (`_conflict_gave_up`, `conflict_rework_abandoned` logged once) and not tried again until the
+  issue changes, rather than costing twenty pages and a warning on every poll for the life of
+  the process. Only that category: a 5xx is the next tick's to retry). At
+  `agent.max_conflict_reworks`
   (default 3, `0` off) it writes one `... conflict limit` block and stays in `review`, and
   the orchestrator remembers per issue and limit that it did (`_conflict_limit_noted`), so
-  a note the session strips is rewritten once per process, not per tick. `_bounce_conflicts`
+  a note the session strips is rewritten once per process, not per tick. `_finish` drops both
+  memos with the issue, so neither grows with the worker's uptime. `_bounce_conflicts`
   runs after every fetch, observer or not (`fetch_states`), skipping issues in `_running` or
   `_retries`.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,

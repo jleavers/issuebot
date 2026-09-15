@@ -80,3 +80,26 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   first and note the block best-effort is a separate decision.
 - #104's `WORKSPACE_ENV_LIMIT` and blocking read are the same defect in a different resource
   and are fixed there.
+- **`WorkspaceManager._run_argv`** (`agent/workspace.py`) is the other subprocess seam, and it
+  still has a timer and no cap: `gh repo clone` and every hook run under `process.communicate()`
+  with `hooks.timeout_ms` bounding the wall clock and nothing bounding the bytes. That is the
+  pattern this issue replaced in `GhRunner`, and `after_create` is where the *target*
+  repository's dependency install runs, so the party growing it is the one this deployment
+  invites. Left here because the fix is `GhRunner`'s and belongs beside it rather than bolted
+  to one caller, and because this branch had already been through two merge bounces. Filed
+  as #139.
+- **`GhCliAdapter._issues_with_label`** (`github/ghcli.py`) walks `hasNextPage` with no page
+  cap, once per role, every tick. "The one caller that paginated" above is true of `gh api
+  --paginate` alone; this GraphQL cursor loop paginates too, and it is grown by anyone who can
+  get issues labelled -- the largest remaining instance of the invariant, since it runs on
+  every poll rather than once a session. Filed as #139 with the seam above: both are
+  pre-existing, neither is named in the issue's four boundaries, and a cap on the board poll
+  needs a decision this issue does not settle (a truncated board is a board the worker will
+  claim from while believing it has seen everything, which the other caps do not have to
+  answer for, since they fail the read instead).
+- **`_conflict_gave_up` is keyed on `issue.updated_at`**, which is "until the issue changes" as
+  the acceptance criterion asks -- but a commenter moves `updated_at`, so an issue whose label
+  history is past `MAX_TIMELINE_PAGES` can be made to cost ten pages again per comment. That is
+  a far smaller ceiling than the per-poll cost it replaces, and the memo is the bound on
+  repetition rather than on the read, which `MAX_TIMELINE_PAGES` already holds. A floor (N
+  ticks, or a state-label change) would close it; it is not closed here.

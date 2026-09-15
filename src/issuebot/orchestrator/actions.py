@@ -29,11 +29,15 @@ FinishOutcome = Literal["complete", "no_change", "cancelled", "unchanged", "fail
 
 CANCEL_REASON = "closed without a merged pull request"
 
-# ``failed`` is a GitHub error the next tick may not see again (a transport error, a rate
-# limit, a 5xx) and is tried then; ``gave_up`` is a ``response`` error, GitHub answering with
-# something issuebot refuses to read (a page past a cap, #110, a malformed page), which is a
-# property of the issue rather than of the moment, so the orchestrator remembers it until the
-# issue changes rather than repeating the same bounded read on every poll.
+# ``gave_up`` is a ``response`` error and only that one: GitHub answering with something
+# issuebot refuses to read (a page past a cap, #110, a malformed page), which is a property of
+# the issue rather than of the moment, so the orchestrator remembers it until the issue changes
+# rather than repeating the same bounded read on every poll. Every other category is ``failed``
+# and tried again next tick -- including the ones that will fail the same way until an operator
+# acts (``auth``, ``config``, ``not_found``), because a retry there costs one request and says
+# so in the log, while a memo would have the bounce stay quiet about a broken token. The split
+# is on the category, not on ``retryable``: a 5xx is worth another tick, a capped read is not,
+# and both of those are answers about *this* issue's size rather than about the deployment.
 ConflictOutcome = Literal["reworked", "limit_reached", "limit_noted", "failed", "gave_up"]
 
 # The workpad headings the conflict bounce writes: a note for a person, never the count. The
@@ -376,6 +380,7 @@ async def conflict_rework(
             return "limit_reached"
         await adapter.set_state(issue.number, StateLabel.REWORK)
     except GitHubError as exc:
+        outcome: ConflictOutcome = "gave_up" if exc.category == "response" else "failed"
         log.warning(
             "conflict_rework_failed",
             issue_number=issue.number,
@@ -383,8 +388,9 @@ async def conflict_rework(
             pr_number=pr.number,
             error=str(exc),
             retryable=exc.retryable,
+            outcome=outcome,
         )
-        return "gave_up" if exc.category == "response" else "failed"
+        return outcome
     bus.publish(
         StateChanged(
             issue_number=issue.number,

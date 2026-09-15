@@ -1206,13 +1206,16 @@ class Orchestrator:
     async def _finish(self, issue: Issue) -> None:
         """Close the issue out, and drop what this worker remembered about it.
 
-        The conflict-limit memo goes whatever GitHub answered: a closed issue is never a
-        bounce candidate again. The ledger entry goes only when the close actually landed,
-        since a ``failed`` one leaves the issue open and its budget still in force. A reopened
-        issue starts from zero either way.
+        Both conflict memos go whatever GitHub answered: a closed issue is never a bounce
+        candidate again. The ledger entry goes only when the close actually landed, since a
+        ``failed`` one leaves the issue open and its budget still in force. A reopened issue
+        starts from zero either way. Dropping ``_conflict_gave_up`` here is what keeps it a
+        memo rather than a leak: an issue that hit a capped read once would otherwise hold an
+        entry for the life of the process, which is the growth this issue is about (#110).
         """
         outcome = await actions.finish_terminal(self._adapter, self._bus, self._workspaces, issue)
         self._conflict_limit_noted.pop(issue.id, None)
+        self._conflict_gave_up.pop(issue.id, None)
         if outcome != "failed":
             self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):
