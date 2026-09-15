@@ -18,7 +18,7 @@ the hook tails). What the session can leave *on disk* for the worker to find is 
 and nothing else: a worker-side read of any other path under a workspace is a bug. The
 clone's own instruction files are on the list (#107): the clone is what the session was
 given, but it is also what the session can rewrite, and the worker reads two names out of
-it for the next turn's prompt.
+it, once per run and after the ``before_run`` hook, for the first turn's prompt.
 
 Every read goes through ``Boundary.read``: the path is opened one component at a time from a
 directory the worker owns, never through a symbolic link (``O_NOFOLLOW`` at every step, so a
@@ -27,7 +27,8 @@ operator's own files); the object is checked *before* a byte is read, on the des
 cannot be swapped between check and use (a FIFO would block the event loop for good, a device
 would allocate until the kernel intervened: ``O_NONBLOCK`` makes the open return either way,
 and ``fstat`` refuses anything but a regular file); the owner must be one of the artefact's
-declared writers (the worker, or the session for the one file the session's hooks write);
+declared writers (the worker, or the session for the file its hooks write and for the
+clone's instruction files, since the clone is cloned as it);
 and at most the artefact's ``limit`` is read, from the head or the tail, whatever the file's
 size. A refusal is ``BoundaryError``, an ``OSError``, so every call site's existing ``except
 OSError`` reports it the way it reports an unreadable file and never crashes a task on it.
@@ -93,7 +94,9 @@ TURN_STDERR = Artefact(
 # The clone is the session's (`gh repo clone` runs as it under `agent.run_as`), so the session
 # is a declared writer; a link, a FIFO or a directory by either name is refused here, and a
 # file past the limit is cut, which the envelope's source says.
-INSTRUCTION_FILE = Artefact("instructions", "CLAUDE.md, AGENTS.md", "session", 128 * KIB)
+INSTRUCTION_FILE = Artefact(
+    "instructions", "<CLAUDE.md|AGENTS.md> at the clone's root", "session", 128 * KIB
+)
 
 ARTEFACTS: tuple[Artefact, ...] = (
     ENV_FILE,

@@ -488,9 +488,10 @@ def _setting_sources_check(settings: Settings) -> Check:
             f"{sources}; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration",
         )
     detail = (
-        f"{sources}; the clone's CLAUDE.md, .claude/ (settings, hooks, skills) and .mcp.json "
-        "are claude's own configuration for every session, and anyone who can merge to "
-        f"{settings.github.repo} can change them; omit the setting to load only the user's"
+        f"{sources}; the clone's CLAUDE.md and .claude/ (settings, hooks, skills) are "
+        "claude's own configuration for every session, and anyone who can merge to "
+        f"{settings.github.repo} can change them (.mcp.json stays out under "
+        "--strict-mcp-config either way); omit the setting to load only the user's"
     )
     return Check(subject, "warn", detail)
 

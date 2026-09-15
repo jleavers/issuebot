@@ -64,10 +64,11 @@ issues that triage is most of the value.
   tools, commit and open PRs -- as text issuebot reads from the clone and hands to the prompt
   inside the same `<github-text>` envelope as the issue, under the workflow's ground rules,
   never as configuration `claude` loads on its own. `claude.setting_sources` defaults to
-  `[user]` for that reason: the clone's `CLAUDE.md`, `.claude/` (settings, hooks, skills) and
-  `.mcp.json` are what anyone who can merge to the repository can change, and a hook or an
-  MCP server in them is shell run at launch with the agent's token. Naming `project` there
-  hands them to every session, and `validate` says so. `WORKFLOW.md` owns the labels and the
+  `[user]` for that reason: the clone's `CLAUDE.md` and `.claude/` (settings, hooks, skills)
+  are what anyone who can merge to the repository can change, and a hook in them is shell run
+  at launch with the agent's token. Naming `project` there hands them to every session, and
+  `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
+  `--strict-mcp-config` (see "MCP servers" below). `WORKFLOW.md` owns the labels and the
   process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
   those files (and to `.github/` itself) for the same reason; it only blocks a merge under
   branch protection's "Require review from Code Owners".
@@ -183,7 +184,7 @@ ignored.
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | a turn is killed after this long, or after this long without output | 1 hour; 5 minutes |
-| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md`, `.claude/` and `.mcp.json` its configuration, which `validate` warns about | `[user]` |
+| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
 | `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |

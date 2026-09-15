@@ -144,8 +144,11 @@ configuration above the prompt, and the envelope is a second, lower-ranked copy 
 against a private repository whose only committers they trust may want its `.claude/` in
 force, and that is their call to make by name; the default and the warning are the boundary.
 
-**`--strict-mcp-config`** is not added: `--setting-sources user` already leaves the clone's
-`.mcp.json` unread (measured), and the flag would also drop the operator's own servers.
+**`--strict-mcp-config`** landed separately, as #119, and unconditionally: with it the clone's
+`.mcp.json` is held off whatever `setting_sources` says (only servers named on the command
+line load, and issuebot names none), so this design has only `CLAUDE.md` and `.claude/` to
+cover. `--setting-sources user` alone also left `.mcp.json` unread (measured), which is what
+the decision above was taken on; the flag is the guarantee that survives an opt-in.
 
 ## Tests
 

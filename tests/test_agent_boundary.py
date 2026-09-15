@@ -73,6 +73,9 @@ def test_the_boundary_knows_who_may_write_what() -> None:
     assert split.split
     assert split.writers(ENV_FILE) == frozenset({1000, 1001})
     assert split.writers(SESSION_FILE) == frozenset({1000})
+    # The clone is `gh repo clone`d as the session (#107), so its instruction files are its.
+    assert split.writers(INSTRUCTION_FILE) == frozenset({1000, 1001})
+    assert same.writers(INSTRUCTION_FILE) == frozenset({1000})
 
 
 def test_current_resolves_the_account_or_leaves_the_session_unset() -> None:

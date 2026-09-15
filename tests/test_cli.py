@@ -416,9 +416,10 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] claude.setting_sources: user, project; the clone's CLAUDE.md, .claude/ "
-        "(settings, hooks, skills) and .mcp.json are claude's own configuration for every "
-        "session, and anyone who can merge to o/r can change them; omit the setting to load "
+        "[WARN] claude.setting_sources: user, project; the clone's CLAUDE.md and .claude/ "
+        "(settings, hooks, skills) are claude's own configuration for every "
+        "session, and anyone who can merge to o/r can change them (.mcp.json stays out under "
+        "--strict-mcp-config either way); omit the setting to load "
         "only the user's" in out
     )
 

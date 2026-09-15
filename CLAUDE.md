@@ -203,9 +203,11 @@ floor, not the shipped version, and moves by hand.
   `created` marker file (the completion sentinel), and `session.json` trusted only when the
   worker owns it. `boundary.py` (#104, spec `2026-09-14-session-boundary-design.md`) is the
   other half of that line: `ARTEFACTS` declares every file the worker reads back out of a
-  workspace after the session has had its uid in it (`.issuebot/env`, the one the session's
-  side writes; `session.json`, the `created` marker and the `runs/<run_id>/turn-N.*` files,
-  the worker's own), each with its writer and the most the worker will ever read of it, and
+  workspace after the session has had its uid in it (`.issuebot/env`, which the session's
+  side writes; the clone's `CLAUDE.md` and `AGENTS.md`, the `instructions` artefact of #107,
+  which the session may own since the clone is cloned as it; `session.json`, the `created`
+  marker and the `runs/<run_id>/turn-N.*` files, the worker's own), each with its writer and
+  the most the worker will ever read of it, and
   `Boundary.read` is the one seam: the path is walked from the workspace one component at a
   time under `O_NOFOLLOW` (a link at the name or above it is refused, not followed), the
   object is checked on the descriptor before a byte is read (`O_NONBLOCK`, so a FIFO cannot
@@ -213,7 +215,8 @@ floor, not the shipped version, and moves by hand.
   writer) and at most the artefact's limit is read, head or tail. `BoundaryError` is an
   `OSError`, so every call site's existing handling reports it as a warning naming the path
   and the reason, never the contents. `read_workspace_env`, `read_session`, `_is_complete`,
-  `capture_turns` and the runner's stderr tail all go through it; `own_dir` creates and
+  `capture_turns`, `read_repository_instructions` and the runner's stderr tail all go through
+  it; `own_dir` creates and
   verifies a run's log directory as the worker's own, closed to others' writes, before a
   turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
   `Boundary.current(run_as)` resolves the session's uid once per runner and manager; unset,
@@ -239,7 +242,9 @@ floor, not the shipped version, and moves by hand.
   `.claude/` (settings, hooks, skills) or `.mcp.json` as configuration -- measured: under
   claude's default every one of them was in force, a `SessionStart` hook and an MCP server
   included -- unless the operator names `project` or `local`, which
-  `ClaudeSettings.loads_clone_settings` reports and `validate` warns about. The default
+  `ClaudeSettings.loads_clone_settings` reports and `validate` warns about; that opt-in
+  hands over `CLAUDE.md` and `.claude/` only, since `.mcp.json` is held off by the
+  unconditional `--strict-mcp-config` (#119) whatever the sources say. The default
   workflow's rule paragraph covers the working tree, ground rule 5 defers to the files under
   the ground rules rather than over them, the self-review brief reports a change to those
   files as Critical, the pull request body names one under `Instruction files`, and this

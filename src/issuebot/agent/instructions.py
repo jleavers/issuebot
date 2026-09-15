@@ -25,8 +25,9 @@ INSTRUCTION_FILE_LIMIT = INSTRUCTION_FILE.limit
 """Bytes of each file the prompt carries; the rest is cut and the envelope's source says so.
 
 Twice what this repository's own ``CLAUDE.md`` weighs: a cut loses the file's end, which is
-where a "how to open pull requests" section tends to sit, and two whole files still fit the
-turn log's 256 KiB prompt head.
+where a "how to open pull requests" section tends to sit. Two files at the cap are the whole
+of the turn log's 256 KiB prompt head on their own, so a capture of such a prompt is itself
+cut; one whole file and most of another still fit beside the template.
 """
 
 
@@ -57,7 +58,8 @@ def read_repository_instructions(
     a directory, a device or a file owned by neither account is refused before a byte is
     read. Every refusal, and a file the worker cannot read, is skipped with a warning; a name
     that is not there is the normal case and says nothing. The text is cut at ``limit`` bytes
-    before decoding, and undecodable bytes are replaced rather than refused.
+    -- at most the artefact's own, which the boundary clamps to -- before decoding, and
+    undecodable bytes are replaced rather than refused.
 
     ``boundary`` is the workspace manager's, which knows the session's uid; the default is
     this process's alone, right where the session is the worker.

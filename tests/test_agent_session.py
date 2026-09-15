@@ -526,13 +526,15 @@ async def test_the_clones_instruction_files_reach_the_first_prompt_enveloped(
     tmp_path: Path,
 ) -> None:
     """#107: claude no longer loads the clone's CLAUDE.md itself; issuebot reads it after
-    the hooks and hands it to the first turn as the committers' text, inside the envelope."""
+    the hooks, `before_run` included (a merge there is seen), and hands it to the first turn
+    as the committers' text, inside the envelope."""
     harness = Harness(
         tmp_path,
         max_turns=2,
         template="{% for f in repo_instructions %}[{{ f.path }}]{{ f.text }}{% endfor %}",
         hooks={
-            "after_create": "printf 'Run the tests.\\n' > CLAUDE.md; ln -s /etc/hostname AGENTS.md"
+            "after_create": "printf 'Stale.\\n' > CLAUDE.md; ln -s /etc/hostname AGENTS.md",
+            "before_run": "printf 'Run the tests.\\n' > CLAUDE.md",
         },
     )
     runner = ScriptedRunner()

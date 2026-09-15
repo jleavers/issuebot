@@ -124,10 +124,11 @@ class ClaudeSettings(_Model):
     disallowed_tools: list[str] = Field(default_factory=list)
     append_system_prompt: str | None = None
     # Which of Claude Code's settings sources the session loads (#107). Always passed, never
-    # claude's own default: with ``project`` or ``local`` in the list the clone's ``CLAUDE.md``,
-    # ``.claude/`` (settings, hooks, skills, commands) and ``.mcp.json`` are configuration in
-    # force for every session, and anyone who can merge to the watched repository can change
-    # them. ``user`` alone is the deployment's own home and nothing from the clone; the clone's
+    # claude's own default: with ``project`` or ``local`` in the list the clone's ``CLAUDE.md``
+    # and ``.claude/`` (settings, hooks, skills, commands) are configuration in force for every
+    # session, and anyone who can merge to the watched repository can change them (its
+    # ``.mcp.json`` stays out either way: ``--strict-mcp-config`` is always passed, #119).
+    # ``user`` alone is the deployment's own home and nothing from the clone; the clone's
     # ``CLAUDE.md`` and ``AGENTS.md`` reach the prompt as enveloped data instead.
     setting_sources: list[SettingSource] = Field(default_factory=lambda: ["user"])
     model_labels: dict[str, str] = Field(default_factory=dict)
