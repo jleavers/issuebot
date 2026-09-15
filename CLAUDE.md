@@ -241,8 +241,9 @@ floor, not the shipped version, and moves by hand.
   `share_with` makes it `1770`, owner the worker (sticky,
   as #75 established) and group the bound account's own, and `seal` puts it back to `0700`
   when the run ends (`session.py`'s `finally`; `WorkspaceManager.seal_idle` at startup, for a
-  worker that was killed outright; `_remove_tree` opens it again, per removing account, since
-  the unlink is theirs, and re-seals if the worker's own pass then fails).
+  worker that was killed outright; `remove` opens it for `before_remove`, and
+  `_remove_tree` again per removing account, since the unlink is theirs, re-sealing if the
+  worker's own pass then fails).
   Both halves are needed: a workspace outlives its run, accounts are fewer than workspaces, so
   without the seal a hostile session would eventually be handed an account holding an honest,
   idle workspace. `_is_complete` also requires `.git` to belong to the bound account, so a
@@ -468,10 +469,15 @@ floor, not the shipped version, and moves by hand.
   retry in that position requeues as kind `accounts`, and one merely waiting for a busy
   account as `slots`. `agent.run_as` is a setting like any other, so a reload can introduce
   exactly what startup refuses: `_settle_run_as` re-runs `probe_run_as` and
-  `credential_complaint` once per change and holds dispatch as `accounts` on a failure
-  (`_run_as_block`, which `_accounts_hold` puts ahead of the record's own complaint and
-  `_bind_account` refuses on) rather than ending the process, so putting the file back lifts
-  it on the next reload. Nothing is sealed on a reload, unlike at startup: sessions are
+  `credential_complaint` on a change *and on every tick the hold lasts*, and holds dispatch as
+  `accounts` on a failure (`_run_as_block`, which `_accounts_hold` puts ahead of the record's
+  own complaint and `_bind_account` refuses on) rather than ending the process, so putting the
+  file back lifts it on the next reload and a `useradd` on the next tick. Not every fault
+  clears without a restart, and the complaint says which: `group_complaint` asks
+  `os.getgroups()`, the credential is read from the process's own environment, and both are
+  fixed when the worker is exec'd -- so a `usermod --append` reaches the next worker, not this
+  one. The hold is keyed on which fault it is, `run_as` or `record`, so a move between them
+  restarts `since` rather than inheriting the other's. Nothing is sealed on a reload, unlike at startup: sessions are
   running, and their workspaces are open to the accounts they are running as.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run

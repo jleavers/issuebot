@@ -3236,11 +3236,36 @@ async def test_a_host_side_repair_lifts_the_accounts_hold_without_a_restart(
     # A second tick with nothing changed keeps the hold and its start: the file never moved.
     await orchestrator.tick()
     assert h.snapshots[-1].dispatch_hold == hold
-    # `usermod --append`, and nothing in the workflow file changes.
+    # `usermod --append`, and nothing in the workflow file changes. (In a real deployment only
+    # some faults clear without a restart; the probe is the seam, so the test drives it.)
     broken[0] = False
     await orchestrator.tick()
     assert h.snapshots[-1].dispatch_hold is None
     assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_accounts_hold_says_it_once_loudly_and_says_when_it_lifts(
+    tmp_path: Path,
+) -> None:
+    """An idle worker says nothing else, so an unchanged fault must not fill the log with it:
+    ERROR on the first and on a changed reason, WARNING after, and a line when it lifts, as the
+    auth hold does (#121)."""
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
+    h = Harness(tmp_path)
+    broken = [""]
+    orchestrator = _with_pool(h, probe=lambda accounts, environ: [broken[0]] if broken[0] else [])
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-2, agent-3")
+    fault = "agent-3: the worker is not in group agent-3"
+    for reason in (fault, fault, "agent-3: cannot run as 'agent-3'", ""):
+        broken[0] = reason
+        await orchestrator.tick()
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    held = [(x["level"], x["problems"]) for x in lines if x["event"] == "dispatch_run_as_unusable"]
+    assert [level for level, _ in held] == ["error", "warning", "error"]
+    [recovered] = [x for x in lines if x["event"] == "dispatch_run_as_recovered"]
+    assert recovered["run_as"] == ["agent-1", "agent-2", "agent-3"]
 
 
 async def test_a_reload_into_a_pool_without_a_credential_holds_dispatch(tmp_path: Path) -> None:

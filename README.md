@@ -263,9 +263,12 @@ session write the clone the first one made. Dispatch is capped by the pool as we
 Turning a pool on over a `/workspaces` volume that already holds clones needs nothing of you:
 a workspace whose clone belongs to another account is re-cloned rather than handed to a
 session git would refuse, and the removal runs as whichever account owns what is there. The
-setting is re-checked on a reload too -- a pool named in `WORKFLOW.md` with an account that
-does not exist, a missing group membership or no credential holds dispatch and says so in
-`issuebot status` and on the dashboard, rather than failing every session it claims for.
+setting is re-checked on a reload, and on every poll while the hold lasts -- a pool named in
+`WORKFLOW.md` with an account that does not exist, a missing group membership or no credential
+holds dispatch and says so in `issuebot status` and on the dashboard, rather than failing every
+session it claims for. A `useradd` lifts it on the next poll; a `usermod --append`, or a
+credential added to `.env`, needs the worker restarted, because a process's supplementary
+groups and environment are fixed when it starts -- and the message says so.
 
 **A pool needs a credential in the environment.** Each account has a home of its own, and
 `claude` reads its login from there, so a pool shares no login between its accounts -- on

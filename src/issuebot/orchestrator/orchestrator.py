@@ -673,6 +673,9 @@ class Orchestrator:
         await self.reconcile()
         self._reload_workflow()
         await self._settle_run_as()
+        # Before any hold is decided, and not inside `_dispatch_candidates`, which a preflight
+        # or auth hold skips: a reason `fire_due_retries` quotes has to be about this tick.
+        self._read_accounts()
         dispatched = 0
         hold: _Hold | None = None
         problems = preflight(self._workflow.config, which=self._which)
@@ -721,7 +724,11 @@ class Orchestrator:
         """
         accounts = self._accounts_hold()
         if hold is None and accounts is not None:
-            hold = _Hold("accounts", accounts, key=ACCOUNTS_HOLD_KEY)
+            # Keyed on *which* fault, not on the constant: an unusable setting and an unreadable
+            # record are different holds, and a move from one to the other should restart
+            # `since` rather than inherit the other's.
+            key = f"{ACCOUNTS_HOLD_KEY}:{'run_as' if self._run_as_block else 'record'}"
+            hold = _Hold("accounts", accounts, key=key)
         if hold is None and self._github_block is not None:
             hold = _Hold("github", self._github_block, key=GITHUB_HOLD_KEY)
         if hold is None:
@@ -877,7 +884,6 @@ class Orchestrator:
         await self._fetch_issues()
 
     async def _dispatch_candidates(self) -> int:
-        self._read_accounts()
         issues = await self._fetch_issues()
         if issues is None:
             return 0
@@ -933,13 +939,22 @@ class Orchestrator:
         deployment wants of a typo. Nothing is sealed here, unlike at startup: sessions are
         running, and their workspaces are open to the accounts they are running as.
 
-        It re-probes while the hold lasts, not only when the setting moves, because three of
-        the four faults are properties of the *host* rather than of the file: an account that
-        does not exist, a worker outside its group, two accounts sharing one. The operator
-        fixes those with ``useradd`` or ``usermod`` and never touches ``WORKFLOW.md``, so a
-        hold keyed on the file alone would last until the worker was restarted -- the very
-        thing `_read_accounts` is written to avoid. Once a tick while held, which is one poll
-        interval, and not at all when there is nothing to re-check.
+        It re-probes while the hold lasts, not only when the setting moves, because the faults
+        are properties of the *host* as much as of the file, and the operator who fixes one
+        never touches ``WORKFLOW.md``: a hold keyed on the file alone would then last until the
+        worker was restarted, which is the very thing `_read_accounts` is written to avoid.
+        Once a tick while held, which is one poll interval, and not at all when there is
+        nothing to re-check.
+
+        Not every fault clears without a restart, and the log says so rather than this pretending
+        otherwise. An account that does not exist is read through NSS on each probe, so
+        ``useradd`` lifts the hold on the next tick. A worker outside the account's group does
+        not: `group_complaint` asks `os.getgroups()`, which is what the kernel authorises
+        `share_with`'s ``chgrp`` by and is fixed when the process is exec'd, so a
+        ``usermod --append`` reaches only the *next* worker -- and the complaint names the
+        restart. A credential missing from the environment is the same. Re-probing is still
+        right: it costs one bounded probe a tick, it lifts what can be lifted, and the
+        alternative is a hold that outlives its cause.
         """
         if not self._run_as_pending and self._run_as_block is None:
             return

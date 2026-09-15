@@ -4,9 +4,11 @@ With ``agent.run_as`` set, ``claude -p``, every hook, the clone and the post-clo
 as that account, a different uid from the worker's, so the worker's code and interpreter,
 its environment (``/proc/<pid>/environ``), its home and the state it keeps in a workspace
 are out of the session's reach. The worker itself stays unprivileged: in the image ``sudo``
-carries exactly one rule, ``issuebot`` may become ``agent`` and nobody else, and the binary
-is executable by the worker's group alone, so the account the session runs as cannot invoke
-it at all.
+carries exactly one rule -- ``issuebot ALL=(%agents) NOPASSWD: ALL`` since #121, so the worker
+may become any session account and nobody else -- and the binary is executable by the worker's
+group alone, so the account the session runs as cannot invoke it at all. That the rule names a
+*group* is what lets a caller pass an account it worked out at runtime: anything outside the
+pool is refused by sudo itself rather than by the caller.
 
 sudo's environment policy never shapes what the session sees. The worker serialises the
 environment it built (``agent_environment`` plus the workspace's ``.issuebot/env``) into an

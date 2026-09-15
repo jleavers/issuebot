@@ -392,7 +392,11 @@ class WorkspaceManager:
     def _removers(self, path: Path) -> list[str]:
         """This workspace's account first, then any other that owns an entry at the top of it.
 
-        Empty on the host route, where there is no delegation and the files are the worker's.
+        Empty on the host route: no account is configured, so any account to delegate to could
+        only come from the directory -- and a *binding* read off the directory is the one thing
+        this module refuses. (A deployment that turned ``agent.run_as`` off over workspaces an
+        account already cloned has a tree the worker cannot remove, exactly as before #121; the
+        answer there is to turn it back on, not to guess a uid.)
         """
         if self._account is None:
             return []

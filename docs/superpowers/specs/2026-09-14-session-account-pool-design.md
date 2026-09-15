@@ -151,9 +151,16 @@ the credential never lands in a home.
 - **A reloaded setting is checked again.** `agent.run_as` is a setting like any other, so a
   reload can introduce exactly what startup refuses: a delegation that does not work, a worker
   outside an account's group, two accounts sharing one, a pool with no credential in the
-  environment. The probes therefore run again whenever the setting changes, and a failure holds
-  dispatch as `accounts` rather than ending the process — putting the file back lifts it on the
-  next reload, which is what a running deployment wants of a typo. Nothing is sealed on a
+  environment. The probes therefore run again whenever the setting changes *and on every tick a
+  hold lasts*, and a failure holds dispatch as `accounts` rather than ending the process —
+  putting the file back lifts it on the next reload, and a `useradd` on the next tick, which is
+  what a running deployment wants of a typo. Not every fault clears without a restart, and the
+  complaint says which: the group check asks `os.getgroups()`, which is what the kernel
+  authorises `share_with`'s `chgrp` by and is fixed when the process is exec'd, so a
+  `usermod --append` reaches the *next* worker however plainly `id` in a new shell says
+  otherwise; the environment credential is the same. Re-probing is still right — it costs one
+  bounded probe a tick, it lifts what can be lifted, and the alternative is a hold that
+  outlives its cause. Nothing is sealed on a
   reload, unlike at startup: sessions are running, and their workspaces are open to the
   accounts they are running as.
 

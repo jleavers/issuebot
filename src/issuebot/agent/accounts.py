@@ -119,6 +119,13 @@ def group_complaint(account: str) -> str | None:
     has to be a member of every session account's group for `share_with` to work at all. A
     pure check, so `validate` reports it before a worker ever claims an issue rather than
     leaving it to the first workspace creation.
+
+    The oracle is `os.getgroups()`, this process's own supplementary groups, because those are
+    what the kernel authorises the `chgrp` by -- not `/etc/group`, which would say the
+    membership exists while the running process still lacked it. That is also why the
+    complaint names a restart: supplementary groups are set when a process is exec'd, so a
+    `usermod --append` on the host does not reach a worker already running, however plainly
+    `id` in a new shell says otherwise.
     """
     try:
         gid = account_gid(account)
@@ -128,7 +135,8 @@ def group_complaint(account: str) -> str | None:
         return None
     return (
         f"this process is not a member of {account}'s group (gid {gid}), "
-        "so it cannot give a workspace to it"
+        "so it cannot give a workspace to it; add it with usermod --append and restart, "
+        "since a process's supplementary groups are set when it starts"
     )
 
 
