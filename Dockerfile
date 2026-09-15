@@ -225,10 +225,11 @@ ENV LANG=C.UTF-8 \
 # or --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting
 # where nobody can answer, the second by loading whatever MCP config the session account's
 # home holds (#119) -- and one that drops --disallowedTools silently widens the session's
-# tool set (#109), so fail the build instead. The first two are passed on every turn and
-# neither is a setting, which is what puts them here rather than in `validate`; the third
-# carries the setting that fixes the tool set. The last line is the delegation itself, as
-# the worker will use it: sudo, the account, and claude under it.
+# tool set (#109), so fail the build instead. --permission-prompts and --strict-mcp-config
+# are passed on every turn and neither is a setting, which is what puts them here rather
+# than in `validate`; --disallowedTools carries the setting that fixes the tool set. The
+# last line is the delegation itself, as the worker will use it: sudo, the account, and
+# claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && claude --help | grep -q -- '--disallowedTools' \

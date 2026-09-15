@@ -65,7 +65,8 @@ Amended by #109 (`2026-09-14-session-authority-design.md`), which landed beside 
 flag is still unconditional, and `claude.mcp_config` in the front matter is now the one place
 a server may be named, a path there resolved against the workflow's directory rather than the
 clone. Empty by default, so a deployment that sets nothing is exactly what this document
-describes.
+describes. The image build asserts `--disallowedTools` beside the two flags named below, so
+"both flags" there is three.
 
 The three options the issue put up, against the measurements:
 

@@ -259,7 +259,8 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  --output-format stream-json --permission-prompts none --strict-mcp-config --disallowedTools
+  WebFetch WebSearch`, prompt on stdin,
   minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
   `.issuebot/runs/<run_id>/`). The session's authority -- its tools, its token, its account --
   is fixed at spawn from the front matter and never by the prompt (#109, spec
