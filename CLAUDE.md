@@ -150,7 +150,10 @@ floor, not the shipped version, and moves by hand.
   lowercased, `unknown` when absent); `GitHubAdapter`
   protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
   `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary;
-  `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given);
+  `ensure_labels` creates, and `missing_labels` reports, the extra labels they are given;
+  `count_own_label_additions(number, label)` (#104) is the issue's `LABELED_EVENT` timeline
+  items the adapter's own account made, paginated, the record the conflict bounce is bounded
+  by);
   `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
   `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
   for what other accounts write). The two records issuebot treats as its own state are resolved
@@ -217,7 +220,26 @@ floor, not the shipped version, and moves by hand.
   first. The CI `docker` job builds that exact shape and runs git in it. Unset (the host route, the tests) runs everything as
   the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
   `created` marker file (the completion sentinel), and `session.json` trusted only when the
-  worker owns it. `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
+  worker owns it. `boundary.py` (#104, spec `2026-09-14-session-boundary-design.md`) is the
+  other half of that line: `ARTEFACTS` declares every file the worker reads back out of a
+  workspace after the session has had its uid in it (`.issuebot/env`, the one the session's
+  side writes; `session.json`, the `created` marker and the `runs/<run_id>/turn-N.*` files,
+  the worker's own), each with its writer and the most the worker will ever read of it, and
+  `Boundary.read` is the one seam: the path is walked from the workspace one component at a
+  time under `O_NOFOLLOW` (a link at the name or above it is refused, not followed), the
+  object is checked on the descriptor before a byte is read (`O_NONBLOCK`, so a FIFO cannot
+  block the event loop; `fstat` refuses anything but a regular file owned by a declared
+  writer) and at most the artefact's limit is read, head or tail. `BoundaryError` is an
+  `OSError`, so every call site's existing handling reports it as a warning naming the path
+  and the reason, never the contents. `read_workspace_env`, `read_session`, `_is_complete`,
+  `capture_turns` and the runner's stderr tail all go through it; `own_dir` creates and
+  verifies a run's log directory as the worker's own, closed to others' writes, before a
+  turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
+  `Boundary.current(run_as)` resolves the session's uid once per runner and manager; unset,
+  the session is the worker and the checks are the same. What the line does *not* yet do is
+  separate concurrent sessions from each other (one account for every slot): #121 carries
+  that design and the credential decision it waits on. `WorkspaceManager` (sanitised keys,
+  containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
@@ -256,9 +278,25 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
-  environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
+  `.issuebot/runs/<run_id>/`). `--strict-mcp-config` is unconditional for the reason
+  `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
+  `claude-home` volume, so it is recreated with each container but shared by every session in
+  one -- a server a session plants there is offered to whichever issue runs next. The flag
+  names what survives rather than what is removed (only `--mcp-config` servers, and issuebot
+  passes none), so it covers a target repository's `.mcp.json` and any MCP location a later
+  `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
+  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
+  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
+  operator's setting is not what the confinement rests on. Both flags are asserted against
+  `claude --help` in the image build, so a release that drops either fails the build rather
+  than a session. The CI `docker` job proves both
+  directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
+  is listed in the init line without the flag and absent with it, no credential needed since
+  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -358,14 +396,20 @@ floor, not the shipped version, and moves by hand.
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
   counts include triage, and only a genuine abandonment still clears the label).
-  `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`): a `review` issue whose
-  open PR reads `conflicting` is moved to `rework` by issuebot, label first and then a
-  `### Issuebot merge conflict` workpad block, whose count is the bounce number (a note that
-  fails after the label moved logs `conflict_rework_note_failed` and still counts as reworked;
-  only a failure before it logs `conflict_rework_failed` and is retried next tick); at
-  `agent.max_conflict_reworks` (default 3, `0` off) it writes one `... conflict limit` block
-  and stays in `review`. `_bounce_conflicts` runs after every fetch, observer or not
-  (`fetch_states`), skipping issues in `_running` or `_retries`.
+  `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`, amended by #104): a `review`
+  issue whose open PR reads `conflicting` is moved to `rework` by issuebot, label first and
+  then a `### Issuebot merge conflict` workpad block, a note for a person. The bounce number
+  is `count_own_label_additions(number, labels.rework)`, the issue's `LABELED_EVENT` timeline
+  items the adapter's own account made: the workpad body is the session's to rewrite, so a
+  count kept there was the session's to zero, while a label event is GitHub's record and an
+  added one only tightens the bound (a note that fails after the label moved logs
+  `conflict_rework_note_failed` and the bounce is still counted; a failure before it logs
+  `conflict_rework_failed` and is retried next tick). At `agent.max_conflict_reworks`
+  (default 3, `0` off) it writes one `... conflict limit` block and stays in `review`, and
+  the orchestrator remembers per issue and limit that it did (`_conflict_limit_noted`), so
+  a note the session strips is rewritten once per process, not per tick. `_bounce_conflicts`
+  runs after every fetch, observer or not (`fetch_states`), skipping issues in `_running` or
+  `_retries`.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
@@ -582,7 +626,9 @@ floor, not the shipped version, and moves by hand.
   `stale` past three poll intervals, or `none`), `snapshot_at`, `snapshot_age_s` and
   `dispatch_hold`; the top-level `worker` is the worst of them, `none` > `stale` > `held` >
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
-  byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
+  byte-for-byte: `tests/test_web_vendor.py` parses the SHA-256 block and the table out of
+  `vendor/README.md` and hashes the files beside it, so the record is the check and a bump is
+  a one-file edit, #108); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
   `unsafe-inline`). The headers are added by `_SecureExit` (#106), a plain ASGI middleware
   that decorates the `send` channel rather than the response `call_next` returns: Starlette's
