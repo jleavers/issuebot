@@ -347,7 +347,8 @@ jobs:
             "
           '
       # `~/.claude.json` is the session account's own, in $HOME beside `.claude/` rather than
-      # inside the `claude-home` volume, so it is recreated with each container and shared by
+      # inside the directory the home sweep walks, so it is recreated with each container and
+      # shared by
       # every session in one -- and `claude` loads `mcpServers` out of it, offering a planted
       # server's tools to whichever issue runs next. `--strict-mcp-config` is what stops that
       # (#119), and this runs the claude the image actually ships rather than reading a help
@@ -416,7 +417,8 @@ jobs:
           assert RunAs("agent").probe(env) is None
           print("the session sees", sorted(seen))
           PY
-      # The session account's ~/.claude is a shared volume across every session and repository
+      # The session account's ~/.claude is shared by every session that account runs, across
+      # every repository
       # (#101), so a slash command, skill, rule, subagent, workflow, plugin or auto memory one
       # session plants there is loaded by the next at the same uid. The worker sweeps that config
       # before every turn; the credential and claude's own transcripts stay. Proved in the image

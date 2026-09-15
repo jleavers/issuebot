@@ -149,10 +149,6 @@ services:
       # an atomic save is picked up by the worker's next tick.
       - ./configs:/configs:ro
       - workspaces:/workspaces
-      # The session's home, not the worker's (#75): claude authenticates itself, so the
-      # login is the account the session runs as. Upgrading across this move needs the
-      # volume's files re-owned once (README, "Upgrades").
-      - claude-home:/home/agent/.claude
     # No depends_on: the database may be in another checkout's project (the hub). A worker
     # that starts first fails its migration, prints [FAIL] database: and exits 1, and
     # restart: unless-stopped brings it back until the hub answers.
@@ -248,7 +244,6 @@ services:
 volumes:
   pgdata:
   workspaces:
-  claude-home:
 
 # Two shared networks, created once per host (README, step 1), external in every project
 # rather than owned by the hub: a single compose file cannot declare a network both ways, and

@@ -47,9 +47,9 @@ REMOVE_TIMEOUT_S = 120
 
 # The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
 # instructions or behaviour, and that a session must therefore not leave behind for the next
-# one at the same uid (#101). With a single session account that home is a shared volume
-# (``claude-home``) across every session and repository; with a pool (#121) each member keeps
-# its own ``0700`` home and the volume is ``agent``'s alone, so the sharing is with the next
+# one at the same uid (#101). Each account keeps the image's own ``0700`` home and nothing is
+# mounted over it (#142); with a single session account that home is shared by every session in
+# the container, across every repository, and with a pool (#121) the sharing is with the next
 # session bound to that account rather than with the ones running beside it. Either way, a
 # slash command, skill, rule, subagent, workflow, plugin, output style, memory file or
 # settings a hostile issue plants would otherwise be read by an unrelated session next week.
@@ -62,11 +62,16 @@ REMOVE_TIMEOUT_S = 120
 # whatever the flag says and keyed by repository, so a session working one issue seeds every
 # later session on the same repository; it is swept below by ``CLAUDE_HOME_MEMORY_DIR`` and
 # never written in the first place, since ``FIXED_ENVIRONMENT`` (``runner.py``) sets
-# ``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``. The credential (``.credentials.json``, which rotates
-# its refresh token) and claude's own per-session runtime state
+# ``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``. The credential (``.credentials.json``) and claude's own
+# per-session runtime state
 # (``projects/<project>/*.jsonl``/``sessions``/``shell-snapshots``/... -- transcripts, not
-# instructions) are deliberately absent: the volume must stay writable for the token, and
-# wiping live runtime would break a concurrent session's ``--resume``. A denylist, not an
+# instructions) are deliberately absent, and for the reason the list itself gives: neither is a
+# surface a later ``claude -p`` loads as instructions or behaviour, so removing them would close
+# no channel while costing something real. A credential file authenticates the next session
+# rather than steering it, and ``claude`` rotates the refresh token inside it as it goes, so a
+# sweep would break a login an account does hold; wiping live runtime would break a concurrent
+# session's ``--resume``. A container session authenticates from the environment instead (#142),
+# which is why its home usually holds no such file at all. A denylist, not an
 # allowlist: everything it does not name is left alone, and a new claude config location has
 # to be added here by hand, which is the residual accepted over a whole-home allowlist that
 # would fail the other way, by wiping a runtime directory claude adds.

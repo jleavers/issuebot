@@ -641,7 +641,8 @@ async def test_startup_fails_when_claude_is_logged_out(tmp_path: Path) -> None:
     with pytest.raises(OrchestratorStartupError) as exc:
         await h.orchestrator.startup()
     assert exc.value.problems == [
-        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        "claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host"
     ]
     # Nothing was fetched or claimed: the probe ran after the gh probes and before any tick.
     assert [name for name, _ in h.github.calls] == ["auth_status", "missing_labels"]
@@ -710,7 +711,8 @@ async def test_startup_fails_on_preflight_auth_or_labels(
         await h.orchestrator.startup()
     assert exc.value.problems == [
         "labels missing: issuebot/review; run issuebot labels ensure",
-        "claude auth: not logged in; run claude auth login or set ANTHROPIC_API_KEY",
+        "claude auth: not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+        "or run claude auth login on the host",
     ]
 
 
@@ -2130,8 +2132,8 @@ async def test_an_authentication_hold_is_carried_in_the_snapshot(tmp_path: Path)
     assert hold is not None
     assert (hold.kind, hold.since) == ("auth", h.now())
     assert hold.reason == (
-        "claude authentication unavailable: not logged in; "
-        "run claude auth login or set ANTHROPIC_API_KEY"
+        "claude authentication unavailable: not logged in; set CLAUDE_CODE_OAUTH_TOKEN "
+        "(claude setup-token), or run claude auth login on the host"
     )
     h.claude_auth_output = LOGGED_IN
     await h.tick()
@@ -3159,8 +3161,18 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
 def _with_run_as(
     h: Harness, probe: Callable[[Sequence[str], Mapping[str, str]], list[str]]
 ) -> Orchestrator:
-    """The harness's orchestrator over a workflow whose session runs as `agent`."""
-    workflow = load_workflow(h.path, environ={**h.environ, "ISSUEBOT_AGENT_USER": "agent"})
+    """The harness's orchestrator over a workflow whose session runs as `agent`.
+
+    A session account has no login of its own since #142, so the environment carries the
+    credential the same way a deployment's would -- otherwise every test here would also be
+    exercising `credential_complaint`, which has its own tests below.
+    """
+    env = {
+        **h.environ,
+        "ISSUEBOT_AGENT_USER": "agent",
+        "CLAUDE_CODE_OAUTH_TOKEN": "agent-credential",
+    }
+    workflow = load_workflow(h.path, environ=env)
     assert workflow.config.agent.run_as == ("agent",)
     return Orchestrator(
         workflow,
@@ -3175,7 +3187,7 @@ def _with_run_as(
         run_as_probe=probe,
         clock=h.clock,
         now=h.now,
-        environ=h.environ,
+        environ=env,
     )
 
 
@@ -3402,13 +3414,19 @@ async def test_the_accounts_hold_says_it_once_loudly_and_says_when_it_lifts(
 
 
 async def test_a_reload_into_a_pool_without_a_credential_holds_dispatch(tmp_path: Path) -> None:
-    """The one rule a pool adds beyond #75's: no shared login, so the credential has to be one
-    `claude` needs no file for. Startup refuses it; a reload holds instead of failing every
-    session's authentication."""
+    """The credential rule follows the account, not the pool (#142): a lone account starts up
+    fine with a credential in the environment, and a reload that grows the pool while the
+    credential is withdrawn holds dispatch instead of failing every session's authentication."""
     h = Harness(tmp_path)
     h.add_issue(1, StateLabel.TODO)
-    orchestrator = _with_pool(h, accounts="agent-1", environ={})
+    orchestrator = _with_pool(
+        h, accounts="agent-1", environ={"CLAUDE_CODE_OAUTH_TOKEN": "agent-1-credential"}
+    )
     await orchestrator.startup()
+    # The deployment withdrew the credential: the same dict `self._environ` reads every tick,
+    # since the harness fixes the environment for the orchestrator's life (`_pool_workflow`
+    # only rewrites the workflow file), so the test mutates it in place.
+    orchestrator._environ.pop("CLAUDE_CODE_OAUTH_TOKEN")
     _pool_workflow(h, "agent-1, agent-2")
     await orchestrator.tick()
     assert h.github.issue(1).state is StateLabel.TODO
@@ -3443,16 +3461,17 @@ async def test_startup_fails_when_one_account_in_the_pool_cannot_be_reached(
 async def test_a_pool_refuses_to_start_without_a_credential_in_the_environment(
     tmp_path: Path,
 ) -> None:
-    """The accounts share no login on purpose (#121), so every session would fail to
-    authenticate: that is a startup failure, the way a definite logged-out is."""
+    """Any `agent.run_as` account has a home nobody logs into, so its credential comes
+    from the environment whatever the count (#121, #142) -- a pool is the case this test
+    exercises, not the reason for the rule. Missing one would fail every session's
+    authentication: that is a startup failure, the way a definite logged-out is."""
     h = Harness(tmp_path)
     orchestrator = _with_pool(h, environ={})
     with pytest.raises(OrchestratorStartupError) as exc:
         await orchestrator.startup()
     assert exc.value.problems == [
-        "agent.run_as: a pool of session accounts needs a credential in the environment, "
-        "since each account has its own home and no login is shared between them: set one of "
-        "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, or name a single account"
+        "agent.run_as: a session account has a home nobody logs into, so its credential "
+        "comes from the environment: set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"
     ]
 
 

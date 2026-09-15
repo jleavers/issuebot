@@ -27,7 +27,28 @@ def test_two_accounts_and_one_delegation() -> None:
     assert "'issuebot ALL=(%agents) NOPASSWD: ALL'" in DOCKERFILE
     assert "closefrom_override" in DOCKERFILE
     assert "chmod 4750 /usr/bin/sudo" in DOCKERFILE and "chgrp issuebot /usr/bin/sudo" in DOCKERFILE
-    assert "ISSUEBOT_AGENT_USER=agent" in DOCKERFILE
+
+
+def test_the_image_records_the_accounts_it_built_and_names_none_in_the_environment() -> None:
+    """#142: the pool is the default, expressed once. The list is accumulated *inside* the
+    loop that runs `useradd` and written from that accumulator, so it can neither name an
+    account the build did not create nor omit one it did -- nothing is re-derived from
+    ISSUEBOT_AGENT_POOL_SIZE, whose spelling `seq` and `test` read differently. `agent` alone
+    is the fallback for an empty pool, so no image resolves to the host route. And no
+    `ENV ISSUEBOT_AGENT_USER` is left to shadow that list with a single account.
+    """
+    assert "install -d -m 0755 /etc/issuebot" in DOCKERFILE
+    assert 'pool="${pool} agent-${n}"' in DOCKERFILE
+    assert "printf '%s\\n' ${pool:-agent} > /etc/issuebot/session-accounts" in DOCKERFILE
+    assert "chmod 0444 /etc/issuebot/session-accounts" in DOCKERFILE
+    assert "ISSUEBOT_AGENT_USER=" not in DOCKERFILE
+
+
+def test_the_build_reads_its_own_account_list_back() -> None:
+    """#142: the list is what `agent.run_as` resolves to in every container, so the build
+    asserts it is non-empty and that every account it names resolves on the image."""
+    assert "test -s /etc/issuebot/session-accounts" in DOCKERFILE
+    assert 'while read -r account; do id -u "${account}" >/dev/null || exit 1; done' in DOCKERFILE
 
 
 def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() -> None:
@@ -66,10 +87,15 @@ def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:
     assert "/home/issuebot/.local/bin" not in DOCKERFILE
 
 
-def test_the_login_volume_is_the_sessions_home() -> None:
-    assert "claude-home:/home/agent/.claude" in COMPOSE
-    assert "/home/issuebot/.claude" not in COMPOSE
-    assert "/home/issuebot/.claude" not in DOCKERFILE
+def test_no_login_volume_is_mounted_anywhere() -> None:
+    """#142: a session account's home holds no login, because nobody logs into it -- the
+    credential is in the environment, where every account reads the same one. A volume at that
+    path would be a second, stale credential route for the default deployment to disagree with.
+    """
+    assert "claude-home" not in COMPOSE
+    assert "/home/agent/.claude" not in COMPOSE
+    assert 'VOLUME ["/workspaces"]' in DOCKERFILE
+    assert "/home/agent/.claude" not in DOCKERFILE
 
 
 def test_the_session_may_run_git_in_the_workspace_the_worker_owns() -> None:
@@ -163,7 +189,6 @@ def test_compose_runs_the_web_as_its_own_account_and_the_worker_as_the_images() 
     # The worker needs the image's `USER issuebot` -- the sudo rule is its -- so it names none;
     # the two services that need no privilege transition at all name accounts of their own.
     assert [name for name, service in SERVICES.items() if "user" in service] == ["egress", "web"]
-    assert "claude-home" not in " ".join(SERVICES["web"].get("volumes", []))
 
 
 def test_the_proxy_is_a_fourth_account_with_nothing_of_the_workers() -> None:
