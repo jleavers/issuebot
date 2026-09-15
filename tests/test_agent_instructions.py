@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent.boundary import INSTRUCTION_FILE, Boundary
 from issuebot.agent.instructions import (
     INSTRUCTION_FILE_LIMIT,
     REPOSITORY_INSTRUCTION_FILES,
@@ -94,3 +95,15 @@ def test_undecodable_bytes_are_replaced_not_refused(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_bytes(b"ok \xff\xfe end\n")
     (file,) = read_repository_instructions(tmp_path)
     assert file.text == "ok �� end\n"
+
+
+def test_the_read_is_the_boundarys(tmp_path: Path) -> None:
+    """#104: the two names are the ``instructions`` artefact, and the read goes through the
+    boundary it is given, so a workspace that is not the worker's own is refused whole."""
+    (tmp_path / "CLAUDE.md").write_text("claude\n", encoding="utf-8")
+    ours = Boundary(worker_uid=os.getuid())
+    assert [f.path for f in read_repository_instructions(tmp_path, boundary=ours)] == ["CLAUDE.md"]
+    theirs = Boundary(worker_uid=os.getuid() + 1)
+    assert read_repository_instructions(tmp_path, boundary=theirs) == ()
+    assert INSTRUCTION_FILE.writer == "session"
+    assert INSTRUCTION_FILE.limit == INSTRUCTION_FILE_LIMIT

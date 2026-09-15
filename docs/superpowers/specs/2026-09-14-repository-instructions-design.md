@@ -83,17 +83,20 @@ the ground rules carries the files, or says the clone has none. Ground rule 5 no
 those files for how to run tools, commit and open pull requests *under* the ground rules; it
 no longer says they win.
 
-The read is total and bounded. `O_NOFOLLOW`: under `agent.run_as` (#75) the clone is the
-session's and this read is the worker's, so a symlink the clone ships must not put a file
-only the worker can read into a prompt the session sees; a link is skipped and logged.
-`O_NONBLOCK`: the open happens before the kind of file is known, and a FIFO by that name --
+The read is total and bounded, and it is the session boundary's (#104, spec
+`2026-09-14-session-boundary-design.md`): the two names are declared there as the
+`instructions` artefact, with the session among its writers, since under `agent.run_as` (#75)
+the clone is the session's and this read is the worker's, and every read goes through
+`Boundary.read`. A symlink the clone ships must not put a file only the worker can read into
+a prompt the session sees, so a link is refused, not followed, and logged. The open is
+`O_NONBLOCK` because it happens before the kind of file is known, and a FIFO by that name --
 which a session can make in its own clone, for the next run over the reused workspace to
 find -- would otherwise block the open, and with it the worker's session task, until a writer
-came. A directory, a FIFO or an unreadable file is skipped with a warning, a missing one
-silently; the section's fallback says issuebot carried none rather than that none exists,
-and tells the session to read a present one itself as data. The text
-is cut at `INSTRUCTION_FILE_LIMIT` (128 KiB, twice this repository's own `CLAUDE.md`) and
-undecodable bytes are replaced. Nothing here
+came. A directory, a FIFO, a file owned by neither account or one the worker cannot read is
+skipped with a warning, a missing one silently; the section's fallback says issuebot carried
+none rather than that none exists, and tells the session to read a present one itself as
+data. The text is cut at the artefact's limit, `INSTRUCTION_FILE_LIMIT` (128 KiB, twice this
+repository's own `CLAUDE.md`), and undecodable bytes are replaced. Nothing here
 fails a run: the files are a convenience for the session, and a session without them reads
 the tree itself, as data, like any contributing guide.
 

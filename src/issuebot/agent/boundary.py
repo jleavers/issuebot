@@ -15,7 +15,10 @@ environment (a memory file, ``runas``), the clone (``gh repo clone`` as the sess
 hook scripts are the worker's to give. What the session hands back over a pipe -- claude's
 stdout and stderr, a hook's output -- is bounded where the pipe is read (``STREAM_LINE_LIMIT``,
 the hook tails). What the session can leave *on disk* for the worker to find is ``ARTEFACTS``,
-and nothing else: a worker-side read of any other path under a workspace is a bug.
+and nothing else: a worker-side read of any other path under a workspace is a bug. The
+clone's own instruction files are on the list (#107): the clone is what the session was
+given, but it is also what the session can rewrite, and the worker reads two names out of
+it for the next turn's prompt.
 
 Every read goes through ``Boundary.read``: the path is opened one component at a time from a
 directory the worker owns, never through a symbolic link (``O_NOFOLLOW`` at every step, so a
@@ -85,6 +88,13 @@ TURN_STDERR = Artefact(
     "turn stderr", ".issuebot/runs/<run_id>/turn-N.stderr.log", "worker", 16 * MIB
 )
 
+# `CLAUDE.md` and `AGENTS.md` at the clone's root: the committers' instruction files, which
+# the prompt carries as enveloped data now that `claude` no longer loads them itself (#107).
+# The clone is the session's (`gh repo clone` runs as it under `agent.run_as`), so the session
+# is a declared writer; a link, a FIFO or a directory by either name is refused here, and a
+# file past the limit is cut, which the envelope's source says.
+INSTRUCTION_FILE = Artefact("instructions", "CLAUDE.md, AGENTS.md", "session", 128 * KIB)
+
 ARTEFACTS: tuple[Artefact, ...] = (
     ENV_FILE,
     SESSION_FILE,
@@ -92,6 +102,7 @@ ARTEFACTS: tuple[Artefact, ...] = (
     TURN_STREAM,
     TURN_PROMPT,
     TURN_STDERR,
+    INSTRUCTION_FILE,
 )
 
 _OPEN_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOCTTY", 0)

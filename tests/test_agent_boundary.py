@@ -14,6 +14,7 @@ from issuebot.agent.boundary import (
     ARTEFACTS,
     CREATED_MARKER,
     ENV_FILE,
+    INSTRUCTION_FILE,
     SESSION_FILE,
     TURN_PROMPT,
     TURN_STDERR,
@@ -54,10 +55,12 @@ def test_every_artefact_names_its_writer_and_its_bound() -> None:
         TURN_STREAM,
         TURN_PROMPT,
         TURN_STDERR,
+        INSTRUCTION_FILE,
     )
     assert len({artefact.name for artefact in ARTEFACTS}) == len(ARTEFACTS)
-    # The session's hooks write exactly one of them; everything else is the worker's own.
-    assert [a.name for a in ARTEFACTS if a.writer == "session"] == ["env"]
+    # The session's side writes two of them: its hooks' env file, and the clone's own
+    # instruction files (#107), since the clone is the session's; the rest is the worker's own.
+    assert [a.name for a in ARTEFACTS if a.writer == "session"] == ["env", "instructions"]
     assert all(a.limit > 0 for a in ARTEFACTS if a is not CREATED_MARKER)
     assert CREATED_MARKER.limit == 0  # read for its existence, never its contents
 

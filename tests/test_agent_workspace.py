@@ -610,3 +610,14 @@ def test_hooks_read_the_env_file_through_the_managers_boundary(
     assert workspace_environment(base, ws)[1] == []
     # ...and the manager's admits it, which is what its hooks read through.
     assert workspace_environment(base, ws, boundary=manager._boundary)[1] == ["DSN"]
+
+
+def test_the_managers_boundary_is_exposed_for_reads_made_outside_it(tmp_path: Path) -> None:
+    """The session's instruction-file read (#107) is made by the run, not the manager, and
+    it has to use the boundary that knows the session's uid (#104), so the manager hands it out."""
+    from issuebot.agent.boundary import Boundary
+
+    manager, _ = make_manager(tmp_path)
+    assert isinstance(manager.boundary, Boundary)
+    assert manager.boundary.worker_uid == os.getuid()
+    assert manager.boundary.session_uid is None  # no agent.run_as here

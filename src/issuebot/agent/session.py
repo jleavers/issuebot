@@ -285,7 +285,9 @@ async def _execute(
         _save(workspaces, workspace.path, state.session_record(0, None))
         # After `before_run`, which may have merged or installed things, and once per run:
         # the first turn's prompt carries the files, and a resumed session already has them.
-        instructions = await asyncio.to_thread(read_repository_instructions, workspace.path)
+        instructions = await asyncio.to_thread(
+            read_repository_instructions, workspace.path, boundary=workspaces.boundary
+        )
         await _turn_loop(
             state,
             workflow,

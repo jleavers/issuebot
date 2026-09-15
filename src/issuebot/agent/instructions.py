@@ -7,21 +7,21 @@ files -- how the repository runs its tests, commits and opens pull requests -- r
 through the prompt instead, inside the same ``<github-text>`` envelope as the issue, so it is
 that repository's committers' text under the ground rules and never instruction the session
 inherits by virtue of a file's location. This module is the read: a declared list of names,
-regular files only, bounded, and never a failure.
+each taken back across the session boundary (#104) as the ``instructions`` artefact --
+regular files only, never through a link, bounded -- and never a failure.
 """
 
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from issuebot.agent.boundary import INSTRUCTION_FILE, Boundary, BoundaryError
 from issuebot.log import get_logger
 
 REPOSITORY_INSTRUCTION_FILES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md")
 """The files at the clone's root the prompt carries, in this order. A declared list, not a
 search: whatever else the tree holds is data the session reads itself."""
 
-INSTRUCTION_FILE_LIMIT = 128 * 1024
+INSTRUCTION_FILE_LIMIT = INSTRUCTION_FILE.limit
 """Bytes of each file the prompt carries; the rest is cut and the envelope's source says so.
 
 Twice what this repository's own ``CLAUDE.md`` weighs: a cut loses the file's end, which is
@@ -43,75 +43,47 @@ class RepositoryFile:
 def read_repository_instructions(
     workspace: Path,
     *,
+    boundary: Boundary | None = None,
     names: tuple[str, ...] = REPOSITORY_INSTRUCTION_FILES,
     limit: int = INSTRUCTION_FILE_LIMIT,
 ) -> tuple[RepositoryFile, ...]:
-    """The named files at the workspace's root, as far as each exists and is a regular file.
+    """The named files at the workspace's root, as far as each exists and the boundary
+    hands it over.
 
-    A symlink is skipped without being followed (``O_NOFOLLOW``): under ``agent.run_as`` the
-    clone is the session's and this read is the worker's, so a link the clone ships could
-    otherwise put a file only the worker can read into a prompt the session sees. The open
-    is ``O_NONBLOCK`` because it happens before the kind of file is known: a FIFO by that
-    name (the session can make one in its own clone) would otherwise block the open until
-    a writer came, and this read sits on the worker's session task. A directory, a FIFO, an
-    unreadable file or a name that is not there is skipped too, all but the last with a
-    warning; a missing file is the normal case and says nothing. The text is cut at
-    ``limit`` bytes before decoding, and undecodable bytes are replaced rather than refused.
+    Every read goes through ``Boundary.read`` (#104): under ``agent.run_as`` the clone is the
+    session's and this read is the worker's, so a link the clone ships is refused rather than
+    followed to a file only the worker can read, a FIFO by that name (the session can make one
+    in its own clone) cannot block the open, since it sits on the worker's session task, and
+    a directory, a device or a file owned by neither account is refused before a byte is
+    read. Every refusal, and a file the worker cannot read, is skipped with a warning; a name
+    that is not there is the normal case and says nothing. The text is cut at ``limit`` bytes
+    before decoding, and undecodable bytes are replaced rather than refused.
+
+    ``boundary`` is the workspace manager's, which knows the session's uid; the default is
+    this process's alone, right where the session is the worker.
     """
     log = get_logger(__name__)
+    boundary = boundary or Boundary.current()
     found: list[RepositoryFile] = []
     for name in names:
         path = workspace / name
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            read = boundary.read(workspace, (name,), INSTRUCTION_FILE, limit=limit)
         except FileNotFoundError:
             continue
-        except OSError as exc:
-            reason = "symlink" if _is_symlink(path) else str(exc)
-            log.warning("repository_instructions_skipped", path=str(path), reason=reason)
+        except BoundaryError as exc:
+            log.warning("repository_instructions_skipped", path=str(path), reason=exc.reason)
             continue
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                log.warning(
-                    "repository_instructions_skipped", path=str(path), reason="not a regular file"
-                )
-                continue
-            raw = _read_up_to(fd, limit + 1)
         except OSError as exc:
             log.warning("repository_instructions_skipped", path=str(path), reason=str(exc))
             continue
-        finally:
-            os.close(fd)
-        truncated = len(raw) > limit
-        carried = raw[:limit]
         found.append(
             RepositoryFile(
                 path=name,
-                text=carried.decode("utf-8", errors="replace"),
-                size=info.st_size,
-                carried=len(carried),
-                truncated=truncated,
+                text=read.data.decode("utf-8", errors="replace"),
+                size=read.size,
+                carried=len(read.data),
+                truncated=read.truncated,
             )
         )
     return tuple(found)
-
-
-def _read_up_to(fd: int, count: int) -> bytes:
-    """Up to ``count`` bytes: one ``read`` may return fewer than asked without being at EOF."""
-    chunks: list[bytes] = []
-    remaining = count
-    while remaining > 0:
-        chunk = os.read(fd, remaining)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _is_symlink(path: Path) -> bool:
-    try:
-        return path.is_symlink()
-    except OSError:
-        return False

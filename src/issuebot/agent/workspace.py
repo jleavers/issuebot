@@ -141,6 +141,11 @@ class WorkspaceManager:
         self._boundary = Boundary.current(settings.agent.run_as)
         self._log = get_logger(__name__)
 
+    @property
+    def boundary(self) -> Boundary:
+        """The worker's side of the line, for a read of a workspace made outside this class."""
+        return self._boundary
+
     # --- paths --------------------------------------------------------------------
 
     def path_for(self, identifier: str) -> Path:

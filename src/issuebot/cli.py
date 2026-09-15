@@ -931,7 +931,9 @@ async def _run_once(
             self_review=settings.agent.self_review,
             workpad=workpad,
             # The clone's instruction files, when a workspace already holds the clone (#107).
-            repo_instructions=read_repository_instructions(workspaces.path_for(issue.identifier)),
+            repo_instructions=read_repository_instructions(
+                workspaces.path_for(issue.identifier), boundary=workspaces.boundary
+            ),
         )
         try:
             print(PromptRenderer(workflow.prompt_template).render(context).rstrip("\n"))
