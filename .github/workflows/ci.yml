@@ -346,6 +346,45 @@ jobs:
           assert RunAs("agent").probe(env) is None
           print("the session sees", sorted(seen))
           PY
+      # The session account's ~/.claude is a shared volume across every session and repository
+      # (#101), so a slash command, skill, rule, subagent, workflow, plugin or auto memory one
+      # session plants there is loaded by the next at the same uid. The worker sweeps that config
+      # before every turn; the credential and claude's own transcripts stay. Proved in the image
+      # because it is the real uid split, the real sudo rule and the real home, and through the
+      # worker's own code path (`RunAs.sweep_home`, the default target) rather than the helper
+      # verb by hand, so a wrong default path or an argv the sudoers rule rejects fails here.
+      - name: a session's ~/.claude config does not survive to the next session
+        run: |
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            set -eu
+            # A prior session poisons the shared home and a credential is in place.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              mkdir -p /home/agent/.claude
+              cd /home/agent/.claude
+              mkdir -p commands skills/evil rules projects/-workspaces-issuebot-7/memory
+              echo poison > commands/evil.md
+              echo poison > skills/evil/SKILL.md
+              echo poison > rules/evil.md
+              echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md
+              echo cred > .credentials.json
+              echo transcript > projects/-workspaces-issuebot-7/keep.jsonl
+            "
+            # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
+            test "$(id -u)" = 1000
+            /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
+            # The next session finds nothing planted, but the credential and transcript remain.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              cd /home/agent/.claude
+              test ! -e commands
+              test ! -e skills
+              test ! -e rules
+              test ! -e projects/-workspaces-issuebot-7/memory
+              test -f .credentials.json
+              test -f projects/-workspaces-issuebot-7/keep.jsonl
+            "
+          '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
       # build carries both, since the checks below are about what is on PATH and under which
