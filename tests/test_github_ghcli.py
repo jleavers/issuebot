@@ -278,11 +278,13 @@ async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
 async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -> None:
     """One role over its ceiling does not void the sweep's other four (#139).
 
-    The role that can actually reach it is ``complete`` -- it grows with everything issuebot
-    has finished -- and its issues are the ones the sweep classifies ``unchanged`` and does
-    nothing with. Letting it refuse the whole read would stop the sweep closing issues out,
-    removing workspaces and releasing session accounts, which is worse than the cost the cap
-    is for. The board poll keeps the all-or-nothing rule: there, four roles are not a board.
+    The role that can actually reach it is ``complete``, which grows with everything issuebot
+    has finished. Letting it refuse the whole read would stop the sweep closing *any* issue
+    out, removing any workspace and releasing any session account, since ``terminal_sweep`` is
+    the only path to ``finish_terminal``. Skipping the one role costs less, though not
+    nothing: ``remove_workspace`` runs for a ``complete`` issue too, so what is lost is the
+    retry of a workspace removal that failed at the time, for the issues in that role. The
+    board poll keeps the all-or-nothing rule: there, four roles are not a board.
     """
     stream = io.StringIO()
     configure_logging(level="WARNING", stream=stream)

@@ -103,10 +103,12 @@ class HookResult:
     duration_ms: int
     stdout_tail: str
     stderr_tail: str
-    # The hook wrote more than ``MAX_HOOK_OUTPUT_BYTES`` to one of its streams and its process
-    # group was killed for it (#139). Its own exit status is the kill's, unless it managed to
-    # exit inside the pipe buffer before the reader caught up -- which is why this is a fact of
-    # its own rather than something read off ``returncode``.
+    # The hook wrote more than ``MAX_HOOK_OUTPUT_BYTES`` to one of its streams, and its process
+    # group was killed for it (#139) -- or the kill was tried and refused, which is
+    # ``_kill_quietly``'s case. Its own exit status is therefore the kill's, or its own where it
+    # exited inside the pipe buffer before the reader caught up, or the timeout's where the kill
+    # did not land: which is why the overrun is a fact of its own and not read off
+    # ``returncode``.
     overrun: bool = False
 
     @property
@@ -472,12 +474,17 @@ class WorkspaceManager:
         """``_kill_group`` with the failure logged rather than raised (#139).
 
         ``os.killpg`` raises ``PermissionError`` for a group at another uid, which is every
-        hook's group under ``agent.run_as`` where the delegated kill did not take, and both
+        hook's group under ``agent.run_as`` where the delegated kill did not take. All three
         callers are places an exception must not reach: the overrun killer runs as a task,
-        whose exception would replace the cancellation the timeout raises, and the timeout
-        branch is building the ``HookResult`` that reports the failure. Either way the hook
-        has already failed and the caller is saying so; a kill that did not land leaves the
-        timeout to bound what it could not, while the reads go on dropping the bytes.
+        whose exception would surface from the shielded await in place of the read's result;
+        the timeout branch is building the ``HookResult`` that reports the failure; and the
+        cancellation branch is on its way to re-raising. In each the hook has already failed
+        and the caller is saying so, so ``Exception`` deliberately rather than ``OSError``:
+        what must not happen here is *any* exception, and the one known today is only the one
+        known today. ``CancelledError`` is not one, which is what leaves the cancellation
+        branch re-raising what it was given. A kill that did not land leaves
+        ``hooks.timeout_ms`` to bound what the cap could not, while the reads go on dropping
+        the bytes -- so the memory stays bounded whether or not the signal is deliverable.
         """
         try:
             await self._kill_group(process)

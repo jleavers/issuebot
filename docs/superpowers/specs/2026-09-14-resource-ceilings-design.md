@@ -61,8 +61,16 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   The overrun is a fact of its own on `HookResult` rather than something read off `returncode`,
   since a hook can exit inside the pipe buffer before the reader catches up; it makes `ok`
   false, it is `overrun=True` and `max_output_bytes` in the `hook_failed` line, and it is what
-  `summary` says, so the run's error quotes the cause (`before_run hook failed: wrote more than
-  4194304 bytes and was killed`) rather than a truncated line of the flood. Much smaller than
+  `summary` says, so the run's error quotes the cause (`before_run hook failed: output exceeded
+  4194304 bytes`) rather than a truncated line of the flood. The wording does not claim the
+  kill, which a hook that exited inside the pipe buffer before the reader caught up never
+  received. Nor is the kill the cap's only stop: `os.killpg` raises `PermissionError` for a
+  group at another uid, which is every hook's group under `agent.run_as` where the delegated
+  kill did not take, so a kill that cannot land is a `hook_kill_failed` warning (`_kill_quietly`,
+  at every one of the three sites, since two of them are building the `HookResult` that reports
+  the failure or re-raising a cancellation) and `hooks.timeout_ms` bounds what the cap could
+  not, while the reads go on dropping the bytes. The memory is bounded either way, which is the
+  part that is not allowed to depend on a signal being deliverable. Much smaller than
   `GhRunner`'s 32 MiB because the resource differs: a hook's output is diagnostic, only
   `_OUTPUT_TAIL` of either stream survives into `HookResult`, and the cap is sized to what a
   chatty-but-honest install may print rather than to what issuebot needs to keep. The reader
@@ -162,8 +170,10 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   bodies in them, grow with the deployment's own successful work for as long as it runs. That
   is the invariant's shape with issuebot in the role of the outside party, and it is why the
   sweep needed a ceiling of its own (`MAX_TERMINAL_PAGES`) rather than the board's. The read is
-  now bounded; that it is repeated at all, over issues whose only outcome is `unchanged`, is
-  not. Filed separately (#149).
+  now bounded; that it is repeated at all is not. Filed separately (#149) -- which has to
+  answer more than it looks: `finish_terminal` classifies a `complete` issue `unchanged` but
+  still calls `remove_workspace`, so simply not re-reading the role would drop the only retry
+  of a workspace removal that failed at the time.
 - **`_conflict_gave_up` is keyed on `issue.updated_at`**, which is "until the issue changes" as
   the acceptance criterion asks -- but a commenter moves `updated_at`, so an issue whose label
   history is past `MAX_TIMELINE_PAGES` can be made to cost ten pages again per comment. That is

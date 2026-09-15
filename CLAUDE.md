@@ -369,7 +369,8 @@ floor, not the shipped version, and moves by hand.
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
-  `bash -lc` hooks with a timeout and a cap on what they hand back, `.issuebot/session.json`, whose `workpad_comment_id` is the
+  `bash -lc` hooks with a timeout and a cap on what they hand back,
+  `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`).
   The hook cap is #139: `_run_argv` reads both pipes through `read_capped` and kills the

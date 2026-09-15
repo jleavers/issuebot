@@ -433,8 +433,12 @@ async def test_hook_output_at_the_cap_is_not_an_overrun(
 
 @posix
 @pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid to escape the group")
+@pytest.mark.parametrize("kill_fails", [False, True])
 async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
-    tmp_path: Path, make_issue: Callable[..., Issue]
+    tmp_path: Path,
+    make_issue: Callable[..., Issue],
+    monkeypatch: pytest.MonkeyPatch,
+    kill_fails: bool,
 ) -> None:
     """A hook killed for flooding whose pipes then stay open past the timeout reports the
     cause and not the symptom (#139).
@@ -443,6 +447,11 @@ async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
     outlives it, and then the timer is what stops the hook. The bytes are bounded either
     way -- the reads have been dropping them since the cap -- so the run's error should say
     the hook flooded, not that it was slow.
+
+    ``kill_fails`` is the same path with ``os.killpg`` refusing, which is what it does for a
+    group at another uid: this is the one route that reaches ``_kill_quietly`` from the
+    timeout branch, where a raised exception would take the place of the ``HookResult`` that
+    reports the overrun.
     """
     log = io.StringIO()
     configure_logging(level="DEBUG", stream=log)
@@ -453,6 +462,10 @@ async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
         tmp_path, hooks={"before_run": f"setsid bash -c {shlex.quote(escaped)}"}, timeout_ms=3000
     )
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    if kill_fails:
+        monkeypatch.setattr(
+            workspace_module, "_kill_group", lambda process: _raise(PermissionError(1, "denied"))
+        )
 
     try:
         result = await manager.run_hook("before_run", ws.path)
@@ -469,6 +482,7 @@ async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
     assert failure["overrun"] is True
     assert failure["timed_out"] is False
     assert failure["max_output_bytes"] == MAX_HOOK_OUTPUT_BYTES
+    assert [r for r in records if r.get("event") == "hook_kill_failed"] or not kill_fails
     # Not the manager's to reap: it escaped the group on purpose, so the test cleans up.
     with contextlib.suppress(ProcessLookupError, ValueError):
         os.kill(int(pidfile.read_text()), signal.SIGKILL)
