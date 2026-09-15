@@ -263,9 +263,11 @@ floor, not the shipped version, and moves by hand.
   in this session's first hook. A hook that is not configured opens no shell and takes no sweep.
   It logs `claude_home_sweep_failed` at WARNING when `RunAs.sweep_home`
   reports the helper did not run or exit 0 (the turn still runs; the next sweeps again); a
-  no-op on the host route (`run_as` unset), where the home is the operator's own -- nothing
-  removes a developer's own `.profile`, and `probe_run_as` refuses an account that is this
-  process's anyway. Which
+  no-op on the host route (`run_as` unset), where the home is the operator's own. Nothing
+  removes a developer's own `.profile` by any route: `sweep_home` refuses a home whose account
+  is the invoking process's own, #111's separation rule where the removal is, because
+  `probe_run_as` catches that at worker startup and in `validate` while `run-once` runs no
+  probe at all. Which
   sharing it is depends on the route (#121), and so does which sweep is load-bearing. With one
   account every session in the container shares that home and re-reads it each turn, so a
   session running beside this one can plant between its turns and *every* sweep is doing work.

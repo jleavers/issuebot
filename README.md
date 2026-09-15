@@ -742,6 +742,14 @@ hook that would truncate it again or append a duplicate per session.
 - `after_create` is the one hook that cannot use it, in either direction: it runs before
   `.issuebot/` exists, because that directory's presence is what marks a workspace whose
   creation finished. Write the file from `before_run`.
+- **A hook cannot hand anything over through `~/.profile`**, which is what a toolchain
+  installer (`rustup`, `nvm`, `pyenv`) appends its `PATH` line to. The worker sweeps the session
+  account's shell start-up files before every hook and every turn (#137), so an installer's line
+  is gone before the next login shell would read it — between two sessions, which is the point,
+  and within one. `PATH` itself is a protected name here too, so the routes for a tool the image
+  does not carry are the ones the requirements list gives: build an image `FROM` this one, or
+  have the hooks and the session call the tool by its full path (a hook can export the
+  directory's *name* through this file and the agent can use it).
 
 ### More than one repository
 

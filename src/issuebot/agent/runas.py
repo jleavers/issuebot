@@ -333,15 +333,25 @@ class RunAs:
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
         like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
         and exited 0, because a sweep that silently never happens is a security control with
-        no failure signal. ``home`` defaults to the account's own; a caller
-        (the tests) passes an explicit path so the sweep can be proved without touching a real
-        home.
+        no failure signal. ``home`` defaults to the account's own; a caller (the tests) passes
+        an explicit path so the sweep can be proved without touching a real home.
+
+        Never the invoking process's own account, whichever way the path was arrived at: this
+        unlinks a home's dotfiles, and the home it exists to clear is one at *another* uid.
+        ``probe_run_as`` refuses such an account at worker startup and in ``validate`` (#111's
+        separation rule), but ``run-once`` runs no probe, so an operator who pointed
+        ``agent.run_as`` at their own account would otherwise have their own ``~/.claude`` and
+        ``.profile`` swept before the first hook. Refused here, where the removal is, and
+        reported like any other sweep that did not run.
         """
+        try:
+            account = self.account()
+        except RunAsError:
+            return False
+        if account.pw_uid == os.getuid():
+            return False
         if home is None:
-            try:
-                home = Path(self.account().pw_dir)
-            except RunAsError:
-                return False
+            home = Path(account.pw_dir)
         # SUDO_TIMEOUT_S, not REMOVE_TIMEOUT_S: this removes a handful of small config entries,
         # not an arbitrary workspace tree. The timeout bounds the worker's wait, not the helper:
         # `subprocess.run` kills `sudo`, while the helper, the account's own process, runs on to

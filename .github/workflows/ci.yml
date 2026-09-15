@@ -384,7 +384,7 @@ jobs:
               mkdir -p /home/agent/.npm
             "
             # Before the sweep the plant runs, which is what the sweep is for: a hook is
-            # `bash -lc` and the setting it reads is the account own home.
+            # `bash -lc`, a login shell, and the home it reads belongs to the account.
             planted=$(sudo -n -H -u agent bash -lc "echo hook-ran")
             case "$planted" in
               *PROFILE-RAN*) ;;

@@ -651,6 +651,43 @@ async def test_the_session_sweeps_the_agent_home_before_every_turn_and_every_hoo
     ]
 
 
+async def test_a_reused_workspace_still_sweeps_before_its_first_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reuse path has no post-clone setup, so `before_run` is the run's *first* login shell
+    -- the one a previous session's `~/.profile` would run in (#137). It is swept because the
+    sweep sits in `_run_script` rather than in workspace creation; a regression that moved it
+    there would pass the fresh-clone ordering test above and fail here."""
+    h = Harness(tmp_path, max_turns=1, hooks={"before_run": "true"})
+    await h.run(ScriptedRunner())
+    order: list[str] = []
+    real_hook = h.workspaces.run_hook
+
+    async def record_sweep() -> None:
+        order.append("sweep")
+
+    async def record_hook(name: str, path: Path) -> object:
+        result = await real_hook(name, path)
+        order.append(name)
+        return result
+
+    clones: list[list[str]] = []
+    real_gh = h.gh.run
+
+    async def counting(args: list[str], *, stdin: str | None = None) -> GhResult:
+        clones.append(list(args))
+        return await real_gh(args, stdin=stdin)
+
+    monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
+    monkeypatch.setattr(h.workspaces, "run_hook", record_hook)
+    monkeypatch.setattr(h.gh, "run", counting)
+    await h.run(ScriptedRunner(on_turn=lambda n: order.append(f"turn{n}")))
+    # Nothing was cloned the second time, so the workspace really was reused -- and the run's
+    # first entry is a sweep, with `before_run` rather than the post-clone setup behind it.
+    assert clones == []
+    assert order[:2] == ["sweep", "before_run"]
+
+
 async def test_before_run_failure_is_hook_error(tmp_path: Path) -> None:
     h = Harness(tmp_path, hooks={"before_run": "exit 4"})
     runner = ScriptedRunner()

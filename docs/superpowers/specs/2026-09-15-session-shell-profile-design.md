@@ -57,9 +57,17 @@ well as before every turn.
   file. A hook that is not configured returns before `_run_script` and so opens nothing and sweeps
   nothing. `session._turn_loop`'s call stays exactly as it was.
 
+- **`RunAs.sweep_home` refuses a home whose account is the invoking process's own**, whichever
+  way the path was arrived at. #111's separation rule, applied where the removal is: the sweep
+  exists to clear a home at *another* uid, and what it removes is now an operator's dotfiles as
+  well as a config directory. `probe_run_as` refuses such an `agent.run_as` at worker startup
+  and in `validate`, but `run-once` runs no probe, so without this an operator who pointed
+  `ISSUEBOT_AGENT_USER` at their own account would lose their `~/.claude` and their `.profile`
+  to the first hook. Reported like any other sweep that did not run: the caller's WARNING, and
+  the run goes on.
+
 - **Nothing else changes.** No image change, no ownership change, no new setting. On the host
-  route (`agent.run_as` unset) the sweep is still a no-op, so nothing ever removes a developer's
-  own `.profile`; `probe_run_as` refuses an account that is this process's own in any case.
+  route (`agent.run_as` unset) the sweep is not reached at all.
 
 ## Why the sweep, not the image
 
@@ -92,9 +100,18 @@ The issue offered three routes. The sweep is the one taken.
   beside this one can plant between a sweep and the shell it protects. A pool closes it, since no
   two concurrent sessions share a home.
 
+- **A hook can no longer bootstrap a toolchain through the start-up files**, within a session
+  as well as between two: `rustup`, `nvm` and `pyenv` persist their `PATH` by appending to
+  `~/.profile` or `~/.bashrc`, and an `after_create` that installed one would find the line gone
+  before `before_run`'s login shell read it. Deliberate -- a file every later session runs is
+  exactly what this closes -- and the routes the requirements list already gives (an image built
+  `FROM` this one, or calling the tool by its full path) are unaffected. `PATH` is a protected
+  name in `.issuebot/env` too, so that is not a substitute for it; the README's `.issuebot/env`
+  section says so where a hook author will be reading.
+
 - **Other dotfiles a tool executes.** `~/.gitconfig` (aliases, `core.pager`) and `~/.ssh/config`
   (`ProxyCommand`) are the same shape one tool further out, and neither is a shell start-up file;
-  out of this issue's scope, filed rather than folded in.
+  out of this issue's scope, filed as #151 rather than folded in.
 
 - **`~/.claude.json`**, unchanged from #101 and #119: claude's own file, kept by a denylist that
   does not name it, with its one executable surface closed by `--strict-mcp-config`.
@@ -109,7 +126,16 @@ real wrapper, the real `bash -lc`, the account's home substituted through `pwd.g
 home is swept, and only `sudo` a fake, because a uid change is the one thing the suite cannot have.
 That test is two-sided: with the sweep removed the plant *is* what the hook runs.
 `tests/test_agent_session.py` records the order — a sweep before the post-clone setup, before each
-configured hook and before every turn, and none for a hook that is not configured.
+configured hook and before every turn, and none for a hook that is not configured — and, on a
+reused workspace, that the run's first login shell is still `before_run`'s and still swept, which
+is the case the pool's "first sweep of the run" rests on and the one a regression that moved the
+call into workspace creation would pass without.
+The refusal has its own test (a sweep aimed at the caller's own account removes nothing and never
+reaches sudo), and `tests/conftest.py` carries an autouse guard behind all of it: a sweep that
+would really run and is aimed outside the suite's `tmp_path` fails the test rather than a
+developer's home. The guard is why the new call site is safe to add — `_run_script` means any
+future test that runs a hook under `agent.run_as` reaches a real `sweep_home`, whose delegation
+resolves `sudo` from the developer's own `PATH` rather than from the environment a test built.
 `tests/test_image_layout.py` pins the CI step. The CI `docker` job proves it in the real image,
 the real uid split and the real home, through the worker's own `RunAs("agent").sweep_home()`: the
 same `bash -lc` runs before the sweep, where the plant must run, and after it, where it must not,

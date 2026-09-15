@@ -30,6 +30,7 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import (
+    CLAUDE_HOME_DIR,
     CLAUDE_HOME_MEMORY_DIR,
     CLAUDE_HOME_SWEEP,
     MODULE,
@@ -421,6 +422,9 @@ def test_the_shell_start_up_list_names_what_bash_and_sh_read() -> None:
     # The home is swept by name, never emptied: what the account keeps there is its own.
     assert ".claude" not in SHELL_STARTUP_SWEEP
     assert ".claude.json" not in SHELL_STARTUP_SWEEP
+    # And the config half of the sweep still reaches ``.claude`` from the home it is aimed at:
+    # a typo here would sweep nothing under it while every name above still passed.
+    assert CLAUDE_HOME_DIR == ".claude"
 
 
 def test_sweep_unlinks_a_symlinked_start_up_file_without_following_it(tmp_path: Path) -> None:
@@ -513,6 +517,7 @@ def test_sweep_home_delegates_and_clears_the_config_through_the_wrapper(
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
     home = tmp_path / "home"
     _plant_home(home)
+    _account_home(monkeypatch, home)  # a sweep that really runs is one at another account
     assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(home) is True
     assert not (home / ".claude" / "commands").exists()
     assert not (home / ".profile").exists()
@@ -523,24 +528,50 @@ def test_sweep_home_delegates_and_clears_the_config_through_the_wrapper(
     assert call["command"][-2:] == ["sweep", str(home)]
 
 
+def test_sweep_home_refuses_the_invoking_accounts_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep unlinks a home's dotfiles, so it is never aimed at the caller's own account.
+
+    ``probe_run_as`` refuses an ``agent.run_as`` that does not separate at worker startup and in
+    ``validate`` (#111), but ``run-once`` runs no probe: without this, an operator who pointed
+    ``ISSUEBOT_AGENT_USER`` at their own account would lose their ``~/.claude`` config and their
+    ``.profile`` to the first hook. Refused where the removal is, and before sudo is asked.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    record = tmp_path / "sudo.jsonl"
+    monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
+    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(home) is False
+    assert (home / ".profile").exists()
+    assert (home / ".claude" / "commands").is_dir()
+    assert not record.exists()
+
+
 def test_sweep_home_defaults_to_the_accounts_own_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No explicit path: the account's home is where the delegated command is aimed. The fake
-    # sudo is told to deny, so it records the aimed command but never execs it -- the real home
-    # is never swept.
+    # No explicit path: the account's home -- `pw_dir`, not `pw_dir / ".claude"` -- is where the
+    # delegated command is aimed. The home is moved under `tmp_path` first and the fake sudo is
+    # told to deny, so what is recorded is the aim and nothing is ever unlinked.
+    home = tmp_path / "home"
+    home.mkdir()
+    _account_home(monkeypatch, home)
     record = tmp_path / "sudo.jsonl"
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
     monkeypatch.setenv("CLAUDE_SUDO_DENY", "1")
     # And a sudo that refuses is reported, not swallowed: the caller logs it.
     assert RunAs(ME, sudo=FAKE_SUDO).sweep_home() is False
     (call,) = [json.loads(line) for line in record.read_text().splitlines()]
-    assert call["command"][-2:] == ["sweep", pwd.getpwnam(ME).pw_dir]
+    assert call["command"][-2:] == ["sweep", str(home)]
+    assert pwd.getpwnam(ME).pw_dir == str(home)  # the substitution, so the aim means something
 
 
-def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises() -> None:
+def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises(
+    tmp_path: Path,
+) -> None:
     assert RunAs("no-such-account-x", sudo=FAKE_SUDO).sweep_home() is False
-    assert RunAs(ME, sudo="/no/such/sudo").sweep_home(Path("/nonexistent")) is False
+    assert RunAs(ME, sudo="/no/such/sudo").sweep_home(tmp_path / "nonexistent") is False
 
 
 def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> None:
@@ -643,13 +674,22 @@ async def test_sweep_agent_home_delegates_under_run_as(
     assert [entry["event"] for entry in logs] == ["claude_home_swept"]
 
 
-def _account_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
-    """Point this account's home at ``home`` for the code under test.
+# A uid that is not this process's, for the account entry `_account_home` substitutes. The
+# sweep refuses a home whose account is the caller's own, which is the rule that keeps a
+# misconfigured `run-once` off an operator's dotfiles -- so a test that means to sweep has to
+# look like the delegation it stands in for: another account, at another uid.
+OTHER_UID = 65534 if os.getuid() != 65534 else 65533
 
-    Everything that resolves the session account's home goes through ``pwd.getpwnam`` --
-    ``RunAs.environment``, which is the ``HOME`` a hook runs with, and ``sweep_home``, which is
-    where the sweep is aimed -- so one substitution moves both, and the real home of whoever
-    runs the suite is never the target of a sweep that actually happens.
+
+def _account_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point this account's home at ``home``, at a uid that is not this process's.
+
+    Everything that resolves the session account's home and uid goes through ``pwd.getpwnam``
+    -- ``RunAs.environment``, which is the ``HOME`` a hook runs with, and ``sweep_home``, which
+    is both where the sweep is aimed and what it compares against ``os.getuid()`` -- so one
+    substitution moves all of it, and the real home of whoever runs the suite is never the
+    target of a sweep that actually happens. The fake ``sudo`` still changes no uid, so the
+    delegated command runs as this process: what is faked is the account, not the separation.
     """
     real = pwd.getpwnam
 
@@ -661,7 +701,7 @@ def _account_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
             (
                 entry.pw_name,
                 entry.pw_passwd,
-                entry.pw_uid,
+                OTHER_UID,
                 entry.pw_gid,
                 entry.pw_gecos,
                 str(home),
@@ -739,8 +779,13 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
 
 
 async def test_workspace_creation_and_removal_run_as_the_account(
-    tmp_path: Path, make_issue: Callable[..., Issue]
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Creation runs the post-clone setup and `after_create`, and every script in a login shell
+    # sweeps the account's home first (#137). Here that account is this process's own, so
+    # `sweep_home` refuses it and nothing is removed -- which is the whole reason it refuses:
+    # a delegation that does not separate is one that would be unlinking the caller's own
+    # dotfiles. (`no_sweep_outside_the_suite` in conftest fails any test that gets past that.)
     root = tmp_path / "workspaces"
     cfg = Settings.model_validate(
         {
@@ -757,6 +802,12 @@ async def test_workspace_creation_and_removal_run_as_the_account(
         environ=base_env(HOME=str(tmp_path), CLAUDE_SUDO_RECORD=str(record)),
         hook_shell=("bash", "-c"),
     )
+    # The spawns resolve `sudo` from the environment above, where the fake comes first; the
+    # sweep's delegation does not (`subprocess.run` with no `env=`), so it is pointed at the
+    # fake by hand. The removal below is left as it was, on the real `sudo`: with one uid a
+    # delegated removal that actually ran would unlink the worker's own directory too, which
+    # it cannot do where the accounts differ.
+    monkeypatch.setattr(manager, "_runas", RunAs(ME, sudo=FAKE_SUDO))
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert ws.created and (ws.path / ".git").is_dir()
     state = ws.path / ".issuebot"
