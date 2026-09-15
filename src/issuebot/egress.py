@@ -373,11 +373,12 @@ class Proxy:
         """One client connection, from its request line to the end of its tunnel.
 
         Never raises: a proxy is the only way out of the worker's network, so a connection that
-        fails in a way nobody anticipated must cost that connection and not the service. That
-        is why the catch below is `Exception` and not the three types this function expects --
-        the contract is the service surviving, and an unanticipated error is exactly the case
-        it is for. `CancelledError` is a `BaseException` and so still propagates, which is what
-        lets the server shut down.
+        fails in a way nobody anticipated must cost that connection and not the service. Hence
+        the two catches below -- the three types a connection ordinarily fails with, at DEBUG,
+        and then `Exception` for everything else, at ERROR with its traceback, since that is a
+        bug in the one chokepoint the whole deployment's egress goes through.
+        `CancelledError` is a `BaseException` and so still propagates, which is what lets the
+        server shut down.
 
         The accept-time bound is here rather than in `_serve` because it is about the
         descriptor, which this connection is already holding: past it the answer is 503 and the
