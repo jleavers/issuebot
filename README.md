@@ -906,7 +906,7 @@ outlive the workspace.
 every page, JSON route and raw turn part asks for `ISSUEBOT_WEB_PASSWORD` as HTTP Basic
 under any username (the browser prompts once and remembers it; `curl -u
 :"$ISSUEBOT_WEB_PASSWORD" http://127.0.0.1:8080/api/v1/repos` from a shell), and a path that
-matches nothing challenges too, so nothing reaches the database anonymously. `POST
+matches nothing challenges too, so no read reaches the database anonymously. `POST
 .../refresh`, the one write, asks for one thing more: a browser replays a cached Basic
 credential on a form another site submits, so the route also requires a custom request
 header, `HX-Request` (any non-empty value; the Poll-now button sends it, a form cannot, and a
@@ -914,7 +914,14 @@ cross-site script cannot add it without a CORS preflight the app never answers),
 a request whose `Sec-Fetch-Site` reads `cross-site` outright. Two things stay open:
 `/static/`, the vendored assets, and `/healthz` to a probe with no credential, which then
 answers liveness alone (`status` and `database`; the workers and their repository names are
-for the credential), so compose's healthcheck needs no secret. A credential that is presented
+for the credential), so compose's healthcheck needs no secret. That anonymous answer is the
+verdict the process already holds, refreshed by at most one connection every ten seconds
+however many probes arrive (a failure is held for the same ten seconds, so the healthcheck
+can read 503 that long after the database is back; the credential's own probe is live, and
+refreshes it too), so a flood of anonymous probes cannot use up the hub cluster's
+connections, which every worker's sink and refresh listener share (#106). Every response
+carries the same four security
+headers, the 500 an unhandled exception becomes included. A credential that is presented
 and wrong is a 401 everywhere and a `web_auth_rejected` log line naming the path and the
 client, never the value. `issuebot web` refuses to start without the password (`[FAIL]
 web: not configured; export ISSUEBOT_WEB_PASSWORD`; it reads the environment only, since a
