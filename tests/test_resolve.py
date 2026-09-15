@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.config.errors import MissingEnvironmentVariable
+from issuebot.config.errors import MissingEnvironmentVariable, SessionAccountsUnreadable
 from issuebot.config.resolve import resolve_config, resolve_env_value
 
 BASE = Path("/srv/workflows")
@@ -150,3 +150,77 @@ def test_mcp_config_unusable_entries_are_left_for_validation() -> None:
     assert out["claude"]["mcp_config"] == "mcp.json"
     out = resolve_config({"claude": {}}, environ={}, base_dir=BASE)
     assert "mcp_config" not in out["claude"]
+
+
+def test_run_as_falls_back_to_the_accounts_the_image_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\nagent-3\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert out["agent"]["run_as"] == ["agent-1", "agent-2", "agent-3"]
+
+
+def test_the_environment_variable_wins_over_the_built_accounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config(
+        {"github": {"repo": "o/r"}}, environ={"ISSUEBOT_AGENT_USER": "agent"}, base_dir=BASE
+    )
+    assert out["agent"]["run_as"] == "agent"
+
+
+def test_an_explicit_run_as_wins_over_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    out = resolve_config(
+        {"github": {"repo": "o/r"}, "agent": {"run_as": ["chosen"]}},
+        environ={"ISSUEBOT_AGENT_USER": "agent"},
+        base_dir=BASE,
+    )
+    assert out["agent"]["run_as"] == ["chosen"]
+
+
+def test_no_built_accounts_is_the_host_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "issuebot.config.resolve.SESSION_ACCOUNTS_FILE", tmp_path / "does-not-exist"
+    )
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert "agent" not in out
+
+
+@pytest.mark.parametrize("text", ["", "\n  \n"])
+def test_a_blank_built_account_list_fails_closed(
+    text: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A list that exists and declares nothing is a corrupt list, never the host route.
+
+    Reading it as "no file" was the fail-open: the image's own `agent.run_as` would resolve
+    to nothing, every session would run as the worker inside the container, and `validate`
+    would say only that `agent.run_as` is not set (#142, #75).
+    """
+    listing = tmp_path / "session-accounts"
+    listing.write_text(text, encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    with pytest.raises(SessionAccountsUnreadable) as exc:
+        resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert exc.value.code == "session_accounts_unreadable"
+    assert "names no account" in exc.value.message
+
+
+def test_an_unreadable_accounts_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = tmp_path / "as-a-dir"
+    listing.mkdir()
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    with pytest.raises(SessionAccountsUnreadable) as exc:
+        resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert exc.value.code == "session_accounts_unreadable"

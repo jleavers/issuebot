@@ -263,7 +263,10 @@ def describe_claude_auth(output: str | None) -> ClaudeAuth:
         reason = "no output" if not output else f"unparseable output {output.strip()[:40]!r}"
         return ClaudeAuth("unreadable", f"could not read auth status ({reason})")
     if not status.get("loggedIn"):
-        detail = "not logged in; run claude auth login or set ANTHROPIC_API_KEY"
+        detail = (
+            "not logged in; set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), "
+            "or run claude auth login on the host"
+        )
         return ClaudeAuth("logged_out", detail)
     method = _auth_method_text(status)
     source = status.get("apiKeySource")
@@ -733,14 +736,15 @@ class ClaudeRunner:
             # #109): it is what makes the run safe, not what makes it convenient, so no
             # setting turns it off. `claude` otherwise loads `mcpServers` out of the session
             # account's `~/.claude.json` -- which lives in $HOME beside `.claude/`, outside
-            # the `claude-home` volume, is recreated per container and persists across every
+            # the directory the home sweep walks, is recreated per container and persists
+            # across every
             # session in one -- and offers the planted server's tools to the next session. It
             # also drops a target repository's `.mcp.json`, and any MCP location a later
             # `claude` adds, since the flag names what is kept rather than what is removed:
             # only `--mcp-config` servers survive it, and `claude.mcp_config` below, the front
             # matter's and empty by default, is the one place they are named. The session's
-            # tool set is therefore what this argv says. The volume's own config surfaces are
-            # a separate question, open as #101.
+            # tool set is therefore what this argv says. The rest of the account home's config
+            # surfaces are a separate question, the per-turn sweep's (#101).
             "--strict-mcp-config",
             "--max-budget-usd",
             str(cfg.max_budget_usd),

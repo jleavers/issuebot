@@ -59,7 +59,7 @@ from issuebot.config import (
     count_overrides,
     load_workflow,
 )
-from issuebot.config.resolve import ENV_REF
+from issuebot.config.resolve import ENV_REF, built_session_accounts
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     Database,
@@ -562,15 +562,39 @@ def _with_uid(account: str) -> str:
     return account
 
 
+def _built_pool_complaint() -> str | None:
+    """Why the accounts configured here and the ones this image built disagree, or ``None``.
+
+    The mismatch #142 was filed for: `ISSUEBOT_AGENT_POOL_SIZE` is a build argument, compose
+    passes the operator's copy of it into the container through `env_file`, and a value raised
+    without a rebuild names accounts no image has. The list wins the comparison because it is
+    the built fact; the variable is only ever the operator's intent.
+    """
+    built = built_session_accounts()
+    if built is None:
+        return None
+    size = os.environ.get("ISSUEBOT_AGENT_POOL_SIZE", "").strip()
+    # `isdecimal` and not `isdigit`: the latter is true of "\N{SUPERSCRIPT TWO}", which `int`
+    # then refuses, and a junk value in the environment is the operator's intent unread -- a
+    # line `validate` says nothing about -- never a traceback out of a check.
+    if not size.isdecimal() or int(size) == len(built):
+        return None
+    return (
+        f"ISSUEBOT_AGENT_POOL_SIZE={size} but this image was built with "
+        f"{_plural(len(built), 'session account')} ({', '.join(built)}): "
+        "docker compose build worker"
+    )
+
+
 def _run_as_check(settings: Settings) -> Check:
     """The accounts the session runs as (#75, #121), or a warning that it is this process.
 
-    Every member of a pool is probed, and so is the one thing a pool needs that a single
-    account does not: a credential in the environment, since the accounts share no login.
-    That credential is the reason this check and `_mcp_config_check` treat a pool differently
-    from `_claude_auth_check`, which still asks the first member alone: a login in the
-    environment is the same for every account by construction (`credential_complaint` admits
-    no other kind), while a file's mode is each account's own.
+    A session runs as an account nobody logs into, so its credential comes from the
+    environment whatever the count -- one account or a pool. That credential is the reason
+    this check and `_mcp_config_check` treat a pool differently from `_claude_auth_check`,
+    which still asks the first member alone: a login in the environment is the same for every
+    account by construction (`credential_complaint` admits no other kind), while a file's mode
+    is each account's own.
     """
     subject = "agent.run_as"
     accounts = settings.agent.run_as
@@ -578,8 +602,9 @@ def _run_as_check(settings: Settings) -> Check:
         uid = os.getuid()
         detail = (
             f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
-            "which shares its environment, code and state with them; the image sets "
-            "ISSUEBOT_AGENT_USER=agent"
+            "which shares its environment, code and state with them; a container built from "
+            "the image resolves its session accounts from the list the build writes at "
+            "/etc/issuebot/session-accounts, and ISSUEBOT_AGENT_USER is an operator override"
         )
         return Check(subject, "warn", detail)
     problems = list(_run_as_probe(accounts, os.environ))
@@ -603,18 +628,25 @@ def _run_as_check(settings: Settings) -> Check:
         )
         if shared:
             detail += f", but all {concurrent} concurrent sessions share it"
-        return Check(subject, "warn" if shared else "ok", detail)
-    status: CheckStatus = "warn" if len(accounts) < concurrent else "ok"
-    detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
-    if status == "warn":
-        detail += (
-            f", which is fewer than agent.max_concurrent_agents "
-            f"({concurrent}): dispatch is capped by the pool"
-        )
-    # Last, and behind its own semicolon: the clause above qualifies the pool's *size*, and a
-    # uid phrase between the two would read as qualifying that instead.
-    detail += f"; each at a uid other than this process's ({os.getuid()})"
-    return Check(subject, status, detail)
+        check = Check(subject, "warn" if shared else "ok", detail)
+    else:
+        status: CheckStatus = "warn" if len(accounts) < concurrent else "ok"
+        detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
+        if status == "warn":
+            detail += (
+                f", which is fewer than agent.max_concurrent_agents "
+                f"({concurrent}): dispatch is capped by the pool"
+            )
+        # Last, and behind its own semicolon: the clause above qualifies the pool's *size*, and
+        # a uid phrase between the two would read as qualifying that instead.
+        detail += f"; each at a uid other than this process's ({os.getuid()})"
+        check = Check(subject, status, detail)
+    # A stale image is never a failure: the accounts named here all exist, so every session
+    # will run; what is wrong is that the operator asked for more of them than the build made.
+    stale = _built_pool_complaint()
+    if stale is None:
+        return check
+    return Check(subject, "warn", f"{check.detail}; {stale}")
 
 
 def _mcp_config_check(cfg: Settings) -> Check:

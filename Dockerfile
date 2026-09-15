@@ -138,23 +138,24 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # next (#121). `issuebot` (uid 1000) is the worker: it holds GH_TOKEN, the database URL and
 # the Slack webhook, parses what the session writes and decides every label move. `agent`
 # (uid 1001) is the session: `claude -p`, every hook, the clone and
-# the post-clone setup run as it, and the login it authenticates with lives in its own home
-# (compose mounts `claude-home` at /home/agent/.claude). Nothing the session can read or
-# write at its own uid is an input to the worker: /app is root's and writable by neither,
-# /home/issuebot and /home/agent are closed to the other account, /proc/<worker>/environ is
-# unreadable across the uid line, and the worker's state inside a workspace sits in sticky
-# directories it owns. The worker stays unprivileged: sudo carries exactly one rule, issuebot
-# may become a session account and nobody else, and the binary is executable by root and
-# group issuebot alone, so a session's uid cannot invoke sudo at all -- not even to be
-# refused by it.
+# the post-clone setup run as it, and the credential it authenticates with comes from the
+# environment (#142): its home holds no login, because nobody logs into it. Nothing the
+# session can read or write at its own uid is an input to the worker: /app is root's and
+# writable by neither, /home/issuebot and /home/agent are closed to the other account,
+# /proc/<worker>/environ is unreadable across the uid line, and the worker's state inside a
+# workspace sits in sticky directories it owns. The worker stays unprivileged: sudo carries
+# exactly one rule, issuebot may become a session account and nobody else, and the binary is
+# executable by root and group issuebot alone, so a session's uid cannot invoke sudo at all --
+# not even to be refused by it.
 # `closefrom_override` is for the one descriptor the worker passes across the uid change, the
 # session's environment (issuebot.agent.runas); `!use_pty` keeps a turn's stream-json byte for
 # byte when `docker compose run` gives the worker a terminal.
 # A pool of them, in fact (#121). `agent` alone is one uid for the whole deployment, so with
 # `agent.max_concurrent_agents` above 1 every concurrent session shares it: the workspaces are
 # siblings under a traversable root and each one is that account's to write, which is no
-# boundary between an issue anybody may open and an honest issue's working tree. So the image
-# also builds `agent-1` .. `agent-N` (uids 1011 upwards, ISSUEBOT_AGENT_POOL_SIZE), and
+# boundary between an issue anybody may open and an honest issue's working tree. So the image's
+# default is the pool, `agent-1` .. `agent-N` (uids 1011 upwards, ISSUEBOT_AGENT_POOL_SIZE) --
+# `agent` alone is the single-account route, for an operator who wants one -- and
 # `agent.run_as` may name the pool -- as a YAML list, or a comma-separated ISSUEBOT_AGENT_USER
 # -- for the orchestrator to bind one member per running slot.
 # Every session account is in group `agents`, and the sudo rule is `(%agents)`: the worker may
@@ -167,7 +168,9 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # more privileged side of the line in any case.
 # The pool accounts get a `.claude` of their own and no volume: a pool shares no login between
 # its accounts on purpose, and takes its credential from the environment instead (#121, the
-# spec). `agent` keeps /home/agent/.claude, which is where compose mounts `claude-home`.
+# spec). `agent` is no different (#142): its home holds no login either, since nobody logs
+# into it, and every account -- pooled or the single `agent` -- reads the same credential from
+# the environment.
 # A third kind of account, `web` (uid 1002), for the dashboard (#102). compose builds the `web`
 # service from this image and selects it with `user: web`; nothing in the image runs as it by
 # default, since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP
@@ -188,22 +191,38 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # the more privileged side of the line. The path is the image's own -- the `install -d` below,
 # the VOLUME further down and compose's mount -- so a `workspace.root` pointed elsewhere inside
 # the container would need its own entry.
+# The account list is the built fact and nothing else (#142): `pool` accumulates inside the
+# loop that runs `useradd`, and that accumulator is what is written, so the file can neither
+# name an account the build did not create nor omit one it did. It is not re-derived from
+# ISSUEBOT_AGENT_POOL_SIZE afterwards, because `seq` and `test` do not agree about what a
+# value is -- `3 ` with a trailing space is a true `-ge 1` and an invalid count to `seq`, so
+# the old shape wrote an empty list for an image with no pool accounts, and an empty list
+# resolves to the host route, where the session *is* the worker. That inverts #75. An empty
+# pool -- a build with the argument below 1 -- falls back to `agent` alone, the single-account
+# route, so every image keeps "the session is never the worker" true.
+# `printf '%s\n' ${pool:-agent}` and `for account in agent ${pool}` are unquoted on purpose,
+# the only unquoted expansions here: the word-splitting is what turns one accumulated string
+# into one account per line and one loop iteration per account. The names are `agent-N`, so
+# there is nothing in them to split on but the spaces that separate them.
 ARG ISSUEBOT_AGENT_POOL_SIZE=3
 RUN set -eu; \
-    accounts=agent; \
-    for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do accounts="${accounts} agent-${n}"; done; \
     groupadd --system agents; \
     useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
     useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
     useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
+    pool=''; \
     for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
       useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
+      pool="${pool} agent-${n}"; \
     done; \
-    for account in ${accounts}; do \
+    for account in agent ${pool}; do \
       chmod 0700 "/home/${account}"; \
       install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
       usermod --append --groups "${account}" issuebot; \
     done; \
+    install -d -m 0755 /etc/issuebot; \
+    printf '%s\n' ${pool:-agent} > /etc/issuebot/session-accounts; \
+    chmod 0444 /etc/issuebot/session-accounts; \
     chmod 0750 /home/issuebot /home/web; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
     git config --system --add safe.directory '/workspaces/*'; \
@@ -247,11 +266,13 @@ USER issuebot
 # nothing to install for it. LANG and not LC_ALL: LC_ALL overrides every category, which would
 # stop a target repository's own LC_* settings from taking effect.
 # No HOME here: Docker sets it from /etc/passwd for whichever account runs, so `--user agent`
-# (the login recipe in the README) gets /home/agent and the worker /home/issuebot.
-# ISSUEBOT_AGENT_USER is `agent.run_as`'s fallback (resolve.py): the session runs as `agent`
-# in every container built from this image unless a WORKFLOW.md says otherwise.
+# (CI's image probes, which run `docker run --user agent` against this image) gets /home/agent
+# and the worker /home/issuebot.
+# No ISSUEBOT_AGENT_USER: `agent.run_as` falls back to /etc/issuebot/session-accounts, written
+# by the account loop above, so the image's default is the pool it built rather than a name
+# that could outlive the accounts (#142). The variable still overrides it for an operator who
+# wants one account, and WORKFLOW.md overrides both.
 ENV LANG=C.UTF-8 \
-    ISSUEBOT_AGENT_USER=agent \
     PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
 # The flag assertions are the point of pinning: a release that drops --permission-prompts
@@ -264,8 +285,13 @@ ENV LANG=C.UTF-8 \
 # --mcp-config is the only route left by which a server reaches a session, so a rename there
 # would break those deployments one session at a time; --setting-sources is what keeps the
 # clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
-# passed on every turn whatever the front matter says. The last line is the delegation
-# itself, as the worker will use it: sudo, the account, and claude under it.
+# passed on every turn whatever the front matter says. Then the delegation itself, as the
+# worker will use it: sudo, the account, and claude under it.
+# The last two lines read the account list back (#142). It is what `agent.run_as` resolves to
+# in every container, so a build that wrote a list naming nothing would ship an image whose
+# sessions run as the worker, and one naming an account the `useradd` loop did not create
+# would fail every run instead: non-empty, and every name in it an account that resolves
+# here, asserted where the delegation is.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && claude --help | grep -q -- '--disallowedTools' \
@@ -275,14 +301,17 @@ RUN claude --version \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \
-      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; }
+      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; } \
+ && test -s /etc/issuebot/session-accounts \
+ && { while read -r account; do id -u "${account}" >/dev/null || exit 1; done; } \
+      < /etc/issuebot/session-accounts
 
 WORKDIR /app
 # Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind
 # mount pins the inode, so an atomic save on the host leaves the container reading the old
 # one (#46). compose.yaml mounts ./configs and sets this same value.
 ENV ISSUEBOT_WORKFLOW=/configs/WORKFLOW.md
-VOLUME ["/workspaces", "/home/agent/.claude"]
+VOLUME ["/workspaces"]
 
 LABEL org.opencontainers.image.source="https://github.com/jleavers/issuebot" \
       org.opencontainers.image.description="issuebot: issue-to-PR agent orchestrator" \

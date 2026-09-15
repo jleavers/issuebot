@@ -36,6 +36,10 @@ class FrontMatterNotAMap(ConfigError):  # noqa: N818
     code = "workflow_front_matter_not_a_map"
 
 
+class SessionAccountsUnreadable(ConfigError):  # noqa: N818
+    code = "session_accounts_unreadable"
+
+
 class MissingEnvironmentVariable(ConfigError):  # noqa: N818
     code = "missing_environment_variable"
 
