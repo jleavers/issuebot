@@ -19,7 +19,8 @@ account's; everything else is exactly what the worker built. ``python -m
 issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec``,
 ``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
 (the agent's files under a workspace, which the worker's uid may not unlink) and ``sweep``
-(the loadable config a prior session left in the agent's shared ``~/.claude``, #101).
+(what a prior session left in the account's home for the next one to load: the config under
+``~/.claude``, #101, and the shell start-up files every ``bash -lc`` hook sources, #137).
 """
 
 import argparse
@@ -44,6 +45,10 @@ MODULE = "issuebot.agent.runas"
 SUDO_TIMEOUT_S = 10
 # Removing a workspace as the agent walks a tree the agent wrote, node_modules included.
 REMOVE_TIMEOUT_S = 120
+
+# The directory inside the home that the config sweep below walks. Named once, because the
+# sweep is aimed at the *home* (#137) and reaches this from it.
+CLAUDE_HOME_DIR = ".claude"
 
 # The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
 # instructions or behaviour, and that a session must therefore not leave behind for the next
@@ -93,6 +98,34 @@ CLAUDE_HOME_SWEEP: tuple[str, ...] = (
 # components rather than a glob, so the sweep walks ``projects`` itself and can refuse to follow
 # a symlink at either level.
 CLAUDE_HOME_MEMORY_DIR: tuple[str, str] = ("projects", "memory")
+
+# The other half of the same class, and the reason the sweep is aimed at the home rather than
+# at ``.claude`` inside it (#137): the account's own shell start-up files. Every hook issuebot
+# runs is ``bash -lc`` (``WorkspaceManager.hook_shell``), a login shell, which sources
+# ``/etc/profile`` and then the first of ``~/.bash_profile``, ``~/.bash_login`` and
+# ``~/.profile`` that exists, runs ``~/.bash_logout`` on the way out, and reaches ``~/.bashrc``
+# through whichever of those Debian's own copies source; ``claude`` takes a shell snapshot for
+# the session's Bash tool the same way. The home is the account's and writable by it -- only
+# ``.claude`` inside it is created by the image -- so a session that writes one of these leaves
+# a script the next session's hooks run at the same uid, for the container's lifetime. Swept
+# beside the ``.claude`` surfaces above and on the same schedule, which is what closes it
+# whatever a later ``claude`` or a target repository's hooks read.
+# Removing them costs nothing an account nobody logs into needs: ``PATH`` for a login shell
+# comes from ``/etc/profile`` and ``/etc/profile.d`` (root's, and where the image puts node and
+# the PostgreSQL binaries), and the copies ``useradd`` took from ``/etc/skel`` set a prompt and
+# some aliases for an interactive session that never happens here. That is also why the sweep
+# is only ever pointed at a session account's home: on the host route (``agent.run_as`` unset)
+# nothing is swept at all, because that home is the operator's own.
+# ``.bash_aliases`` and the like are deliberately absent: nothing reads them but a ``.bashrc``
+# that sources them, and ``.bashrc`` is on the list, so naming what the shells themselves read
+# keeps this to something a reader can check against ``bash(1)``.
+SHELL_STARTUP_SWEEP: tuple[str, ...] = (
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+    ".bashrc",
+    ".bash_logout",
+)
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -292,19 +325,21 @@ class RunAs:
         """Remove what the account owns under ``path``; the worker removes its own after."""
         self._delegate("remove", str(path), timeout=REMOVE_TIMEOUT_S)
 
-    def sweep_home(self, claude_dir: Path | None = None) -> bool:
-        """Clear the loadable config surfaces under the account's ``~/.claude`` (#101).
+    def sweep_home(self, home: Path | None = None) -> bool:
+        """Clear what a prior session could steer the next one with from the account's home:
+        the loadable config under ``~/.claude`` (#101) and the shell start-up files a login
+        shell reads (#137).
 
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
         like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
         and exited 0, because a sweep that silently never happens is a security control with
-        no failure signal. ``claude_dir`` defaults to the account's own ``~/.claude``; a caller
+        no failure signal. ``home`` defaults to the account's own; a caller
         (the tests) passes an explicit path so the sweep can be proved without touching a real
         home.
         """
-        if claude_dir is None:
+        if home is None:
             try:
-                claude_dir = Path(self.account().pw_dir) / ".claude"
+                home = Path(self.account().pw_dir)
             except RunAsError:
                 return False
         # SUDO_TIMEOUT_S, not REMOVE_TIMEOUT_S: this removes a handful of small config entries,
@@ -312,7 +347,7 @@ class RunAs:
         # `subprocess.run` kills `sudo`, while the helper, the account's own process, runs on to
         # completion. A tree deep enough to outlast it reads as a failed sweep here, and the
         # next turn sweeps again.
-        return self._delegate("sweep", str(claude_dir), timeout=SUDO_TIMEOUT_S)
+        return self._delegate("sweep", str(home), timeout=SUDO_TIMEOUT_S)
 
     def _delegate(self, *args: str, timeout: float) -> bool:
         """Run one helper verb as the account; ``True`` only when it ran and exited 0."""
@@ -387,12 +422,16 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
-def _sweep_targets(claude_dir: Path) -> Iterator[Path]:
-    """Every path the sweep removes under ``claude_dir``: the named surfaces and each project's
-    auto memory directory. ``projects`` and each entry in it are walked, never followed: claude
+def _sweep_targets(home: Path) -> Iterator[Path]:
+    """Every path the sweep removes under ``home``: the shell start-up files, the named
+    ``.claude`` surfaces and each project's auto memory directory.
+
+    ``projects`` and each entry in it are walked, never followed: claude
     creates real directories there, so a symlink at either level is a session's, planted to
     point claude's memory read at a tree the sweep would not visit, and it is yielded as the
     target -- unlinked like a symlinked surface -- rather than stepped through."""
+    yield from (home / name for name in SHELL_STARTUP_SWEEP)
+    claude_dir = home / CLAUDE_HOME_DIR
     yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
     projects = claude_dir / projects_name
@@ -409,15 +448,18 @@ def _sweep_targets(claude_dir: Path) -> Iterator[Path]:
                 yield project / memory_name
 
 
-def _sweep(claude_dir: Path) -> None:
-    """Remove the loadable config surfaces under ``claude_dir`` (``CLAUDE_HOME_SWEEP`` and
-    each project's ``CLAUDE_HOME_MEMORY_DIR``).
+def _sweep(home: Path) -> None:
+    """Remove, from the account's ``home``, what a prior session could steer the next one with:
+    its shell start-up files (``SHELL_STARTUP_SWEEP``) and the loadable config surfaces under
+    ``.claude`` (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
-    Keeps the credential and claude's own runtime state by naming only what it removes.
+    Keeps the credential and claude's own runtime state -- and everything else in the home,
+    ``.claude.json``, a tool's cache or state directory included -- by naming only what it
+    removes.
     Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
     unlinked rather than followed, so the tree it points at is never touched.
     """
-    for target in _sweep_targets(claude_dir):
+    for target in _sweep_targets(home):
         with contextlib.suppress(OSError):
             if target.is_symlink() or not target.is_dir():
                 target.unlink()

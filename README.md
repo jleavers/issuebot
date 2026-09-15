@@ -942,21 +942,30 @@ that matters on your host.
   session could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
   `agents/`, `workflows/`, `agent-memory/`, `plugins/`, `output-styles/`, `settings.json`,
   `settings.local.json` and each project's auto memory (`projects/<project>/memory/`), the
-  surfaces a later `claude -p` loads as instructions or behaviour — and leaves the rest of the
+  surfaces a later `claude -p` loads as instructions or behaviour — and, from the home itself,
+  the account's shell start-up files (`.bash_profile`, `.bash_login`, `.profile`, `.bashrc`,
+  `.bash_logout`, #137): `/home/<account>` is the account's to write, every hook and the
+  post-clone setup run under `bash -lc`, a login shell, and `claude` snapshots one for the
+  session's Bash tool, so a `~/.profile` one session leaves is a script every later session
+  runs at that uid. That is why the sweep runs before each of those scripts as well as before
+  each turn — `before_run` would otherwise be the next session's first login shell, and it runs
+  before turn 1. It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
-  transcripts beside the memory it removes, and anything else claude keeps there. It is a
+  transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
+  tool the session ran keeps there (`gh`'s state, npm's cache). It is a
   denylist of what is loaded, not an allowlist of what is kept, so a new claude location has to
-  be added to it by hand. Auto memory is also switched off for the session
+  be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+  home is your own. Auto memory is also switched off for the session
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next
-  session's prompt on the same repository. So a slash command, skill or memory a hostile issue
+  session's prompt on the same repository. So a slash command, skill, memory or profile script a
+  hostile issue
   plants is not waiting for a session working a different issue next week. What remains: the
   window between one turn's sweep and its `claude -p` start, in which a session running beside
   it at the same uid can still plant -- which a pool closes, since no two concurrent sessions
-  share a home; the account's `~/.claude.json`, which sits beside the swept directory rather
+  share a home; and the account's `~/.claude.json`, which sits beside the swept directory rather
   than in it, whose `mcpServers` no session loads (`--strict-mcp-config`, #119) while its trust
-  state persists for the container's lifetime; and the account's shell profile, which a
-  login-shell hook sources (#137).
+  state persists for the container's lifetime.
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches

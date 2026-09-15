@@ -601,13 +601,19 @@ async def test_prompt_error_fails_before_any_turn(tmp_path: Path) -> None:
     assert h.kinds() == ["run_started", "run_ended"]
 
 
-async def test_the_session_sweeps_the_agent_home_before_every_turn(
+async def test_the_session_sweeps_the_agent_home_before_every_turn_and_every_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The wiring that makes #101 real: the shared ~/.claude config is cleared immediately
-    before every claude turn, the first included, so what a prior session, the before_run
-    hook or a concurrent session planted is gone when `claude -p` starts. Recorded here so
-    deleting the call in `_turn_loop`, or moving it back to once per session, fails."""
+    """The wiring that makes #101 and #137 real: the account's home is cleared immediately
+    before every claude turn, the first included, and before every hook, so what a prior
+    session, another hook or a concurrent session planted -- a user-level `CLAUDE.md`, a
+    `~/.profile` a hook's login shell would source -- is gone when the hook or `claude -p`
+    starts. Recorded here so deleting either call, or moving the turn one back to once per
+    session, fails.
+
+    Each entry is appended when the thing it names has *happened*, so the list is the order
+    the session ran them in: a hook's own sweep is the entry before it.
+    """
     h = Harness(tmp_path, max_turns=3, hooks={"before_run": "true", "after_run": "true"})
     order: list[str] = []
     real_hook = h.workspaces.run_hook
@@ -616,16 +622,23 @@ async def test_the_session_sweeps_the_agent_home_before_every_turn(
         order.append("sweep")
 
     async def record_hook(name: str, path: Path) -> object:
+        result = await real_hook(name, path)
         order.append(name)
-        return await real_hook(name, path)
+        return result
 
     monkeypatch.setattr(h.workspaces, "sweep_agent_home", record_sweep)
     monkeypatch.setattr(h.workspaces, "run_hook", record_hook)
     runner = ScriptedRunner(on_turn=lambda n: order.append(f"turn{n}"))
     await h.run(runner)
-    # `after_create` is the workspace's own hook, run at creation (its shell is a no-op here).
+    # The first sweep is the post-clone setup's: that is a `bash -lc` script too, and the
+    # session's first command at its own uid (`_run_script` is the seam, so hooks and setup
+    # alike sweep first). `after_create` is the workspace's own hook, configured with nothing
+    # here -- so it opens no shell and takes no sweep of its own, which is the entry missing
+    # between the two below.
     assert order == [
+        "sweep",
         "after_create",
+        "sweep",
         "before_run",
         "sweep",
         "turn1",
@@ -633,6 +646,7 @@ async def test_the_session_sweeps_the_agent_home_before_every_turn(
         "turn2",
         "sweep",
         "turn3",
+        "sweep",
         "after_run",
     ]
 
