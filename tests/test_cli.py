@@ -565,7 +565,7 @@ def test_validate_asks_every_account_in_a_pool_whether_it_can_read_an_mcp_file(
     out = capsys.readouterr().out
     assert (
         f"[FAIL] claude.mcp_config: {tmp_path / 'servers.json'} is not readable by agent-2, "
-        "accounts the session runs as" in out
+        "1 of the 3 accounts the session may run as" in out
     )
     # Every member, not the first: the one that answered no is in the middle of the pool.
     assert asked == ["agent-1", "agent-2", "agent-3"]

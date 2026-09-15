@@ -662,8 +662,15 @@ def _mcp_path_problem(path: Path, accounts: Sequence[str]) -> str | None:
     refused = [account for account in accounts if _mcp_unreadable_by(path, account)]
     if not refused:
         return None
-    noun = "the account" if len(accounts) == 1 else "accounts"
-    return f"{path} is not readable by {', '.join(refused)}, {noun} the session runs as"
+    names = ", ".join(refused)
+    if len(accounts) == 1:
+        return f"{path} is not readable by {names}, the account the session runs as"
+    # The pool's size is the other half of it: one member of three refusing means the file
+    # works on two issues in three, which is the shape an operator would otherwise chase.
+    return (
+        f"{path} is not readable by {names}, "
+        f"{len(refused)} of the {len(accounts)} accounts the session may run as"
+    )
 
 
 # The delegated readability test answers in words rather than in an exit status: a `sudo -n`
