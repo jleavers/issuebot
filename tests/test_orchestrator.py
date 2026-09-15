@@ -3330,6 +3330,47 @@ async def test_the_spend_ceiling_keeps_saying_no_without_repeating_itself(
     assert h.github.comments_for(1)[0].body.count("### Issuebot budget limit (") == 1
 
 
+async def test_an_escape_github_refused_is_still_announced_by_the_tick_that_retries_it(
+    tmp_path: Path,
+) -> None:
+    """The block landing and the `Blocked` event going out have a failure point between them.
+
+    So the worker cannot read "already announced" off the workpad: an escape whose `set_state`
+    failed has left the block there and told nobody. The ledger is marked only once the escape
+    landed, which is what makes the retry announce rather than inherit the first one's silence.
+    """
+    h = Harness(tmp_path, max_issue_cost_usd=0.4)
+    h.add_issue(1)
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.REWORK)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+
+    ok = h.github.set_state
+    calls = 0
+
+    async def fails_once(number: int, state: StateLabel, **kwargs: object) -> None:
+        """`fail_next` is positional, and the escape reads the board before it writes to it."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise GitHubError("transport", "the escape could not move the label")
+        await ok(number, state, **kwargs)
+
+    h.github.set_state = fails_once  # type: ignore[method-assign]
+    await h.fire(1)
+    assert h.github.issue(1).state is StateLabel.REWORK  # the label never moved
+    assert h.orchestrator.snapshot().counters.blocked == 0
+    assert h.recorder.of(Blocked) == []
+    assert h.github.comments_for(1)[0].body.count("### Issuebot budget limit (") == 1
+
+    h.github.set_state = ok  # type: ignore[method-assign]
+    await h.tick()  # still a candidate, so the loop comes back to it
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.orchestrator.snapshot().counters.blocked == 1
+    assert len(h.recorder.of(Blocked)) == 1
+    assert h.github.comments_for(1)[0].body.count("### Issuebot budget limit (") == 1
+
+
 async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path) -> None:
     """The conflict bounce and the gate disagree about one issue; the bounce limit ends it.
 

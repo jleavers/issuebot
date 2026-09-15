@@ -384,26 +384,36 @@ floor, not the shipped version, and moves by hand.
   `in_progress`, so a move of that label broke the chain before it ever reached the escape.
   Only a run that succeeded, or the blocked escape that ends a chain by handing the issue to a
   human (`_record_escape`, on `applied` or `skipped`), clears it; that second one is what makes
-  the README's documented recovery -- fix the cause, then relabel -- still work. `agent.max_issue_cost_usd`
-  (default `0`, off) is the gate's cumulative spend ceiling, the bound on an issue relabelled
-  again and again. A budget refusal is never silent, because a board that stops moving for an
-  issue with nothing said about it anywhere a human looks is worse than no ceiling at all:
-  `_handle_refusal` logs `dispatch_refused` and takes `actions.budget_escape`, the one
-  escalation with no run behind it (`BUDGET_HEADING`, written once per issue and matched
-  line-anchored, so a heading quoted in the session's own prose is not a block; it accepts the
-  issue in any of `ACTIVE_STATES`,
-  including the orphaned `in_progress` one the gate meets before `_resume_plan`, because what
-  keeps it off a *running* issue is `admit` answering `busy` long before it reaches the budget,
-  not the state), which also stops the refusal repeating: the issue lands in `review`, where
-  the gate refuses it as `inactive` instead -- unless the conflict bounce moves it back to
-  `rework`, the one way one issue reaches the escape twice, which `agent.max_conflict_reworks`
-  bounds. The block is the escalation's identity as well as its record: an issue whose workpad
-  already carries one is *returned* to `review` rather than escalated afresh, so the outcome
-  is `skipped`, the label move is still published and a second `Blocked` -- a second Slack
-  line, a second count on the dashboard's blocked tile -- is not. Its block names the way out, which differs by
+  the README's documented recovery -- fix the cause, then relabel -- still work.
+  `agent.max_issue_cost_usd` (default `0`, off) is the gate's cumulative spend ceiling, the
+  bound on an issue relabelled again and again. A budget refusal is never silent, because a
+  board that stops moving for an issue with nothing said about it anywhere a human looks is
+  worse than no ceiling at all: `_handle_refusal` logs `dispatch_refused` and takes
+  `actions.budget_escape`, the one escalation with no run behind it. It accepts the issue in
+  any of `ACTIVE_STATES`, including the orphaned `in_progress` one the gate meets before
+  `_resume_plan`, because what keeps it off a *running* issue is `admit` answering `busy` long
+  before it reaches the budget, not the state. Its block names the way out, which differs by
   ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
-  is not for `spend`, whose figure never resets. A failed escape is retried by the next tick
-  rather than by a queued entry, since the issue is still a candidate. `Ledger` is
+  is not for `spend`, whose figure never resets.
+  The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
+  refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
+  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Two separate things
+  keep that round trip from reporting one escalation over and over, and they are separate
+  because the block and the event are two writes with a failure point between them. The block
+  is matched by its *reason*, line-anchored, and not by `BUDGET_HEADING`, which both ceilings
+  share: a bounce runs no session, so it reproduces the reason exactly and writes nothing,
+  while an issue escalated on `attempts` that later runs up `max_issue_cost_usd` -- or one
+  whose operator raised the ceiling and relabelled -- has a new reason and gets its own block,
+  which matters because the first block would name the wrong way out. The `Blocked` event, a
+  Slack line and a count on the dashboard's blocked tile, is announced on
+  `IssueLedger.escalated` instead, which `_handle_refusal` marks (`Ledger.escalate`) only
+  *after* the escape landed and which only `dispatched` clears: an escape whose `set_state`
+  failed has written the block and told nobody, and the tick that retries it must still
+  announce. So `budget_escape` takes `announce=` and returns `applied` exactly when it
+  published; an unannounced one returns `skipped`, which `_record_escape` already ends the
+  chain on, and the label move is published either way because it happened.
+  A failed escape is retried by the next tick rather than by a queued entry, since the issue
+  is still a candidate. `Ledger` is
   keyed by `Issue.identifier` (the column the store records runs
   under), bounded at `LEDGER_LIMIT` with the least recently run entry evicted and logged (a
   seed is sorted by `last_run_at` on the way in rather than trusted: the store answers newest

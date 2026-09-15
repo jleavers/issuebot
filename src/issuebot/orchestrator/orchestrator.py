@@ -896,6 +896,14 @@ class Orchestrator:
         entry with a backoff: the issue is still a candidate, so the loop comes back to it on
         its own, one poll interval later. That is the same cadence the other holds report
         themselves at, and it costs nothing while GitHub is answering.
+
+        The escalation is announced once, and the ledger is what remembers that: the conflict
+        bounce can return an over-budget ``review`` issue to ``rework`` for the gate to refuse
+        again, and one escalation must not become a Slack line and a count on the blocked tile
+        per bounce. The entry is marked only *after* the escape landed, so an escape GitHub
+        refused -- which has written the block but published nothing -- is still announced by
+        the tick that retries it; and only a run clears the mark, so the next refusal after one
+        is a new fact and is announced again.
         """
         if verdict.kind not in ("attempts", "spend"):
             return
@@ -908,9 +916,16 @@ class Orchestrator:
                 reason=verdict.reason,
             )
         outcome = await actions.budget_escape(
-            self._adapter, self._bus, issue.id, verdict.kind, verdict.reason, now=self._now()
+            self._adapter,
+            self._bus,
+            issue.id,
+            verdict.kind,
+            verdict.reason,
+            now=self._now(),
+            announce=not self._ledger.get(issue.identifier).escalated,
         )
         if outcome == "applied":
+            self._ledger.escalate(issue.identifier)
             self._counters = self._counters.bump(blocked=1)
         # `applied` and `skipped` both end the chain: the issue is a human's now. A `failed`
         # one leaves it, so the next tick tries again -- the issue is still a candidate.
@@ -1368,10 +1383,13 @@ class Orchestrator:
     def _record_escape(self, identifier: str, outcome: actions.EscapeOutcome) -> None:
         """An escape that landed ends the chain; one that could not be written has not.
 
-        ``skipped`` ends it too: the issue had already moved or closed, so there is no chain
-        left to bound. The README's recovery -- fix the cause, then relabel -- works because
-        of this line, and it is the *only* thing besides a run that succeeded which clears
-        the chain, so a label move on its own still cannot (#112).
+        ``skipped`` ends it too. For ``blocked_escape`` that means the issue had already moved
+        or closed, so there is no chain left to bound; ``budget_escape`` also answers it for an
+        escalation it made earlier and has now only *returned* to ``review``, which did write
+        the label -- so this is not a "nothing happened" outcome, only a "no new escalation"
+        one, and the chain is over either way. The README's recovery -- fix the cause, then
+        relabel -- works because of this line, and it is the *only* thing besides a run that
+        succeeded which clears the chain, so a label move on its own still cannot (#112).
         """
         if outcome in ("applied", "skipped"):
             self._ledger.cleared(identifier)

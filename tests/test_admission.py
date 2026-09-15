@@ -169,6 +169,30 @@ def test_a_refusal_is_news_once_and_a_dispatch_makes_it_news_again() -> None:
     assert ledger.refused("repo-42", "something else") is True
 
 
+def test_an_escalation_is_announced_once_and_only_a_run_makes_it_news_again() -> None:
+    """The conflict bounce moves the label and the escape moves it back; neither is a run.
+
+    Nor is `cleared`, which the escape itself triggers -- so if that reset the mark, the very
+    next bounce would announce the same escalation over again.
+    """
+    ledger = Ledger()
+    assert ledger.escalate("repo-42") is True
+    assert ledger.escalate("repo-42") is False
+    ledger.cleared("repo-42")
+    assert ledger.escalate("repo-42") is False
+    ledger.dispatched("repo-42", at=NOW)
+    assert ledger.escalate("repo-42") is True
+
+
+def test_an_escalation_is_remembered_for_an_issue_with_no_failures_behind_it() -> None:
+    """Unlike a refusal: the spend ceiling refuses issues whose every run succeeded."""
+    ledger = Ledger()
+    assert ledger.escalate("repo-42") is True
+    assert ledger.get("repo-42").escalated is True
+    ledger.forget("repo-42")
+    assert ledger.escalate("repo-42") is True  # a reopened issue starts again from nothing
+
+
 def test_a_refusal_on_an_issue_with_no_history_is_neither_kept_nor_reported() -> None:
     ledger = Ledger()
     assert ledger.refused("repo-42", "busy") is False

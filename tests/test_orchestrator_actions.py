@@ -1,6 +1,7 @@
 """Tests for the orchestrator's GitHub-writing actions against FakeGitHub."""
 
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from issuebot.events import (
 from issuebot.github import WORKPAD_MARKER, FakeGitHub, GitHubError, StateLabel
 from issuebot.orchestrator.actions import (
     BUDGET_HEADING,
+    BUDGET_REASON_PREFIX,
     CANCEL_REASON,
     CONFLICT_HEADING,
     CONFLICT_LIMIT_HEADING,
@@ -683,6 +685,20 @@ async def test_remove_workspace_contains_agent_errors(
 BUDGET_REASON = "this issue has cost $12.50 over 4 runs and agent.max_issue_cost_usd is $10.00"
 
 
+def _fails_once(method: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    """Fail this one call and no other. `fail_next` is positional, and the read comes first."""
+    calls = 0
+
+    async def wrapper(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise GitHubError("transport", "the escape could not move the label")
+        await method(*args, **kwargs)
+
+    return wrapper
+
+
 def test_budget_block_names_the_reason_and_the_stamp() -> None:
     block = budget_block("spend", BUDGET_REASON, NOW, LABELS)
     assert block.startswith("### Issuebot budget limit (2026-09-03T14:02:11Z)\n\n")
@@ -700,13 +716,22 @@ def test_budget_block_tells_each_ceiling_its_own_way_out() -> None:
     assert "Relabelling on its own only brings the issue back here" in spend
 
 
-def test_a_quoted_heading_is_not_a_budget_block(tmp_path: Path) -> None:
-    """The workpad is the agent's to rewrite, so the check is line-anchored."""
+def test_a_budget_block_is_matched_by_its_reason_not_its_heading(tmp_path: Path) -> None:
+    """Both ceilings share the heading, so the reason is what makes two blocks the same one.
+
+    A block for a different reason -- the other ceiling, a raised one, a higher spend after
+    another run -- is a different escalation, and its way out is different too; a session
+    quoting the reason in its own prose is neither, so the check is line-anchored.
+    """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
-    await_body = f"{WORKPAD_MARKER}\n\n### Notes\n\n- it once wrote a `{BUDGET_HEADING}` block\n"
-    assert not _has_budget_block(await_body)
-    assert _has_budget_block(f"{WORKPAD_MARKER}\n\n{BUDGET_HEADING}2026)\n\nr.\n")
+    block = budget_block("spend", BUDGET_REASON, NOW, h.github.labels)
+    assert _has_budget_block(f"{WORKPAD_MARKER}\n\n{block}\n", BUDGET_REASON)
+    assert not _has_budget_block(f"{WORKPAD_MARKER}\n\n{block}\n", "some other reason")
+    said = f"{BUDGET_REASON_PREFIX}{BUDGET_REASON}."
+    quoted = f"{WORKPAD_MARKER}\n\n### Notes\n\n- it said `{said}` last time\n"
+    assert not _has_budget_block(quoted, BUDGET_REASON)
+    assert BUDGET_HEADING in block  # still the heading a human and the docs look for
 
 
 @pytest.mark.parametrize("state", ["todo", "rework", "in-progress"])
@@ -734,24 +759,68 @@ async def test_budget_escape_creates_the_workpad_when_there_is_none(tmp_path: Pa
     assert body.startswith(f"{WORKPAD_MARKER}\n\n{BUDGET_HEADING}")
 
 
-async def test_budget_escape_escalates_once_and_then_only_returns_the_issue(
+async def test_an_unannounced_budget_escape_returns_the_issue_without_a_blocked_event(
     tmp_path: Path,
 ) -> None:
-    """The block is the escalation, so an issue that has one is returned rather than escalated.
+    """`announce=False` is the caller saying it has already told everyone about this one.
 
-    The reason names the counts, which cannot change, so a second block would only repeat the
-    first -- and a second `Blocked` would report a second escalation to Slack and to the
-    dashboard's blocked tile when only one was ever made. The label move is published either
-    way: the issue really did come back from `rework`, and the board should say so.
+    The label move is published either way -- the issue really did come back from `rework`,
+    and the board should say so -- but a second `Blocked` would report a second escalation to
+    Slack and to the dashboard's blocked tile when only one was ever made.
     """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
     assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "applied"
     h.github.human_set_state(42, StateLabel.REWORK)
-    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "skipped"
+    outcome = await budget_escape(
+        h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW, announce=False
+    )
+    assert outcome == "skipped"
     assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
     assert h.github.issue(42).state is StateLabel.REVIEW
     assert h.recorder.kinds == ["state_changed", "blocked", "state_changed"]
+
+
+async def test_a_budget_escape_that_could_not_move_the_issue_still_announces_on_retry(
+    tmp_path: Path,
+) -> None:
+    """The block landing and the event going out are two writes with a failure between them.
+
+    A `set_state` that fails leaves the block behind and publishes nothing, so the escalation
+    has not been announced and the tick that retries it must still announce it -- which is why
+    the caller cannot read that decision off the workpad.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    ok = h.github.set_state
+    h.github.set_state = _fails_once(ok)  # type: ignore[method-assign]
+    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "failed"
+    assert h.recorder.kinds == []
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    h.github.set_state = ok  # type: ignore[method-assign]
+    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "applied"
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1  # not written twice
+
+
+async def test_a_second_ceiling_gets_its_own_block_and_its_own_announcement(
+    tmp_path: Path,
+) -> None:
+    """The two ceilings name different ways out, so the `attempts` block cannot stand in.
+
+    An issue escalated on attempts, recovered by a human and run again until it exceeds
+    `agent.max_issue_cost_usd` is a new escalation with a different remedy; a block matched on
+    the shared heading would leave it with the wrong one and nothing said anywhere.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    assert await budget_escape(h.github, h.bus, "42", "attempts", "3 runs", now=NOW) == "applied"
+    h.github.human_set_state(42, StateLabel.REWORK)
+    assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert body.count(BUDGET_HEADING) == 2
+    assert "Raise `agent.max_issue_cost_usd`" in body  # the spend block's own way out
+    assert h.recorder.kinds == ["state_changed", "blocked", "state_changed", "blocked"]
 
 
 @pytest.mark.parametrize("state", ["review", "complete"])

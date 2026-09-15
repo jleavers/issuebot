@@ -57,6 +57,13 @@ class IssueLedger:
     issue, so a candidate the gate turns away on every tick says so once rather than every
     thirty seconds. It lives here because it is per-issue and must be forgotten exactly when
     the rest of the entry is.
+
+    ``escalated`` is the same kind of thing for the budget escape's ``Blocked`` event, which
+    is a Slack line and a count on the dashboard's blocked tile: true once one has gone out
+    for this issue and nothing has run since. Only ``dispatched`` clears it, because only a
+    run can make the next refusal a new fact -- not ``cleared``, which the escape itself
+    triggers, and not a label move, which is what the conflict bounce performs when it returns
+    an over-budget issue to ``rework`` for the gate to refuse again.
     """
 
     failures: int = 0
@@ -65,6 +72,7 @@ class IssueLedger:
     cost_usd: float = 0.0
     last_run_at: datetime | None = None
     reported_refusal: str | None = None
+    escalated: bool = False
 
     @property
     def attempt(self) -> int:
@@ -142,7 +150,13 @@ class Ledger:
         current = self.get(identifier)
         return self._put(
             identifier,
-            replace(current, runs=current.runs + 1, last_run_at=at, reported_refusal=None),
+            replace(
+                current,
+                runs=current.runs + 1,
+                last_run_at=at,
+                reported_refusal=None,
+                escalated=False,
+            ),
         )
 
     def spent(self, identifier: str, *, turns: int, cost_usd: float) -> IssueLedger:
@@ -199,6 +213,20 @@ class Ledger:
         if current.reported_refusal == reason:
             return False
         self._entries[identifier] = replace(current, reported_refusal=reason)
+        return True
+
+    def escalate(self, identifier: str) -> bool:
+        """Record that a budget escalation has been announced; True when it had not been.
+
+        The caller announces only on the answer ``True``, and calls this only once the escape
+        has actually landed -- an escape GitHub refused has announced nothing, and the tick
+        that retries it must still be able to. Unlike ``refused`` this does insert, since an
+        issue can be refused on cumulative spend with no failures behind it at all.
+        """
+        current = self.get(identifier)
+        if current.escalated:
+            return False
+        self._put(identifier, replace(current, escalated=True))
         return True
 
     def forget(self, identifier: str) -> None:

@@ -183,9 +183,15 @@ async def blocked_escape(
     return "applied"
 
 
-# The heading of the block a budget escape writes, and its own idempotence: one per issue,
-# ever. The reason names the counts, so a second one would only repeat what the first said.
+# The heading of the block a budget escape writes. Both ceilings share it, so it is not what
+# makes two blocks the same block: the *reason* is, since it names the ceiling, the figure and
+# the counts. A bounce that returns an over-budget issue runs no session, so it reproduces the
+# reason exactly and writes nothing; an issue escalated on `attempts` that later runs up
+# `max_issue_cost_usd`, or one whose operator raised the ceiling and relabelled, has a new
+# reason and gets its own block -- which matters because the way out differs by ceiling, and
+# the first block would name the wrong one.
 BUDGET_HEADING = "### Issuebot budget limit ("
+BUDGET_REASON_PREFIX = "issuebot has stopped claiming this issue: "
 
 BudgetLimit = Literal["attempts", "spend"]
 
@@ -212,14 +218,15 @@ def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubL
     recovery = _BUDGET_RECOVERY[limit].format(rework=labels.rework, todo=labels.todo)
     return (
         f"{BUDGET_HEADING}{_stamp(now)})\n\n"
-        f"issuebot has stopped claiming this issue: {reason}.\n"
+        f"{BUDGET_REASON_PREFIX}{reason}.\n"
         f"Moved to `{labels.review}` for a human to look at. {recovery}"
     )
 
 
-def _has_budget_block(body: str) -> bool:
-    """Line-anchored: a heading quoted in the session's own prose is not a block."""
-    return any(line.startswith(BUDGET_HEADING) for line in body.split("\n"))
+def _has_budget_block(body: str, reason: str) -> bool:
+    """Has this issue already been told *this*? Line-anchored, so a quotation is not a block."""
+    line = f"{BUDGET_REASON_PREFIX}{reason}."
+    return any(candidate.strip() == line for candidate in body.split("\n"))
 
 
 async def budget_escape(
@@ -230,6 +237,7 @@ async def budget_escape(
     reason: str,
     *,
     now: datetime,
+    announce: bool = True,
 ) -> EscapeOutcome:
     """Hand an issue that has spent its per-issue budget to a human (#112).
 
@@ -238,14 +246,17 @@ async def budget_escape(
     refused issue would sit on the board with nothing said about it anywhere a human looks,
     which is worse than having no ceiling at all. Moving it also stops the refusal repeating,
     since the gate reads a ``review`` issue as one this worker does not claim -- unless the
-    conflict bounce moves it back to ``rework``, which is the one way this is reached twice
-    for one issue, and `agent.max_conflict_reworks` bounds that.
+    conflict bounce moves it back to ``rework``, which `agent.max_conflict_reworks` bounds.
 
-    The block is the escalation, so it is also its identity: an issue whose workpad already
-    carries one is being *returned* to ``review``, not escalated afresh, and the outcome is
-    ``skipped``. The label move is still published -- it happened, and the board should say so
-    -- but a second ``Blocked`` is not, since a second Slack line and a second count would
-    report an escalation that was only ever made once.
+    ``announce`` is that round trip's answer, and it is the caller's to give: the ``Blocked``
+    event is a Slack line and a count on the dashboard's blocked tile, and an issue bouncing
+    between ``review`` and ``rework`` is one escalation being returned, not several being
+    made. The decision cannot be read off the workpad here, because the block landing and the
+    event going out are two writes with a failure point between them -- an escape whose
+    ``set_state`` fails has left the block behind and announced nothing, and the tick that
+    retries it must still be able to. So the orchestrator remembers on the issue's ledger
+    entry, where only a *run* clears it, and this function returns ``applied`` exactly when it
+    published. The label move is published either way: it happened, and the board should say so.
 
     Unlike ``blocked_escape`` it accepts the issue in any of ``ACTIVE_STATES``, because a
     refused issue is wherever the gate found it -- usually ``todo`` or ``rework``, but an
@@ -270,8 +281,7 @@ async def budget_escape(
             )
             return "skipped"
         workpad = await adapter.find_workpad_comment(issue.number)
-        noted = workpad is not None and _has_budget_block(workpad.body)
-        if not noted:
+        if workpad is None or not _has_budget_block(workpad.body, reason):
             await _append_workpad(
                 adapter, issue.number, workpad, budget_block(limit, reason, now, adapter.labels)
             )
@@ -289,12 +299,12 @@ async def budget_escape(
             pr_url=pr_url(issue),
         )
     )
-    if noted:
+    if not announce:
         log.info(
-            "budget_escape_skipped",
+            "budget_escape_returned",
             issue_number=issue.number,
             issue_identifier=issue.identifier,
-            reason="already escalated",
+            reason=reason,
         )
         return "skipped"
     bus.publish(
