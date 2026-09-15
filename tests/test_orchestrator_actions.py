@@ -27,7 +27,6 @@ from issuebot.orchestrator.actions import (
     conflict_block,
     conflict_limit_block,
     conflict_rework,
-    count_conflict_bounces,
     finish_terminal,
     remove_workspace,
 )
@@ -100,29 +99,20 @@ def test_conflict_limit_block_says_it_stopped() -> None:
     assert block.endswith("A human resolves the conflict on the branch, or moves the issue.")
 
 
-def test_count_conflict_bounces_counts_bounce_headings_only() -> None:
-    body = "\n\n".join(
-        [
-            WORKPAD_MARKER,
-            "### Plan\n\n- [ ] 1. Do it",
-            conflict_block(51, 1, 3, NOW, LABELS),
-            "### Issuebot blocked (2026-09-03T15:00:00Z)\n\nr.",
-            conflict_block(51, 2, 3, NOW, LABELS),
-            conflict_limit_block(51, 3, NOW, LABELS),
-        ]
-    )
-    assert count_conflict_bounces(body) == 2
-    assert count_conflict_bounces("") == 0
-    assert count_conflict_bounces(f"{WORKPAD_MARKER}\n") == 0
-    # The headings are what the count keys on, so they must stay distinguishable.
+def test_the_two_conflict_headings_stay_distinguishable() -> None:
     assert not CONFLICT_LIMIT_HEADING.startswith(CONFLICT_HEADING)
 
 
-async def seed(h: Harness, *blocks: str) -> None:
-    """A review issue whose PR #51 conflicts, with a workpad holding ``blocks`` if given."""
+async def seed(h: Harness, *blocks: str, bounces: int = 0) -> None:
+    """A review issue whose PR #51 conflicts, bounced ``bounces`` times already by issuebot's
+    own account (its label history, which is what the count reads), with a workpad holding
+    ``blocks`` if given."""
     h.github.add_issue("Task", labels=("issuebot/review",), number=42)
     h.github.open_pr(42, pr_number=51)
     h.github.set_pr_mergeable(51, "conflicting")
+    for _ in range(bounces):
+        await h.github.set_state(42, StateLabel.REWORK)
+        h.github.human_set_state(42, StateLabel.REVIEW)  # the session brought it back
     if blocks:
         body = "\n\n".join([WORKPAD_MARKER, "### Plan\n\n- [ ] 1. Do it", *blocks]) + "\n"
         await h.github.comment(42, body)
@@ -139,8 +129,15 @@ async def test_conflict_rework_moves_the_issue_and_records_the_bounce(tmp_path: 
     assert len(comments) == 1
     assert comments[0].body.startswith(f"{WORKPAD_MARKER}\n\n{CONFLICT_HEADING}")
     assert "(bounce 1 of 3)" in comments[0].body
-    # The workpad is read for the count, then the label moves, then the note lands.
-    assert [name for name, _ in h.github.calls] == ["find_workpad_comment", "set_state", "comment"]
+    # The label history is read for the count and the workpad for the note's home, then the
+    # label moves, then the note lands.
+    assert [name for name, _ in h.github.calls] == [
+        "count_own_label_additions",
+        "find_workpad_comment",
+        "set_state",
+        "comment",
+    ]
+    assert h.calls("count_own_label_additions") == [(42, "issuebot/rework")]
     assert h.calls("set_state") == [(42, StateLabel.REWORK)]
     assert h.recorder.kinds == ["state_changed"]
     changed = h.recorder.events[0]
@@ -155,7 +152,8 @@ async def test_conflict_rework_moves_the_issue_and_records_the_bounce(tmp_path: 
 
 async def test_conflict_rework_appends_to_an_existing_workpad_and_counts(tmp_path: Path) -> None:
     h = Harness(tmp_path)
-    await seed(h, conflict_block(51, 1, 3, NOW, LABELS), conflict_block(51, 2, 3, NOW, LABELS))
+    blocks = (conflict_block(51, 1, 3, NOW, LABELS), conflict_block(51, 2, 3, NOW, LABELS))
+    await seed(h, *blocks, bounces=2)
     issue = h.github.issue(42)
     assert await conflict_rework(h.github, h.bus, issue, limit=3, now=NOW) == "reworked"
     body = h.github.comments_for(42)[0].body
@@ -172,7 +170,7 @@ async def test_conflict_rework_at_the_limit_notes_it_once_and_stays_in_review(
     tmp_path: Path,
 ) -> None:
     h = Harness(tmp_path)
-    await seed(h, *(conflict_block(51, n, 3, NOW, LABELS) for n in (1, 2, 3)))
+    await seed(h, *(conflict_block(51, n, 3, NOW, LABELS) for n in (1, 2, 3)), bounces=3)
     issue = h.github.issue(42)
     assert await conflict_rework(h.github, h.bus, issue, limit=3, now=NOW) == "limit_reached"
     body = h.github.comments_for(42)[0].body
@@ -185,16 +183,63 @@ async def test_conflict_rework_at_the_limit_notes_it_once_and_stays_in_review(
     # The block's presence is the idempotence: the next tick changes nothing.
     assert await conflict_rework(h.github, h.bus, issue, limit=3, now=NOW) == "limit_noted"
     assert h.github.comments_for(42)[0].body == body
-    assert [name for name, _ in h.github.calls] == ["find_workpad_comment"]
+    assert [name for name, _ in h.github.calls] == [
+        "count_own_label_additions",
+        "find_workpad_comment",
+    ]
 
 
 async def test_conflict_rework_with_the_limit_lowered_below_the_count(tmp_path: Path) -> None:
     """An operator dropping the setting to 1 after two bounces gets the limit note, not a third."""
     h = Harness(tmp_path)
-    await seed(h, conflict_block(51, 1, 3, NOW, LABELS), conflict_block(51, 2, 3, NOW, LABELS))
+    await seed(
+        h, conflict_block(51, 1, 3, NOW, LABELS), conflict_block(51, 2, 3, NOW, LABELS), bounces=2
+    )
     issue = h.github.issue(42)
     assert await conflict_rework(h.github, h.bus, issue, limit=1, now=NOW) == "limit_reached"
     assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+async def test_the_cap_holds_when_the_session_rewrites_the_workpad(tmp_path: Path) -> None:
+    """The count is the label history, so a workpad stripped of every block changes nothing
+    (#104): three bounces, then the limit note, however the body reads."""
+    h = Harness(tmp_path)
+    await seed(h)
+    outcomes = []
+    for _ in range(5):
+        outcomes.append(
+            await conflict_rework(h.github, h.bus, h.github.issue(42), limit=3, now=NOW)
+        )
+        h.github.human_set_state(42, StateLabel.REVIEW)  # the session returns it to review
+        pad = await h.github.find_workpad_comment(42)
+        assert pad is not None
+        await h.github.update_comment(pad.id, f"{WORKPAD_MARKER}\n\n### Plan\n\n- [x] done\n")
+    assert outcomes == ["reworked", "reworked", "reworked", "limit_reached", "limit_reached"]
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert len([e for e in h.recorder.events if isinstance(e, StateChanged)]) == 3
+
+
+async def test_a_humans_rework_label_is_not_a_bounce(tmp_path: Path) -> None:
+    """Only the account's own additions count; a reviewer asking for changes is not the cap."""
+    h = Harness(tmp_path)
+    await seed(h)
+    for _ in range(3):
+        h.github.human_set_state(42, StateLabel.REWORK, actor="reviewer")
+        h.github.human_set_state(42, StateLabel.REVIEW)
+    assert (
+        await conflict_rework(h.github, h.bus, h.github.issue(42), limit=1, now=NOW) == "reworked"
+    )
+
+
+async def test_conflict_rework_failure_on_the_count_writes_nothing(tmp_path: Path) -> None:
+    """The count is read first; without it there is no bound to act under."""
+    h = Harness(tmp_path)
+    await seed(h)
+    h.github.fail_next("transport")
+    assert await conflict_rework(h.github, h.bus, h.github.issue(42), limit=3, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.github.comments_for(42) == []
+    assert h.recorder.events == []
 
 
 async def test_conflict_rework_failure_on_set_state_writes_nothing(
