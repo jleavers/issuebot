@@ -21,7 +21,9 @@ uv run ruff check . && uv run ruff format --check .
 uv run pre-commit run --all-files    # whitespace, yaml, ruff (same as CI lint job)
 uv run issuebot validate             # load ./configs/WORKFLOW.md and check the environment
                                      #   (the container runs the session as uid 1001 `agent`, the
-                                     #    worker as uid 1000 `issuebot`; #75, agent.run_as)
+                                     #    worker as uid 1000 `issuebot`; #75, agent.run_as; and
+                                     #    compose runs the dashboard as uid 1002 `web`, which
+                                     #    cannot invoke sudo at all; #102)
 uv run issuebot validate --slack-probe   # same, plus one test message to the Slack webhook
 uv run issuebot labels ensure        # create/update the state labels and markers in github.repo
 uv run issuebot issues list          # table of open issues carrying a state label

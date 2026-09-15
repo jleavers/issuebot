@@ -821,7 +821,9 @@ that matters on your host.
   session account's: run `docker run --rm -v issuebot_claude-home:/v alpine:3 chown -R 1001:1001
   /v` once so `agent` owns its own login (the volume's name follows your checkout directory,
   see `docker volume ls` under "Checking that the login took"), then
-  `docker compose up -d --force-recreate worker`.
+  `docker compose up -d --force-recreate worker`. Upgrading across the dashboard's own account
+  (#102) is the rebuild alone: compose now runs `web` as `web`, an account only the new image
+  has, so against a stale one the container fails to start with `unable to find user web`.
   Check that your edits followed the rename
   (`git status`) before starting, and note that `workspace.root` now resolves against
   `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
@@ -837,7 +839,10 @@ that matters on your host.
   workspace are all out of the session's reach, and the worker cannot become root or anything
   but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
   pushes with it, which is why the token should be scoped to the repository. The session's
-  login is its own, in `/home/agent/.claude`. The agent's environment is otherwise minimal —
+  login is its own, in `/home/agent/.claude`. The dashboard is a third account: compose runs
+  the `web` service as `web` (uid 1002), which takes HTTP from a browser, needs no privilege
+  transition and so has none — it cannot execute `sudo` at all, and neither the worker's home
+  nor the session's is readable from it (#102). The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
   it — but that allow-list, the workspace and the protected-key list are conveniences, not the
