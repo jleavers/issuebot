@@ -122,6 +122,15 @@ def test_the_pre_commit_bump_job_runs_the_hooks_without_a_write_token() -> None:
     assert not [step for step in open_pr["steps"] if invokes.search(step.get("run", ""))]
 
 
+def _commands(script: str) -> str:
+    """A step's script with its comment lines dropped: the invocation, not the word.
+
+    Several of these scripts explain in a comment what they deliberately do *not* do, so a
+    match against the raw text would read the explanation as the thing it rules out.
+    """
+    return "\n".join(ln for ln in script.splitlines() if not ln.lstrip().startswith("#"))
+
+
 def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_token() -> None:
     """The new claude release is installed and executed in the job that cannot push (#138).
 
@@ -134,17 +143,41 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     build, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
 
     def executes(job: dict) -> list[dict]:
-        steps = job["steps"]
-        return [s for s in steps if EXECUTES.search(f"{s.get('uses', '')}\n{s.get('run', '')}")]
+        return [
+            s
+            for s in job["steps"]
+            if EXECUTES.search(f"{s.get('uses', '')}\n{_commands(s.get('run', ''))}")
+        ]
 
-    assert executes(build), "the build job never builds or runs the new version"
+    # Named one at a time: `EXECUTES` also matches `docker/setup-buildx-action`, so asserting
+    # only that `build` executes *something* would still hold with both real steps deleted.
+    assert [s for s in build["steps"] if "docker/build-push-action@" in s.get("uses", "")]
+    assert [s for s in build["steps"] if "docker run" in _commands(s.get("run", ""))]
+
+    # The load-bearing half: nothing in the job that can push goes near the image.
     assert not executes(open_pr), "the job that pushes builds or runs the new version"
-    assert not [s for s in open_pr["steps"] if "build-args" in (s.get("with") or {})]
 
-    # The artefact crossed a job boundary, so the job that commits re-checks the shape it
-    # carries -- the pin is the version this run resolved -- before it writes a branch.
+    # No `--build-arg` either: it would override the ARG the build job just wrote into the
+    # Dockerfile, so the image would prove the argument rather than the file open-pr commits.
+    for job in (build, open_pr):
+        assert not [s for s in job["steps"] if "build-args" in (s.get("with") or {})]
+
+    # open-pr keeps the credential it needs, which is the other half of the split: the point
+    # is not that nobody persists one, it is that the job that does executes nothing.
+    pushes = next(s for s in open_pr["steps"] if "actions/checkout@" in s.get("uses", ""))
+    assert (pushes.get("with") or {}).get("persist-credentials") is not False
+
+    # The artefact crossed a job boundary from the job that ran the unreviewed release, so
+    # the job that commits re-checks what it carries before writing a branch. Each check is
+    # named separately: they guard different things, and asserting the grep alone let the
+    # artefact's own check be deleted while the reuse path's identical one kept the test green.
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
-    assert 'grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}"' in opens["run"]
+    # -F, so the version's dots are dots and not any-character.
+    pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
+    assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
+    assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
+    # ... and the copy may move that one line and nothing else.
+    assert "git diff --numstat -- Dockerfile" in opens["run"]
 
     # Dropping the persisted credential also drops git's own access to the remote, and this
     # repository is private: an unauthenticated `git ls-remote` fails outright rather than
@@ -153,5 +186,4 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     # The invocation, not the word: the line that replaced it says why in a comment.
     check = next(step for step in build["steps"] if step.get("id") == "check")
     assert 'gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}"' in check["run"]
-    commands = [ln for ln in check["run"].splitlines() if not ln.lstrip().startswith("#")]
-    assert not [ln for ln in commands if "git ls-remote" in ln], "asks git for a remote ref"
+    assert "git ls-remote" not in _commands(check["run"]), "asks git for a remote ref"

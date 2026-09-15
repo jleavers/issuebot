@@ -113,11 +113,13 @@ read out; it hands its result over as an artefact, and the half holding `content
 re-checks that artefact's shape, commits, pushes and opens the PR while building and running
 none of it. `tests/test_pins.py` pins that split for both.
 `claude-code-version.yml` covers what Dependabot cannot see: weekly, its `build` job compares
-the Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, writes the new pin,
-builds the image with it and runs `claude --version` out of it as the proof; `open-pr` then
-downloads that rewritten `Dockerfile`, refuses it unless the pin is the resolved version and
-the copy moves that one line alone, and opens the PR. `MIN_CLAUDE_VERSION`
-(`agent/runner.py`) is a compatibility floor, not the shipped version, and moves by hand.
+the Dockerfile's `CLAUDE_CODE_VERSION` with npm's `dist-tags.latest`, writes the new pin into
+the file and builds *that* file (no `--build-arg`, which would prove itself instead), then
+runs `claude --version` out of the image as the proof; `open-pr` refuses to open anything
+unless the tree it proposes carries the resolved pin -- the downloaded `Dockerfile` for a new
+branch, where the copy must also move that one line alone, and the branch's own for one it
+reuses. `MIN_CLAUDE_VERSION` (`agent/runner.py`) is a compatibility floor, not the shipped
+version, and moves by hand.
 
 ## Package layout
 

@@ -100,9 +100,16 @@ jobs:
               # fails with "Repository not found" and the `if` reads that as "no branch" --
               # which would have open-pr try to create a branch that is already there and
               # be rejected on push. `gh` has GH_TOKEN, and reading a ref is contents: read.
-              if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent >/dev/null 2>&1; then
+              # Only a 404 is "no branch". Anything else -- a 5xx, a rate limit, a token
+              # that lost its scope -- is a question this job could not answer, and
+              # answering it "no" would have open-pr try to create a branch that is
+              # already there and be rejected on push. So it fails the run instead.
+              if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent 2>&1)"; then
                 echo "::notice::${branch} exists with no pull request; reusing it"
                 reuse=true
+              elif ! printf '%s' "${err}" | grep -q 'HTTP 404'; then
+                echo "::error::could not read refs/heads/${branch}: ${err}"
+                exit 1
               fi
             fi
           fi
@@ -123,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${LATEST}/" Dockerfile
-          grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile
+          grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
         if: steps.check.outputs.changed == 'true'
@@ -139,8 +146,9 @@ jobs:
           push: false
           load: true
           tags: issuebot:bump
-          build-args: |
-            CLAUDE_CODE_VERSION=${{ steps.check.outputs.latest }}
+          # No build-args: the pin was written into the Dockerfile above, and `--build-arg`
+          # would override that ARG default and prove itself instead. Without it the bytes
+          # that produced this image are exactly the bytes open-pr commits.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -154,7 +162,10 @@ jobs:
 
       - name: Collect the rewritten Dockerfile for the job that can push
         if: steps.check.outputs.changed == 'true'
-        run: cp Dockerfile /tmp/bump/Dockerfile
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bump
+          cp Dockerfile /tmp/bump/Dockerfile
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.check.outputs.changed == 'true'
@@ -199,7 +210,7 @@ jobs:
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
             # earlier run, and writable by anyone who can push here -- so it is held to the
             # same rule as one this job writes: it must already carry the resolved pin.
-            if ! grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile; then
+            if ! grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile; then
               echo "::error::${BRANCH} is not pinned to ${LATEST}"
               exit 1
             fi
@@ -208,7 +219,7 @@ jobs:
             # job that pushes: the Dockerfile it carries must be pinned to that version, and
             # copying it in must move that one line and nothing else, so the file cannot
             # bring anything along with the pin.
-            if ! grep -qx "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/bump/Dockerfile; then
+            if ! grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/bump/Dockerfile; then
               echo "::error::the artefact's Dockerfile is not pinned to ${LATEST}"
               exit 1
             fi
@@ -221,10 +232,12 @@ jobs:
           fi
           # The version string below is output from the very release under review, and it
           # lands in a body a human reads to decide whether to merge. So it is taken as one
-          # line, stripped of the backticks that would end the fence it is quoted in, capped,
-          # and refused unless it names the version this run resolved -- which is also the
-          # proof that the image installed what the pin asks for.
-          version="$(head -n 1 /tmp/bump/claude-version.txt | tr -d '`' | cut -c1-120)"
+          # line, stripped of the backticks that would end the fence it is quoted in and of
+          # anything unprintable, capped, and refused unless it names the version this run
+          # resolved -- which is also the proof that the image installed what the pin asks
+          # for. Bytes are dropped rather than cut, so the cap cannot split a character.
+          version="$(head -n 1 /tmp/bump/claude-version.txt \
+            | LC_ALL=C tr -d '`' | LC_ALL=C tr -cd '[:print:]' | cut -c1-120)"
           if ! printf '%s' "${version}" | grep -qF -- "${LATEST}"; then
             echo "::error::the built image reports '${version}', which does not name ${LATEST}"
             exit 1
