@@ -23,6 +23,11 @@ _ENV_VARS = (
     "SLACK_WEBHOOK_URL",
     "ISSUEBOT_WORKSPACE_ROOT",
     "ISSUEBOT_WORKFLOW",
+    # The image sets this one (``ENV ISSUEBOT_AGENT_USER=agent``), so a suite run inside the
+    # container -- or on a host that exports it -- would otherwise resolve `agent.run_as` for
+    # every workflow that does not name it, and the checks that shell out to `sudo` would
+    # reach a real delegation. A test that wants an account sets it itself.
+    "ISSUEBOT_AGENT_USER",
     "ISSUEBOT_LOG_LEVEL",
     "ISSUEBOT_LOG_FORMAT",
 )

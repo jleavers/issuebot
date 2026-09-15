@@ -414,6 +414,32 @@ def test_validate_counts_the_mcp_files_and_documents_it_can_load(
     )
 
 
+def test_validate_asks_nobody_about_an_mcp_file_on_the_host_route(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Without `agent.run_as` the session is this process, so there is nobody to delegate to
+    and the worker's own stat is the whole answer (#109). The pool made that implicit -- the
+    empty tuple simply yields no account to ask (#121) -- and this pins it, because a
+    regression that fell back to one would reach a real `sudo` and read as a passing test.
+    """
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nclaude:\n  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+
+    def _never(user: str) -> object:
+        raise AssertionError(f"the host route delegated to {user!r}")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _never)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
+
+
 def test_validate_fails_when_an_mcp_file_is_missing_or_not_a_file(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

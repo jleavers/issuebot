@@ -567,6 +567,10 @@ def _run_as_check(settings: Settings) -> Check:
 
     Every member of a pool is probed, and so is the one thing a pool needs that a single
     account does not: a credential in the environment, since the accounts share no login.
+    That credential is the reason this check and `_mcp_config_check` treat a pool differently
+    from `_claude_auth_check`, which still asks the first member alone: a login in the
+    environment is the same for every account by construction (`credential_complaint` admits
+    no other kind), while a file's mode is each account's own.
     """
     subject = "agent.run_as"
     accounts = settings.agent.run_as
@@ -614,14 +618,14 @@ def _run_as_check(settings: Settings) -> Check:
 
 
 def _mcp_config_check(cfg: Settings) -> Check:
-    """The MCP server files ``claude.mcp_config`` names, as the session's account reads them.
+    """The MCP server files ``claude.mcp_config`` names, as the session's accounts read them.
 
     The one route by which a server reaches a session (#109), so a path that is missing, is not
     a file, or -- the case under compose, since the entry is resolved against the workflow's
-    directory and read at a *different* uid -- is unreadable by ``agent`` would otherwise fail
-    every turn with claude's own startup error, which is ``max_attempts`` opaque failures and a
-    blocked escape rather than a line here. A JSON document is on the command line already and
-    has nothing to stat.
+    directory and read at a *different* uid -- is unreadable by a session account would
+    otherwise fail every turn with claude's own startup error, which is ``max_attempts``
+    opaque failures and a blocked escape rather than a line here. A JSON document is on the
+    command line already and has nothing to stat.
     """
     subject = "claude.mcp_config"
     entries = cfg.claude.mcp_config
