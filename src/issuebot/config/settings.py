@@ -99,6 +99,12 @@ class AgentSettings(_Model):
     max_turns: int = Field(default=5, ge=1)
     max_attempts: int = Field(default=3, ge=1)
     max_retry_backoff_ms: int = Field(default=300_000, ge=1000)
+    # A run's wall clock (#110), measured from the moment the session starts: a turn still
+    # running when it is up is killed, and no further turn starts. The one ceiling the
+    # session's own output cannot move -- ``claude.turn_timeout_ms`` and
+    # ``claude.stall_timeout_ms`` both bound silence, and a session that keeps printing
+    # resets them for as long as it likes.
+    run_timeout_ms: int = Field(default=14_400_000, ge=1000)
     # How many times the worker may move one issue from review to rework because its pull
     # request conflicts with the default branch; 0 turns the automatic bounce off.
     max_conflict_reworks: int = Field(default=3, ge=0)

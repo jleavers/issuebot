@@ -703,7 +703,7 @@ async def test_scoped_reads_see_only_their_own_repository(
         assert "other-run" not in [event.run_id for event in await ours.recent_events(50)]
         assert len(await theirs.events_for_issue(1, 50)) == 3
         assert await ours.events_for_issue(1, 50) == []
-        # turn_summaries_for_issue and turn: run_turns is scoped through its run
+        # turn_summaries_for_issue and turn: run_turns is scoped by its own repo column
         assert [turn.model for turn in await theirs.turn_summaries_for_issue(1)] == [
             "claude-elsewhere"
         ]

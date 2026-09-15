@@ -120,6 +120,12 @@ GITHUB_HOLD_KEY = "github"
 # And the same for the account registry (#121): one unreadable record, however the
 # complaint is worded from tick to tick.
 ACCOUNTS_HOLD_KEY = "accounts"
+# The least time between the end of one tick and the start of the next when a refresh asks
+# for it (#110). A NOTIFY is one row on the store away from any client with its DSN, and
+# every tick polls GitHub with this worker's token, so the NOTIFY rate must not set the tick
+# rate: a refresh inside the interval is admitted when the interval is up, one tick for
+# however many asked, and never dropped. The web throttles its own POST to the same figure.
+MIN_REFRESH_INTERVAL_S = 5.0
 # How much of `gh`'s complaint the hold's reason carries. Neither `gh`'s stderr nor GitHub's
 # GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
 MAX_HOLD_ERROR_CHARS = 300
@@ -138,13 +144,14 @@ class RunAsProbe(Protocol):
 
 
 def probe_run_as(accounts: Sequence[str], environ: Mapping[str, str]) -> list[str]:
-    """Every reason these accounts cannot be the sessions' own (#75, #121), or ``[]``.
+    """Every reason these accounts cannot be the sessions' own (#75, #111, #121), or ``[]``.
 
     Three questions, and the first that fails is the one worth reporting: can the worker run a
-    command as the account at all, can it give a workspace to that account's group, and -- for
-    a pool -- do the accounts have groups of their own, without which each could enter the
-    others' workspaces. The account is named only when there is more than one, since a single
-    account's own error already says which it is.
+    command as the account *and* land at a uid that is not its own (`RunAs.probe`, which is
+    where #111's separation check lives, so every member of a pool is held to it), can it give
+    a workspace to that account's group, and -- for a pool -- do the accounts have groups of
+    their own, without which each could enter the others' workspaces. The account is named only
+    when there is more than one, since a single account's own error already says which it is.
     """
     env = agent_environment(environ, token=None)
     problems = []
@@ -385,6 +392,11 @@ class Orchestrator:
         # and the limit it noted (#104): the note's presence in the workpad is the session's
         # to erase, so without this a stripped note would be rewritten on every tick.
         self._conflict_limit_noted: dict[str, int] = {}
+        # Issues whose bounce failed on a `response` error, keyed to the issue's `updated_at`
+        # when it did (#110): the reads the bounce makes are bounded, but a bound repeated
+        # every poll for as long as the answer stays the same is the tick rate set by the
+        # thread's length. The next change to the issue is what earns another try.
+        self._conflict_gave_up: dict[str, datetime] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -918,9 +930,21 @@ class Orchestrator:
                 continue
             if self._conflict_limit_noted.get(issue.id) == limit:
                 continue
+            if self._conflict_gave_up.get(issue.id) == issue.updated_at:
+                continue
             outcome = await actions.conflict_rework(
                 self._adapter, self._bus, issue, limit=limit, now=self._now()
             )
+            if outcome == "gave_up":
+                self._conflict_gave_up[issue.id] = issue.updated_at
+                self._log.warning(
+                    "conflict_rework_abandoned",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    updated_at=issue.updated_at.isoformat(),
+                )
+            else:
+                self._conflict_gave_up.pop(issue.id, None)
             if outcome in ("limit_reached", "limit_noted"):
                 self._conflict_limit_noted[issue.id] = limit
             if outcome == "limit_noted":
@@ -1406,10 +1430,12 @@ class Orchestrator:
     async def _finish(self, issue: Issue) -> None:
         """Close the issue out, and drop what this worker remembered about it.
 
-        The conflict-limit memo goes whatever GitHub answered: a closed issue is never a
-        bounce candidate again. The ledger entry goes only when the close actually landed,
-        since a ``failed`` one leaves the issue open and its budget still in force. A reopened
-        issue starts from zero either way.
+        Both conflict memos go whatever GitHub answered: a closed issue is never a bounce
+        candidate again. The ledger entry goes only when the close actually landed, since a
+        ``failed`` one leaves the issue open and its budget still in force. A reopened issue
+        starts from zero either way. Dropping ``_conflict_gave_up`` here is what keeps it a
+        memo rather than a leak: an issue that hit a capped read once would otherwise hold an
+        entry for the life of the process, which is the growth this issue is about (#110).
         """
         # Removing a workspace means unlinking what the session wrote, which only the session's
         # own account can do (#75) -- and under a pool that is the account bound to *this*
@@ -1418,6 +1444,7 @@ class Orchestrator:
             self._adapter, self._bus, self._workspaces_for(issue), issue
         )
         self._conflict_limit_noted.pop(issue.id, None)
+        self._conflict_gave_up.pop(issue.id, None)
         if outcome != "failed":
             self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):
@@ -1560,6 +1587,18 @@ class Orchestrator:
             return
         if result.error_category == "auth_failed":
             await self._auth_failed(entry, result)
+            return
+        if result.error_category == "run_timeout" and result.final_state is StateLabel.IN_PROGRESS:
+            # The run's wall clock is spent (#110). A retry never resumes the session, so it
+            # would re-read the repository from cold and spend the same clock again, up to
+            # max_attempts times over: the case max_turns escapes for, and it escapes the same
+            # way. The issue's ceiling is therefore agent.run_timeout_ms, not a multiple of it.
+            review = self._workflow.config.github.labels.review
+            reason = (
+                f"Wall clock exhausted: {result.turns} turns in attempt {entry.attempt} "
+                f"without reaching `{review}` ({result.error})."
+            )
+            await self._escape(entry, reason, result)
             return
         await self._after_failure(entry, f"{result.error_category}: {result.error}", result)
 
@@ -1859,7 +1898,11 @@ class Orchestrator:
             await self.shutdown()
 
     async def _wait_for_next_tick(self) -> None:
-        deadline = self._clock() + self._workflow.config.polling.interval_ms / 1000
+        started = self._clock()
+        deadline = started + self._workflow.config.polling.interval_ms / 1000
+        # The earliest a refresh may start the next tick (#110): one asked for before then
+        # brings the deadline forward to it rather than returning at once.
+        admissible = started + MIN_REFRESH_INTERVAL_S
         while not self._stopping:
             await self.fire_due_retries()
             now = self._clock()
@@ -1874,7 +1917,13 @@ class Orchestrator:
                 continue
             if message is _REFRESH:
                 self._refresh_pending = False
-                return
+                now = self._clock()
+                if now >= admissible:
+                    return
+                if admissible < deadline:
+                    deadline = admissible
+                    self._log.debug("refresh_deferred", wait_s=round(admissible - now, 3))
+                continue
             if message is _STOP:
                 return
             if isinstance(message, _WorkerExited):

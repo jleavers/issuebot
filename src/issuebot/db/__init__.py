@@ -4,9 +4,11 @@ from issuebot.agent.turnlog import OMITTED_TYPE, PROMPT_LIMIT, STDERR_LIMIT, Tur
 from issuebot.db.connection import (
     APPLICATION_NAME,
     CONNECT_TIMEOUT_S,
+    LOCK_TIMEOUT_S,
     POSTGRES_SCHEMES,
     RECONNECT_DELAYS_S,
     REDACTED,
+    STATEMENT_TIMEOUT_S,
     Connector,
     classify,
     connect,
@@ -15,6 +17,7 @@ from issuebot.db.connection import (
     is_postgres_url,
     reconnect_delay,
     redact,
+    session_statements,
 )
 from issuebot.db.database import Database, Probe
 from issuebot.db.errors import (
@@ -23,7 +26,7 @@ from issuebot.db.errors import (
     StoreError,
     StoreUnavailableError,
 )
-from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener
+from issuebot.db.listen import REFRESH_CHANNEL, RefreshListener, refresh_channel
 from issuebot.db.migrate import (
     ADVISORY_LOCK_KEY,
     MIGRATIONS_ROOT,
@@ -65,6 +68,7 @@ __all__ = [
     "ISSUE_LIST_LIMIT",
     "LEDGER_SEED_LIMIT",
     "LEDGER_WINDOW_DAYS",
+    "LOCK_TIMEOUT_S",
     "MAX_WINDOW_DAYS",
     "MIGRATIONS_ROOT",
     "OMITTED_TYPE",
@@ -74,6 +78,7 @@ __all__ = [
     "RECONNECT_DELAYS_S",
     "REDACTED",
     "REFRESH_CHANNEL",
+    "STATEMENT_TIMEOUT_S",
     "STDERR_LIMIT",
     "Connector",
     "DailyPoint",
@@ -113,5 +118,7 @@ __all__ = [
     "migrate",
     "reconnect_delay",
     "redact",
+    "refresh_channel",
     "schema_version",
+    "session_statements",
 ]

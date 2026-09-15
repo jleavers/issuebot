@@ -256,14 +256,42 @@ def test_the_environment_arrives_whole_when_the_descriptor_takes_it_a_piece_at_a
     assert seen["GH_TOKEN"] == "t" and seen["USER"] == ME
 
 
-def test_probe_answers_none_when_the_account_answers_and_names_the_refusal_otherwise() -> None:
-    assert RunAs(ME, sudo=FAKE_SUDO).probe(base_env()) is None
-    refused = RunAs(ME, sudo=FAKE_SUDO).probe(base_env(CLAUDE_SUDO_DENY="1"))
-    assert refused == f"cannot run as {ME!r}: sudo: a password is required"
+def test_probe_is_affirmative_only_when_the_delegated_uid_is_the_target_s_and_not_ours() -> None:
+    """The probe compares against the invoking uid (#111): a delegation that works is not a
+    delegation that separates."""
+    me = os.getuid()
+    other = next((entry for entry in pwd.getpwall() if entry.pw_uid != me), None)
+    if other is None:  # pragma: no cover - a stripped /etc/passwd, not a failure
+        pytest.skip("no account other than this process's to delegate to")
+    # The account named is this process's own: nothing to separate, and sudo is never asked.
+    assert RunAs(ME, sudo=FAKE_SUDO).probe(base_env()) == (
+        f"agent.run_as names {ME!r}, this process's own account (uid {me}); "
+        "the session would run with no separation"
+    )
+    # The fake changes no uid, so the delegated `id -u` answers with ours: no separation,
+    # reported as such rather than as a refusal.
+    assert RunAs(other.pw_name, sudo=FAKE_SUDO).probe(base_env()) == (
+        f"{FAKE_SUDO} ran the command as this process (uid {me}), not as "
+        f"{other.pw_name!r} (uid {other.pw_uid}): no separation"
+    )
+    # A third uid is separated but not as asked, and says so rather than reading as a refusal.
+    elsewhere = RunAs(other.pw_name, sudo=FAKE_SUDO).probe(
+        base_env(CLAUDE_SUDO_PRETEND_UID="65534")
+    )
+    assert elsewhere == (
+        f"{FAKE_SUDO} ran the command as uid 65534, not as {other.pw_name!r} (uid {other.pw_uid})"
+    )
+    # Only an answer that is the target's uid, and not this process's, is separation.
+    separated = RunAs(other.pw_name, sudo=FAKE_SUDO).probe(
+        base_env(CLAUDE_SUDO_PRETEND_UID=str(other.pw_uid))
+    )
+    assert separated is None
+    refused = RunAs(other.pw_name, sudo=FAKE_SUDO).probe(base_env(CLAUDE_SUDO_DENY="1"))
+    assert refused == f"cannot run as {other.pw_name!r}: sudo: a password is required"
     assert RunAs("no-such-account-x", sudo=FAKE_SUDO).probe(base_env()) == (
         "agent.run_as: no account named 'no-such-account-x'"
     )
-    missing = RunAs(ME, sudo="/nonexistent/sudo").probe(base_env())
+    missing = RunAs(other.pw_name, sudo="/nonexistent/sudo").probe(base_env())
     assert missing is not None and missing.startswith("cannot run '/nonexistent/sudo'")
 
 

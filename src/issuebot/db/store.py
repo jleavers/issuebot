@@ -59,7 +59,7 @@ INSERT INTO runs (repo, run_id, issue_number, issue_identifier, attempt, session
                   workspace_path)
 VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(attempt)s, %(session_id)s,
         %(started_at)s, %(workspace_path)s)
-ON CONFLICT (run_id) DO UPDATE SET
+ON CONFLICT (repo, run_id) DO UPDATE SET
     issue_number = EXCLUDED.issue_number,
     issue_identifier = EXCLUDED.issue_identifier,
     attempt = EXCLUDED.attempt,
@@ -74,7 +74,7 @@ INSERT INTO runs (repo, run_id, issue_number, issue_identifier, started_at, ende
 VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(started_at)s, %(ended_at)s,
         %(outcome)s, %(error)s, %(turns)s, %(input_tokens)s, %(output_tokens)s, %(cost_usd)s,
         %(duration_s)s, %(log_dir)s)
-ON CONFLICT (run_id) DO UPDATE SET
+ON CONFLICT (repo, run_id) DO UPDATE SET
     ended_at = EXCLUDED.ended_at,
     outcome = EXCLUDED.outcome,
     error = EXCLUDED.error,
@@ -87,17 +87,17 @@ ON CONFLICT (run_id) DO UPDATE SET
 """
 
 INSERT_TURN = """
-INSERT INTO run_turns (run_id, turn_number, captured_at, model, subtype, is_error, num_turns,
-                       input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-                       output_tokens, cost_usd, duration_ms, result_text, prompt, prompt_bytes,
-                       stream, stream_bytes, stream_lines, omitted_lines, stderr, stderr_bytes,
-                       truncated)
-VALUES (%(run_id)s, %(turn_number)s, now(), %(model)s, %(subtype)s, %(is_error)s, %(num_turns)s,
-        %(input_tokens)s, %(cache_creation_input_tokens)s, %(cache_read_input_tokens)s,
-        %(output_tokens)s, %(cost_usd)s, %(duration_ms)s, %(result_text)s, %(prompt)s,
-        %(prompt_bytes)s, %(stream)s, %(stream_bytes)s, %(stream_lines)s, %(omitted_lines)s,
-        %(stderr)s, %(stderr_bytes)s, %(truncated)s)
-ON CONFLICT (run_id, turn_number) DO UPDATE SET
+INSERT INTO run_turns (repo, run_id, turn_number, captured_at, model, subtype, is_error,
+                       num_turns, input_tokens, cache_creation_input_tokens,
+                       cache_read_input_tokens, output_tokens, cost_usd, duration_ms,
+                       result_text, prompt, prompt_bytes, stream, stream_bytes, stream_lines,
+                       omitted_lines, stderr, stderr_bytes, truncated)
+VALUES (%(repo)s, %(run_id)s, %(turn_number)s, now(), %(model)s, %(subtype)s, %(is_error)s,
+        %(num_turns)s, %(input_tokens)s, %(cache_creation_input_tokens)s,
+        %(cache_read_input_tokens)s, %(output_tokens)s, %(cost_usd)s, %(duration_ms)s,
+        %(result_text)s, %(prompt)s, %(prompt_bytes)s, %(stream)s, %(stream_bytes)s,
+        %(stream_lines)s, %(omitted_lines)s, %(stderr)s, %(stderr_bytes)s, %(truncated)s)
+ON CONFLICT (repo, run_id, turn_number) DO UPDATE SET
     captured_at = now(),
     model = EXCLUDED.model,
     subtype = EXCLUDED.subtype,
@@ -243,7 +243,8 @@ class PostgresStore:
                 if turns:
                     async with conn.cursor() as cursor:
                         await cursor.executemany(
-                            INSERT_TURN, [turn_row(event.run_id, turn) for turn in turns]
+                            INSERT_TURN,
+                            [self._stamp(turn_row(event.run_id, turn)) for turn in turns],
                         )
             elif isinstance(event, StateChanged):
                 await conn.execute(STATE_CHANGED, self._stamp(self._state_changed_row(event)))
@@ -267,8 +268,14 @@ class PostgresStore:
             await conn.execute(WRITE_SNAPSHOT, self._stamp({"at": at, "data": Jsonb(dict(data))}))
 
     def _stamp(self, row: dict[str, Any]) -> dict[str, Any]:
-        """The bound parameters of one write, with this store's repository merged in."""
-        return {"repo": self._repo, **row}
+        """The bound parameters of one write, with this store's repository forced in.
+
+        Forced, not merged (#111): the repository a row belongs to is the store's, decided
+        when the worker registered, and a row that arrived carrying one of its own would
+        otherwise be written into another repository's history. Every write goes through
+        here, ``INSERT_TURN`` included, so this is the one place a row's tenancy is set.
+        """
+        return {**row, "repo": self._repo}
 
     def _require(self) -> AsyncConnection:
         if self._conn is None or self._conn.closed:
@@ -319,7 +326,8 @@ def run_started_row(event: RunStarted) -> dict[str, Any]:
 
 
 def turn_row(run_id: str, turn: TurnCapture) -> dict[str, Any]:
-    """The bound parameters of INSERT_TURN: every TurnCapture field plus the run id."""
+    """The bound parameters of INSERT_TURN but the repository: every TurnCapture field plus
+    the run id; ``_stamp`` adds the repository, as for every other write."""
     return {"run_id": run_id, **{f.name: getattr(turn, f.name) for f in fields(turn)}}
 
 

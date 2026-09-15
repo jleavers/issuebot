@@ -46,6 +46,7 @@ from issuebot.agent.accounts import (
     settings_with_run_as,
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
+from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
 from issuebot.agent.turnlog import TurnCapture, capture_turns
@@ -66,6 +67,7 @@ from issuebot.db import (
     PostgresSink,
     RefreshListener,
     is_postgres_url,
+    refresh_channel,
 )
 from issuebot.db.queries import DailyPoint, SnapshotRow
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
@@ -533,17 +535,29 @@ def _run_as_check(settings: Settings) -> Check:
         return Check(subject, "fail", "; ".join(problems))
     concurrent = settings.agent.max_concurrent_agents
     if len(accounts) == 1:
+        # The probe compared the delegated uid with this process's (#111), so the line names
+        # both sides of that comparison and the reader need not take the verdict on trust. The
+        # account's uid is the one the delegation answered with, the probe having said so; it
+        # is looked up without raising, because a check reports and never fails on its own
+        # wording.
+        account = None
+        with contextlib.suppress(OSError, KeyError):
+            account = RunAs(accounts[0]).account().pw_uid
+        one = named if account is None else f"{named} (uid {account})"
         shared = concurrent > 1
-        detail = f"{named}; the session runs as a separate account"
+        detail = (
+            f"{one}; the session runs as a separate account, at a uid other than this "
+            f"process's ({os.getuid()})"
+        )
         if shared:
             detail += f", but all {concurrent} concurrent sessions share it"
         return Check(subject, "warn" if shared else "ok", detail)
-    status: CheckStatus = "warn" if len(accounts) < settings.agent.max_concurrent_agents else "ok"
+    status: CheckStatus = "warn" if len(accounts) < concurrent else "ok"
     detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
     if status == "warn":
         detail += (
             f", which is fewer than agent.max_concurrent_agents "
-            f"({settings.agent.max_concurrent_agents}): dispatch is capped by the pool"
+            f"({concurrent}): dispatch is capped by the pool"
         )
     return Check(subject, status, detail)
 
@@ -1376,7 +1390,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    print(f"[ OK ] refresh: notified issuebot_refresh for {repo}")
+    print(f"[ OK ] refresh: notified {refresh_channel(repo)} for {repo}")
     return 0
 
 
