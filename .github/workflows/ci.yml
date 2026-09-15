@@ -215,6 +215,59 @@ jobs:
               git config --local --add issuebot.probe 1
             "
           '
+      # `~/.claude.json` is the session account's own, in $HOME beside `.claude/` rather than
+      # inside the `claude-home` volume, so it is recreated with each container and shared by
+      # every session in one -- and `claude` loads `mcpServers` out of it, offering a planted
+      # server's tools to whichever issue runs next. `--strict-mcp-config` is what stops that
+      # (#119), and this runs the claude the image actually ships rather than reading a help
+      # string, so a release that changed the flag's behaviour fails a PR here.
+      # Two-sided on purpose: without the flag the planted server must be *listed*, or the
+      # proof would pass just as well against a claude that never reads the file. No credential
+      # is needed, because the init line is emitted before the login check -- the run ends at
+      # `Not logged in`, which is also what shows the flag leaves a headless `claude -p`
+      # working rather than dying on an unknown argument. `/bin/true` is server enough: one
+      # that fails its handshake is still listed, and being listed is the loading at issue.
+      # Every exit carries claude's own stderr: the likeliest failures here (a flag that no
+      # longer parses, a claude that will not start, the timeout) produce *no* init line at
+      # all, which under `set -e` would otherwise end the step with a bare exit code and throw
+      # away the one thing that says why.
+      - name: a planted MCP server in the session account's ~/.claude.json is not loaded
+        run: |
+          mkdir -p /tmp/mcp-probe
+          cat > /tmp/mcp-probe/probe.sh <<'PROBE'
+          set -eu
+          init() {
+            printf '%s' '{"mcpServers":{"planted":{"type":"stdio","command":"/bin/true"}}}' \
+              > "$HOME/.claude.json"
+            echo hi | timeout 300 claude -p --output-format stream-json --verbose \
+              --permission-prompts none "$@" 2>/tmp/claude-stderr | grep -m1 '"subtype":"init"'
+          }
+          died() {
+            echo "$1" >&2
+            echo "--- claude stderr ---" >&2
+            cat /tmp/claude-stderr >&2 || true
+            exit 1
+          }
+          without=$(init) || died "no init line at all without the flag"
+          case "$without" in
+            *'"planted"'*) ;;
+            *) died "claude did not load the planted server, so this proves nothing: $without" ;;
+          esac
+          with=$(init --strict-mcp-config) \
+            || died "no init line with --strict-mcp-config: the flag did not parse, or claude died"
+          case "$with" in
+            *'"planted"'*) died "--strict-mcp-config still loaded ~/.claude.json: $with" ;;
+          esac
+          # Spacing-tolerant: this pins that the list came back empty, not how claude spells it.
+          case "${with// /}" in
+            *'"mcp_servers":[]'*) ;;
+            *) died "the confined run reported no empty mcp_servers: $with" ;;
+          esac
+          echo "ok: loaded without the flag, gone with it"
+          PROBE
+          chmod a+rX /tmp/mcp-probe /tmp/mcp-probe/probe.sh
+          docker run --rm --user agent -v /tmp/mcp-probe:/mcp-probe:ro \
+            --entrypoint bash issuebot:ci -lc 'bash /mcp-probe/probe.sh'
       # The wrapper is what the worker actually runs (issuebot.agent.runas): the environment
       # crosses the uid change on a descriptor, so what the session sees is the mapping the
       # worker built with the account's own HOME, USER and LOGNAME, and nothing sudo adds or
@@ -232,6 +285,45 @@ jobs:
           assert RunAs("agent").probe(env) is None
           print("the session sees", sorted(seen))
           PY
+      # The session account's ~/.claude is a shared volume across every session and repository
+      # (#101), so a slash command, skill, rule, subagent, workflow, plugin or auto memory one
+      # session plants there is loaded by the next at the same uid. The worker sweeps that config
+      # before every turn; the credential and claude's own transcripts stay. Proved in the image
+      # because it is the real uid split, the real sudo rule and the real home, and through the
+      # worker's own code path (`RunAs.sweep_home`, the default target) rather than the helper
+      # verb by hand, so a wrong default path or an argv the sudoers rule rejects fails here.
+      - name: a session's ~/.claude config does not survive to the next session
+        run: |
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            set -eu
+            # A prior session poisons the shared home and a credential is in place.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              mkdir -p /home/agent/.claude
+              cd /home/agent/.claude
+              mkdir -p commands skills/evil rules projects/-workspaces-issuebot-7/memory
+              echo poison > commands/evil.md
+              echo poison > skills/evil/SKILL.md
+              echo poison > rules/evil.md
+              echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md
+              echo cred > .credentials.json
+              echo transcript > projects/-workspaces-issuebot-7/keep.jsonl
+            "
+            # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
+            test "$(id -u)" = 1000
+            /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
+            # The next session finds nothing planted, but the credential and transcript remain.
+            sudo -n -H -u agent bash -c "
+              set -eu
+              cd /home/agent/.claude
+              test ! -e commands
+              test ! -e skills
+              test ! -e rules
+              test ! -e projects/-workspaces-issuebot-7/memory
+              test -f .credentials.json
+              test -f projects/-workspaces-issuebot-7/keep.jsonl
+            "
+          '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
       # build carries both, since the checks below are about what is on PATH and under which

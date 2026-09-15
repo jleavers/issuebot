@@ -16,6 +16,7 @@ from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
+    PROTECTED_ENV_NAMES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -70,6 +71,7 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "auto",
         "--permission-prompts",
         "none",
+        "--strict-mcp-config",
         "--max-budget-usd",
         "5.0",
         "--session-id",
@@ -93,9 +95,9 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
     )
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
-    assert argv[10] == "2.5"
-    assert argv[11:13] == ["--resume", SESSION_ID]
-    assert argv[13:] == [
+    assert argv[11] == "2.5"
+    assert argv[12:14] == ["--resume", SESSION_ID]
+    assert argv[14:] == [
         "--model",
         "opus",
         "--setting-sources",
@@ -109,6 +111,41 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         "WebFetch",
     ]
     assert "--session-id" not in argv
+
+
+# --- the MCP config a session must not be able to plant (#119) -------------------------
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({}, id="defaults"),
+        pytest.param({"setting_sources": ["project"]}, id="setting-sources-project"),
+        pytest.param({"setting_sources": ["user", "project"]}, id="setting-sources-user-project"),
+        pytest.param({"permission_mode": "bypassPermissions"}, id="bypass-permissions"),
+        pytest.param({"allowed_tools": ["Read"]}, id="allowed-tools"),
+    ],
+)
+def test_build_argv_always_confines_mcp_to_the_command_line(
+    tmp_path: Path, resume: bool, extra: dict[str, object]
+) -> None:
+    """No setting reaches ``--strict-mcp-config``, on a fresh session or a resumed one.
+
+    The session account's ``~/.claude.json`` outlives every session in one container, and
+    ``claude`` loads ``mcpServers`` from it, so the flag is what stops a planted server being
+    offered to the next issue's session. The cases are the settings that might look as though
+    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, and
+    ``[user, project]`` does not -- and each is named, so a failure says which shape broke
+    rather than which loop iteration.
+    """
+    runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
+    assert "--strict-mcp-config" in argv
+    # No `--mcp-config` beside it: the flag keeps only the servers named there, so issuebot
+    # naming none is what reduces the loadable set to nothing. It cannot fail today -- no
+    # branch emits it -- which is the point: adding one would have to come here first.
+    assert "--mcp-config" not in argv
 
 
 # --- per-issue model override ----------------------------------------------------------
@@ -176,7 +213,17 @@ def test_agent_environment_passes_only_the_allowed_names() -> None:
         "NO_COLOR": "1",
         "GH_PAGER": "cat",
         "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     }
+
+
+def test_agent_environment_turns_auto_memory_off_and_a_hook_cannot_turn_it_back_on() -> None:
+    """Auto memory is read whatever `--setting-sources` says and lives in the shared session
+    home (#101): fixed off, and protected like the rest of the fixed entries, so a workspace
+    env line cannot re-enable it for the next turn."""
+    parent = {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}
+    assert agent_environment(parent, token=None)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in PROTECTED_ENV_NAMES
 
 
 def test_agent_environment_adds_the_configured_token() -> None:

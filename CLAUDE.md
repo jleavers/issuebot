@@ -201,8 +201,29 @@ floor, not the shipped version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; `probe`/`probe_run_as` report whether the delegation *separates*, not
-  only whether it works (#111): the delegated `id -u` must answer the target's uid and that
+  two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
+  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
+  `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
+  `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
+  (`projects/<project>/memory`, walked without following a symlink at either level), the
+  surfaces a later `claude -p` loads as instructions or behaviour, per the `claude-directory`
+  docs (a test pins the list, so dropping a name is a deliberate edit in both places).
+  A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
+  for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
+  `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
+  among them. The shipped `setting_sources: [project]` already gates the `user` source
+  (`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`), but the setting
+  defaults to every source and the rest are outside the flag's table, so the sweep runs
+  regardless; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
+  an option: it never reads the OAuth credential the login recipe writes.
+  `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
+  `session._turn_loop`, since concurrent sessions re-read the home each turn and the `before_run`
+  hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
+  `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
+  sweeps again); a no-op on the host route (`run_as` unset), where the
+  home is the operator's own. `probe`/`probe_run_as` report whether the delegation *separates*,
+  not only whether it works (#111): the delegated `id -u` must answer the target's uid and that
   uid must differ from the invoking `os.getuid()`, so an account that is the worker's own is
   refused before sudo is asked and a sudo that ran the command at the worker's uid reads `no
   separation`, apart from a refusal; the affirmative is what the
@@ -274,9 +295,25 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none`, prompt on stdin, minimal
-  environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`); `workspace_environment` layers the
+  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
+  `.issuebot/runs/<run_id>/`). `--strict-mcp-config` is unconditional for the reason
+  `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
+  `claude-home` volume, so it is recreated with each container but shared by every session in
+  one -- a server a session plants there is offered to whichever issue runs next. The flag
+  names what survives rather than what is removed (only `--mcp-config` servers, and issuebot
+  passes none), so it covers a target repository's `.mcp.json` and any MCP location a later
+  `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
+  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
+  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
+  operator's setting is not what the confinement rests on. Both flags are asserted against
+  `claude --help` in the image build, so a release that drops either fails the build rather
+  than a session. The CI `docker` job proves both
+  directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
+  is listed in the init line without the flag and absent with it, no credential needed since
+  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
@@ -613,7 +650,9 @@ floor, not the shipped version, and moves by hand.
   `stale` past three poll intervals, or `none`), `snapshot_at`, `snapshot_age_s` and
   `dispatch_hold`; the top-level `worker` is the worst of them, `none` > `stale` > `held` >
   `ok`); `/static` (vendored htmx 2.0.10 and Chart.js 4.5.1 under `static/vendor/`, kept
-  byte-for-byte); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
+  byte-for-byte: `tests/test_web_vendor.py` parses the SHA-256 block and the table out of
+  `vendor/README.md` and hashes the files beside it, so the record is the check and a bump is
+  a one-file edit, #108); JSON error envelopes under `/api/` and `/healthz`, `error.html` elsewhere;
   `DatabaseError` is 503; the four security headers on every response, a CSP without
   `unsafe-inline`). The headers are added by `_SecureExit` (#106), a plain ASGI middleware
   that decorates the `send` channel rather than the response `call_next` returns: Starlette's

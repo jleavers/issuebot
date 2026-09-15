@@ -2,7 +2,8 @@
 
 This session cannot build the image; the CI ``docker`` job runs the checks. This pins the
 shape those checks depend on, so a drift in the Dockerfile, the compose file or the job
-itself fails here first. The dashboard's account (#102) is pinned the same way.
+itself fails here first. The dashboard's account (#102) and the sweep of the session's shared
+``~/.claude`` (#101) are pinned the same way.
 """
 
 import re
@@ -53,7 +54,45 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "--user agent --entrypoint sudo issuebot:ci" in CI
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
-    assert CI.count("docker run --rm --user agent -v /tmp/") == 2
+    # The npm smoke test, the README's cluster recipe, and the MCP probe (#119): three steps
+    # that mount a script from the runner and run it as the session's own account.
+    assert CI.count("docker run --rm --user agent -v /tmp/") == 3
+
+
+def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -> None:
+    """Both directions, against the image's own claude (#119).
+
+    Without the flag the planted server must be *listed*, or the proof would pass equally
+    against a claude that had stopped reading ``~/.claude.json`` -- at which point the step
+    would be testing nothing while still going green.
+    """
+    assert "--strict-mcp-config" in CI
+    # Beside `--permission-prompts`: both are passed on every turn and neither is a setting,
+    # so a release that drops either must fail the build rather than a session.
+    assert "claude --help | grep -q -- '--permission-prompts'" in DOCKERFILE
+    assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE
+    assert '"mcpServers":{"planted"' in CI
+    assert "*'\"planted\"'*) ;;" in CI
+    assert "claude did not load the planted server, so this proves nothing" in CI
+    assert "*'\"mcp_servers\":[]'*) ;;" in CI
+
+
+def test_ci_proves_the_session_home_sweep() -> None:
+    """The shared ``~/.claude`` config a session plants is swept before the next session, and
+    the credential and transcripts are kept (#101). Proved in the image, where the uid split
+    and the home are real, and through ``RunAs.sweep_home`` with its default target, so the
+    worker's own code path is what passes -- not the helper verb run by hand."""
+    assert 'RunAs(\\"agent\\").sweep_home()' in CI
+    assert "issuebot.agent.runas sweep" not in CI
+    assert "cd /home/agent/.claude" in CI
+    for planted in ("commands", "skills", "rules", "projects/-workspaces-issuebot-7/memory"):
+        assert f"test ! -e {planted}" in CI, planted
+    assert "echo poison > commands/evil.md" in CI
+    assert "echo poison > skills/evil/SKILL.md" in CI
+    assert "echo poison > rules/evil.md" in CI
+    assert "echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md" in CI
+    assert "test -f .credentials.json" in CI
+    assert "test -f projects/-workspaces-issuebot-7/keep.jsonl" in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
