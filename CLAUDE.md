@@ -205,8 +205,9 @@ floor, not the shipped version, and moves by hand.
   order: the front matter or its overlay, then `ISSUEBOT_AGENT_USER`, then the accounts the
   image's build recorded at `/etc/issuebot/session-accounts` -- `resolve.py`, #142, so a
   container's default is the pool it actually built and no `ENV` names an account that could
-  outlive it; a list that exists and will not read is `SessionAccountsUnreadable`, a
-  `ConfigError` reported as `[FAIL] workflow:`, never a silent fall back to the host route --
+  outlive it; a list that exists and will not read, or that reads and names no account, is
+  `SessionAccountsUnreadable`, a `ConfigError` reported as `[FAIL] workflow:`, never a silent
+  fall back to the host route --
   and then nothing, which is the host route; a comma-separated
   value or a YAML list is a *pool*, `accounts.py` below), `claude -p`, every
   hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as

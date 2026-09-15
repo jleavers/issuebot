@@ -72,6 +72,12 @@ def built_session_accounts() -> list[str] | None:
     would have a container whose account file it cannot read silently run every session as
     the worker instead: exactly the privilege-separation regression #75 and #121 exist to
     rule out. So this one is loud rather than quiet.
+
+    A file that exists and names no account takes the same exit, for the same reason. The
+    order is "the baked list, *when the file exists*", and then "the host route, where no
+    such file does": a list declaring nothing is neither, it is a corrupt list, and reading
+    it as the host route is the same silent fall back to the worker's own uid by another
+    route -- a build that wrote its list from something other than the accounts it made.
     """
     try:
         text = SESSION_ACCOUNTS_FILE.read_text(encoding="utf-8")
@@ -80,7 +86,12 @@ def built_session_accounts() -> list[str] | None:
     except OSError as exc:
         raise SessionAccountsUnreadable(f"session accounts unreadable: {exc}") from exc
     accounts = [line.strip() for line in text.splitlines() if line.strip()]
-    return accounts or None
+    if not accounts:
+        raise SessionAccountsUnreadable(
+            f"session accounts empty: {SESSION_ACCOUNTS_FILE} exists and names no account; "
+            "rebuild the image (docker compose build worker)"
+        )
+    return accounts
 
 
 def resolve_path(value: str, *, base_dir: Path) -> Path:

@@ -196,14 +196,23 @@ def test_no_built_accounts_is_the_host_route(
     assert "agent" not in out
 
 
-def test_a_blank_built_account_list_is_the_host_route(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("text", ["", "\n  \n"])
+def test_a_blank_built_account_list_fails_closed(
+    text: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A list that exists and declares nothing is a corrupt list, never the host route.
+
+    Reading it as "no file" was the fail-open: the image's own `agent.run_as` would resolve
+    to nothing, every session would run as the worker inside the container, and `validate`
+    would say only that `agent.run_as` is not set (#142, #75).
+    """
     listing = tmp_path / "session-accounts"
-    listing.write_text("\n  \n", encoding="utf-8")
+    listing.write_text(text, encoding="utf-8")
     monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
-    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
-    assert "agent" not in out
+    with pytest.raises(SessionAccountsUnreadable) as exc:
+        resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert exc.value.code == "session_accounts_unreadable"
+    assert "names no account" in exc.value.message
 
 
 def test_an_unreadable_accounts_file_fails_closed(

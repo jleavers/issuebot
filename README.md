@@ -361,7 +361,9 @@ credential is enough and no restart is needed. A `claude` that cannot answer the
 holds it up for ten polls at most, and then the worker goes back to failing one issue at a
 time rather than sitting idle for good.
 
-To ask `claude` directly, without going through issuebot:
+To ask `claude` directly, without going through issuebot — as `agent`, which every image has
+whatever pool it built, and whose answer is the answer for `agent-1` too, since the credential
+is the environment's and not any account's file:
 
 ```bash
 docker compose run --rm --user agent --entrypoint claude worker auth status

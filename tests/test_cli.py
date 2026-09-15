@@ -3432,6 +3432,27 @@ def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
     assert "docker compose build worker" in out
 
 
+def test_validate_survives_a_pool_size_that_is_not_a_decimal_number(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    bare_account_names: None,
+    tmp_path: Path,
+) -> None:
+    """Junk in the variable is intent unread, never a traceback: "\N{SUPERSCRIPT TWO}" is a
+    digit to `str.isdigit` and not a number to `int`, so the comparison asks for decimals."""
+    listing = tmp_path / "session-accounts"
+    listing.write_text("agent-1\nagent-2\nagent-3\n", encoding="utf-8")
+    monkeypatch.setattr("issuebot.config.resolve.SESSION_ACCOUNTS_FILE", listing)
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
+    monkeypatch.setenv("ISSUEBOT_AGENT_POOL_SIZE", "\N{SUPERSCRIPT TWO}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    assert "docker compose build worker" not in capsys.readouterr().out
+
+
 def test_validate_says_nothing_about_a_built_pool_on_a_host(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

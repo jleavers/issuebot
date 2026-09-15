@@ -28,15 +28,25 @@ def test_two_accounts_and_one_delegation() -> None:
 
 
 def test_the_image_records_the_accounts_it_built_and_names_none_in_the_environment() -> None:
-    """#142: the pool is the default, expressed once. The loop that creates the accounts
-    writes them, so `agent.run_as` cannot resolve a name the build did not create; and no
+    """#142: the pool is the default, expressed once. The list is accumulated *inside* the
+    loop that runs `useradd` and written from that accumulator, so it can neither name an
+    account the build did not create nor omit one it did -- nothing is re-derived from
+    ISSUEBOT_AGENT_POOL_SIZE, whose spelling `seq` and `test` read differently. `agent` alone
+    is the fallback for an empty pool, so no image resolves to the host route. And no
     `ENV ISSUEBOT_AGENT_USER` is left to shadow that list with a single account.
     """
     assert "install -d -m 0755 /etc/issuebot" in DOCKERFILE
-    assert "sed 's/^/agent-/' > /etc/issuebot/session-accounts" in DOCKERFILE
-    assert "echo agent > /etc/issuebot/session-accounts" in DOCKERFILE
+    assert 'pool="${pool} agent-${n}"' in DOCKERFILE
+    assert "printf '%s\\n' ${pool:-agent} > /etc/issuebot/session-accounts" in DOCKERFILE
     assert "chmod 0444 /etc/issuebot/session-accounts" in DOCKERFILE
     assert "ISSUEBOT_AGENT_USER=" not in DOCKERFILE
+
+
+def test_the_build_reads_its_own_account_list_back() -> None:
+    """#142: the list is what `agent.run_as` resolves to in every container, so the build
+    asserts it is non-empty and that every account it names resolves on the image."""
+    assert "test -s /etc/issuebot/session-accounts" in DOCKERFILE
+    assert 'while read -r account; do id -u "${account}" >/dev/null || exit 1; done' in DOCKERFILE
 
 
 def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() -> None:

@@ -574,7 +574,10 @@ def _built_pool_complaint() -> str | None:
     if built is None:
         return None
     size = os.environ.get("ISSUEBOT_AGENT_POOL_SIZE", "").strip()
-    if not size.isdigit() or int(size) == len(built):
+    # `isdecimal` and not `isdigit`: the latter is true of "\N{SUPERSCRIPT TWO}", which `int`
+    # then refuses, and a junk value in the environment is the operator's intent unread -- a
+    # line `validate` says nothing about -- never a traceback out of a check.
+    if not size.isdecimal() or int(size) == len(built):
         return None
     return (
         f"ISSUEBOT_AGENT_POOL_SIZE={size} but this image was built with "

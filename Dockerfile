@@ -191,28 +191,37 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # the more privileged side of the line. The path is the image's own -- the `install -d` below,
 # the VOLUME further down and compose's mount -- so a `workspace.root` pointed elsewhere inside
 # the container would need its own entry.
+# The account list is the built fact and nothing else (#142): `pool` accumulates inside the
+# loop that runs `useradd`, and that accumulator is what is written, so the file can neither
+# name an account the build did not create nor omit one it did. It is not re-derived from
+# ISSUEBOT_AGENT_POOL_SIZE afterwards, because `seq` and `test` do not agree about what a
+# value is -- `3 ` with a trailing space is a true `-ge 1` and an invalid count to `seq`, so
+# the old shape wrote an empty list for an image with no pool accounts, and an empty list
+# resolves to the host route, where the session *is* the worker. That inverts #75. An empty
+# pool -- a build with the argument below 1 -- falls back to `agent` alone, the single-account
+# route, so every image keeps "the session is never the worker" true.
+# `printf '%s\n' ${pool:-agent}` and `for account in agent ${pool}` are unquoted on purpose,
+# the only unquoted expansions here: the word-splitting is what turns one accumulated string
+# into one account per line and one loop iteration per account. The names are `agent-N`, so
+# there is nothing in them to split on but the spaces that separate them.
 ARG ISSUEBOT_AGENT_POOL_SIZE=3
 RUN set -eu; \
-    accounts=agent; \
-    for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do accounts="${accounts} agent-${n}"; done; \
     groupadd --system agents; \
     useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
     useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
     useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
+    pool=''; \
     for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
       useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
+      pool="${pool} agent-${n}"; \
     done; \
-    for account in ${accounts}; do \
+    for account in agent ${pool}; do \
       chmod 0700 "/home/${account}"; \
       install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
       usermod --append --groups "${account}" issuebot; \
     done; \
     install -d -m 0755 /etc/issuebot; \
-    if [ "${ISSUEBOT_AGENT_POOL_SIZE}" -ge 1 ]; then \
-      seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}" | sed 's/^/agent-/' > /etc/issuebot/session-accounts; \
-    else \
-      echo agent > /etc/issuebot/session-accounts; \
-    fi; \
+    printf '%s\n' ${pool:-agent} > /etc/issuebot/session-accounts; \
     chmod 0444 /etc/issuebot/session-accounts; \
     chmod 0750 /home/issuebot /home/web; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
@@ -276,8 +285,13 @@ ENV LANG=C.UTF-8 \
 # --mcp-config is the only route left by which a server reaches a session, so a rename there
 # would break those deployments one session at a time; --setting-sources is what keeps the
 # clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
-# passed on every turn whatever the front matter says. The last line is the delegation
-# itself, as the worker will use it: sudo, the account, and claude under it.
+# passed on every turn whatever the front matter says. Then the delegation itself, as the
+# worker will use it: sudo, the account, and claude under it.
+# The last two lines read the account list back (#142). It is what `agent.run_as` resolves to
+# in every container, so a build that wrote a list naming nothing would ship an image whose
+# sessions run as the worker, and one naming an account the `useradd` loop did not create
+# would fail every run instead: non-empty, and every name in it an account that resolves
+# here, asserted where the delegation is.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
  && claude --help | grep -q -- '--disallowedTools' \
@@ -287,7 +301,10 @@ RUN claude --version \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \
-      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; }
+      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; } \
+ && test -s /etc/issuebot/session-accounts \
+ && { while read -r account; do id -u "${account}" >/dev/null || exit 1; done; } \
+      < /etc/issuebot/session-accounts
 
 WORKDIR /app
 # Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind

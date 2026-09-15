@@ -483,9 +483,13 @@ class Orchestrator:
                 self._run_as_probe, settings.agent.run_as, self._environ
             )
             problems.extend(f"agent.run_as: {error}" for error in unusable)
-        # A pool shares no login between its accounts on purpose (#121), so the credential has
-        # to be one `claude` needs no file for. Refusing here rather than per run: every
-        # session would fail to authenticate, which is #17's rule for a definite logged-out.
+        # No account a session runs as is one anybody logs into, whether the deployment runs a
+        # pool or a single account (#121, #142): a pool shares no login between its members by
+        # construction, and the lone `agent` holds none either now that the container's
+        # interactive login is gone. So the credential has to be one `claude` needs no file
+        # for, and the complaint below asks that of any non-empty `agent.run_as`. Refusing
+        # here rather than per run: every session would fail to authenticate, which is #17's
+        # rule for a definite logged-out.
         complaint = credential_complaint(settings, self._environ)
         if complaint is not None:
             problems.append(f"agent.run_as: {complaint}")
