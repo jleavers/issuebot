@@ -59,7 +59,9 @@ issues that triage is most of the value.
   yourself. Nothing in the tree is a working credential: every one is filled in per
   deployment. Compose refuses to start the database, the worker and the dashboard while the
   database password is missing; an empty `GH_TOKEN` is caught by the worker's own preflight,
-  and an empty `ANTHROPIC_API_KEY` is the log-in-once path.
+  and an empty `ANTHROPIC_API_KEY` is the log-in-once path. It also holds the two bounds that
+  are the deployment's rather than the repository's: `ISSUEBOT_AGENT_USER`, the account(s) a
+  session runs as, and `ISSUEBOT_EGRESS_ALLOW`, the hosts a session may reach.
 - The agent follows the target repository's own `CLAUDE.md` and `AGENTS.md` for how to run
   tools, commit and open PRs -- as text issuebot reads from the clone and hands to the prompt
   inside the same `<github-text>` envelope as the issue, under the workflow's ground rules,
@@ -96,6 +98,9 @@ issues that triage is most of the value.
    fine-grained token cannot -- and `validate` warns on it, because the session holds the
    token and a classic token's reach is the whole account's, not one repository's (#109).
    The account needs permission to push branches and open PRs in the target repository.
+   Where the token can be *sent* is bounded separately, by the network allow-list under step 2
+   ("What a session may reach"): under Compose a session can open a connection to Anthropic,
+   to GitHub and to whatever else you have named, and to nothing else (#126).
 2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
    (see step 2 below for the container).
 3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
@@ -120,7 +125,9 @@ for the host route use WSL.
 ### Step 1: clone and configure
 
 ```bash
-docker network create issuebot   # once per host: every checkout's containers join it
+# Once per host, two shared networks: every checkout's containers join them.
+docker network create issuebot              # the dashboard's route to the database
+docker network create --internal issuebot-internal   # the worker's, with no route off the host
 git clone git@github.com:jleavers/issuebot.git
 cd issuebot
 cp .env.example .env
@@ -254,6 +261,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
 [WARN] agent.run_as: agent (uid 1001); the session runs as a separate account, at a uid other than this process's (1000), but all 2 concurrent sessions share it
 [ OK ] claude.mcp_config: no MCP server configured
+[ OK ] egress: http://egress:3128: egress-probe.invalid refused, api.github.com admitted; no route round it
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -262,12 +270,71 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-17 checks: 0 failed, 3 warnings
+18 checks: 0 failed, 3 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
 the target repository; run it once per repository, and again after an upgrade that adds a label.
 The labels warning disappears on the next `validate`.
+
+#### What a session may reach
+
+The `egress` line above is the third bound on what a session can do, beside the token it holds
+and the tools it holds it with (#126). Under Compose the worker's networks are all `internal`,
+so the container that runs `claude -p`, every hook and the clone **has no route off the host at
+all**; its one way out is the `egress` service, a forward proxy that speaks `CONNECT` alone and
+answers it only for a host on an allow-list. Anyone can open an issue, and a session reads what
+they wrote; without this, a `curl` under `Bash` could send `GH_TOKEN` anywhere, or fetch the
+next page of its own instructions from a host of its choosing.
+
+The shipped list is what the workflow itself needs and nothing else:
+
+| Host | Reached by |
+|---|---|
+| `api.anthropic.com` | `claude -p`, every turn |
+| `statsig.anthropic.com` | Claude Code's feature flags (a session runs without it) |
+| `github.com` | `gh repo clone`, and every `git fetch`/`push` in a workspace |
+| `api.github.com` | every `gh api`, `gh issue` and `gh pr` call, the worker's polls included |
+| `objects.githubusercontent.com` | release assets and raw objects `gh` redirects to |
+| `www.githubstatus.com` | the status page the worker reads to annotate a dispatch hold |
+
+**The target repository's toolchain is yours to add**, because it differs per deployment: the
+registries a `uv sync`, `pip install`, `npm ci` or `go mod download` reaches, in a hook or in a
+session's own shell. Set `ISSUEBOT_EGRESS_ALLOW` in this checkout's `.env` and
+`docker compose up -d egress`:
+
+```bash
+# in this checkout's .env -- commas or spaces; extends the list above, never replaces it
+ISSUEBOT_EGRESS_ALLOW=pypi.org,files.pythonhosted.org,registry.npmjs.org
+```
+
+An entry is a host name on port 443 (`pypi.org`), a host and a port (`registry.internal:8443`),
+or a leading dot for a domain and everything under it (`.githubusercontent.com`). Two things to
+know before you widen it:
+
+- **Egress is HTTPS only.** The proxy speaks `CONNECT` and nothing else, so it never sees a URL,
+  a header or a body, and never has to hold a certificate authority — but a plain `http://`
+  registry cannot be reached from a session whatever the list says.
+- **A name on the list is a name a session can post to.** The list is a reach, not a read: it
+  bounds where the token can go as much as where the tools can fetch from. Add the registry,
+  not the domain it happens to live under.
+
+A refused request fails with `403` from the proxy, which names the host and this variable; the
+proxy logs `egress_denied` with the host and port, which is the line to grep for when a hook
+starts failing after an upgrade.
+
+`validate` asks the proxy both of its questions — a name reserved by RFC 2606 must come back
+`403`, and `api.github.com` must come back `200` — and then asks the *network* whether there is
+a route round it at all. That last one is a warning rather than a failure, because a host
+running without Compose is entitled to reach the internet; under Compose it means
+`issuebot-internal` was created without `--internal`, and the line says so.
+
+**On the host route** (`uv run issuebot worker`, no Compose) there is no proxy and no internal
+network, so a session's egress is your machine's. `validate` warns — `[WARN] egress: no proxy
+configured` — the way it warns that the session shares your uid. Setting `HTTPS_PROXY` in the
+worker's environment points sessions at a proxy of your own; issuebot passes the six proxy
+variables through to `claude`, every hook and the clone, and a hook's `.issuebot/env` cannot
+overwrite them.
 
 #### One account per concurrent session
 
@@ -761,7 +828,11 @@ hook that would truncate it again or append a duplicate per session.
   `GH_NO_UPDATE_NOTIFIER`, `NO_COLOR`, `GH_PAGER`, `DISABLE_AUTOUPDATER`,
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) keep `gh` and `claude` running as issuebot launched them,
   so a typo cannot take either down in the middle of a run and a line cannot switch the shared
-  home's auto memory back on (#101). So is anything starting
+  home's auto memory back on (#101). So are the six proxy variables (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY` and their lower-case spellings), for the reason `PATH` is and no
+  stronger one: what bounds egress is the container's lack of a route rather than a variable,
+  so a line emptying them would take `gh`, `git` and the next turn's `claude` off the network
+  without admitting anything off the allow-list (#126). So is anything starting
   `ANTHROPIC_` or `CLAUDE_`: the file lives in the agent's own workspace, so the *session* can
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
@@ -784,7 +855,10 @@ One database and one dashboard serve every repository; each repository still get
 worker, in its own checkout, with its own `configs/WORKFLOW.local.md`, workspaces volume
 and Claude login. The checkouts meet on one Docker network.
 
-1. Once per host: `docker network create issuebot`.
+1. Once per host: `docker network create issuebot` and
+   `docker network create --internal issuebot-internal`. The second is where the workers reach
+   the hub's database; `--internal` is what leaves them no route off the host except the
+   allow-listing proxy (see "What a session may reach" under step 2).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
@@ -958,13 +1032,22 @@ that matters on your host.
   `docker compose up -d --force-recreate worker`. Upgrading across the dashboard's own account
   (#102) is the rebuild alone: compose now runs `web` as `web`, an account only the new image
   has, so against a stale one the container fails to start with `unable to find user web`.
+  Upgrading across the egress proxy (#126) needs the second shared network before anything
+  starts -- `docker network create --internal issuebot-internal`, once per host -- because the
+  worker now joins that one instead of `issuebot` and compose refuses a network it did not
+  create. Then `docker compose up -d` in the hub checkout (which recreates `db` onto both
+  networks) and in every worker checkout. Until the hub has been recreated, a worker on the new
+  network cannot resolve `db` and restarts with `[FAIL] database:`. If a hook of yours reaches
+  a registry, put it in `ISSUEBOT_EGRESS_ALLOW` in the same pass: after the upgrade the session
+  reaches Anthropic and GitHub and nothing else, so an unlisted registry fails the hook rather
+  than the network (see "What a session may reach").
   Check that your edits followed the rename
   (`git status`) before starting, and note that `workspace.root` now resolves against
   `/configs` rather than `/app`: the checked-in value is absolute, but if yours is relative
   make it absolute, because `/configs` is mounted read-only. A setting that a newer
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
   `<key>: Extra inputs are not permitted`.
-- **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
+- **Safety.** The enforced boundary is the container, its **network**, and inside it the uid: the session
   (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
   worker (`issuebot`, uid 1000) that supervises and credentials it (#75), and -- with a pool
   configured, see "One account per concurrent session" under step 2 -- at a different uid from
@@ -980,7 +1063,11 @@ that matters on your host.
   from it (`claude.disallowed_tools`, which ships with `WebFetch` and `WebSearch` in it, and
   `--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
   describe what the session may do *within* that authority rather than granting it, and the
-  `<github-text>` envelope is a hint to the model, never the boundary (#109). The session's
+  `<github-text>` envelope is a hint to the model, never the boundary (#109). Its *network* is
+  fixed outside the prompt too: under Compose the container's every network is `internal`, so
+  the session has no route off the host but the allow-listing proxy beside it, and `GH_TOKEN`
+  can be carried to Anthropic, to GitHub and to whatever else the deployment named, and to
+  nothing else (#126, "What a session may reach" under step 2). The session's
   login is its own, in `/home/agent/.claude`. With a single session account that home is a
   shared volume across every session and repository; with a pool (`agent.run_as` naming more
   than one account) each member keeps its own `0700` home from the image and the volume is
