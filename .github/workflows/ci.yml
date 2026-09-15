@@ -61,6 +61,10 @@ jobs:
       - name: compose config under each profile
         run: |
           docker network create issuebot
+          # The second shared network, and `--internal` is the whole of it (#126): a container
+          # on internal networks alone gets no default route, which is what leaves the worker
+          # with no way off the host but the proxy.
+          docker network create --internal issuebot-internal
           for profiles in hub worker hub,worker; do
             # Both directions (#78): without the store's password nothing configures -- the
             # refusal is the invariant, so a default creeping back in fails the PR -- and with
@@ -85,6 +89,19 @@ jobs:
           # image side -- that the account exists and cannot invoke sudo -- is proved below.
           test "$(COMPOSE_PROFILES=hub ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r .services.web.user)" = web
           test "$(COMPOSE_PROFILES=worker ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json | jq -r '.services.worker.user // "none"')" = none
+          # The session's egress (#126), as far as the compose file can be asked about it: the
+          # worker joins internal networks and nothing else, so it has no default route; the
+          # proxy is the one service with a leg on each side; and it runs as its own account,
+          # for the reason the dashboard does. The runtime proof is the step further down.
+          worker_config=$(COMPOSE_PROFILES=worker ISSUEBOT_DB_PASSWORD=ci-only docker compose config --format json)
+          test "$(echo "$worker_config" | jq -r '.services.worker.networks | (if type == "object" then keys else . end) | sort | join(",")')" = egress,issuebot-internal
+          test "$(echo "$worker_config" | jq -r '.networks.egress.internal')" = true
+          test "$(echo "$worker_config" | jq -r '.networks["issuebot-internal"].external')" = true
+          test "$(echo "$worker_config" | jq -r '.networks.outside.internal // false')" = false
+          test "$(echo "$worker_config" | jq -r '.services.egress.networks | (if type == "object" then keys else . end) | sort | join(",")')" = egress,outside
+          test "$(echo "$worker_config" | jq -r '.services.egress.user')" = egress
+          test "$(echo "$worker_config" | jq -r '.services.worker.environment.HTTPS_PROXY')" = http://egress:3128
+          test "$(echo "$worker_config" | jq -r '.services.worker.environment.https_proxy')" = http://egress:3128
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
@@ -243,6 +260,57 @@ jobs:
             echo "the dashboard started against a dead database" >&2; exit 1
           fi
           grep -q '^\[FAIL\] database: cannot connect: ' /tmp/web-start.txt
+      # The session's network egress is the third property of its authority (#109 fixed the
+      # other two), and the only one that cannot be set where the process is spawned: it is a
+      # property of the container's routing table. So the proof has to be a stack that is
+      # actually up. compose gives the worker internal networks alone -- no default route at
+      # all -- and one service, `egress`, an allow-listing CONNECT proxy built from this same
+      # image, has a leg on each side. Both halves are asked of a real session account, since
+      # a proxy that filters is no bound at all while there is a route round it, and a route
+      # that is closed is no use if GitHub is closed with it.
+      #
+      # The whole `hub,worker` profile, not the worker alone: `db` gained a second network in
+      # this change, so that the dashboard's published port still answers is this step's to
+      # prove rather than to assume. The images are the ones already built above, tagged under
+      # the names compose derives from COMPOSE_PROJECT_NAME, so nothing is built twice.
+      - name: a session under the worker profile reaches GitHub and nothing else
+        env:
+          COMPOSE_PROJECT_NAME: ci
+          COMPOSE_PROFILES: hub,worker
+          ISSUEBOT_DB_PASSWORD: ci-only
+          ISSUEBOT_WEB_PASSWORD: ci-only
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docker tag issuebot:ci ci-worker
+          docker tag issuebot:ci ci-egress
+          docker tag issuebot:ci ci-web
+          docker compose up -d --no-build --wait db web egress
+          # The hub is unchanged from the outside: `db` publishes on `issuebot` as before and
+          # the dashboard still answers on the host's loopback.
+          curl -fsS -o /dev/null http://127.0.0.1:8080/healthz
+          docker compose run --rm --no-deps --user agent \
+            -e GH_TOKEN -e GITHUB_REPOSITORY --entrypoint bash worker -lc '
+            set -eu
+            # The address reached the session, which is the pass-through in agent_environment.
+            test "$HTTPS_PROXY" = http://egress:3128
+            test "$https_proxy" = http://egress:3128
+            # Off the allow-list: the proxy refuses it...
+            if curl -sS -o /dev/null --max-time 30 https://example.com/; then
+              echo "a session reached a host off the egress allow-list" >&2; exit 1
+            fi
+            # ...and there is no route round the proxy to reach it by.
+            if curl -sS -o /dev/null --noproxy "*" --connect-timeout 10 --max-time 20 https://example.com/; then
+              echo "a session left the container without the proxy" >&2; exit 1
+            fi
+            # On the allow-list: `gh` works, which is the whole workflow, and so does a plain
+            # HTTPS client, so what is proved is the route rather than the settings of one tool.
+            gh api rate_limit --jq .rate.limit > /dev/null
+            gh api "repos/${GITHUB_REPOSITORY}" --jq .full_name > /dev/null
+            curl -fsS -o /dev/null --max-time 30 https://api.github.com/
+            # And the hub database, the one thing the internal network is there to carry.
+            /app/.venv/bin/python -c "import socket; socket.create_connection((\"db\", 5432), 10).close()"
+          '
+          docker compose down -v --remove-orphans
       # git's ownership check is part of the boundary rather than a detail of it: a workspace
       # directory is the worker's and the clone inside it is the session's, so without the
       # image's `safe.directory` entry every git command a session runs dies as `dubious

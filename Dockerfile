@@ -168,6 +168,13 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # The pool accounts get a `.claude` of their own and no volume: a pool shares no login between
 # its accounts on purpose, and takes its credential from the environment instead (#121, the
 # spec). `agent` keeps /home/agent/.claude, which is where compose mounts `claude-home`.
+# A fourth, `egress` (uid 1003), for the allow-listing proxy (#126), on the same reasoning and
+# for a sharper reason. Under compose the worker's networks are all internal, so the proxy
+# container is the one process in the deployment with a route to the open internet; it reads a
+# host name out of a CONNECT line and relays bytes it never looks at. It holds no credential,
+# runs no session and touches no workspace, so it gets an account that can reach none of them:
+# outside group issuebot it cannot execute sudo, outside `agents` the rule names nothing it
+# could become, and its home is its own. `nologin` for the reason `web` has it.
 # A third kind of account, `web` (uid 1002), for the dashboard (#102). compose builds the `web`
 # service from this image and selects it with `user: web`; nothing in the image runs as it by
 # default, since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP
@@ -196,6 +203,7 @@ RUN set -eu; \
     useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
     useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
     useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
+    useradd --create-home --uid 1003 --shell /usr/sbin/nologin egress; \
     for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
       useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
     done; \
@@ -204,7 +212,7 @@ RUN set -eu; \
       install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
       usermod --append --groups "${account}" issuebot; \
     done; \
-    chmod 0750 /home/issuebot /home/web; \
+    chmod 0750 /home/issuebot /home/web /home/egress; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
     git config --system --add safe.directory '/workspaces/*'; \
     printf '%s\n' \

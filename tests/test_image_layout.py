@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from issuebot.egress import PROXY_ENV_NAMES
+
 ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = (ROOT / "Dockerfile").read_text()
 COMPOSE = (ROOT / "compose.yaml").read_text()
@@ -159,9 +161,77 @@ def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
 def test_compose_runs_the_web_as_its_own_account_and_the_worker_as_the_images() -> None:
     assert SERVICES["web"]["user"] == "web"
     # The worker needs the image's `USER issuebot` -- the sudo rule is its -- so it names none;
-    # neither does anything else, since only the dashboard has an account of its own.
-    assert [name for name, service in SERVICES.items() if "user" in service] == ["web"]
+    # the two services that need no privilege transition at all name accounts of their own.
+    assert [name for name, service in SERVICES.items() if "user" in service] == ["egress", "web"]
     assert "claude-home" not in " ".join(SERVICES["web"].get("volumes", []))
+
+
+def test_the_proxy_is_a_fourth_account_with_nothing_of_the_workers() -> None:
+    """#126: the proxy container is the one process with a route to the open internet, so it
+    runs as an account that can reach nothing else in the image."""
+    assert "useradd --create-home --uid 1003 --shell /usr/sbin/nologin egress" in DOCKERFILE
+    assert "chmod 0750 /home/issuebot /home/web /home/egress" in DOCKERFILE
+    # Nothing puts it in the worker's group (the one the 4750 sudo binary is executable by) or
+    # in `agents` (the one the single sudo rule names).
+    assert not re.search(
+        r"usermod\b.*\begress\b|useradd\b.*(?:-G|--groups)\b.*\begress\b"
+        r"|gpasswd\b.*\begress\b|adduser\b.*\begress\b",
+        DOCKERFILE,
+    )
+    assert SERVICES["egress"]["user"] == "egress"
+    assert SERVICES["egress"]["command"] == ["egress", "--bind", "0.0.0.0", "--port", "3128"]
+    assert SERVICES["egress"]["profiles"] == ["worker"]
+    # No volume, no workspace, no credential: a host name off a CONNECT line is all it reads.
+    assert "volumes" not in SERVICES["egress"]
+    assert list(SERVICES["egress"]["environment"]) == ["ISSUEBOT_EGRESS_ALLOW"]
+
+
+def test_the_worker_has_no_route_off_the_host_but_the_proxy() -> None:
+    """The network half of #126, which is what makes the proxy unavoidable rather than
+    advisory: Docker gives a container on internal networks alone no default route."""
+    networks = yaml.safe_load(COMPOSE)["networks"]
+    assert sorted(SERVICES["worker"]["networks"]) == ["egress", "issuebot-internal"]
+    assert networks["egress"]["internal"] is True
+    # The shared one is external, so its `--internal` is the operator's to pass and cannot be
+    # asserted here -- compose rejects any other attribute beside `external`. The README says
+    # so and `validate` probes for a route round the proxy.
+    assert networks["issuebot-internal"] == {"external": True}
+    assert "--internal issuebot-internal" in (ROOT / "README.md").read_text()
+    # The proxy is the only service with a leg on each side.
+    assert sorted(SERVICES["egress"]["networks"]) == ["egress", "outside"]
+    assert not (networks["outside"] or {}).get("internal")
+    assert [
+        name for name, service in SERVICES.items() if "outside" in (service.get("networks") or [])
+    ] == ["egress"]
+    # The hub's database is on both: `issuebot` for the dashboard and its published port,
+    # `issuebot-internal` for the worker.
+    assert sorted(SERVICES["db"]["networks"]) == ["issuebot", "issuebot-internal"]
+    assert SERVICES["web"]["networks"] == ["issuebot"]
+
+
+def test_the_worker_points_every_client_at_the_proxy() -> None:
+    """Both cases of all three names: curl deliberately ignores an upper-case ``HTTP_PROXY``,
+    while other clients read only the upper-case spelling."""
+    environment = SERVICES["worker"]["environment"]
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        assert environment[name] == "http://egress:3128"
+    for name in ("NO_PROXY", "no_proxy"):
+        assert "db" in environment[name].split(",")
+    assert set(PROXY_ENV_NAMES) <= set(environment)
+
+
+def test_ci_proves_a_session_reaches_github_and_nothing_else() -> None:
+    assert "docker network create --internal issuebot-internal" in CI
+    assert "a session reached a host off the egress allow-list" in CI
+    assert "a session left the container without the proxy" in CI
+    # Both halves in one step, since either alone proves nothing: a proxy that filters is no
+    # bound while there is a route round it, and a closed route is no use if GitHub is closed
+    # with it.
+    assert "curl -sS -o /dev/null --max-time 30 https://example.com/" in CI
+    assert '--noproxy "*"' in CI
+    assert "gh api rate_limit --jq .rate.limit" in CI
+    # The dashboard's published port still answers, which `db`'s second network could break.
+    assert "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz" in CI
 
 
 def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> None:
