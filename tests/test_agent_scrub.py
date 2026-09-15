@@ -103,6 +103,20 @@ def test_an_empty_scrubber_masks_shapes_only() -> None:
         ("Authorization: Bearer abc.def-ghi", f"Authorization: Bearer {REDACTED}"),
         ('-H "authorization: token abc"', f'-H "authorization: token {REDACTED}"'),
         ("ghp_short and sk-ant-x", "ghp_short and sk-ant-x"),
+        # The same names as JSON keys (#109): an MCP server definition spells its `env` block
+        # this way, and there is a colon and two quotes where the `=` rule wants an `=`.
+        (
+            '{"env": {"LINEAR_API_KEY": "lin_oo_notakey", "PORT": "8080"}}',
+            f'{{"env": {{"LINEAR_API_KEY": "{REDACTED}", "PORT": "8080"}}}}',
+        ),
+        # The name has to *end* that way, as in the `=` spelling: `githubToken` is one and
+        # `tokenizer` is not.
+        ('{"githubToken":"abc"}', f'{{"githubToken":"{REDACTED}"}}'),
+        ('{"tokenizer":"abc"}', '{"tokenizer":"abc"}'),
+        ('{"GH_TOKEN" : "abc"}', f'{{"GH_TOKEN" : "{REDACTED}"}}'),
+        # An empty value has nothing to mask, and a key without a string value is left alone.
+        ('{"API_KEY": ""}', '{"API_KEY": ""}'),
+        ('{"API_KEY": null}', '{"API_KEY": null}'),
     ],
 )
 def test_credential_shapes_are_masked(text: str, expected: str) -> None:

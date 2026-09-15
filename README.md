@@ -68,7 +68,7 @@ issues that triage is most of the value.
   are what anyone who can merge to the repository can change, and a hook in them is shell run
   at launch with the agent's token. Naming `project` there hands them to every session, and
   `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
-  `--strict-mcp-config` (see "MCP servers" below). `WORKFLOW.md` owns the labels and the
+  `--strict-mcp-config` (see the `claude.mcp_config` row below, which is the only way to name one). `WORKFLOW.md` owns the labels and the
   process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
   those files (and to `.github/` itself) for the same reason; it only blocks a merge under
   branch protection's "Require review from Code Owners".
@@ -93,8 +93,9 @@ issues that triage is most of the value.
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
    without it any push touching those files is rejected. A classic token with the `repo` scope
    works too; it needs `workflow` adding for the same reason, and it reads check runs where a
-   fine-grained token cannot. The account needs permission to push branches and open PRs in the
-   target repository.
+   fine-grained token cannot -- and `validate` warns on it, because the session holds the
+   token and a classic token's reach is the whole account's, not one repository's (#109).
+   The account needs permission to push branches and open PRs in the target repository.
 2. **Claude access**: an Anthropic API key (`ANTHROPIC_API_KEY`), or a Claude Code login
    (see step 2 below for the container).
 3. **Docker with Compose** for the container stack (recommended: the image bundles `git`, `gh`
@@ -188,7 +189,10 @@ ignored.
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | both bound *silence*, not time: a turn is killed after this long without a line of output on its stream, or after this long without a turn event reaching the worker. A session that keeps printing resets both, so a run's length is `agent.run_timeout_ms`'s to bound | 1 hour; 5 minutes |
 | `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
-| `claude.allowed_tools`, `claude.disallowed_tools`, `claude.append_system_prompt` | passed straight to `claude` | none |
+| `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
+| `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
+| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account, so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
+| `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
@@ -247,7 +251,9 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] workspace.root: /workspaces
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
+[ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
 [ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other than this process's (1000)
+[ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -255,8 +261,8 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
-[ OK ] prompt: 11314 characters, renders
-15 checks: 0 failed, 2 warnings
+[ OK ] prompt: 21444 characters, renders
+17 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
@@ -335,12 +341,13 @@ renews itself rather than expiring after a few hours.
 
 That file is also where `claude` keeps `mcpServers`, and it outlives every session in the
 container, so issuebot runs every turn with `--strict-mcp-config` (#119): only servers named
-on the command line are loaded, and issuebot names none. No MCP server in
-`/home/agent/.claude.json`, and no `.mcp.json` in a repository issuebot clones, reaches a
-session — including one an earlier session wrote there. The rest of the file is still read:
-`claude` keeps its account metadata, its trust state and a `projects` map in it. Adding an MCP
-server for the agent is therefore not a matter of `claude mcp add` inside the container; it
-would need a change to the argv issuebot builds.
+on the command line are loaded, and the command line names what `claude.mcp_config` in the
+front matter lists, nothing by default. No MCP server in `/home/agent/.claude.json`, and no
+`.mcp.json` in a repository issuebot clones, reaches a session — including one an earlier
+session wrote there. The rest of the file is still read: `claude` keeps its account metadata,
+its trust state and a `projects` map in it. Adding an MCP server for the agent is therefore
+not a matter of `claude mcp add` inside the container; it is a `claude.mcp_config` entry
+(#109), a setting the session cannot write.
 
 Because `claude-home` is a named volume there is no directory to open on the host, but you can
 list it from a throwaway container:
@@ -922,7 +929,13 @@ that matters on your host.
   in a hub checkout the dashboard password), its home and the state it keeps inside a
   workspace are all out of the session's reach, and the worker cannot become root or anything
   but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
-  pushes with it, which is why the token should be scoped to the repository. The session's
+  pushes with it, which is why the token should be scoped to the repository: `validate` warns
+  when it is a classic or an OAuth token, whose reach is the account's, and says so. The
+  session's tools are fixed the same way, by the front matter and the argv issuebot builds
+  from it (`claude.disallowed_tools`, which ships with `WebFetch` and `WebSearch` in it, and
+  `--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
+  describe what the session may do *within* that authority rather than granting it, and the
+  `<github-text>` envelope is a hint to the model, never the boundary (#109). The session's
   login is its own, in `/home/agent/.claude`. That home is a shared volume across every session
   and repository, so before every turn the worker sweeps the config a prior or concurrent session
   could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,

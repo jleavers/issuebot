@@ -16,6 +16,7 @@ class _Model(BaseModel):
 RepoName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 PermissionMode = Literal["auto", "acceptEdits", "dontAsk", "bypassPermissions"]
+DEFAULT_DISALLOWED_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 SettingSource = Literal["user", "project", "local"]
 
 
@@ -135,7 +136,20 @@ class ClaudeSettings(_Model):
     turn_timeout_ms: int = Field(default=3_600_000, ge=1)
     stall_timeout_ms: int = 300_000
     allowed_tools: list[str] = Field(default_factory=list)
-    disallowed_tools: list[str] = Field(default_factory=list)
+    # The model's own network tools, denied unless the front matter says otherwise (#109). The
+    # workflow never needs them -- the session reads GitHub through `gh` and the repository
+    # through its clone -- and a session whose input is text somebody else wrote should not
+    # hold a purpose-built way to fetch the next page of it. A list replaces as a whole, so
+    # `disallowed_tools: []` widens it; that is a setting, outside the prompt, which is where
+    # the session's authority is fixed: neither the prose nor an issue can.
+    disallowed_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_DISALLOWED_TOOLS))
+    # The MCP servers a session may use, as `claude --mcp-config` takes them: paths to JSON
+    # files, or JSON strings. Every session runs with `--strict-mcp-config`, so this list is
+    # the whole set; empty -- the default -- is no server at all, whatever the clone's
+    # `.mcp.json` or a settings file says. A path is resolved against the workflow's directory
+    # (`resolve.py`; the clone is the session's cwd and the session's to write, so a relative
+    # one must not be read from there) and is read by the session's account.
+    mcp_config: list[NonEmptyStr] = Field(default_factory=list)
     append_system_prompt: str | None = None
     # Which of Claude Code's settings sources the session loads (#107). Always passed, never
     # claude's own default: with ``project`` or ``local`` in the list the clone's ``CLAUDE.md``

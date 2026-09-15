@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from issuebot.config.settings import GitHubLabels, Settings
+from issuebot.config.settings import DEFAULT_DISALLOWED_TOOLS, GitHubLabels, Settings
 
 MINIMAL = {"github": {"repo": "owner/repo"}}
 
@@ -48,7 +48,7 @@ def test_minimal_config_applies_every_default() -> None:
     assert s.claude.turn_timeout_ms == 3_600_000
     assert s.claude.stall_timeout_ms == 300_000
     assert s.claude.allowed_tools == []
-    assert s.claude.disallowed_tools == []
+    assert s.claude.disallowed_tools == ["WebFetch", "WebSearch"]
     assert s.claude.append_system_prompt is None
     assert s.claude.model_labels == {}
     assert s.database.url is None
@@ -276,3 +276,25 @@ def test_model_labels_rejects_unusable_entries(value: dict[str, str], needle: st
     with pytest.raises(ValidationError, match=needle) as exc:
         Settings.model_validate({**MINIMAL, "claude": {"model_labels": value}})
     assert any(loc.startswith("claude.model_labels") for loc in _locs(exc.value))
+
+
+def test_the_tool_policy_ships_restrictive_and_is_widened_by_a_setting() -> None:
+    """#109: the deny list is a default, not an empty slot, and a list replaces as a whole."""
+    default = Settings.model_validate({"github": {"repo": "o/r"}})
+    assert (
+        default.claude.disallowed_tools
+        == list(DEFAULT_DISALLOWED_TOOLS)
+        == ["WebFetch", "WebSearch"]
+    )
+    assert default.claude.allowed_tools == []
+    widened = Settings.model_validate(
+        {"github": {"repo": "o/r"}, "claude": {"disallowed_tools": []}}
+    )
+    assert widened.claude.disallowed_tools == []
+    tightened = Settings.model_validate(
+        {"github": {"repo": "o/r"}, "claude": {"disallowed_tools": ["WebFetch", "Bash(curl *)"]}}
+    )
+    assert tightened.claude.disallowed_tools == ["WebFetch", "Bash(curl *)"]
+    assert default.claude.mcp_config == []
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"github": {"repo": "o/r"}, "claude": {"mcp_config": [""]}})

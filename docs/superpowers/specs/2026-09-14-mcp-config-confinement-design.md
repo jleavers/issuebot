@@ -39,11 +39,14 @@ the live home was never touched, and with the worker's own flags:
 | omitted (`claude.setting_sources` defaults to `None`) | user | `[{"name":"probe119","status":"connected"}]`, tool `mcp__probe119__probe_exfiltrate` offered |
 | omitted | project | connected, same tool |
 | `user,project` | user | connected |
-| `project` (what `configs/WORKFLOW.md` passes) | user or project | `[]` |
+| `project` (what `configs/WORKFLOW.md` passed then) | user or project | `[]` |
 
 So: **yes, `claude -p` loads `mcpServers` from `~/.claude.json`**, at the shipped defaults.
-The repository's own workflow suppresses it only as a side effect of a setting that exists for
-other reasons and defaults to `None`.
+The repository's own workflow suppressed it only as a side effect of a setting that exists for
+other reasons. The `--setting-sources` column is as measured: #107 has since made the setting
+always passed and defaulted it to `[user]`, and the workflow names it no longer, so the last
+row is no longer the shipped shape and nothing suppresses the entry but the flag. That
+strengthens the conclusion below rather than changing it.
 
 Two things measured alongside it, because they bound the scope:
 
@@ -60,6 +63,13 @@ Pass `--strict-mcp-config` on every turn, unconditionally, from `ClaudeRunner.bu
 beside `--permission-prompts none` and for the same reason: it is what makes the run safe
 rather than what makes it convenient, so no setting reaches it. It keeps only servers named by
 `--mcp-config`, and issuebot names none.
+
+Amended by #109 (`2026-09-14-session-authority-design.md`), which landed beside this: the
+flag is still unconditional, and `claude.mcp_config` in the front matter is now the one place
+a server may be named, a path there resolved against the workflow's directory rather than the
+clone. Empty by default, so a deployment that sets nothing is exactly what this document
+describes. The image build asserts `--disallowedTools` beside the two flags named below, so
+"both flags" there is three.
 
 The three options the issue put up, against the measurements:
 

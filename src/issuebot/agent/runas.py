@@ -48,12 +48,12 @@ REMOVE_TIMEOUT_S = 120
 # one at the same uid (#101). The home is a shared volume (``claude-home``) across every
 # session and repository, so a slash command, skill, rule, subagent, workflow, plugin, output
 # style, memory file or settings a hostile issue plants would otherwise be read by an unrelated
-# session next week. The shipped workflow's ``setting_sources: [project]`` already keeps the
-# ``user`` source out of a turn -- ``settings.json``, ``CLAUDE.md``, ``rules``, ``skills``,
-# ``commands`` and ``agents`` -- but the setting defaults to unset (every source), an overlay can
-# drop the pin, and ``plugins``, ``output-styles``, ``workflows`` and ``agent-memory`` are not in
-# that flag's table at all, so the whole list is swept regardless: the flag is a workflow's
-# choice and the sweep is the worker's. Auto memory (``projects/<project>/memory/``) is read
+# session next week. ``setting_sources`` does not stand in for this: since #107 it is always
+# passed and defaults to ``[user]``, which is the very source most of these surfaces belong to
+# -- ``settings.json``, ``CLAUDE.md``, ``rules``, ``skills``, ``commands`` and ``agents`` -- while
+# ``plugins``, ``output-styles``, ``workflows`` and ``agent-memory`` are not in that flag's table
+# at all. The whole list is swept regardless: the flag is a workflow's choice and the sweep is
+# the worker's. Auto memory (``projects/<project>/memory/``) is read
 # whatever the flag says and keyed by repository, so a session working one issue seeds every
 # later session on the same repository; it is swept below by ``CLAUDE_HOME_MEMORY_DIR`` and
 # never written in the first place, since ``FIXED_ENVIRONMENT`` (``runner.py``) sets

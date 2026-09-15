@@ -80,7 +80,29 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         "user",
         "--session-id",
         SESSION_ID,
+        "--disallowedTools",
+        "WebFetch",
+        "WebSearch",
     ]
+
+
+def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path) -> None:
+    """#109: the session's tools are fixed by the argv, from the front matter. The default
+    denies the model's own network tools and loads no MCP server; an operator widens the deny
+    list by emptying it, and even then the MCP flag stays."""
+    argv = ClaudeRunner(settings(tmp_path, disallowed_tools=[]), environ={}).build_argv(
+        session_id=SESSION_ID, resume=False
+    )
+    assert "--disallowedTools" not in argv
+    assert "--strict-mcp-config" in argv
+    assert "--mcp-config" not in argv
+    # The MCP half is widened the same way, by naming the servers in the front matter, and
+    # the strict flag stays so nothing else joins them.
+    argv = ClaudeRunner(settings(tmp_path, mcp_config=["a.json", "b.json"]), environ={}).build_argv(
+        session_id=SESSION_ID, resume=False
+    )
+    assert argv[-3:] == ["--mcp-config", "a.json", "b.json"]
+    assert "--strict-mcp-config" in argv
 
 
 def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
@@ -94,11 +116,13 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
             append_system_prompt="Be terse.",
             allowed_tools=["Read", "Bash(git *)"],
             disallowed_tools=["WebFetch"],
+            mcp_config=["/etc/issuebot/mcp.json"],
         ),
         environ={},
     )
     argv = runner.build_argv(session_id=SESSION_ID, resume=True)
     assert argv[6] == "bypassPermissions"
+    assert argv[9] == "--strict-mcp-config"
     assert argv[11] == "2.5"
     assert argv[12:14] == ["--setting-sources", "project,local"]
     assert argv[14:16] == ["--resume", SESSION_ID]
@@ -112,6 +136,8 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         "Bash(git *)",
         "--disallowedTools",
         "WebFetch",
+        "--mcp-config",
+        "/etc/issuebot/mcp.json",
     ]
     assert "--session-id" not in argv
 
@@ -138,16 +164,17 @@ def test_build_argv_always_confines_mcp_to_the_command_line(
     The session account's ``~/.claude.json`` outlives every session in one container, and
     ``claude`` loads ``mcpServers`` from it, so the flag is what stops a planted server being
     offered to the next issue's session. The cases are the settings that might look as though
-    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, and
-    ``[user, project]`` does not -- and each is named, so a failure says which shape broke
-    rather than which loop iteration.
+    they already cover it -- ``setting_sources: [project]`` does suppress the same entry, while
+    ``[user, project]`` does not and neither does the default, which is ``[user]`` since #107 --
+    and each is named, so a failure says which shape broke rather than which loop iteration.
     """
     runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
     argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
     assert "--strict-mcp-config" in argv
-    # No `--mcp-config` beside it: the flag keeps only the servers named there, so issuebot
-    # naming none is what reduces the loadable set to nothing. It cannot fail today -- no
-    # branch emits it -- which is the point: adding one would have to come here first.
+    # No `--mcp-config` beside it: the flag keeps only the servers named there, and none of
+    # these settings names one, so the loadable set is nothing. The one that does is
+    # `claude.mcp_config` (#109), the front matter's, empty by default and pinned in
+    # `test_the_tool_policy_is_a_setting_and_nothing_else_widens_it`.
     assert "--mcp-config" not in argv
 
 
@@ -186,7 +213,7 @@ def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
     base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
     resolved = settings_for_labels(base, ("issuebot/model/fable",))
     argv = ClaudeRunner(resolved, environ={}).build_argv(session_id=SESSION_ID, resume=False)
-    assert argv[-2:] == ["--model", "fable"]
+    assert argv[argv.index("--model") + 1] == "fable"
 
 
 def test_agent_environment_passes_only_the_allowed_names() -> None:
@@ -979,6 +1006,52 @@ async def test_run_turn_counts_the_applied_keys_on_its_start_line(workspace: Pat
 
 
 @posix
+async def test_run_turn_scrubs_the_argv_it_logs(workspace: Path) -> None:
+    """#109: every other element is a flag, a model name, a tool name or a session id, but
+    `claude.mcp_config` takes a JSON document as well as a path, and an MCP server definition
+    carries its credentials in its own `env` block -- so an operator who inlines one would put
+    it in this line, and from there into whatever ships the worker's logs."""
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo", "token": "ghp_0123456789abcdef"},
+            "workspace": {"root": str(workspace.parent)},
+            "claude": {
+                "command": str(FAKE_CLAUDE),
+                "turn_timeout_ms": 30_000,
+                # A value no *shape* rule would catch on its own, so what is proved is the
+                # name beside it rather than the accident that MCP credentials often look
+                # like Anthropic keys.
+                "mcp_config": [
+                    '{"mcpServers": {"x": {"env": {"LINEAR_API_KEY": "lin_oo_notakey"}}}}'
+                ],
+            },
+        }
+    )
+    runner = ClaudeRunner(
+        cfg,
+        environ={
+            "PATH": os.environ["PATH"],
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "CLAUDE_FAKE_SCENARIO": "success",
+        },
+    )
+    stream = io.StringIO()
+    configure_logging(level="INFO", fmt="json", stream=stream)
+    try:
+        await run(runner, workspace)
+    finally:
+        configure_logging(stream=io.StringIO())
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    (started,) = [r for r in records if r["event"] == "claude_turn_started"]
+    logged = " ".join(started["argv"])
+    assert "lin_oo_notakey" not in logged
+    assert "***" in logged
+    # Scrubbed, not dropped: the flag and the shape of the document are still readable.
+    assert "--mcp-config" in started["argv"]
+    assert "mcpServers" in logged
+
+
+@posix
 async def test_run_turn_rereads_the_workspace_env_file_every_turn(
     workspace: Path, tmp_path: Path
 ) -> None:
@@ -1031,7 +1104,10 @@ async def test_run_turn_success_parses_everything(workspace: Path, tmp_path: Pat
     assert recorded["stdin"] == "Do the thing"
     assert recorded["cwd"] == str(workspace.resolve())
     assert recorded["argv"][:2] == ["-p", "--output-format"]
-    assert recorded["argv"][-2:] == ["--session-id", SESSION_ID]
+    assert recorded["argv"][recorded["argv"].index("--session-id") + 1] == SESSION_ID
+    # The default tool policy reaches the process, not just the argv builder (#109).
+    assert recorded["argv"][-3:] == ["--disallowedTools", "WebFetch", "WebSearch"]
+    assert "--strict-mcp-config" in recorded["argv"]
     assert recorded["env"]["GH_TOKEN"] == "sekret"
     assert recorded["env"]["NO_COLOR"] == "1"
     assert recorded["env"]["DISABLE_AUTOUPDATER"] == "1"
@@ -1062,7 +1138,7 @@ async def test_run_turn_resume_passes_the_resume_flag(workspace: Path, tmp_path:
     runner = runner_for(workspace, extra_env={"CLAUDE_FAKE_RECORD": str(record)})
     turn = await run(runner, workspace, turn_number=2, resume=True)
     argv = json.loads(record.read_text())["argv"]
-    assert argv[-2:] == ["--resume", SESSION_ID]
+    assert argv[argv.index("--resume") + 1] == SESSION_ID
     assert "--session-id" not in argv
     assert turn.stdout_path.name == "turn-2.jsonl"
 

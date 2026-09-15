@@ -114,3 +114,39 @@ def test_resolve_env_value_non_string_passes_through() -> None:
 def test_empty_workspace_root_is_left_for_validation() -> None:
     out = resolve_config({"workspace": {"root": ""}}, environ={}, base_dir=BASE)
     assert out["workspace"]["root"] == ""
+
+
+def test_relative_mcp_config_path_resolves_against_workflow_dir() -> None:
+    """The clone is the session's cwd and the session's to write, so a relative path must not
+    be read from there (#109): it names a file beside the workflow, the operator's."""
+    out = resolve_config(
+        {"claude": {"mcp_config": ["mcp.json", "servers/a.json", "/etc/issuebot/mcp.json"]}},
+        environ={},
+        base_dir=BASE,
+    )
+    assert out["claude"]["mcp_config"] == [
+        "/srv/workflows/mcp.json",
+        "/srv/workflows/servers/a.json",
+        "/etc/issuebot/mcp.json",
+    ]
+
+
+def test_mcp_config_tilde_expands(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/home/tester")
+    out = resolve_config({"claude": {"mcp_config": ["~/mcp.json"]}}, environ={}, base_dir=BASE)
+    assert out["claude"]["mcp_config"] == ["/home/tester/mcp.json"]
+
+
+def test_mcp_config_json_documents_pass_through() -> None:
+    documents = ['{"mcpServers": {}}', '  [{"a": 1}]', "{}"]
+    out = resolve_config({"claude": {"mcp_config": documents}}, environ={}, base_dir=BASE)
+    assert out["claude"]["mcp_config"] == documents
+
+
+def test_mcp_config_unusable_entries_are_left_for_validation() -> None:
+    out = resolve_config({"claude": {"mcp_config": ["", 3, None, "  "]}}, environ={}, base_dir=BASE)
+    assert out["claude"]["mcp_config"] == ["", 3, None, "  "]
+    out = resolve_config({"claude": {"mcp_config": "mcp.json"}}, environ={}, base_dir=BASE)
+    assert out["claude"]["mcp_config"] == "mcp.json"
+    out = resolve_config({"claude": {}}, environ={}, base_dir=BASE)
+    assert "mcp_config" not in out["claude"]
