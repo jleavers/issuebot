@@ -187,7 +187,6 @@ class WorkspaceManager:
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
-            self._log.warning("workspace_remnant_removed", workspace=str(path))
             # A remnant is a workspace whose creation did not finish, or one whose binding
             # moved (#121): either way `_remove_tree` opens it to each account that owns
             # something in it, which a sealed or re-bound directory otherwise refuses.
@@ -362,9 +361,10 @@ class WorkspaceManager:
         """Delete a workspace: the agent's files as the agent (#75), then the worker's own.
 
         Under a pool the files inside may be a *previous* binding's (#121): turning a pool on
-        over a live ``/workspaces``, or shrinking one, leaves a clone whose directories belong
-        to an account this manager is not. Neither the new account (it owns nothing there) nor
-        the worker (it owns the workspace but not the directories inside the clone) could then
+        over a live ``/workspaces``, or narrowing ``agent.run_as``, leaves a clone whose
+        directories belong to an account this manager is not. Neither the new account (it owns
+        nothing there) nor the worker (it owns the workspace but not the directories in the
+        clone) could then
         unlink it, and the issue would fail every attempt on a remnant nothing removes. So the
         delegated remove runs as every account that owns something at the top of the tree as
         well as as this workspace's own. Only the removal is derived from the directory; the
@@ -397,9 +397,17 @@ class WorkspaceManager:
         if self._account is None:
             return []
         accounts = [self._account]
-        for owner in _top_level_owners(path):
+        owners, unresolved = _top_level_owners(path)
+        for owner in owners:
             if owner not in accounts:
                 accounts.append(owner)
+        if unresolved:
+            # Nothing here can remove what a deleted account left: say which uid, so an
+            # operator can recreate it or clear the tree, rather than leave the removal to
+            # fail with a permission error naming nobody.
+            self._log.warning(
+                "workspace_owner_unresolved", workspace=str(path), uids=sorted(set(unresolved))
+            )
         return accounts
 
     async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
@@ -589,27 +597,38 @@ def _as_int(value: object) -> int:
     return value
 
 
-def _top_level_owners(path: Path) -> list[str]:
-    """The accounts owning ``path`` and its direct children, the worker's own uid aside.
+def _top_level_owners(path: Path) -> tuple[list[str], list[int]]:
+    """The accounts owning ``path`` and its direct children, the worker's own uid aside, and
+    the uids among them that resolve to no account at all.
 
     A clone made by another account is ``.git`` and a working tree that account owns, so one
     level is enough to name it; deeper entries cannot belong to a uid this misses, since a
-    session can only create files as itself. Unresolvable owners are skipped: the answer is a
-    list of extra removal passes, never a decision.
+    session can only create files as itself. The answer is a list of extra removal passes,
+    never a decision, so an owner that will not resolve is skipped rather than raised on -- but
+    it is reported, because it is the one shape of this that nothing can put right. A uid with
+    no passwd entry is an account that has been *deleted* (lowering ``ISSUEBOT_AGENT_POOL_SIZE``
+    and rebuilding the image does exactly that), and nothing short of root can then unlink what
+    it left; the uid is what an operator needs to recreate the account or clear the tree by
+    hand, and without it the removal would just fail with a permission error naming nobody.
     """
     me = os.getuid()
     owners: list[str] = []
+    unresolved: list[int] = []
     entries = [path]
     with contextlib.suppress(OSError):
         entries.extend(sorted(path.iterdir()))
     for entry in entries:
         try:
             uid = entry.lstat().st_uid
-            if uid != me:
-                owners.append(pwd.getpwuid(uid).pw_name)
-        except OSError, KeyError:
+        except OSError:
             continue
-    return owners
+        if uid == me:
+            continue
+        try:
+            owners.append(pwd.getpwuid(uid).pw_name)
+        except KeyError:
+            unresolved.append(uid)
+    return owners, unresolved
 
 
 def _owned_by(path: Path, account: str | None) -> bool:

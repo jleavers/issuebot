@@ -20,6 +20,7 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, Wo
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.session import run_session
+from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
 from issuebot.events import (
     Blocked,
@@ -3173,6 +3174,70 @@ async def test_a_reload_that_repairs_the_pool_lifts_the_hold_and_dispatches(
     await orchestrator.tick()
     assert h.snapshots[-1].dispatch_hold is not None
     _pool_workflow(h, "agent-1, agent-2")
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is None
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_a_terminal_removal_is_narrowed_to_the_account_that_owns_the_files(
+    tmp_path: Path,
+) -> None:
+    """The removal is a delegated unlink, so it has to run as the account whose files they
+    are -- and never as no account at all, which is what the host route would do (#121)."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    await orchestrator.startup()
+    record = h.add_issue(1, StateLabel.TODO)
+    assert orchestrator._pool is not None
+    key = workspace_key(record.identifier)
+    orchestrator._pool.allocate(key)
+    assert orchestrator._pool.bound(key) == "agent-1"
+    assert orchestrator._workspaces_for(record)._account == "agent-1"
+
+
+async def test_a_removal_whose_binding_is_unknown_still_delegates(tmp_path: Path) -> None:
+    """A binding the record has forgotten, or one it cannot read, must not become the host
+    route: the worker owns the workspace but not the directories inside the clone, so a
+    removal with no delegation leaves a tree nothing can remove (#121)."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    await orchestrator.startup()
+    record = h.add_issue(1, StateLabel.TODO)
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(record.identifier)) is None
+    # The pool's first member: not the binding, but an account the delegation works for, from
+    # which the manager finds the files' real owner.
+    assert orchestrator._workspaces_for(record)._account == "agent-1"
+
+
+async def test_a_host_side_repair_lifts_the_accounts_hold_without_a_restart(
+    tmp_path: Path,
+) -> None:
+    """Three of the four faults are properties of the host, not of `WORKFLOW.md`: an operator
+    fixes them with `usermod` and never touches the file. A hold keyed on the file alone would
+    last until the worker restarted, so it is re-probed while it lasts (#121)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    broken = [False]
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: (
+            ["agent-3: the worker is not in group agent-3"] if broken[0] else []
+        ),
+    )
+    await orchestrator.startup()
+    # The pool grows by an account whose group the worker was never added to.
+    broken[0] = True
+    _pool_workflow(h, "agent-1, agent-2, agent-3")
+    await orchestrator.tick()
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert h.github.issue(1).state is StateLabel.TODO
+    # A second tick with nothing changed keeps the hold and its start: the file never moved.
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold == hold
+    # `usermod --append`, and nothing in the workflow file changes.
+    broken[0] = False
     await orchestrator.tick()
     assert h.snapshots[-1].dispatch_hold is None
     assert h.github.issue(1).state is StateLabel.IN_PROGRESS

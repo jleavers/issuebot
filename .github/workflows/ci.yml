@@ -169,12 +169,12 @@ jobs:
             python - <<'"'"'PY'"'"'
           from pathlib import Path
           from issuebot.agent.accounts import seal, share_with
-          for key, account in (("one", "agent-1"), ("two", "agent-2")):
+          # Created sealed and opened by `share_with`, as `WorkspaceManager` does: the mode
+          # is never briefly wider than it ends up, which is what that ordering is for.
+          for key, account in (("one", "agent-1"), ("two", "agent-2"), ("idle", "agent-1")):
               path = Path("/workspaces") / key
-              path.mkdir()
+              path.mkdir(mode=0o700)
               share_with(path, account)
-          (Path("/workspaces") / "idle").mkdir()
-          share_with(Path("/workspaces") / "idle", "agent-1")
           seal(Path("/workspaces") / "idle")
           PY
             test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 $(id -g agent-1) 1770"

@@ -236,11 +236,13 @@ floor, not the shipped version, and moves by hand.
   worker is visible at all), and `prune` (the terminal sweep, after its removals) forgets a
   workspace that is gone while keeping every key with a session running or a retry pending. The binding is *never*
   derived from the directory: one computed from the workspace key would be a binding whoever
-  opens the issue chooses. A workspace is open to exactly one account and only while that
-  account's session is running in it: `share_with` makes it `1770`, owner the worker (sticky,
+  opens the issue chooses. A workspace is open to exactly one account, and only while that
+  account is working in it -- a session running, or a removal unlinking what one left:
+  `share_with` makes it `1770`, owner the worker (sticky,
   as #75 established) and group the bound account's own, and `seal` puts it back to `0700`
   when the run ends (`session.py`'s `finally`; `WorkspaceManager.seal_idle` at startup, for a
-  worker that was killed outright; `remove` opens it again, since the unlink is the account's).
+  worker that was killed outright; `_remove_tree` opens it again, per removing account, since
+  the unlink is theirs, and re-seals if the worker's own pass then fails).
   Both halves are needed: a workspace outlives its run, accounts are fewer than workspaces, so
   without the seal a hostile session would eventually be handed an account holding an honest,
   idle workspace. `_is_complete` also requires `.git` to belong to the bound account, so a
@@ -571,7 +573,7 @@ floor, not the shipped version, and moves by hand.
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
   goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
-  (preflight > auth > github) *after* the fetch, from a `_Hold` the branches return rather than
+  (preflight > auth > accounts > github) *after* the fetch, from a `_Hold` the branches return rather than
   by recording as they go: releasing and re-holding within a tick would restart `since` on a
   hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
   `_probe_github_status` annotates the hold once, when it engages, through the

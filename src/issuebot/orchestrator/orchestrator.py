@@ -932,8 +932,16 @@ class Orchestrator:
         process: putting the file back lifts it on the next reload, which is what a running
         deployment wants of a typo. Nothing is sealed here, unlike at startup: sessions are
         running, and their workspaces are open to the accounts they are running as.
+
+        It re-probes while the hold lasts, not only when the setting moves, because three of
+        the four faults are properties of the *host* rather than of the file: an account that
+        does not exist, a worker outside its group, two accounts sharing one. The operator
+        fixes those with ``useradd`` or ``usermod`` and never touches ``WORKFLOW.md``, so a
+        hold keyed on the file alone would last until the worker was restarted -- the very
+        thing `_read_accounts` is written to avoid. Once a tick while held, which is one poll
+        interval, and not at all when there is nothing to re-check.
         """
-        if not self._run_as_pending:
+        if not self._run_as_pending and self._run_as_block is None:
             return
         self._run_as_pending = False
         settings = self._workflow.config
@@ -945,9 +953,17 @@ class Orchestrator:
         complaint = credential_complaint(settings, self._environ)
         if complaint is not None:
             problems.append(complaint)
+        previous = self._run_as_block
         self._run_as_block = f"agent.run_as: {'; '.join(problems)}" if problems else None
         if problems:
-            self._log.error("dispatch_run_as_unusable", problems=problems)
+            # ERROR on the first and on a changed reason, WARNING after: a held worker says
+            # nothing else, and an unchanged fault should not fill the log with it.
+            if self._run_as_block != previous:
+                self._log.error("dispatch_run_as_unusable", problems=problems)
+            else:
+                self._log.warning("dispatch_run_as_unusable", problems=problems)
+        elif previous is not None:
+            self._log.info("dispatch_run_as_recovered", run_as=list(settings.agent.run_as))
 
     def _accounts_hold(self) -> str | None:
         """Why no workspace can be bound to a session account: the setting first, then the
@@ -1255,6 +1271,11 @@ class Orchestrator:
         will not read -- therefore falls back to the pool's first member, which the manager
         uses as the starting point for a removal that also runs as whoever owns what is
         actually there.
+
+        The fallback is for the unlink, but `before_remove` rides along on the same account,
+        which for an unknown binding may be one that owns nothing in the workspace. That is
+        the right trade: the hook is the operator's own script and a wrong uid makes it fail,
+        while no account at all makes the *removal* fail and leaves the workspace for ever.
         """
         settings = self._workflow.config
         account = session_account(settings)

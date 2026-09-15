@@ -26,7 +26,7 @@ from issuebot.agent.accounts import SEALED_DIR_MODE, WORKSPACE_DIR_MODE
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import MODULE, RunAs, RunAsError, anonymous_fd
 from issuebot.agent.runner import ClaudeRunner
-from issuebot.agent.workspace import WorkspaceManager
+from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
 from issuebot.github import Issue
@@ -444,7 +444,9 @@ async def test_a_removal_runs_as_every_account_that_owns_something_in_the_tree(
     # `nobody` exists everywhere this runs and owns nothing here: it stands for the previous
     # binding, whose files the current account could not unlink. Sharing with it fails (the
     # worker is in no group of its), which is suppressed -- the pass is still attempted.
-    monkeypatch.setattr("issuebot.agent.workspace._top_level_owners", lambda target: ["nobody", ME])
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._top_level_owners", lambda target: (["nobody", ME], [])
+    )
     await manager._remove_tree(path, "cannot remove remnant")
     # The bound account first, then the other owner, each named once; and no pass sees the
     # sealed directory it arrived as.
@@ -470,12 +472,39 @@ def test_the_owners_a_removal_delegates_to_come_from_the_tree_not_the_binding(
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
     # Everything here is this process's, so there is nothing to add to the bound account.
     assert manager._removers(path) == [ME]
+    assert _top_level_owners(path) == ([], [])
     host = Settings.model_validate(
         {"github": {"repo": "example/repo"}, "workspace": {"root": str(root)}}
     )
     hosted = WorkspaceManager(host, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
     # The host route delegates nothing: the files are the worker's and it removes them itself.
     assert hosted._removers(path) == []
+
+
+def test_an_owner_with_no_account_is_reported_rather_than_silently_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A uid with no passwd entry is an account that has been deleted -- lowering
+    ISSUEBOT_AGENT_POOL_SIZE and rebuilding does that -- and nothing short of root can then
+    unlink what it left. The removal will fail; the log has to say which uid (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._top_level_owners", lambda target: ([], [4242, 4242])
+    )
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(manager._log, "warning", lambda event, **kw: warnings.append((event, kw)))
+    assert manager._removers(path) == [ME]
+    assert warnings == [("workspace_owner_unresolved", {"workspace": str(path), "uids": [4242]})]
 
 
 async def test_a_removal_that_fails_seals_the_workspace_it_leaves_behind(
