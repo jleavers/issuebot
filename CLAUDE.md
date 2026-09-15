@@ -222,10 +222,11 @@ floor, not the shipped version, and moves by hand.
   A denylist: everything it does not name stays, `.credentials.json` (the volume stays writable
   for the rotating refresh token) and claude's own per-session runtime (`projects/<project>/*.jsonl`,
   `sessions`/... transcripts, whose removal would break a concurrent session's `--resume`)
-  among them. The shipped `setting_sources: [project]` already gates the `user` source
-  (`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`), but the setting
-  defaults to every source and the rest are outside the flag's table, so the sweep runs
-  regardless; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
+  among them. `setting_sources` gates none of it: since #107 it defaults to `[user]`, which
+  is the source these surfaces *are* (`settings.json`, `CLAUDE.md`, `rules`, `skills`,
+  `commands`, `agents`), and the rest (`plugins`, `output-styles`, `workflows`,
+  `agent-memory`) are outside that flag's table altogether, so the sweep is what stands
+  between one session's plant and the next session's prompt; auto memory is read whatever the flag says, so `FIXED_ENVIRONMENT` also sets
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
   an option: it never reads the OAuth credential the login recipe writes.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
@@ -384,24 +385,41 @@ floor, not the shipped version, and moves by hand.
   the rule once, before the first envelope, and its feedback and test-plan rules answer a
   comment's author, or run a description's steps, under the ground rules rather than as
   written; `ClaudeRunner` (`claude -p
-  --output-format stream-json --permission-prompts none --strict-mcp-config`, prompt on stdin,
+  --output-format stream-json --permission-prompts none --strict-mcp-config --disallowedTools
+  WebFetch WebSearch`, prompt on stdin,
   minimal environment, silence timeout, SIGTERM then SIGKILL, per-turn logs under
-  `.issuebot/runs/<run_id>/`). `--strict-mcp-config` is unconditional for the reason
+  `.issuebot/runs/<run_id>/`). The session's authority -- its tools, its token, its account --
+  is fixed at spawn from the front matter and never by the prompt (#109, spec
+  `2026-09-14-session-authority-design.md`): `claude.disallowed_tools` ships
+  `DEFAULT_DISALLOWED_TOOLS` (`WebFetch`, `WebSearch`) and `build_argv` emits it, `[]` widens
+  it, `--strict-mcp-config` is unconditional (below, #119), so the clone's `.mcp.json` adds nothing, and
+  `claude.mcp_config` (`--mcp-config`, paths or JSON strings, default none; a path is resolved
+  against the workflow's directory in `resolve.py`, never read relative to the clone, which is
+  the session's cwd and the session's to write) is the one route
+  in; the Dockerfile asserts all three flags at build. The `<github-text>` envelope is therefore a hint to
+  the model, not the boundary: `_defang` neutralises a `<` (or the fullwidth and small forms
+  NFKC folds to it) that is followed, on the text's skeleton (`tag_skeleton`: Unicode format
+  characters, category `Cf`, removed and compatibility forms folded), by any run of
+  whitespace and an optional `/` and then the tag name; it is total over that skeleton, which
+  `check_envelopes` also walks, so text inside an envelope can never fail the render however
+  its tag is spelled, while a template or an unwrapped value that forges an edge still does.
+  `--strict-mcp-config` is unconditional for the reason
   `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
   account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than in the
   `claude-home` volume, so it is recreated with each container but shared by every session in
   one -- a server a session plants there is offered to whichever issue runs next. The flag
-  names what survives rather than what is removed (only `--mcp-config` servers, and issuebot
-  passes none), so it covers a target repository's `.mcp.json` and any MCP location a later
+  names what survives rather than what is removed (only `--mcp-config` servers, which is
+  what `claude.mcp_config` names and nothing else does), so it covers a target repository's `.mcp.json` and any MCP location a later
   `claude` adds, where clearing keys out of that file would be a denylist over an undocumented
-  format. `claude.setting_sources: [project]`, which `configs/WORKFLOW.md` sets, happens to
-  suppress the same entry; `[user, project]` does not, and the field defaults to `None`, so an
-  operator's setting is not what the confinement rests on. Both flags are asserted against
-  `claude --help` in the image build, so a release that drops either fails the build rather
-  than a session. The CI `docker` job proves both
+  format. `claude.setting_sources` suppresses nothing here: since #107 it is always passed
+  and defaults to `[user]`, which is the very source `~/.claude.json` belongs to, and it is an
+  operator's setting in any case, so it was never what the confinement rests on -- the flag
+  is. The flag is asserted against
+  `claude --help` in the image build beside `--permission-prompts` and `--disallowedTools`,
+  so a release that drops any of them fails the build rather than a session. The CI `docker` job proves both
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
-  that line precedes the login check. (The volume's own config surfaces are #101, still open.)
+  that line precedes the login check. (The volume's own config surfaces are #101, landed in #123: the sweep above.)
   Two timers, and they bound different things (#110):
   `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
   output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`
@@ -990,9 +1008,12 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (sixteen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (seventeen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
-  overrides)`), three network probes through the
+  overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
+  App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
+  the fine-grained alternative restricted to `github.repo` (#109), three network probes
+  through the
   adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
   the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
   probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the
@@ -1007,7 +1028,16 @@ floor, not the shipped version, and moves by hand.
   which the OK line names, when the worker is not in an account's group, when two accounts
   share one, or when a pool has no environment credential; warns when unset since the session
   then shares the worker's uid, when one account serves more than one concurrent session, and
-  when the pool is smaller than `agent.max_concurrent_agents`), a `database.url` check that connects and
+  when the pool is smaller than `agent.max_concurrent_agents`), a `claude.mcp_config` check
+  that stats each path it names and, with `agent.run_as` set, asks *every* account in it
+  whether it can read the file (#109, #121: the one route by which an MCP server reaches a
+  session, resolved against the workflow's directory and opened at the session's uid, so a
+  file the worker can read and a session account cannot would fail every turn with claude's
+  own startup error instead of a line here -- and under a pool the orchestrator binds
+  whichever member is free, so one that cannot read it fails whichever issue lands there,
+  which is worse than one that fails always; an inline JSON
+  document is on the command line already and only earns a warning, since `ps` reads it),
+  a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
   warns on an incident or on a page that will not answer but can never fail (advisory: a

@@ -254,15 +254,24 @@ ENV LANG=C.UTF-8 \
     ISSUEBOT_AGENT_USER=agent \
     PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
 
-# The flag assertion is the point of pinning: a release that drops --permission-prompts or
-# --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting where
-# nobody can answer, the second by loading whatever MCP config the session account's home
-# holds (#119) -- so fail the build instead. Both are passed on every turn and neither is a
-# setting, which is what puts them here rather than in `validate`. The last line is the
-# delegation itself, as the worker will use it: sudo, the account, and claude under it.
+# The flag assertions are the point of pinning: a release that drops --permission-prompts
+# or --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting
+# where nobody can answer, the second by loading whatever MCP config the session account's
+# home holds (#119) -- and one that drops --disallowedTools silently widens the session's
+# tool set (#109), so fail the build instead. --permission-prompts and --strict-mcp-config
+# are passed on every turn and neither is a setting, which is what puts them here rather
+# than in `validate`; --disallowedTools carries the setting that fixes the tool set, and
+# --mcp-config is the only route left by which a server reaches a session, so a rename there
+# would break those deployments one session at a time; --setting-sources is what keeps the
+# clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
+# passed on every turn whatever the front matter says. The last line is the delegation
+# itself, as the worker will use it: sudo, the account, and claude under it.
 RUN claude --version \
  && claude --help | grep -q -- '--permission-prompts' \
+ && claude --help | grep -q -- '--disallowedTools' \
  && claude --help | grep -q -- '--strict-mcp-config' \
+ && claude --help | grep -q -- '--mcp-config <' \
+ && claude --help | grep -q -- '--setting-sources' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \

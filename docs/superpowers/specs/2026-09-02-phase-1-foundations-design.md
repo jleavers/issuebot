@@ -160,9 +160,9 @@ failure.
 | `claude.turn_timeout_ms` | int ≥ 1 | 3600000 |
 | `claude.stall_timeout_ms` | int; ≤ 0 disables | 300000 |
 | `claude.allowed_tools` | `list[str]` | `[]` |
-| `claude.disallowed_tools` | `list[str]` | `[]` |
+| `claude.disallowed_tools` | `list[str]` | `[]` (amended by #109: `[WebFetch, WebSearch]`) |
 | `claude.append_system_prompt` | `str \| None` | `None` |
-| `claude.setting_sources` | `list[user \| project \| local] \| None`, non-empty and distinct when set (added in Phase 3; passed as `--setting-sources`) | `None` |
+| `claude.setting_sources` | `list[user \| project \| local] \| None`, non-empty and distinct when set (added in Phase 3; passed as `--setting-sources`) | `None` (amended by #107: `[user]`, always passed) |
 | `database.url` | `SecretStr \| None`, resolved (4.3) | env `DATABASE_URL` |
 | `notifications.slack.webhook_url` | `SecretStr \| None`, resolved (4.3) | env `SLACK_WEBHOOK_URL` |
 | `notifications.slack.events` | `list[str]`, each a member of `EVENT_KINDS` (section 6) | `["state_changed", "blocked"]` |

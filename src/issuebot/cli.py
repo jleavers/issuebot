@@ -126,6 +126,7 @@ def _claude_version_output(command: str) -> str | None:
 _claude_version = _claude_version_output
 _claude_auth = claude_auth_status
 _run_as_probe = probe_run_as
+_run_as_factory: Callable[[str], RunAs] = RunAs
 _run_session = run_session
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
@@ -359,6 +360,7 @@ def run_checks(
         _claude_auth_check(cfg.claude.command, run_as=session_account(cfg)),
         _setting_sources_check(cfg),
         _run_as_check(cfg),
+        _mcp_config_check(cfg),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -431,16 +433,59 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+# What a token of each kind reaches, by GitHub's own prefixes (#109). The session holds the
+# token, so its reach is the session's: a fine-grained token (`github_pat_`) is restricted to
+# the repositories it names, an installation token (`ghs_`) to its installation, while a classic
+# or an OAuth token is the account's whole reach. An unknown prefix says nothing either way.
+_TOKEN_REACH: tuple[tuple[str, str | None], ...] = (
+    ("github_pat_", None),
+    ("ghs_", None),
+    ("ghp_", "a classic token"),
+    ("gho_", "an OAuth token"),
+    ("ghu_", "a GitHub App user token"),
+)
+
+
+def _token_reach(secret: str) -> str | None:
+    """The kind of token that reaches beyond one repository, or ``None`` when it is fine."""
+    for prefix, kind in _TOKEN_REACH:
+        if secret.startswith(prefix):
+            return kind
+    return None
+
+
 def _token_check(workflow: Workflow) -> Check:
-    if workflow.config.github.token is None:
+    token = workflow.config.github.token
+    if token is None:
         return Check("github.token", "fail", "not set; export GH_TOKEN or set github.token: $VAR")
     raw_github = workflow.raw_config.get("github")
     raw_token = raw_github.get("token") if isinstance(raw_github, dict) else None
     if raw_token is None:
-        return Check("github.token", "ok", "set (from GH_TOKEN)")
-    if isinstance(raw_token, str) and ENV_REF.match(raw_token):
-        return Check("github.token", "ok", f"set (from {raw_token})")
-    return Check("github.token", "warn", "literal value in WORKFLOW.md; prefer $VAR")
+        source = "from GH_TOKEN"
+    elif isinstance(raw_token, str) and ENV_REF.match(raw_token):
+        source = f"from {raw_token}"
+    else:
+        source = None
+    reach = _token_reach(token.get_secret_value())
+    reach_detail = (
+        None
+        if reach is None
+        else (
+            f"{reach}, which reaches every repository its account can, and the session holds "
+            f"it: a fine-grained token restricted to {workflow.config.github.repo} is the "
+            "least it needs"
+        )
+    )
+    if source is None:
+        # A literal in the file is the more urgent complaint, but both facts fit one line, and
+        # a committed classic token is the worst case of all: saying only half of it would have
+        # the operator move the token into a variable and re-run to learn the rest.
+        literal = "literal value in WORKFLOW.md; prefer $VAR"
+        detail = literal if reach_detail is None else f"{literal}; {reach_detail}"
+        return Check("github.token", "warn", detail)
+    if reach_detail is None:
+        return Check("github.token", "ok", f"set ({source})")
+    return Check("github.token", "warn", f"set ({source}); {reach_detail}")
 
 
 def _workspace_check(root: Path) -> Check:
@@ -566,6 +611,86 @@ def _run_as_check(settings: Settings) -> Check:
     # uid phrase between the two would read as qualifying that instead.
     detail += f"; each at a uid other than this process's ({os.getuid()})"
     return Check(subject, status, detail)
+
+
+def _mcp_config_check(cfg: Settings) -> Check:
+    """The MCP server files ``claude.mcp_config`` names, as the session's account reads them.
+
+    The one route by which a server reaches a session (#109), so a path that is missing, is not
+    a file, or -- the case under compose, since the entry is resolved against the workflow's
+    directory and read at a *different* uid -- is unreadable by ``agent`` would otherwise fail
+    every turn with claude's own startup error, which is ``max_attempts`` opaque failures and a
+    blocked escape rather than a line here. A JSON document is on the command line already and
+    has nothing to stat.
+    """
+    subject = "claude.mcp_config"
+    entries = cfg.claude.mcp_config
+    if not entries:
+        return Check(subject, "ok", "no MCP server configured")
+    documents = [entry for entry in entries if entry.lstrip()[:1] in {"{", "["}]
+    paths = [Path(entry) for entry in entries if entry not in documents]
+    accounts = cfg.agent.run_as
+    problems = [detail for path in paths if (detail := _mcp_path_problem(path, accounts))]
+    if problems:
+        return Check(subject, "fail", "; ".join(problems))
+    parts = [_plural(len(paths), "file")] if paths else []
+    if not documents:
+        return Check(subject, "ok", " and ".join(parts))
+    parts.append(_plural(len(documents), "inline document"))
+    # An inline document is an argv element, so it is in `ps` and in the turn's start line (the
+    # latter scrubbed, #109), and an MCP server carries its credentials in its own `env` block.
+    # A file is read by `claude` and by nobody watching the process table.
+    return Check(
+        subject,
+        "warn",
+        f"{' and '.join(parts)}; an inline document is on the command line, where `ps` reads "
+        "it, so a server whose env holds a credential belongs in a file beside this one",
+    )
+
+
+def _mcp_path_problem(path: Path, accounts: Sequence[str]) -> str | None:
+    """Why a session could not load ``path``, or ``None``.
+
+    Every member of a pool is asked, not the first (#121): the orchestrator binds whichever
+    account is free to the next workspace, so a file one member cannot read is a file that
+    fails on whichever issue happens to land there, which is worse than one that fails always.
+    """
+    if not path.exists():
+        return f"{path} does not exist"
+    if not path.is_file():
+        return f"{path} is not a regular file"
+    refused = [account for account in accounts if _mcp_unreadable_by(path, account)]
+    if not refused:
+        return None
+    noun = "the account" if len(accounts) == 1 else "accounts"
+    return f"{path} is not readable by {', '.join(refused)}, {noun} the session runs as"
+
+
+# The delegated readability test answers in words rather than in an exit status: a `sudo -n`
+# that the sudoers policy refuses exits non-zero too, and reading that as "the file is not
+# readable" would have `validate` blame a file that is fine, on the same run as the
+# `agent.run_as` check that reports the real fault. Anything but these two lines means the
+# delegation did not run.
+_READABLE = "issuebot-readable"
+_UNREADABLE = "issuebot-unreadable"
+_READ_TEST = f'if test -r "$1"; then echo {_READABLE}; else echo {_UNREADABLE}; fi'
+_READ_TEST_TIMEOUT_S = 10
+
+
+def _mcp_unreadable_by(path: Path, account: str) -> bool:
+    """Whether ``account`` is definitely refused ``path``; false when it can or cannot be asked.
+
+    Delegated through ``RunAs`` rather than read here: the worker's uid reading a file proves
+    nothing about the session's, which is the whole point of the split (#75). A delegation that
+    does not work is ``agent.run_as``'s own check to report, so this one stays quiet about it
+    rather than blaming a file that is fine.
+    """
+    argv = ["sh", "-c", _READ_TEST, "sh", str(path)]
+    try:
+        completed = _run_as_factory(account).run(argv, os.environ, timeout=_READ_TEST_TIMEOUT_S)
+    except OSError, subprocess.SubprocessError:
+        return False
+    return completed.stdout.strip() == _UNREADABLE
 
 
 def _version_text(version: tuple[int, int, int]) -> str:
