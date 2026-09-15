@@ -30,7 +30,7 @@ from issuebot.cli import (
     render_stats,
     render_status,
 )
-from issuebot.config import GitHubLabels, GitHubSettings, Settings
+from issuebot.config import GitHubLabels, GitHubSettings, Settings, Workflow, load_workflow
 from issuebot.db import (
     MAX_WINDOW_DAYS,
     DatabaseError,
@@ -414,6 +414,32 @@ def test_validate_counts_the_mcp_files_and_documents_it_can_load(
     )
 
 
+def test_validate_asks_nobody_about_an_mcp_file_on_the_host_route(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Without `agent.run_as` the session is this process, so there is nobody to delegate to
+    and the worker's own stat is the whole answer (#109). The pool made that implicit -- the
+    empty tuple simply yields no account to ask (#121) -- and this pins it, because a
+    regression that fell back to one would reach a real `sudo` and read as a passing test.
+    """
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nclaude:\n  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+
+    def _never(user: str) -> object:
+        raise AssertionError(f"the host route delegated to {user!r}")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _never)
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
+
+
 def test_validate_fails_when_an_mcp_file_is_missing_or_not_a_file(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -452,7 +478,7 @@ def test_validate_asks_the_session_account_whether_it_can_read_an_mcp_file(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
     asked: list[list[str]] = []
 
     class _Refuses:
@@ -490,7 +516,7 @@ def test_validate_does_not_blame_the_file_when_sudo_itself_is_refused(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     class _SudoRefuses:
         def __init__(self, user: str) -> None:
@@ -517,7 +543,7 @@ def test_validate_accepts_a_file_the_session_account_can_read(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     class _Allows:
         def __init__(self, user: str) -> None:
@@ -529,6 +555,46 @@ def test_validate_accepts_a_file_the_session_account_can_read(
     monkeypatch.setattr("issuebot.cli._run_as_factory", _Allows)
     assert main(["validate", "--workflow", str(path)]) == 0
     assert "[ OK ] claude.mcp_config: 1 file" in capsys.readouterr().out
+
+
+def test_validate_asks_every_account_in_a_pool_whether_it_can_read_an_mcp_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The orchestrator binds whichever member is free (#121), so a file one account cannot
+    read fails whichever issue lands there -- which is worse than one that fails always, and
+    is why the check asks the whole pool rather than its first member."""
+    (tmp_path / "servers.json").write_text("{}")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nagent:\n  run_as: [agent-1, agent-2, agent-3]\nclaude:\n"
+        "  mcp_config:\n    - servers.json\n---\nBody",
+    )
+    monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    asked: list[str] = []
+
+    class _RefusesOne:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
+        def run(self, argv: list[str], environ: object, timeout: float) -> object:
+            asked.append(self.user)
+            answer = "issuebot-unreadable" if self.user == "agent-2" else "issuebot-readable"
+            return subprocess.CompletedProcess(argv, 0, f"{answer}\n", "")
+
+    monkeypatch.setattr("issuebot.cli._run_as_factory", _RefusesOne)
+    assert main(["validate", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert (
+        f"[FAIL] claude.mcp_config: {tmp_path / 'servers.json'} is not readable by agent-2, "
+        "1 of the 3 accounts the session may run as" in out
+    )
+    # Every member, not the first: the one that answered no is in the middle of the pool.
+    assert asked == ["agent-1", "agent-2", "agent-3"]
 
 
 def test_validate_stays_quiet_when_the_delegation_itself_is_broken(
@@ -546,7 +612,7 @@ def test_validate_stays_quiet_when_the_delegation_itself_is_broken(
         "  mcp_config:\n    - servers.json\n---\nBody",
     )
     monkeypatch.setenv("GH_TOKEN", "github_pat_0123456789abcdef")
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: None)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
 
     def _explode(user: str) -> object:
         raise OSError("no sudo here")
@@ -3141,18 +3207,145 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
     probed: list[str] = []
-    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda user, environ: probed.append(user))
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe", lambda accounts, environ: probed.extend(accounts) or []
+    )
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     uid = os.getuid()
-    # The account's own uid is named when it resolves on this host and left out when it does
-    # not, so the assertion is on the two parts that do not depend on /etc/passwd.
-    assert "[ OK ] agent.run_as: agent" in out
+    # One account and three concurrent sessions is the sharing #121 is about, so it warns --
+    # and it still names both sides of the uid comparison the probe made (#111). The account's
+    # own uid is named when it resolves on this host and left out when it does not, so the
+    # assertion is on the parts that do not depend on /etc/passwd.
+    assert "[WARN] agent.run_as: agent" in out
     assert (
-        f"the session runs as a separate account, at a uid other than this process's ({uid})" in out
+        f"the session runs as a separate account, at a uid other than this process's ({uid})"
+        ", but all 3 concurrent sessions share it" in out
     )
     assert probed == ["agent"]
+    assert "17 checks: 0 failed, 2 warnings" in out
+
+
+def test_run_once_takes_the_workspaces_own_account_from_the_pool(
+    tmp_path: Path, fake_github: FakeGitHub
+) -> None:
+    """One issue means one account (#121), and the same one every time it is dispatched."""
+    from issuebot.agent.accounts import AccountRegistry
+    from issuebot.cli import _with_bound_account
+
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    workflow = _workflow_with(tmp_path, root, "agent-1,agent-2")
+    issue = fake_github.add_issue("Sample", labels=("issuebot/todo",), number=7)
+    bound = _with_bound_account(workflow, issue)
+    assert bound.config.agent.run_as == ("agent-1",)
+    assert not bound.config.agent.run_as_pooled
+    assert AccountRegistry(root, ("agent-1", "agent-2")).bound(issue.identifier) == "agent-1"
+    # Read back from the record, not recomputed: a rework writes the clone the first run made.
+    assert _with_bound_account(workflow, issue).config.agent.run_as == ("agent-1",)
+    # One account is no pool, so nothing is bound and nothing is written.
+    single = _workflow_with(tmp_path, root, "agent")
+    assert _with_bound_account(single, issue) is single
+
+
+def test_run_once_refuses_an_account_a_live_worker_is_running(
+    tmp_path: Path, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open workspace is what a running session looks like from another process (#121):
+    taking its account would put two sessions at one uid, which is what the pool removes."""
+    from issuebot.agent import AgentError
+    from issuebot.cli import _with_bound_account
+
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    monkeypatch.setattr(
+        "issuebot.agent.accounts.AccountRegistry.busy_accounts",
+        lambda self: {"agent-1", "agent-2"},
+    )
+    workflow = _workflow_with(tmp_path, root, "agent-1,agent-2")
+    with pytest.raises(AgentError, match="every session account is busy"):
+        _with_bound_account(workflow, fake_github.add_issue("Other", number=8))
+
+
+def _workflow_with(tmp_path: Path, root: Path, accounts: str) -> Workflow:
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text(
+        "---\n"
+        "github:\n  repo: example/repo\n"
+        f"workspace:\n  root: {root}\n"
+        "---\n\nPrompt {{ issue.identifier }}\n"
+    )
+    return load_workflow(
+        path, environ={"GH_TOKEN": "t", "ISSUEBOT_AGENT_USER": accounts}, overlay=False
+    )
+
+
+def test_validate_reports_a_pool_of_session_accounts(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2,agent-3")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "pool-credential")
+    probed: list[str] = []
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe", lambda accounts, environ: probed.extend(accounts) or []
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] agent.run_as: agent-1, agent-2, agent-3; a pool of 3, "
+        "one account per concurrent session" in out
+    )
+    # The pool line carries #111's evidence too: the probe compared every member's uid with
+    # this process's, so the line says so rather than leaving the reader to take it on trust.
+    # (No member resolves on this host, so none is named with its uid -- which is the fallback.)
+    assert f"each at a uid other than this process's ({os.getuid()})" in out
+    assert probed == ["agent-1", "agent-2", "agent-3"]
     assert "17 checks: 0 failed, 1 warnings" in out
+
+
+def test_validate_fails_a_pool_with_no_credential_in_the_environment(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The pool's accounts share no login on purpose (#121), so the credential has to be one
+    `claude` needs no file for."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] agent.run_as: a pool of session accounts needs a credential" in out
+    assert "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY" in out
+
+
+def test_validate_fails_when_the_worker_cannot_give_a_workspace_to_the_account(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
+    monkeypatch.setattr(
+        "issuebot.cli._run_as_probe",
+        lambda accounts, environ: [
+            f"this process is not a member of {a}'s group (gid 1001)" for a in accounts
+        ],
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] agent.run_as: this process is not a member of agent's group" in out
+
+
+def test_validate_warns_when_a_pool_is_smaller_than_the_concurrency(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent-1,agent-2")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.setattr("issuebot.cli._run_as_probe", lambda accounts, environ: [])
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "fewer than agent.max_concurrent_agents (3): dispatch is capped by the pool" in out
 
 
 def test_validate_fails_when_the_session_account_cannot_be_reached(
@@ -3162,7 +3355,9 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     monkeypatch.setenv("ISSUEBOT_AGENT_USER", "agent")
     monkeypatch.setattr(
         "issuebot.cli._run_as_probe",
-        lambda user, environ: f"cannot run as {user!r}: sudo: a password is required",
+        lambda accounts, environ: [
+            f"cannot run as {a!r}: sudo: a password is required" for a in accounts
+        ],
     )
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out

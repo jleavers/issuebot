@@ -1,4 +1,5 @@
-"""The image draws the line between the session and the worker (#75), and CI proves it.
+"""The image draws the line between the session and the worker (#75), and between one
+session and the next (#121), and CI proves both.
 
 This session cannot build the image; the CI ``docker`` job runs the checks. This pins the
 shape those checks depend on, so a drift in the Dockerfile, the compose file or the job
@@ -20,11 +21,39 @@ SERVICES = yaml.safe_load(COMPOSE)["services"]
 
 def test_two_accounts_and_one_delegation() -> None:
     assert "useradd --create-home --uid 1000 --shell /bin/bash issuebot" in DOCKERFILE
-    assert "useradd --create-home --uid 1001 --shell /bin/bash agent" in DOCKERFILE
-    assert "'issuebot ALL=(agent) NOPASSWD: ALL'" in DOCKERFILE
+    assert "useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent" in DOCKERFILE
+    assert "'issuebot ALL=(%agents) NOPASSWD: ALL'" in DOCKERFILE
     assert "closefrom_override" in DOCKERFILE
     assert "chmod 4750 /usr/bin/sudo" in DOCKERFILE and "chgrp issuebot /usr/bin/sudo" in DOCKERFILE
     assert "ISSUEBOT_AGENT_USER=agent" in DOCKERFILE
+
+
+def test_the_session_accounts_are_a_pool_the_worker_may_give_a_workspace_to() -> None:
+    """#121: N accounts in one group the sudo rule names, each with a home of its own, and the
+    worker a member of each account's own group -- the one thing `share_with` needs."""
+    assert "ARG ISSUEBOT_AGENT_POOL_SIZE=3" in DOCKERFILE
+    assert "groupadd --system agents" in DOCKERFILE
+    assert '--uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"' in DOCKERFILE
+    assert 'usermod --append --groups "${account}" issuebot' in DOCKERFILE
+    # Every session home is closed to the worker's group membership, which is why it is 0700.
+    assert 'chmod 0700 "/home/${account}"' in DOCKERFILE
+    assert 'install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"' in (
+        DOCKERFILE
+    )
+    assert 'test "$(sudo -n -u agent-1 id -u)" = 1011' in DOCKERFILE
+
+
+def test_ci_proves_one_session_cannot_enter_another_sessions_workspace() -> None:
+    assert "from issuebot.agent.accounts import seal, share_with" in CI
+    assert 'test "$(stat -c "%u %g %a" /workspaces/one)" = "1000 $(id -g agent-1) 1770"' in CI
+    assert 'test "$(id -g agent-1)" != "$(id -g agent-2)"' in CI
+    assert "wrote into the other session workspace" in CI
+    assert "listed the other session workspace" in CI
+    assert "a pool account can invoke sudo" in CI
+    # An idle workspace is closed to its own account too: it outlives the run, and there
+    # are fewer accounts than workspaces.
+    assert 'test "$(stat -c "%u %g %a" /workspaces/idle)" = "1000 $(id -g agent-1) 700"' in CI
+    assert "a session entered a sealed workspace bound to its own account" in CI
 
 
 def test_the_workers_code_and_claude_are_roots_and_home_is_not_pinned() -> None:
@@ -112,7 +141,9 @@ def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
     runs as an account that is not the worker's (#102): outside group ``issuebot``, which is
     the only group the ``4750`` sudo binary is executable by, and with no shell to log in to."""
     assert "useradd --create-home --uid 1002 --shell /usr/sbin/nologin web" in DOCKERFILE
-    assert "chmod 0750 /home/issuebot /home/agent /home/web" in DOCKERFILE
+    # 0750 for the two homes no pool loop touches; every session account's is 0700 above, since
+    # the worker is a member of each of their groups and of none of these.
+    assert "chmod 0750 /home/issuebot /home/web" in DOCKERFILE
     # No line adds it to the worker's group, in any of the spellings that could (CI's `id -Gn`
     # is the invariant itself), and the one rule still names the worker alone.
     assert not re.search(
@@ -120,7 +151,7 @@ def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
         r"|gpasswd\b.*\bweb\b|adduser\b.*\bweb\b",
         DOCKERFILE,
     )
-    assert re.findall(r"'(\w+) ALL=\(\w+\) NOPASSWD: ALL'", DOCKERFILE) == ["issuebot"]
+    assert re.findall(r"'(\w+) ALL=\(%?\w+\) NOPASSWD: ALL'", DOCKERFILE) == ["issuebot"]
     # The image's default account stays the worker's: compose is where the web selects its own.
     assert re.findall(r"^USER (\S+)$", DOCKERFILE, re.M) == ["issuebot"]
 

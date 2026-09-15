@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -16,6 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, get_args
 
+from issuebot.agent.accounts import (
+    REGISTRY_DIR,
+    SEALED_DIR_MODE,
+    seal,
+    session_account,
+    share_with,
+)
 from issuebot.agent.boundary import SESSION_FILE, Boundary, BoundaryError
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
@@ -41,7 +49,8 @@ STATE_DIR = ".issuebot"
 # sticky: the agent creates what it likes inside them but can neither unlink nor rename the
 # worker's entries, which is what keeps ``session.json`` and ``runs/`` the worker's own. What
 # the worker reads back out of them is declared, and guarded, in ``issuebot.agent.boundary``.
-SHARED_DIR_MODE = 0o1777
+# The mode and the group come from ``share_with`` (#121): the bound account's group and nobody
+# else's, so a sibling session at another uid cannot enter the directory at all.
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
@@ -135,10 +144,15 @@ class WorkspaceManager:
         # the result is built, before the cut that keeps their end.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
         # The account the clone, the hooks and the post-clone setup run as (#75), or None.
-        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
+        # One account: the orchestrator narrows a pool to this workspace's bound member before
+        # it builds the manager (#121), so nothing below here has a pool to reason about.
+        self._account = session_account(settings)
+        self._runas = RunAs(self._account) if self._account else None
         # The worker's side of the line (#104): every read of what the session leaves in a
-        # workspace goes through it, and the worker's own state is created through it.
-        self._boundary = Boundary.current(settings.agent.run_as)
+        # workspace goes through it, and the worker's own state is created through it. Its
+        # session uid is the bound account's alone, so under a pool a workspace's boundary
+        # names the one member that may have written in it (#121).
+        self._boundary = Boundary.current(self._account)
         self._log = get_logger(__name__)
 
     @property
@@ -152,6 +166,12 @@ class WorkspaceManager:
         path = (self.root / workspace_key(identifier)).resolve()
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
+        if path.name == REGISTRY_DIR:
+            # The worker keeps its account bindings there (#121), and a workspace is
+            # removed wholesale. No identifier reaches it today -- one is `<repo>-<number>`,
+            # so a key always ends in a digit -- but the record is not something to leave
+            # resting on how identifiers happen to be spelled.
+            raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
     def is_contained(self, path: Path) -> bool:
@@ -163,9 +183,18 @@ class WorkspaceManager:
     async def create_or_reuse(self, issue: Issue) -> Workspace:
         path = self.path_for(issue.identifier)
         if self._is_complete(path):
+            # Re-applied on reuse, not only on creation: the mode and the group are what keep a
+            # sibling session out (#121), and a workspace whose bound account changed -- the
+            # pool shrank, or the setting did -- would otherwise be one its own session could
+            # not enter. Idempotent, and the directories are the worker's either way.
+            self._share(path)
+            self._share(path / ".issuebot")
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
+            # A remnant is a workspace whose creation did not finish, or one whose binding
+            # moved (#121): either way `_remove_tree` opens it to each account that owns
+            # something in it, which a sealed or re-bound directory otherwise refuses.
             self._log.warning("workspace_remnant_removed", workspace=str(path))
             await self._remove_tree(path, "cannot remove remnant")
         try:
@@ -176,8 +205,9 @@ class WorkspaceManager:
             ) from exc
         try:
             # The directory first, and the worker's: the clone lands inside it, so under
-            # agent.run_as it is shared (sticky) rather than the agent's own (#75).
-            path.mkdir()
+            # agent.run_as it is shared (sticky) rather than the agent's own (#75). Created
+            # closed and opened by `_share`, so it is never briefly wider than it ends up.
+            path.mkdir(mode=SEALED_DIR_MODE)
             self._share(path)
         except OSError as exc:
             raise AgentError(
@@ -212,21 +242,58 @@ class WorkspaceManager:
     def _is_complete(self, path: Path) -> bool:
         """A clone whose creation finished, in a workspace whose state is still the worker's.
 
-        The clone is the session's (#75) and only has to be there; the state directory, the
-        run directory and the sentinel are read back through the boundary (#104), so each is
-        a directory or a regular file the worker owns, reached through no symbolic link.
+        The clone is the session's (#75) and only has to be there -- but under a pool it has to
+        be *this* workspace's bound account's (#121), since a binding that moved leaves a tree
+        the new account cannot write. The state directory, the run directory and the sentinel
+        are read back through the boundary (#104), so each is a directory or a regular file the
+        worker owns, reached through no symbolic link.
         """
         if not (path / ".git").is_dir():
             return False
-        return (
+        if not (
             self._boundary.is_own_dir(path, (STATE_DIR,))
             and self._boundary.is_own_dir(path, (STATE_DIR, "runs"))
             and self._boundary.is_own_file(path, (STATE_DIR, CREATED_MARKER))
-        )
+        ):
+            return False
+        # And the clone has to belong to the account that will work in it (#121). A binding
+        # that moved -- the pool shrank, the setting changed -- leaves a tree the new account
+        # cannot write, and git would fail every command rather than say so: re-clone instead.
+        return _owned_by(path / ".git", self._account)
 
     def _share(self, path: Path) -> None:
-        if self._runas is not None:
-            os.chmod(path, SHARED_DIR_MODE)
+        if self._account is not None:
+            share_with(path, self._account)
+
+    def seal(self, path: Path) -> None:
+        """Close a workspace the run has finished with (#121).
+
+        A workspace outlives its run -- an issue in ``review`` keeps its clone for days -- and
+        there are fewer accounts than workspaces, so an idle one that stayed open would
+        eventually sit beside a session running as the same account. Sealed, nothing but the
+        worker can traverse into it, and the next dispatch opens it again for its own account.
+        Never raises: this runs on the way out of a run.
+        """
+        if self._account is not None:
+            seal(path)
+
+    def seal_idle(self) -> None:
+        """Seal every workspace under the root: what a worker does before it claims anything.
+
+        A run's own seal is in its ``finally``, so the only way one stays open is a worker that
+        was killed outright. Startup is where that is put right, since nothing is running yet.
+        """
+        if self._account is None:
+            return
+        try:
+            children = list(self.root.iterdir())
+        except OSError:
+            return
+        for child in children:
+            # Through the boundary (#104): a workspace is a directory of the worker's, reached
+            # without following a link, so a name a session planted here is not sealed as one.
+            if child.name != REGISTRY_DIR and self._boundary.is_own_dir(self.root, (child.name,)):
+                seal(child)
 
     def _make_state_dir(self, path: Path) -> None:
         state = path / ".issuebot"
@@ -234,7 +301,7 @@ class WorkspaceManager:
             # Under agent.run_as the clone is the agent's, so a repository that ships a
             # `.issuebot` entry has put one where the worker's state goes: refuse, rather than
             # keep state in a directory the session owns.
-            state.mkdir(exist_ok=self._runas is None)
+            state.mkdir(mode=SEALED_DIR_MODE, exist_ok=self._runas is None)
             self._share(state)
             (state / "runs").mkdir(exist_ok=self._runas is None)
         except FileExistsError as exc:
@@ -269,7 +336,13 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear the loadable config a prior or concurrent session may have left in the
-        account's shared ``~/.claude``, immediately before each of this session's turns (#101).
+        account's ``~/.claude``, immediately before each of this session's turns (#101).
+
+        Which session that is depends on the route (#121): one account is shared by everything
+        running in the container, while a pool leaves only the next session bound to this
+        member -- so under a pool the sweep before turn 1 is the load-bearing one, and it is
+        also what clears this run's own ``before_run`` hook, which runs as the account before
+        the loop starts.
 
         Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
         left untouched, and the container is the boundary regardless. Off the event loop, since
@@ -289,8 +362,19 @@ class WorkspaceManager:
         path = self.path_for(identifier)
         if not path.exists():
             return False
-        await self.run_hook("before_remove", path)
-        await self._remove_tree(path, "cannot remove workspace")
+        # Open again: `before_remove` runs as the account and the delegated unlink is its own,
+        # and a workspace reaching this is a sealed one nine times in ten (#121).
+        with contextlib.suppress(AgentError):
+            self._share(path)
+        try:
+            await self.run_hook("before_remove", path)
+            await self._remove_tree(path, "cannot remove workspace")
+        finally:
+            # A removal that failed leaves the directory on disk, and an open one would be
+            # readable by the next session bound to the same account (#121). The caller only
+            # logs the failure, so closing it again is this method's job.
+            if path.exists():
+                self.seal(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
 
@@ -303,10 +387,61 @@ class WorkspaceManager:
         return await self._run_script(name, script, workspace)
 
     async def _remove_tree(self, path: Path, what: str) -> None:
-        """Delete a workspace: the agent's files as the agent (#75), then the worker's own."""
-        if self._runas is not None:
-            await asyncio.to_thread(self._runas.remove_tree, path)
-        _remove_path(path, what)
+        """Delete a workspace: the agent's files as the agent (#75), then the worker's own.
+
+        Under a pool the files inside may be a *previous* binding's (#121): turning a pool on
+        over a live ``/workspaces``, or narrowing ``agent.run_as``, leaves a clone whose
+        directories belong to an account this manager is not. Neither the new account (it owns
+        nothing there) nor the worker (it owns the workspace but not the directories in the
+        clone) could then
+        unlink it, and the issue would fail every attempt on a remnant nothing removes. So the
+        delegated remove runs as every account that owns something at the top of the tree as
+        well as as this workspace's own. Only the removal is derived from the directory; the
+        *binding* never is, and cannot be widened by this: the sudo rule names the pool's group
+        and refuses anything else, exactly as it does today. ``remove_tree`` is uid-scoped,
+        idempotent and swallows its own failures, so the extra passes cost a ``sudo`` each.
+
+        Each pass needs the directory *open to the account it delegates to*, and a workspace
+        arriving here is usually closed to all of them: sealed (``0700``) after its run, or
+        after ``seal_idle``, and open to the current binding's group at best, which is the one
+        account that owns nothing in a tree a previous binding made. So it is re-shared per
+        pass, and sealed again if the worker's own removal then fails, so a tree that stays on
+        disk is never left wider than it arrived.
+        """
+        for account in self._removers(path):
+            with contextlib.suppress(AgentError):
+                share_with(path, account)
+            await asyncio.to_thread(RunAs(account).remove_tree, path)
+        try:
+            _remove_path(path, what)
+        except AgentError:
+            self.seal(path)
+            raise
+
+    def _removers(self, path: Path) -> list[str]:
+        """This workspace's account first, then any other that owns an entry at the top of it.
+
+        Empty on the host route: no account is configured, so any account to delegate to could
+        only come from the directory -- and a *binding* read off the directory is the one thing
+        this module refuses. (A deployment that turned ``agent.run_as`` off over workspaces an
+        account already cloned has a tree the worker cannot remove, exactly as before #121; the
+        answer there is to turn it back on, not to guess a uid.)
+        """
+        if self._account is None:
+            return []
+        accounts = [self._account]
+        owners, unresolved = _top_level_owners(path)
+        for owner in owners:
+            if owner not in accounts:
+                accounts.append(owner)
+        if unresolved:
+            # Nothing here can remove what a deleted account left: say which uid, so an
+            # operator can recreate it or clear the tree, rather than leave the removal to
+            # fail with a permission error naming nobody.
+            self._log.warning(
+                "workspace_owner_unresolved", workspace=str(path), uids=sorted(set(unresolved))
+            )
+        return accounts
 
     async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
         # Off the event loop: the delegated kill is a sudo subprocess with its own timeout,
@@ -493,6 +628,50 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"expected an integer, got {value!r}")
     return value
+
+
+def _top_level_owners(path: Path) -> tuple[list[str], list[int]]:
+    """The accounts owning ``path`` and its direct children, the worker's own uid aside, and
+    the uids among them that resolve to no account at all.
+
+    A clone made by another account is ``.git`` and a working tree that account owns, so one
+    level is enough to name it; deeper entries cannot belong to a uid this misses, since a
+    session can only create files as itself. The answer is a list of extra removal passes,
+    never a decision, so an owner that will not resolve is skipped rather than raised on -- but
+    it is reported, because it is the one shape of this that nothing can put right. A uid with
+    no passwd entry is an account that has been *deleted* (lowering ``ISSUEBOT_AGENT_POOL_SIZE``
+    and rebuilding the image does exactly that), and nothing short of root can then unlink what
+    it left; the uid is what an operator needs to recreate the account or clear the tree by
+    hand, and without it the removal would just fail with a permission error naming nobody.
+    """
+    me = os.getuid()
+    owners: list[str] = []
+    unresolved: list[int] = []
+    entries = [path]
+    with contextlib.suppress(OSError):
+        entries.extend(sorted(path.iterdir()))
+    for entry in entries:
+        try:
+            uid = entry.lstat().st_uid
+        except OSError:
+            continue
+        if uid == me:
+            continue
+        try:
+            owners.append(pwd.getpwuid(uid).pw_name)
+        except KeyError:
+            unresolved.append(uid)
+    return owners, unresolved
+
+
+def _owned_by(path: Path, account: str | None) -> bool:
+    """True when ``path`` belongs to ``account``; False when either cannot be resolved."""
+    if account is None:
+        return True
+    try:
+        return path.lstat().st_uid == pwd.getpwnam(account).pw_uid
+    except OSError, KeyError:
+        return False
 
 
 def _remove_path(path: Path, what: str) -> None:

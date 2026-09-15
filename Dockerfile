@@ -134,20 +134,49 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
    && PATH="/opt/node/bin:${PATH}" /opt/node/bin/npm --version; \
     fi
 
-# Two accounts, one privilege each (#75). `issuebot` (uid 1000) is the worker: it holds
-# GH_TOKEN, the database URL and the Slack webhook, parses what the session writes and decides
-# every label move. `agent` (uid 1001) is the session: `claude -p`, every hook, the clone and
+# The worker and the session are different accounts (#75), and so is one session from the
+# next (#121). `issuebot` (uid 1000) is the worker: it holds GH_TOKEN, the database URL and
+# the Slack webhook, parses what the session writes and decides every label move. `agent`
+# (uid 1001) is the session: `claude -p`, every hook, the clone and
 # the post-clone setup run as it, and the login it authenticates with lives in its own home
 # (compose mounts `claude-home` at /home/agent/.claude). Nothing the session can read or
 # write at its own uid is an input to the worker: /app is root's and writable by neither,
 # /home/issuebot and /home/agent are closed to the other account, /proc/<worker>/environ is
 # unreadable across the uid line, and the worker's state inside a workspace sits in sticky
 # directories it owns. The worker stays unprivileged: sudo carries exactly one rule, issuebot
-# may become agent and nobody else, and the binary is executable by root and group issuebot
-# alone, so the session's uid cannot invoke sudo at all -- not even to be refused by it.
+# may become a session account and nobody else, and the binary is executable by root and
+# group issuebot alone, so a session's uid cannot invoke sudo at all -- not even to be
+# refused by it.
 # `closefrom_override` is for the one descriptor the worker passes across the uid change, the
 # session's environment (issuebot.agent.runas); `!use_pty` keeps a turn's stream-json byte for
 # byte when `docker compose run` gives the worker a terminal.
+# A pool of them, in fact (#121). `agent` alone is one uid for the whole deployment, so with
+# `agent.max_concurrent_agents` above 1 every concurrent session shares it: the workspaces are
+# siblings under a traversable root and each one is that account's to write, which is no
+# boundary between an issue anybody may open and an honest issue's working tree. So the image
+# also builds `agent-1` .. `agent-N` (uids 1011 upwards, ISSUEBOT_AGENT_POOL_SIZE), and
+# `agent.run_as` may name the pool -- as a YAML list, or a comma-separated ISSUEBOT_AGENT_USER
+# -- for the orchestrator to bind one member per running slot.
+# Every session account is in group `agents`, and the sudo rule is `(%agents)`: the worker may
+# become any of them and nothing else. The worker is *not* in `agents`, and the binary is still
+# executable by root and group issuebot alone, so no session account can invoke sudo.
+# The worker *is* a supplementary member of each session account's own group, which is the one
+# thing `share_with` needs: POSIX lets the owner of a file change its group only to one it
+# belongs to, and a workspace is the worker's directory given to the bound account's group
+# (1770). That membership buys the worker nothing else -- each home is 0700 -- and it is the
+# more privileged side of the line in any case.
+# The pool accounts get a `.claude` of their own and no volume: a pool shares no login between
+# its accounts on purpose, and takes its credential from the environment instead (#121, the
+# spec). `agent` keeps /home/agent/.claude, which is where compose mounts `claude-home`.
+# A third kind of account, `web` (uid 1002), for the dashboard (#102). compose builds the `web`
+# service from this image and selects it with `user: web`; nothing in the image runs as it by
+# default, since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP
+# from a browser and needs no privilege transition at all, so it must not carry the worker's:
+# outside group issuebot it cannot execute sudo, and outside group `agents` the rule names
+# nothing it could become; it owns nothing the worker or a session writes -- its home is closed
+# to all of them and theirs to it, and /app is root's. `nologin` because no shell is ever opened
+# as it: `issuebot web` is the one process, and a `docker compose exec web` still runs whatever
+# command it names.
 # The split needs one thing of git. A workspace directory is the worker's and sticky, so the
 # session cannot unlink the state kept there, while the clone inside it is the session's own --
 # and git refuses to work in a repository whose worktree belongs to another account (`detected
@@ -159,29 +188,33 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # the more privileged side of the line. The path is the image's own -- the `install -d` below,
 # the VOLUME further down and compose's mount -- so a `workspace.root` pointed elsewhere inside
 # the container would need its own entry.
-# A third account, `web` (uid 1002), for the dashboard (#102). compose builds the `web` service
-# from this image and selects it with `user: web`; nothing in the image runs as it by default,
-# since `USER issuebot` below is the worker and `validate`. The dashboard takes HTTP from a
-# browser and needs no privilege transition at all, so it must not carry the worker's: outside
-# group issuebot it cannot execute sudo, let alone use the rule, and it owns nothing either
-# account writes -- its home is closed to both of them and theirs to it, and /app is root's.
-# `nologin` because no shell is ever opened as it: `issuebot web` is the one process, and a
-# `docker compose exec web` still runs whatever command it names.
-RUN useradd --create-home --uid 1000 --shell /bin/bash issuebot \
- && useradd --create-home --uid 1001 --shell /bin/bash agent \
- && useradd --create-home --uid 1002 --shell /usr/sbin/nologin web \
- && chmod 0750 /home/issuebot /home/agent /home/web \
- && install -d -m 0755 -o issuebot -g issuebot /workspaces \
- && git config --system --add safe.directory '/workspaces/*' \
- && install -d -m 0700 -o agent -g agent /home/agent/.claude \
- && printf '%s\n' \
+ARG ISSUEBOT_AGENT_POOL_SIZE=3
+RUN set -eu; \
+    accounts=agent; \
+    for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do accounts="${accounts} agent-${n}"; done; \
+    groupadd --system agents; \
+    useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
+    useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
+    useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
+    for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
+      useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
+    done; \
+    for account in ${accounts}; do \
+      chmod 0700 "/home/${account}"; \
+      install -d -m 0700 -o "${account}" -g "${account}" "/home/${account}/.claude"; \
+      usermod --append --groups "${account}" issuebot; \
+    done; \
+    chmod 0750 /home/issuebot /home/web; \
+    install -d -m 0755 -o issuebot -g issuebot /workspaces; \
+    git config --system --add safe.directory '/workspaces/*'; \
+    printf '%s\n' \
       'Defaults:issuebot !use_pty, !syslog, !lecture, closefrom_override' \
-      'issuebot ALL=(agent) NOPASSWD: ALL' \
-      > /etc/sudoers.d/issuebot \
- && chmod 0440 /etc/sudoers.d/issuebot \
- && visudo -cf /etc/sudoers.d/issuebot \
- && chgrp issuebot /usr/bin/sudo \
- && chmod 4750 /usr/bin/sudo
+      'issuebot ALL=(%agents) NOPASSWD: ALL' \
+      > /etc/sudoers.d/issuebot; \
+    chmod 0440 /etc/sudoers.d/issuebot; \
+    visudo -cf /etc/sudoers.d/issuebot; \
+    chgrp issuebot /usr/bin/sudo; \
+    chmod 4750 /usr/bin/sudo
 
 # The worker's code, venv and interpreter: root's, readable by both accounts and writable by
 # neither (the bytecode is compiled in the builder, so nothing needs to write here at runtime).
@@ -240,7 +273,9 @@ RUN claude --version \
  && claude --help | grep -q -- '--mcp-config <' \
  && claude --help | grep -q -- '--setting-sources' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
- && sudo -n -H -u agent claude --version
+ && sudo -n -H -u agent claude --version \
+ && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \
+      || { test "$(sudo -n -u agent-1 id -u)" = 1011 && sudo -n -H -u agent-1 claude --version; }; }
 
 WORKDIR /app
 # Mount the DIRECTORY holding WORKFLOW.md here, never the file itself: a single-file bind

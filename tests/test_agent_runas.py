@@ -23,6 +23,12 @@ import pytest
 from structlog.testing import capture_logs
 
 from issuebot.agent import runas as runas_module
+from issuebot.agent.accounts import (
+    SEALED_DIR_MODE,
+    WORKSPACE_DIR_MODE,
+    settings_with_run_as,
+)
+from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import (
     CLAUDE_HOME_MEMORY_DIR,
     CLAUDE_HOME_SWEEP,
@@ -33,7 +39,7 @@ from issuebot.agent.runas import (
     anonymous_fd,
 )
 from issuebot.agent.runner import ClaudeRunner
-from issuebot.agent.workspace import SHARED_DIR_MODE, WorkspaceManager
+from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
 from issuebot.github import Issue
@@ -492,8 +498,9 @@ def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> Non
 
 def test_run_as_setting_accepts_an_account_name_and_nothing_else() -> None:
     cfg = Settings.model_validate({"github": {"repo": "o/r"}, "agent": {"run_as": "agent"}})
-    assert cfg.agent.run_as == "agent"
-    assert Settings.model_validate({"github": {"repo": "o/r"}}).agent.run_as is None
+    assert cfg.agent.run_as == ("agent",)
+    assert not cfg.agent.run_as_pooled
+    assert Settings.model_validate({"github": {"repo": "o/r"}}).agent.run_as == ()
     with pytest.raises(ValueError, match="account name"):
         Settings.model_validate({"github": {"repo": "o/r"}, "agent": {"run_as": "-u root"}})
 
@@ -618,17 +625,241 @@ async def test_workspace_creation_and_removal_run_as_the_account(
     assert (state / "who").read_text().strip() == ME
     assert (state / "created").is_file() and (state / "runs").is_dir()
     for shared in (ws.path, state):
-        assert stat.S_IMODE(shared.stat().st_mode) == SHARED_DIR_MODE
+        assert stat.S_IMODE(shared.stat().st_mode) == WORKSPACE_DIR_MODE
     calls = [json.loads(line) for line in record.read_text().splitlines()]
     commands = [c["command"][c["command"].index("--") + 1 :] for c in calls]
     assert commands[0][:3] == ["gh", "repo", "clone"], commands
     assert all(c["u"] == ME for c in calls)
-    # Reuse, then removal: the account's files go through the helper, the worker's own after.
+    # A finished run seals the workspace: it stays on disk for the next dispatch but is closed
+    # to every account until then (#121).
+    manager.seal(ws.path)
+    assert stat.S_IMODE(ws.path.stat().st_mode) == SEALED_DIR_MODE
+    # Reuse opens it again, and re-applies the group as well as the mode, so a workspace whose
+    # bound account changed is not left open to the previous one.
     again = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert not again.created
+    for shared in (ws.path, state):
+        assert stat.S_IMODE(shared.stat().st_mode) == WORKSPACE_DIR_MODE
+    # A clone owned by another account is a remnant, not a workspace to reuse: git would fail
+    # every command in it rather than say so.
+    manager.seal(ws.path)
+    manager.seal_idle()
+    assert stat.S_IMODE(ws.path.stat().st_mode) == SEALED_DIR_MODE
     assert await manager.remove("example-42") is True
     assert not ws.path.exists()
     assert [c["command"][-2] for c in calls[len(commands) :]] == [] or any(
         "remove" in c["command"]
         for c in [json.loads(line) for line in record.read_text().splitlines()]
     )
+
+
+async def test_a_removal_runs_as_every_account_that_owns_something_in_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-cloning a workspace whose binding moved means removing the *previous* account's
+    files, which neither the new account nor the worker can unlink (#121). Each pass therefore
+    delegates to an account that owns something there, with the directory opened to it first:
+    a sealed workspace is one nothing but the worker can enter, and one opened to the current
+    binding is closed to the one whose files are actually inside.
+    """
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    passes: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        runas_module.RunAs,
+        "remove_tree",
+        lambda self, target: passes.append((self.user, stat.S_IMODE(target.stat().st_mode))),
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    manager.seal(path)
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+    # `nobody` exists everywhere this runs and owns nothing here: it stands for the previous
+    # binding, whose files the current account could not unlink. Sharing with it fails (the
+    # worker is in no group of its), which is suppressed -- the pass is still attempted.
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._top_level_owners", lambda target: (["nobody", ME], [])
+    )
+    await manager._remove_tree(path, "cannot remove remnant")
+    # The bound account first, then the other owner, each named once; and no pass sees the
+    # sealed directory it arrived as.
+    assert passes == [(ME, WORKSPACE_DIR_MODE), ("nobody", WORKSPACE_DIR_MODE)]
+    assert not path.exists()
+
+
+def test_the_owners_a_removal_delegates_to_come_from_the_tree_not_the_binding(
+    tmp_path: Path,
+) -> None:
+    """One level is enough to name a clone's account, and the worker's own entries are not
+    accounts to delegate to (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    # Everything here is this process's, so there is nothing to add to the bound account.
+    assert manager._removers(path) == [ME]
+    assert _top_level_owners(path) == ([], [])
+    host = Settings.model_validate(
+        {"github": {"repo": "example/repo"}, "workspace": {"root": str(root)}}
+    )
+    hosted = WorkspaceManager(host, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    # The host route delegates nothing: the files are the worker's and it removes them itself.
+    assert hosted._removers(path) == []
+
+
+def test_an_owner_with_no_account_is_reported_rather_than_silently_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A uid with no passwd entry is an account that has been deleted -- lowering
+    ISSUEBOT_AGENT_POOL_SIZE and rebuilding does that -- and nothing short of root can then
+    unlink what it left. The removal will fail; the log has to say which uid (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._top_level_owners", lambda target: ([], [4242, 4242])
+    )
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(manager._log, "warning", lambda event, **kw: warnings.append((event, kw)))
+    assert manager._removers(path) == [ME]
+    assert warnings == [("workspace_owner_unresolved", {"workspace": str(path), "uids": [4242]})]
+
+
+async def test_a_removal_that_fails_seals_the_workspace_it_leaves_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open workspace the removal could not delete would be readable by the next session
+    bound to the same account, and would read as busy for ever after (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    monkeypatch.setattr(runas_module.RunAs, "remove_tree", lambda self, target: None)
+    monkeypatch.setattr(
+        "issuebot.agent.workspace._remove_path",
+        lambda target, what: (_ for _ in ()).throw(AgentError("workspace_error", what)),
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    with pytest.raises(AgentError):
+        await manager._remove_tree(path, "cannot remove remnant")
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+
+
+def test_a_clone_owned_by_another_account_is_not_a_workspace_to_reuse(tmp_path: Path) -> None:
+    """A binding that moved -- the pool shrank, the setting changed -- leaves a tree the new
+    account cannot write, and git would fail every command in it rather than say so (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    (path / ".git").mkdir(parents=True)
+    state = path / ".issuebot"
+    (state / "runs").mkdir(parents=True)
+    (state / "created").touch()
+
+    def manager_for(account: str) -> WorkspaceManager:
+        cfg = Settings.model_validate(
+            {
+                "github": {"repo": "example/repo"},
+                "workspace": {"root": str(root)},
+                "agent": {"run_as": account},
+            }
+        )
+        return WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+
+    assert manager_for(ME)._is_complete(path)
+    # `nobody` exists everywhere this runs and is never the account the tests run as.
+    assert not manager_for("nobody")._is_complete(path)
+
+
+async def test_a_removal_that_fails_leaves_the_workspace_closed(tmp_path: Path) -> None:
+    """The caller only logs a failed removal, so the directory stays on disk: open, the next
+    session bound to the same account could read the last issue's tree (#121)."""
+    root = tmp_path / "workspaces"
+    path = root / "ws"
+    path.mkdir(parents=True)
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(
+        cfg, gh=object(), environ=base_env(HOME=str(tmp_path)), hook_shell=("bash", "-c")
+    )
+    manager.seal(path)
+
+    async def refuse(_path: Path, _what: str) -> None:
+        raise AgentError("workspace_error", "cannot remove workspace")
+
+    manager._remove_tree = refuse  # type: ignore[method-assign]
+    with pytest.raises(AgentError):
+        await manager.remove("ws")
+    assert path.is_dir()
+    assert stat.S_IMODE(path.stat().st_mode) == SEALED_DIR_MODE
+
+
+async def test_sweep_agent_home_follows_the_binding_under_a_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep is a control over one home, so under a pool (#121) it has to be the home of
+    the account this workspace is bound to.
+
+    What this pins is the composition, since that is where it could go wrong: the manager
+    sweeps through `session_account`, which answers with the *first* member of whatever pool
+    its settings carry, so it is the caller's narrowing that decides. Bound to `agent-2`, the
+    second member, it sweeps `agent-2`; built from the un-narrowed pool -- the shape a caller
+    that skipped `settings_with_run_as` would produce -- the same manager sweeps `agent-1`,
+    someone else's home. The orchestrator narrows before it builds either a manager or a
+    runner, which is what makes the first case the real one.
+    """
+    swept: list[str] = []
+
+    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
+        swept.append(self.user)
+        return True
+
+    monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", record)
+    pooled = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ["agent-1", "agent-2", "agent-3"]},
+        }
+    )
+    bound = WorkspaceManager(
+        settings_with_run_as(pooled, "agent-2"), gh=object(), environ=base_env()
+    )
+    await bound.sweep_agent_home()
+    assert swept == ["agent-2"]
+
+    swept.clear()
+    await WorkspaceManager(pooled, gh=object(), environ=base_env()).sweep_agent_home()
+    assert swept == ["agent-1"], "un-narrowed, the sweep lands on the pool's first member"

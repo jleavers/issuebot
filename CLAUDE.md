@@ -200,7 +200,8 @@ floor, not the shipped version, and moves by hand.
   `github` dispatch hold and `validate`'s `github.status` check.
 - `issuebot.agent`: `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
   session runs at a different uid from the worker. With `agent.run_as` set (the image sets
-  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`), `claude -p`, every
+  `ISSUEBOT_AGENT_USER=agent`, the setting's fallback via `resolve.py`; a comma-separated
+  value or a YAML list is a *pool*, `accounts.py` below), `claude -p`, every
   hook, the clone and the post-clone setup run through `RunAs`, which wraps the argv as
   `sudo -n -u <user> -C <fd+1> -- python -m issuebot.agent.runas exec --env-fd N -- <argv>`:
   the session's environment crosses the uid change on the descriptor `anonymous_fd` opens
@@ -212,7 +213,7 @@ floor, not the shipped version, and moves by hand.
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
   two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
-  left in the account's shared `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
+  left in the account's `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
   `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
   (`projects/<project>/memory`, walked without following a symlink at either level), the
@@ -229,15 +230,27 @@ floor, not the shipped version, and moves by hand.
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (protected like the other fixed entries). `--bare` is not
   an option: it never reads the OAuth credential the login recipe writes.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
-  `session._turn_loop`, since concurrent sessions re-read the home each turn and the `before_run`
-  hook runs as the account too, and logs `claude_home_sweep_failed` at WARNING when
-  `RunAs.sweep_home` reports the helper did not run or exit 0 (the turn still runs; the next
-  sweeps again); a no-op on the host route (`run_as` unset), where the
-  home is the operator's own. `probe`/`probe_run_as` report whether the delegation *separates*,
+  `session._turn_loop`, and logs `claude_home_sweep_failed` at WARNING when `RunAs.sweep_home`
+  reports the helper did not run or exit 0 (the turn still runs; the next sweeps again); a
+  no-op on the host route (`run_as` unset), where the home is the operator's own. Which
+  sharing it is depends on the route (#121), and so does which sweep is load-bearing. With one
+  account every session in the container shares that home and re-reads it each turn, so a
+  session running beside this one can plant between its turns and *every* sweep is doing work.
+  A pool gives each account its own home (`claude-home` is mounted at `/home/agent/.claude`
+  alone; `agent-1` .. `agent-N` keep the image's own `0700` one), so the only sharing left is
+  with the *next* session bound to that account, and the sweep before turn 1 is the one that
+  matters: it clears what the previous session left and what this run's `before_run` hook left,
+  since the hook runs as the account and runs once, before the loop. The later sweeps are then
+  defence in depth — between two turns the writer is the session itself, or at most a
+  `before_remove` hook the worker runs at that uid for another, idle workspace the same account
+  holds — which is why per-turn stays unconditional rather than being narrowed to the first
+  turn on one route.
+  `probe`/`probe_run_as` report whether the delegation *separates*,
   not only whether it works (#111): the delegated `id -u` must answer the target's uid and that
   uid must differ from the invoking `os.getuid()`, so an account that is the worker's own is
   refused before sudo is asked and a sudo that ran the command at the worker's uid reads `no
-  separation`, apart from a refusal; the affirmative is what the
+  separation`, apart from a refusal. Every member of a pool is held to that (#121), since
+  `probe_run_as` asks it of each in turn; the affirmative, for *every* account, is what the
   orchestrator checks at startup (refusing to start when it cannot) and `validate` reports as
   its `agent.run_as` check. `RunAsError` is an `OSError`, so every spawn site's `except OSError`
   reports it like a missing `claude`. The image declares `/workspaces/*` a git
@@ -266,11 +279,54 @@ floor, not the shipped version, and moves by hand.
   it; `own_dir` creates and
   verifies a run's log directory as the worker's own, closed to others' writes, before a
   turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
-  `Boundary.current(run_as)` resolves the session's uid once per runner and manager; unset,
-  the session is the worker and the checks are the same. What the line does *not* yet do is
-  separate concurrent sessions from each other (one account for every slot): #121 carries
-  that design and the credential decision it waits on. `WorkspaceManager` (sanitised keys,
-  containment, `gh repo clone --depth 1`,
+  `Boundary.current(account)` resolves the session's uid once per runner and manager, from the
+  one account that session runs as -- under a pool, the account bound to *that* workspace
+  (#121), so a boundary names the single member that may have written in it and no other
+  session's uid; unset, the session is the worker and the checks are the same.
+  `accounts.py` (#121, spec `2026-09-14-session-account-pool-design.md`) is the line between
+  one session and the next: `agent.run_as` normalises to a tuple (`()` is the host route,
+  `run_as_pooled` is more than one), and everything below the orchestrator sees exactly one
+  account -- `settings_with_run_as` narrows the settings to the workspace's bound member before
+  the runner and the workspace manager are built, and `session_account` is the single reader.
+  `AccountRegistry` is the worker's own record of which account each workspace belongs to
+  (`<workspace.root>/.issuebot/accounts.json`, `0600` in a `0700` directory, re-read on every
+  call so a restart sees it, under an advisory lock since `run-once` may be run beside a live
+  worker): `allocate` binds the least-loaded account no session is running
+  as (`None` when every one is busy, so the candidate waits rather than sharing a uid), `bound`
+  answers without binding, `busy_accounts` reads which accounts have a workspace *open* (the
+  one cross-process signal that a session is running, which is how `run-once` beside a live
+  worker is visible at all), and `prune` (the terminal sweep, after its removals) forgets a
+  workspace that is gone while keeping every key with a session running or a retry pending. The binding is *never*
+  derived from the directory: one computed from the workspace key would be a binding whoever
+  opens the issue chooses. A workspace is open to exactly one account, and only while that
+  account is working in it -- a session running, or a removal unlinking what one left:
+  `share_with` makes it `1770`, owner the worker (sticky,
+  as #75 established) and group the bound account's own, and `seal` puts it back to `0700`
+  when the run ends (`session.py`'s `finally`; `WorkspaceManager.seal_idle` at startup, for a
+  worker that was killed outright; `remove` opens it for `before_remove`, and
+  `_remove_tree` again per removing account, since the unlink is theirs, re-sealing if the
+  worker's own pass then fails).
+  Both halves are needed: a workspace outlives its run, accounts are fewer than workspaces, so
+  without the seal a hostile session would eventually be handed an account holding an honest,
+  idle workspace. `_is_complete` also requires `.git` to belong to the bound account, so a
+  binding that moved re-clones rather than handing the session a tree git refuses -- and
+  re-cloning is a removal of the *previous* account's files, which neither the new account nor
+  the worker owns, so `_remove_tree` delegates one pass per account owning an entry at the top
+  of the workspace (`_removers`, `_top_level_owners`) with the directory opened to each in
+  turn, and re-seals when the worker's own pass then fails. Only which removals to attempt is
+  read off the directory; the binding never is, and the sudo rule still refuses anything
+  outside the pool. The `1770`
+  needs the worker to be a member of that account's group -- `group_complaint` -- and the
+  pool's accounts to have groups of their own -- `pool_complaint`, since two sharing one would
+  open every workspace to both; `probe_run_as` asks all three and the image arranges them with
+  `usermod --append`. `credential_complaint` is the pool's one extra rule: the accounts
+  share no login, so the credential has to be one `claude` needs no file for
+  (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, both already through
+  `agent_environment`'s `PASSTHROUGH_PREFIXES`), and a pool without one fails startup and
+  `validate` rather than failing every session's authentication. The record's
+  read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
+  beside a live worker.
+  `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with timeout, `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`); `PromptRenderer`
@@ -587,7 +643,30 @@ floor, not the shipped version, and moves by hand.
   for the same reason: a `worker crashed: <exc>` names whatever the exception did, and the
   retry it schedules carries the message into the snapshot's `retrying` rows.
   A session's runner is built from `settings_for_labels`, so a model label on the issue picks
-  that session's model.
+  that session's model, and then from `settings_with_run_as`, so a pooled `agent.run_as` picks
+  that session's account (#121): `_bind_account` runs *before* the claim, so an issue whose
+  account is busy is left on the board rather than moved to `in-progress` to wait there, and
+  `_workspaces_for` narrows a terminal removal to the account that owns the files -- never to
+  *no* account under a pool, since the host route would skip the delegated unlink and leave a
+  tree the worker cannot remove either, so an unknown binding falls back to the pool's first
+  member and the manager finds the real owner from the tree.
+  `_prune_accounts` runs on the terminal sweep, and a record that will not read holds
+  dispatch as a fourth `DispatchHold` kind, `accounts`: `_read_accounts` re-derives it from
+  the record once a tick, so it is a statement about the file rather than about a candidate
+  and can neither stick after a fix nor vanish on a tick whose only work was a retry; a due
+  retry in that position requeues as kind `accounts`, and one merely waiting for a busy
+  account as `slots`. `agent.run_as` is a setting like any other, so a reload can introduce
+  exactly what startup refuses: `_settle_run_as` re-runs `probe_run_as` and
+  `credential_complaint` on a change *and on every tick the hold lasts*, and holds dispatch as
+  `accounts` on a failure (`_run_as_block`, which `_accounts_hold` puts ahead of the record's
+  own complaint and `_bind_account` refuses on) rather than ending the process, so putting the
+  file back lifts it on the next reload and a `useradd` on the next tick. Not every fault
+  clears without a restart, and the complaint says which: `group_complaint` asks
+  `os.getgroups()`, the credential is read from the process's own environment, and both are
+  fixed when the worker is exec'd -- so a `usermod --append` reaches the next worker, not this
+  one. The hold is keyed on which fault it is, `run_as` or `record`, so a move between them
+  restarts `since` rather than inheriting the other's. Nothing is sealed on a reload, unlike at startup: sessions are
+  running, and their workspaces are open to the accounts they are running as.
   A reading is about the account, not the issue, so `RunObserver` forwards it past the entry
   through `on_rate_limits` to the orchestrator, which keeps the newest (sessions run
   concurrently, so they arrive out of order) and carries it, with the startup probe's
@@ -659,16 +738,17 @@ floor, not the shipped version, and moves by hand.
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
-  All three holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
-  `_github_block`) and `_current_hold()` composes the one live hold from them, preflight >
-  auth > github, for the snapshot and the gate alike -- so the reason an operator reads and
+  All four holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
+  `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()` composes the one
+  live hold from them, preflight > auth > accounts > github, for the snapshot and the gate alike -- so the reason an operator reads and
   the reason a caller refuses on can no longer be two different claims. The preflight one used
   to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
   not it: there was nothing to consult (#112).
   Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
-  builds), `auth` (`claude authentication unavailable: <the probe's detail>`) or `github`
-  (#88, below), and `since`
+  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `accounts`
+  (#121: the account registry will not read, so no workspace can be bound to a session
+  account) or `github` (#88, below), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
   one restarts it. A held worker keeps ticking, so without it `issuebot status`,
   `/api/v1/repos/<owner>/<name>/state`,
@@ -698,11 +778,13 @@ floor, not the shipped version, and moves by hand.
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
   goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
-  *after* the fetch, from `_current_hold()` rather than by recording as it goes: releasing and
-  re-holding within a tick would restart `since` on a hold that never lifted, and
-  `GITHUB_HOLD_KEY` keys one outage however it rewords itself. The gate reads the same three
-  fields rather than the settled `dispatch_hold`, which is a tick behind: a GitHub hold this
-  tick's successful fetch has just lifted must not refuse the claim that fetch produced.
+  (preflight > auth > accounts > github) *after* the fetch, from `_current_hold()` rather than
+  by recording as it goes: releasing and re-holding within a tick would restart `since` on a
+  hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
+  That one function is also what the admission gate asks (#112), so the account hold (#121)
+  refuses a claim at either door rather than only colouring the snapshot. The gate reads the
+  same fields rather than the settled `dispatch_hold`, which is a tick behind: a GitHub hold
+  this tick's successful fetch has just lifted must not refuse the claim that fetch produced.
   `_probe_github_status` annotates the hold once, when it engages, through the
   `github_status` seam (default `fetch_status_summary`) in a thread under
   `GITHUB_STATUS_DEADLINE_S` (the fetch's socket timeout does not bound the name lookup, and
@@ -941,13 +1023,19 @@ floor, not the shipped version, and moves by hand.
   missing so an older-but-permitted `claude` stays green, a `claude.setting_sources` check
   that warns when `project` or `local` hands the clone's files to the session as
   configuration (#107), an `agent.run_as` check that probes
-  the uid drop through `probe_run_as` (#75, #111: fails when set but unusable or not a
-  different uid from this process's, which the OK line names; warns when unset
-  since the session then shares the worker's uid), a `claude.mcp_config` check that stats each
-  path it names and, with `agent.run_as` set, asks that account whether it can read it (#109:
-  the one route by which an MCP server reaches a session, resolved against the workflow's
-  directory and opened at the session's uid, so a file the worker can read and `agent` cannot
-  would fail every turn with claude's own startup error instead of a line here; an inline JSON
+  the uid drop, the group membership and the pool's distinct groups through `probe_run_as`
+  (#75, #111, #121: fails when set but unusable or not a different uid from this process's,
+  which the OK line names, when the worker is not in an account's group, when two accounts
+  share one, or when a pool has no environment credential; warns when unset since the session
+  then shares the worker's uid, when one account serves more than one concurrent session, and
+  when the pool is smaller than `agent.max_concurrent_agents`), a `claude.mcp_config` check
+  that stats each path it names and, with `agent.run_as` set, asks *every* account in it
+  whether it can read the file (#109, #121: the one route by which an MCP server reaches a
+  session, resolved against the workflow's directory and opened at the session's uid, so a
+  file the worker can read and a session account cannot would fail every turn with claude's
+  own startup error instead of a line here -- and under a pool the orchestrator binds
+  whichever member is free, so one that cannot read it fails whichever issue lands there,
+  which is worse than one that fails always; an inline JSON
   document is on the command line already and only earns a warning, since `ps` reads it),
   a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),

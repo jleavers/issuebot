@@ -111,6 +111,14 @@ accounts cannot read, or an environment-borne credential. That is a deployment d
 session cannot make or test, so #121 carries the design and the decision; #101 (the same
 domain in its sequential form) waits on the same answer.
 
+#121 has since answered it: a pool takes its credential from the environment
+(`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), which copies and shares no credential
+file, so the refresh failure is avoided by design rather than ruled out by a test. Its spec is
+`2026-09-14-session-account-pool-design.md`, and the seam here is unchanged by it: a
+`Boundary` is still built per runner and per workspace manager, from the one account that
+session runs as -- under a pool, the member bound to *that* workspace -- so a boundary names
+the single uid that may have written in it rather than the pool's.
+
 ## Tests
 
 `tests/test_agent_boundary.py` drives the declaration and the seam: a FIFO is refused

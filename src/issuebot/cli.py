@@ -9,7 +9,7 @@ import signal
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -37,6 +37,13 @@ from issuebot.agent import (
     run_session,
     settings_for_labels,
     settings_with_model,
+    workspace_key,
+)
+from issuebot.agent.accounts import (
+    AccountRegistry,
+    credential_complaint,
+    session_account,
+    settings_with_run_as,
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.runas import RunAs
@@ -350,9 +357,9 @@ def run_checks(
         _token_check(workflow),
         _workspace_check(cfg.workspace.root),
         _claude_check(cfg.claude.command),
-        _claude_auth_check(cfg.claude.command, run_as=cfg.agent.run_as),
+        _claude_auth_check(cfg.claude.command, run_as=session_account(cfg)),
         _setting_sources_check(cfg),
-        _run_as_check(cfg.agent.run_as),
+        _run_as_check(cfg),
         _mcp_config_check(cfg),
         _executable_check("gh", "gh"),
     ]
@@ -548,10 +555,26 @@ def _setting_sources_check(settings: Settings) -> Check:
     return Check(subject, "warn", detail)
 
 
-def _run_as_check(run_as: str | None) -> Check:
-    """The account the session runs as (#75), or a warning that it is this process."""
+def _with_uid(account: str) -> str:
+    """``name (uid N)``, or just the name where the account does not resolve on this host."""
+    with contextlib.suppress(OSError, KeyError):
+        return f"{account} (uid {RunAs(account).account().pw_uid})"
+    return account
+
+
+def _run_as_check(settings: Settings) -> Check:
+    """The accounts the session runs as (#75, #121), or a warning that it is this process.
+
+    Every member of a pool is probed, and so is the one thing a pool needs that a single
+    account does not: a credential in the environment, since the accounts share no login.
+    That credential is the reason this check and `_mcp_config_check` treat a pool differently
+    from `_claude_auth_check`, which still asks the first member alone: a login in the
+    environment is the same for every account by construction (`credential_complaint` admits
+    no other kind), while a file's mode is each account's own.
+    """
     subject = "agent.run_as"
-    if run_as is None:
+    accounts = settings.agent.run_as
+    if not accounts:
         uid = os.getuid()
         detail = (
             f"not set; the session, its hooks and the clone run as this process (uid {uid}), "
@@ -559,34 +582,50 @@ def _run_as_check(run_as: str | None) -> Check:
             "ISSUEBOT_AGENT_USER=agent"
         )
         return Check(subject, "warn", detail)
-    error = _run_as_probe(run_as, os.environ)
-    if error is not None:
-        return Check(subject, "fail", error)
-    # The probe compared the delegated uid with this process's (#111), so the line names
-    # both sides of that comparison and the reader need not take the verdict on trust. The
-    # account's uid is the one the delegation answered with, the probe having said so; it is
-    # looked up without raising, because a check reports and never fails on its own wording.
-    account = None
-    with contextlib.suppress(OSError, KeyError):
-        account = RunAs(run_as).account().pw_uid
-    named = run_as if account is None else f"{run_as} (uid {account})"
-    return Check(
-        subject,
-        "ok",
-        f"{named}; the session runs as a separate account, at a uid other than this "
-        f"process's ({os.getuid()})",
-    )
+    problems = list(_run_as_probe(accounts, os.environ))
+    complaint = credential_complaint(settings, os.environ)
+    if complaint is not None:
+        problems.append(complaint)
+    if problems:
+        return Check(subject, "fail", "; ".join(problems))
+    concurrent = settings.agent.max_concurrent_agents
+    # The probe compared each delegated uid with this process's (#111), so the line names both
+    # sides of that comparison and the reader need not take the verdict on trust -- on the pool
+    # path as much as the single one, where the whole point is that no session shares a uid.
+    # Each is looked up without raising, because a check reports and never fails on its own
+    # wording, and a name that will not resolve simply goes without its uid.
+    named = ", ".join(_with_uid(account) for account in accounts)
+    if len(accounts) == 1:
+        shared = concurrent > 1
+        detail = (
+            f"{named}; the session runs as a separate account, at a uid other than this "
+            f"process's ({os.getuid()})"
+        )
+        if shared:
+            detail += f", but all {concurrent} concurrent sessions share it"
+        return Check(subject, "warn" if shared else "ok", detail)
+    status: CheckStatus = "warn" if len(accounts) < concurrent else "ok"
+    detail = f"{named}; a pool of {len(accounts)}, one account per concurrent session"
+    if status == "warn":
+        detail += (
+            f", which is fewer than agent.max_concurrent_agents "
+            f"({concurrent}): dispatch is capped by the pool"
+        )
+    # Last, and behind its own semicolon: the clause above qualifies the pool's *size*, and a
+    # uid phrase between the two would read as qualifying that instead.
+    detail += f"; each at a uid other than this process's ({os.getuid()})"
+    return Check(subject, status, detail)
 
 
 def _mcp_config_check(cfg: Settings) -> Check:
-    """The MCP server files ``claude.mcp_config`` names, as the session's account reads them.
+    """The MCP server files ``claude.mcp_config`` names, as the session's accounts read them.
 
     The one route by which a server reaches a session (#109), so a path that is missing, is not
     a file, or -- the case under compose, since the entry is resolved against the workflow's
-    directory and read at a *different* uid -- is unreadable by ``agent`` would otherwise fail
-    every turn with claude's own startup error, which is ``max_attempts`` opaque failures and a
-    blocked escape rather than a line here. A JSON document is on the command line already and
-    has nothing to stat.
+    directory and read at a *different* uid -- is unreadable by a session account would
+    otherwise fail every turn with claude's own startup error, which is ``max_attempts``
+    opaque failures and a blocked escape rather than a line here. A JSON document is on the
+    command line already and has nothing to stat.
     """
     subject = "claude.mcp_config"
     entries = cfg.claude.mcp_config
@@ -594,7 +633,8 @@ def _mcp_config_check(cfg: Settings) -> Check:
         return Check(subject, "ok", "no MCP server configured")
     documents = [entry for entry in entries if entry.lstrip()[:1] in {"{", "["}]
     paths = [Path(entry) for entry in entries if entry not in documents]
-    problems = [detail for path in paths if (detail := _mcp_path_problem(path, cfg.agent.run_as))]
+    accounts = cfg.agent.run_as
+    problems = [detail for path in paths if (detail := _mcp_path_problem(path, accounts))]
     if problems:
         return Check(subject, "fail", "; ".join(problems))
     parts = [_plural(len(paths), "file")] if paths else []
@@ -612,13 +652,29 @@ def _mcp_config_check(cfg: Settings) -> Check:
     )
 
 
-def _mcp_path_problem(path: Path, run_as: str | None) -> str | None:
-    """Why the session could not load ``path``, or ``None``."""
+def _mcp_path_problem(path: Path, accounts: Sequence[str]) -> str | None:
+    """Why a session could not load ``path``, or ``None``.
+
+    Every member of a pool is asked, not the first (#121): the orchestrator binds whichever
+    account is free to the next workspace, so a file one member cannot read is a file that
+    fails on whichever issue happens to land there, which is worse than one that fails always.
+    """
     if not path.exists():
         return f"{path} does not exist"
     if not path.is_file():
         return f"{path} is not a regular file"
-    return _mcp_readable_by(path, run_as)
+    refused = [account for account in accounts if _mcp_unreadable_by(path, account)]
+    if not refused:
+        return None
+    names = ", ".join(refused)
+    if len(accounts) == 1:
+        return f"{path} is not readable by {names}, the account the session runs as"
+    # The pool's size is the other half of it: one member of three refusing means the file
+    # works on two issues in three, which is the shape an operator would otherwise chase.
+    return (
+        f"{path} is not readable by {names}, "
+        f"{len(refused)} of the {len(accounts)} accounts the session may run as"
+    )
 
 
 # The delegated readability test answers in words rather than in an exit status: a `sudo -n`
@@ -632,24 +688,20 @@ _READ_TEST = f'if test -r "$1"; then echo {_READABLE}; else echo {_UNREADABLE}; 
 _READ_TEST_TIMEOUT_S = 10
 
 
-def _mcp_readable_by(path: Path, run_as: str | None) -> str | None:
-    """Whether the session's account can read ``path``; ``None`` when it can or cannot be asked.
+def _mcp_unreadable_by(path: Path, account: str) -> bool:
+    """Whether ``account`` is definitely refused ``path``; false when it can or cannot be asked.
 
     Delegated through ``RunAs`` rather than read here: the worker's uid reading a file proves
     nothing about the session's, which is the whole point of the split (#75). A delegation that
     does not work is ``agent.run_as``'s own check to report, so this one stays quiet about it
     rather than blaming a file that is fine.
     """
-    if run_as is None:
-        return None
     argv = ["sh", "-c", _READ_TEST, "sh", str(path)]
     try:
-        completed = _run_as_factory(run_as).run(argv, os.environ, timeout=_READ_TEST_TIMEOUT_S)
+        completed = _run_as_factory(account).run(argv, os.environ, timeout=_READ_TEST_TIMEOUT_S)
     except OSError, subprocess.SubprocessError:
-        return None
-    if completed.stdout.strip() != _UNREADABLE:
-        return None
-    return f"{path} is not readable by {run_as}, the account the session runs as"
+        return False
+    return completed.stdout.strip() == _UNREADABLE
 
 
 def _version_text(version: tuple[int, int, int]) -> str:
@@ -1047,8 +1099,12 @@ async def _run_once(
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
     rework = issue.state is StateLabel.REWORK
-    workspaces = WorkspaceManager(settings)
     try:
+        # One issue, so one account: under a pool this run takes the workspace's own bound
+        # member (#121), which is what a rework needs to be able to write the clone again.
+        workflow = _with_bound_account(workflow, issue)
+        settings = workflow.config
+        workspaces = WorkspaceManager(settings)
         attempt = _next_attempt(workspaces, issue)
     except AgentError as exc:
         print(f"[FAIL] workspace: {exc.message}")
@@ -1177,6 +1233,42 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
     if issue.state not in (StateLabel.TODO, StateLabel.REWORK, StateLabel.IN_PROGRESS):
         return f"is {issue.state.value}" + hint
     return None
+
+
+def _with_bound_account(workflow: Workflow, issue: Issue) -> Workflow:
+    """``workflow`` with ``agent.run_as`` narrowed to this issue's bound pool account.
+
+    Unchanged without a pool: one account, or none, binds nothing. With one, `run-once` goes
+    through the same worker-owned record the orchestrator does, so a workspace keeps the
+    account it was created under however it is dispatched, and refuses an account some other
+    process already has a session in.
+    """
+    settings = workflow.config
+    if not settings.agent.run_as_pooled:
+        return workflow
+    pool = AccountRegistry(settings.workspace.root, settings.agent.run_as)
+    key = workspace_key(issue.identifier)
+    busy = pool.busy_accounts()
+    account = pool.bound(key) or pool.allocate(key, busy=busy)
+    # A worker may be running beside this command, and an open workspace is the one signal of
+    # that another process can read (#121). Refusing beats putting two sessions at one uid,
+    # which is the whole point of the pool -- and the two refusals are different facts, so
+    # they say different things: `allocate` already skips the busy accounts, so it answers
+    # `None` only when every one of them is in use, while a *bound* account that is busy is
+    # this one workspace waiting for the session already running in it.
+    if account is None:
+        raise AgentError(
+            "workspace_error",
+            f"every session account is busy ({', '.join(sorted(busy))}); "
+            "a worker is running one, so wait for it or stop the worker",
+        )
+    if account in busy:
+        raise AgentError(
+            "workspace_error",
+            f"this workspace is bound to {account}, which a session is already running as; "
+            "wait for it or stop the worker",
+        )
+    return replace(workflow, config=settings_with_run_as(settings, account))
 
 
 def _next_attempt(workspaces: WorkspaceManager, issue: Issue) -> int:

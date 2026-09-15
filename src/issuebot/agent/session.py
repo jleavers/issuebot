@@ -305,6 +305,9 @@ async def _execute(
     finally:
         await workspaces.run_hook("after_run", workspace.path)
         _save(workspaces, workspace.path, state.session_record(state.turns, state.outcome))
+        # Last, and after the hook that still needs to run inside it: the workspace stays on
+        # disk for the next dispatch but is closed to every account until then (#121).
+        workspaces.seal(workspace.path)
 
 
 async def _turn_loop(
@@ -364,12 +367,15 @@ async def _turn_loop(
         except AgentError as exc:
             state.fail(exc.category, exc.message)
             return
-        # Immediately before every `claude -p`, not once per session: the account's ~/.claude is
-        # shared with a prior session in this or another repository, and with the sessions
-        # running beside this one, each of which re-reads it on every turn. A sweep here clears
-        # what any of them planted and leaves the smallest window a concurrent one can plant
-        # into (#101). Total today, so a sweep that cannot run costs a turn its hygiene, never
-        # the run.
+        # Immediately before every `claude -p`, not once per session: the account's ~/.claude
+        # is shared with a prior session in this or another repository, and -- when one account
+        # serves the whole deployment -- with the sessions running beside this one, each of
+        # which re-reads it on every turn. A sweep here clears what any of them planted and
+        # leaves the smallest window a concurrent one can plant into (#101). Under a pool the
+        # concurrent half is gone (#121): each account has its own home, so this sweep's work
+        # is the previous session at this account and this run's own `before_run` hook, both
+        # cleared by the pass before turn 1. Total today, so a sweep that cannot run costs a
+        # turn its hygiene, never the run.
         await workspaces.sweep_agent_home()
         turn = await runner.run_turn(
             prompt=prompt,

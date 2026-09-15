@@ -70,6 +70,12 @@ class PollingSettings(_Model):
 _ACCOUNT_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
 
 
+def _split_accounts(value: str) -> list[str]:
+    """``"agent"`` -> one account, ``"agent-1,agent-2"`` -> two: the spelling an environment
+    variable can carry, since ``ISSUEBOT_AGENT_USER`` is a string and a pool is a list."""
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 class WorkspaceSettings(_Model):
     root: Path = Path("/workspaces")
 
@@ -112,20 +118,40 @@ class AgentSettings(_Model):
     # ceiling that bites).
     max_issue_cost_usd: float = Field(default=0.0, ge=0)
     self_review: bool = True
-    # The account the session runs as (#75): ``claude -p``, every hook, the clone and the
-    # post-clone setup, through ``issuebot.agent.runas``. A different uid from the worker's
+    # The accounts the session runs as (#75, #121): ``claude -p``, every hook, the clone and
+    # the post-clone setup, through ``issuebot.agent.runas``. A different uid from the worker's
     # is what puts the worker's code, environment and state out of the session's reach; unset
     # (the host route, the tests) runs everything as the worker, which is the shared privilege
     # domain the image no longer has. Falls back to ``ISSUEBOT_AGENT_USER`` (``resolve.py``),
     # which the image sets to ``agent``.
-    run_as: str | None = None
+    #
+    # One name is one account for the whole deployment, which is what every concurrent session
+    # then shares (#121). A list is a *pool*: the orchestrator binds one member to each running
+    # slot, so two concurrent sessions sit at two uids and neither can enter the other's
+    # workspace. Written as a YAML list, or as a comma-separated ``ISSUEBOT_AGENT_USER``;
+    # normalised either way to a tuple, empty for the host route, so every reader has one
+    # shape to handle. ``run_as_pooled`` is the question the pool's extra rules hang off.
+    run_as: tuple[str, ...] = ()
 
-    @field_validator("run_as")
+    @field_validator("run_as", mode="before")
     @classmethod
-    def _run_as_is_an_account_name(cls, value: str | None) -> str | None:
-        if value is not None and not _ACCOUNT_NAME.fullmatch(value):
-            raise ValueError("agent.run_as must be an account name")
-        return value
+    def _run_as_is_a_pool_of_accounts(cls, value: object) -> object:
+        if value is None:
+            return ()
+        names = _split_accounts(value) if isinstance(value, str) else value
+        if not isinstance(names, list | tuple):
+            raise ValueError("agent.run_as must be an account name or a list of them")
+        pool = [str(name).strip() for name in names]
+        if not pool or not all(_ACCOUNT_NAME.fullmatch(name) for name in pool):
+            raise ValueError("agent.run_as must be an account name or a list of them")
+        if len(set(pool)) != len(pool):
+            raise ValueError("agent.run_as must not name the same account twice")
+        return tuple(pool)
+
+    @property
+    def run_as_pooled(self) -> bool:
+        """True when ``run_as`` names more than one account, so the pool's rules apply."""
+        return len(self.run_as) > 1
 
 
 class ClaudeSettings(_Model):

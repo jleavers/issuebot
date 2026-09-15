@@ -7,7 +7,8 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, Wo
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.session import run_session
+from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
 from issuebot.events import (
     Blocked,
@@ -225,6 +227,7 @@ class Harness:
         self.model = model
         self.model_labels = model_labels or {}
         self.runner_settings: list[Settings] = []
+        self.workspace_settings: list[Settings] = []
         self.environ = {
             "GH_TOKEN": "fake-token",
             "PATH": os.environ["PATH"],
@@ -303,6 +306,10 @@ class Harness:
         return ClaudeRunner(settings, environ=self.environ)
 
     def make_workspaces(self, settings: Settings) -> WorkspaceManager:
+        # Recorded like `runner_settings`: the manager's own `agent.run_as` is what decides the
+        # account its `~/.claude` sweep clears and whose uid its `Boundary` will accept (#121),
+        # so a test needs to be able to see what the orchestrator narrowed it to.
+        self.workspace_settings.append(settings)
         return WorkspaceManager(
             settings, gh=StubGh(), environ=self.environ, hook_shell=("bash", "-c")
         )
@@ -3149,10 +3156,12 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
 # --- agent.run_as (#75) -----------------------------------------------------------------
 
 
-def _with_run_as(h: Harness, probe: Callable[[str, Mapping[str, str]], str | None]) -> Orchestrator:
+def _with_run_as(
+    h: Harness, probe: Callable[[Sequence[str], Mapping[str, str]], list[str]]
+) -> Orchestrator:
     """The harness's orchestrator over a workflow whose session runs as `agent`."""
     workflow = load_workflow(h.path, environ={**h.environ, "ISSUEBOT_AGENT_USER": "agent"})
-    assert workflow.config.agent.run_as == "agent"
+    assert workflow.config.agent.run_as == ("agent",)
     return Orchestrator(
         workflow,
         bus=h.bus,
@@ -3175,7 +3184,10 @@ async def test_startup_fails_when_the_session_account_cannot_be_established(
 ) -> None:
     h = Harness(tmp_path)
     orchestrator = _with_run_as(
-        h, lambda user, environ: f"cannot run as {user!r}: sudo: a password is required"
+        h,
+        lambda accounts, environ: [
+            f"cannot run as {account!r}: sudo: a password is required" for account in accounts
+        ],
     )
     with pytest.raises(OrchestratorStartupError) as exc:
         await orchestrator.startup()
@@ -3189,10 +3201,462 @@ async def test_startup_probes_the_session_account_and_passes_it_to_the_auth_prob
 ) -> None:
     h = Harness(tmp_path)
     probed: list[str] = []
-    orchestrator = _with_run_as(h, lambda user, environ: probed.append(user))
+    orchestrator = _with_run_as(h, lambda accounts, environ: probed.extend(accounts) or [])
     await orchestrator.startup()
     assert probed == ["agent"]
     assert h.claude_auth_calls, "the login was probed after the account"
+
+
+# --- a pool of session accounts (#121) ----------------------------------------------------
+
+POOL_ENV = {"CLAUDE_CODE_OAUTH_TOKEN": "pool-credential"}
+
+
+def _with_pool(
+    h: Harness,
+    accounts: str = "agent-1,agent-2",
+    *,
+    probe: Callable[[Sequence[str], Mapping[str, str]], list[str]] = lambda accounts, environ: [],
+    environ: Mapping[str, str] | None = None,
+) -> Orchestrator:
+    """The harness driving an orchestrator whose sessions run as a pool of accounts."""
+    env = {
+        **h.environ,
+        "ISSUEBOT_AGENT_USER": accounts,
+        **(POOL_ENV if environ is None else environ),
+    }
+    workflow = load_workflow(h.path, environ=env)
+    # One account is allowed here too: a reload *into* a pool is a case worth driving.
+    assert workflow.config.agent.run_as == tuple(a.strip() for a in accounts.split(","))
+    h.orchestrator = Orchestrator(
+        workflow,
+        bus=h.bus,
+        adapter_factory=lambda _settings: h.github,
+        workspaces_factory=h.make_workspaces,
+        runner_factory=h.make_runner,
+        run_session=h.sessions,
+        which=h.which,
+        claude_auth=h.claude_auth,
+        github_status=h.github_status,
+        run_as_probe=probe,
+        clock=h.clock,
+        now=h.now,
+        environ=env,
+        on_snapshot=h.snapshots.append,
+    )
+    return h.orchestrator
+
+
+def _pool_workflow(h: Harness, accounts: str) -> None:
+    """Rewrite the workflow with ``agent.run_as`` spelled out, so a reload can change it: the
+    environment fallback is fixed for the life of the orchestrator."""
+    h.write_workflow(
+        text=WORKFLOW_TEMPLATE.format(
+            interval_ms=30_000,
+            root=h.root,
+            max_concurrent=2,
+            max_turns=3,
+            max_attempts=3,
+            max_retry_backoff_ms=300_000,
+            max_conflict_reworks=3,
+            max_issue_cost_usd=0.0,
+            claude=h.claude,
+            claude_extra=h.claude_extra(),
+            stall_timeout_ms=300_000,
+            hooks="",
+            prompt="Task {{ issue.identifier }}",
+        ).replace("agent:\n", f"agent:\n  run_as: [{accounts}]\n", 1)
+    )
+
+
+async def test_a_reload_into_an_unusable_pool_holds_dispatch_instead_of_claiming(
+    tmp_path: Path,
+) -> None:
+    """`agent.run_as` is a setting like any other, so a reload can introduce exactly what
+    startup refuses (#121). The probe runs again and the fault holds dispatch."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a == "agent-3"
+        ],
+    )
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-3")
+    await orchestrator.tick()
+    assert h.github.issue(1).state is StateLabel.TODO, "nothing is claimed for a broken pool"
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "agent-3: cannot run as 'agent-3'" in hold.reason
+
+
+async def test_a_reload_that_repairs_the_pool_lifts_the_hold_and_dispatches(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a == "agent-3"
+        ],
+    )
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-3")
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is not None
+    _pool_workflow(h, "agent-1, agent-2")
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is None
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_a_terminal_removal_is_narrowed_to_the_account_that_owns_the_files(
+    tmp_path: Path,
+) -> None:
+    """The removal is a delegated unlink, so it has to run as the account whose files they
+    are -- and never as no account at all, which is what the host route would do (#121)."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    await orchestrator.startup()
+    record = h.add_issue(1, StateLabel.TODO)
+    assert orchestrator._pool is not None
+    key = workspace_key(record.identifier)
+    orchestrator._pool.allocate(key)
+    assert orchestrator._pool.bound(key) == "agent-1"
+    assert orchestrator._workspaces_for(record)._account == "agent-1"
+
+
+async def test_a_removal_whose_binding_is_unknown_still_delegates(tmp_path: Path) -> None:
+    """A binding the record has forgotten, or one it cannot read, must not become the host
+    route: the worker owns the workspace but not the directories inside the clone, so a
+    removal with no delegation leaves a tree nothing can remove (#121)."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    await orchestrator.startup()
+    record = h.add_issue(1, StateLabel.TODO)
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(record.identifier)) is None
+    # The pool's first member: not the binding, but an account the delegation works for, from
+    # which the manager finds the files' real owner.
+    assert orchestrator._workspaces_for(record)._account == "agent-1"
+
+
+async def test_a_host_side_repair_lifts_the_accounts_hold_without_a_restart(
+    tmp_path: Path,
+) -> None:
+    """Three of the four faults are properties of the host, not of `WORKFLOW.md`: an operator
+    fixes them with `usermod` and never touches the file. A hold keyed on the file alone would
+    last until the worker restarted, so it is re-probed while it lasts (#121)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    broken = [False]
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: (
+            ["agent-3: the worker is not in group agent-3"] if broken[0] else []
+        ),
+    )
+    await orchestrator.startup()
+    # The pool grows by an account whose group the worker was never added to.
+    broken[0] = True
+    _pool_workflow(h, "agent-1, agent-2, agent-3")
+    await orchestrator.tick()
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert h.github.issue(1).state is StateLabel.TODO
+    # A second tick with nothing changed keeps the hold and its start: the file never moved.
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold == hold
+    # `usermod --append`, and nothing in the workflow file changes. (In a real deployment only
+    # some faults clear without a restart; the probe is the seam, so the test drives it.)
+    broken[0] = False
+    await orchestrator.tick()
+    assert h.snapshots[-1].dispatch_hold is None
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_accounts_hold_says_it_once_loudly_and_says_when_it_lifts(
+    tmp_path: Path,
+) -> None:
+    """An idle worker says nothing else, so an unchanged fault must not fill the log with it:
+    ERROR on the first and on a changed reason, WARNING after, and a line when it lifts, as the
+    auth hold does (#121)."""
+    stream = io.StringIO()
+    configure_logging(fmt="json", level="INFO", stream=stream)
+    h = Harness(tmp_path)
+    broken = [""]
+    orchestrator = _with_pool(h, probe=lambda accounts, environ: [broken[0]] if broken[0] else [])
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-2, agent-3")
+    fault = "agent-3: the worker is not in group agent-3"
+    for reason in (fault, fault, "agent-3: cannot run as 'agent-3'", ""):
+        broken[0] = reason
+        await orchestrator.tick()
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    held = [(x["level"], x["problems"]) for x in lines if x["event"] == "dispatch_run_as_unusable"]
+    assert [level for level, _ in held] == ["error", "warning", "error"]
+    [recovered] = [x for x in lines if x["event"] == "dispatch_run_as_recovered"]
+    assert recovered["run_as"] == ["agent-1", "agent-2", "agent-3"]
+
+
+async def test_a_reload_into_a_pool_without_a_credential_holds_dispatch(tmp_path: Path) -> None:
+    """The one rule a pool adds beyond #75's: no shared login, so the credential has to be one
+    `claude` needs no file for. Startup refuses it; a reload holds instead of failing every
+    session's authentication."""
+    h = Harness(tmp_path)
+    h.add_issue(1, StateLabel.TODO)
+    orchestrator = _with_pool(h, accounts="agent-1", environ={})
+    await orchestrator.startup()
+    _pool_workflow(h, "agent-1, agent-2")
+    await orchestrator.tick()
+    assert h.github.issue(1).state is StateLabel.TODO
+    hold = h.snapshots[-1].dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in hold.reason
+
+
+async def test_startup_probes_every_account_in_the_pool(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    probed: list[str] = []
+    orchestrator = _with_pool(h, probe=lambda accounts, environ: probed.extend(accounts) or [])
+    await orchestrator.startup()
+    assert probed == ["agent-1", "agent-2"]
+
+
+async def test_startup_fails_when_one_account_in_the_pool_cannot_be_reached(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(
+        h,
+        probe=lambda accounts, environ: [
+            f"{a}: cannot run as {a!r}" for a in accounts if a != "agent-1"
+        ],
+    )
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await orchestrator.startup()
+    assert exc.value.problems == ["agent.run_as: agent-2: cannot run as 'agent-2'"]
+
+
+async def test_a_pool_refuses_to_start_without_a_credential_in_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The accounts share no login on purpose (#121), so every session would fail to
+    authenticate: that is a startup failure, the way a definite logged-out is."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h, environ={})
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await orchestrator.startup()
+    assert exc.value.problems == [
+        "agent.run_as: a pool of session accounts needs a credential in the environment, "
+        "since each account has its own home and no login is shared between them: set one of "
+        "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, or name a single account"
+    ]
+
+
+async def test_two_concurrent_sessions_run_as_two_different_accounts(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert sorted(entry.account for entry in orchestrator.running.values()) == [
+        "agent-1",
+        "agent-2",
+    ]
+    # The narrowing reaches the runner, so nothing below the orchestrator sees a pool.
+    assert sorted(settings.agent.run_as for settings in h.runner_settings) == [
+        ("agent-1",),
+        ("agent-2",),
+    ]
+    assert not any(settings.agent.run_as_pooled for settings in h.runner_settings)
+    # And the workspace manager, which is the half that matters for the files: its account is
+    # the uid its `Boundary` accepts as the session's and the home its `~/.claude` sweep clears
+    # (#101), so a manager left holding the whole pool would sweep and trust the wrong account.
+    # Each session's manager is narrowed to its own account. The orchestrator's own manager is
+    # deliberately not (it is built from the whole config and reads only files whose declared
+    # writer is the worker, `session.json` among them), which is why this is a subset rather
+    # than an equality.
+    assert {("agent-1",), ("agent-2",)} <= {
+        settings.agent.run_as for settings in h.workspace_settings
+    }
+
+
+async def test_a_workspace_is_dispatched_to_the_same_account_for_as_long_as_it_exists(
+    tmp_path: Path,
+) -> None:
+    """A rework lands back in the clone the first session made, so it needs the same uid."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    h.clock.advance(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    first = {entry.issue.number: entry.account for entry in orchestrator.running.values()}
+    assert set(first.values()) == {"agent-1", "agent-2"}
+    for number in (1, 2):
+        h.workspace_dir(h.github.issue(number).identifier)
+        h.github.human_set_state(number, StateLabel.REVIEW)
+        await h.exit(h.run_for(number), final_issue=h.github.issue(number))
+    await h.fire(2)  # the continuation retries release: the issues are with a reviewer
+    assert not orchestrator.running and not orchestrator.retries
+    for number in (1, 2):
+        h.github.human_set_state(number, StateLabel.REWORK)
+    await h.tick()
+    assert {entry.issue.number: entry.account for entry in orchestrator.running.values()} == first
+
+
+async def test_a_candidate_whose_account_is_busy_waits_rather_than_sharing_a_uid(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    orchestrator = _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    # Three slots, two accounts: the third candidate is left, and never claimed.
+    assert len(orchestrator.running) == 2
+    assert h.github.issue(3).state is StateLabel.TODO
+    assert sorted(entry.account for entry in orchestrator.running.values()) == [
+        "agent-1",
+        "agent-2",
+    ]
+
+
+async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    await h.tick()
+    identifier = h.github.issue(1).identifier
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(identifier) == "agent-1"
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(2)
+    # The workspace was never created and nothing holds the key, so the next terminal sweep --
+    # the tenth tick after the first -- forgets the binding rather than leaving it to skew the
+    # load for ever.
+    for _ in range(10):
+        await h.tick()
+    assert orchestrator._pool.bound(identifier) is None
+
+
+async def test_a_retry_whose_account_is_busy_is_requeued_rather_than_dropped(
+    tmp_path: Path,
+) -> None:
+    """A free slot is not a free account (#121): requeueing keeps the attempt count, which
+    letting `_dispatch` refuse the issue would spend."""
+    h = Harness(tmp_path, max_concurrent=3, max_retry_backoff_ms=30_000)
+    orchestrator = _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    assert h.entry(1).account == "agent-1"
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    # Issue 3 takes the freed account, so when issue 1's retry comes due both are busy.
+    await h.tick()
+    assert h.entry(3).account == "agent-1"
+    assert orchestrator._slots() == 1
+    await h.fire(20)
+    retry = h.retry(1)
+    assert (retry.kind, retry.attempt) == ("slots", 2)
+    assert retry.error == "the workspace's session account is busy"
+    assert [run.issue.number for run in h.sessions.runs] == [1, 2, 3], (
+        "issue 1 was dispatched again while its own account was still running"
+    )
+
+
+async def test_a_repaired_record_stops_blaming_the_accounts_under_another_hold(
+    tmp_path: Path,
+) -> None:
+    """`_read_accounts` runs in `tick`, not in the candidate loop a preflight or auth hold
+    skips (#121). Read there, the reason survives the repair for as long as the other hold
+    lasts, and a retry firing in the meantime is requeued as `accounts` quoting a fault that
+    is already fixed -- so the snapshot's `retrying` row blames the record while the worker is
+    really waiting for `claude`.
+    """
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    (h.root / ".issuebot").mkdir()
+    (h.root / ".issuebot" / "accounts.json").write_text("{not json")
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    # The record is repaired, and preflight fails in the same tick, so the candidate loop -- the
+    # old home of the re-read -- never runs again to notice.
+    (h.root / ".issuebot" / "accounts.json").unlink()
+    h.which = lambda name: None if name == "claude" else f"/usr/bin/{name}"
+    orchestrator._which = h.which
+    h.add_issue(1, "todo")
+    orchestrator._retries["1"] = replace(_retry_entry(h, 1), due_mono=h.clock.value - 1)
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "preflight", "preflight still outranks accounts"
+    await orchestrator.fire_due_retries()
+    requeued = orchestrator._retries.get("1")
+    assert requeued is None or requeued.kind != "accounts", requeued
+
+
+async def test_an_unreadable_account_record_holds_dispatch_rather_than_idling_quietly(
+    tmp_path: Path,
+) -> None:
+    """Without the hold, `issuebot status`, the dashboard and `/healthz` all read as a healthy
+    worker while the board stops moving -- which is what `DispatchHold` (#29) exists for."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    (h.root / ".issuebot").mkdir()
+    (h.root / ".issuebot" / "accounts.json").write_text("{not json")
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert not orchestrator.running
+    assert h.github.issue(1).state is StateLabel.TODO
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    assert "unusable" in hold.reason
+    # And it holds on a tick whose only dispatchable work is a retry the candidate loop skips,
+    # which is where a hold derived from that loop alone would quietly vanish.
+    h.add_issue(2, "todo")
+    orchestrator._retries["2"] = _retry_entry(h, 2)
+    await h.tick()
+    hold = orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "accounts"
+    # And it lifts of its own accord once the record reads again.
+    orchestrator._retries.clear()
+    (h.root / ".issuebot" / "accounts.json").unlink()
+    await h.tick()
+    assert orchestrator.snapshot().dispatch_hold is None
+    assert sorted(orchestrator.running) == ["1", "2"]
+
+
+def _retry_entry(h: Harness, number: int) -> RetryEntry:
+    issue = h.github.issue(number)
+    return RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue_number=number,
+        issue_url=issue.url,
+        title=issue.title,
+        attempt=2,
+        kind="failure",
+        due_mono=h.clock.value + 3600,
+        due_at=h.now(),
+        error="boom",
+    )
 
 
 async def test_the_bounce_cap_holds_when_the_session_strips_the_workpad(tmp_path: Path) -> None:
@@ -3641,3 +4105,39 @@ async def test_the_dispatch_line_carries_what_the_issue_has_cost(tmp_path: Path)
         await h.fire(1)
     line = next(entry for entry in logs if entry["event"] == "dispatched")
     assert (line["issue_runs"], line["issue_cost_usd"]) == (2, 0.5)
+
+
+async def test_an_accounts_hold_refuses_a_due_retry_through_the_gate(
+    tmp_path: Path,
+) -> None:
+    """The admission gate (#112) and the account hold (#121) meet here: the gate asks
+    `_current_hold()`, so the record that will not name a session's account refuses a claim at
+    the retry door too, not just in the tick's candidate loop.
+
+    Before the gate existed the retry path made this decision for itself, just before it
+    dispatched. Composing it into the one hold is what keeps the snapshot the operator reads
+    and the answer a caller gets from being two different claims -- and the retry has to come
+    back as kind `accounts`, since requeuing it as `slots` would blame a full worker for a
+    record an operator has to go and fix.
+    """
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    (h.root / ".issuebot").mkdir()
+    (h.root / ".issuebot" / "accounts.json").write_text("{not json")
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert orchestrator.snapshot().dispatch_hold is not None
+    orchestrator._retries["1"] = replace(_retry_entry(h, 1), due_mono=h.clock.value - 1)
+    before = len(h.calls("fetch_issues_by_ids"))
+    await orchestrator.fire_due_retries()
+    requeued = orchestrator._retries.get("1")
+    assert requeued is not None, "the entry waits rather than being dropped"
+    assert requeued.kind == "accounts"
+    assert "unusable" in (requeued.error or "")
+    assert not orchestrator.running, "and nothing was claimed"
+    # The refusal happened *before* the refresh, which is the observable the gate adds and the
+    # only one that distinguishes it from `_fire`'s own `_bind_account` fallback below: that
+    # fallback reaches the same requeue with the same wording, one GitHub request later. A held
+    # worker must not spend a request per due retry per poll finding out what it may not claim.
+    assert len(h.calls("fetch_issues_by_ids")) == before, "the gate refused before the refresh"

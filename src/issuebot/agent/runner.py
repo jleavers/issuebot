@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import SecretStr
 
+from issuebot.agent.accounts import session_account
 from issuebot.agent.boundary import ENV_FILE, TURN_STDERR, Boundary, BoundaryError, split_parts
 from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import RunAs, Spawn
@@ -697,11 +698,15 @@ class ClaudeRunner:
         # ``TurnResult.error`` and ``result_text``, and every ``TurnEvent.detail``, rather than
         # each sink they reach.
         self._scrubber = Scrubber.for_deployment(settings, self._environ)
-        # The account every turn runs as (#75), or None for the worker's own uid.
-        self._runas = RunAs(settings.agent.run_as) if settings.agent.run_as else None
+        # The account every turn runs as (#75), or None for the worker's own uid. One
+        # account: a pool has been narrowed to this workspace's bound member above (#121).
+        account = session_account(settings)
+        self._runas = RunAs(account) if account else None
         # The worker's side of the line the session writes across (#104): every read of the
-        # workspace's env file and of the turn files goes through it.
-        self._boundary = Boundary.current(settings.agent.run_as)
+        # workspace's env file and of the turn files goes through it. Its session uid is that
+        # one account's, so under a pool the boundary accepts the workspace's bound member and
+        # no other session's uid (#121).
+        self._boundary = Boundary.current(account)
         self._log = get_logger(__name__)
 
     def _prepared(

@@ -4,9 +4,11 @@ With ``agent.run_as`` set, ``claude -p``, every hook, the clone and the post-clo
 as that account, a different uid from the worker's, so the worker's code and interpreter,
 its environment (``/proc/<pid>/environ``), its home and the state it keeps in a workspace
 are out of the session's reach. The worker itself stays unprivileged: in the image ``sudo``
-carries exactly one rule, ``issuebot`` may become ``agent`` and nobody else, and the binary
-is executable by the worker's group alone, so the account the session runs as cannot invoke
-it at all.
+carries exactly one rule -- ``issuebot ALL=(%agents) NOPASSWD: ALL`` since #121, so the worker
+may become any session account and nobody else -- and the binary is executable by the worker's
+group alone, so the account the session runs as cannot invoke it at all. That the rule names a
+*group* is what lets a caller pass an account it worked out at runtime: anything outside the
+pool is refused by sudo itself rather than by the caller.
 
 sudo's environment policy never shapes what the session sees. The worker serialises the
 environment it built (``agent_environment`` plus the workspace's ``.issuebot/env``) into an
@@ -45,11 +47,14 @@ REMOVE_TIMEOUT_S = 120
 
 # The entries under the session account's ``~/.claude`` that a later ``claude -p`` loads as
 # instructions or behaviour, and that a session must therefore not leave behind for the next
-# one at the same uid (#101). The home is a shared volume (``claude-home``) across every
-# session and repository, so a slash command, skill, rule, subagent, workflow, plugin, output
-# style, memory file or settings a hostile issue plants would otherwise be read by an unrelated
-# session next week. ``setting_sources`` does not stand in for this: since #107 it is always
-# passed and defaults to ``[user]``, which is the very source most of these surfaces belong to
+# one at the same uid (#101). With a single session account that home is a shared volume
+# (``claude-home``) across every session and repository; with a pool (#121) each member keeps
+# its own ``0700`` home and the volume is ``agent``'s alone, so the sharing is with the next
+# session bound to that account rather than with the ones running beside it. Either way, a
+# slash command, skill, rule, subagent, workflow, plugin, output style, memory file or
+# settings a hostile issue plants would otherwise be read by an unrelated session next week.
+# ``setting_sources`` does not stand in for this: since #107 it is always passed and defaults
+# to ``[user]``, which is the very source most of these surfaces belong to
 # -- ``settings.json``, ``CLAUDE.md``, ``rules``, ``skills``, ``commands`` and ``agents`` -- while
 # ``plugins``, ``output-styles``, ``workflows`` and ``agent-memory`` are not in that flag's table
 # at all. The whole list is swept regardless: the flag is a workflow's choice and the sweep is

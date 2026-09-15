@@ -191,7 +191,7 @@ ignored.
 | `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
 | `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
-| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account, so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
+| `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
@@ -252,7 +252,7 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] claude.command: /usr/local/bin/claude (2.1.259)
 [ OK ] claude auth: logged in (claude.ai, max)
 [ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
-[ OK ] agent.run_as: agent; the session runs as a separate account, at a uid other than this process's (1000)
+[WARN] agent.run_as: agent (uid 1001); the session runs as a separate account, at a uid other than this process's (1000), but all 2 concurrent sessions share it
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
@@ -262,12 +262,55 @@ docker compose run --rm worker labels ensure    # on the host: uv run issuebot l
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-17 checks: 0 failed, 2 warnings
+17 checks: 0 failed, 3 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
 the target repository; run it once per repository, and again after an upgrade that adds a label.
 The labels warning disappears on the next `validate`.
+
+#### One account per concurrent session
+
+`agent.run_as` above names one account, which is what the image defaults to
+(`ISSUEBOT_AGENT_USER=agent`). One account for the deployment is one account for *every*
+concurrent session, so with `agent.max_concurrent_agents` above 1 a session working one issue
+can write the workspace of a session working another -- which is why `validate` warns about it.
+Anyone may open an issue, so that is a boundary worth having (#121).
+
+Name a pool instead, and the worker binds one account to each running slot:
+
+```bash
+# in this checkout's .env
+ISSUEBOT_AGENT_USER=agent-1,agent-2,agent-3
+CLAUDE_CODE_OAUTH_TOKEN=...        # or ANTHROPIC_API_KEY
+```
+
+or, in `WORKFLOW.md`, `agent: {run_as: [agent-1, agent-2, agent-3]}`. The image builds three
+such accounts by default (`ISSUEBOT_AGENT_POOL_SIZE` in this checkout's `.env`, at build time;
+`docker compose build worker` to pick a change up); each workspace directory then belongs to
+the worker and to its bound account's group alone (`1770`), so a sibling session cannot enter
+it, and a workspace keeps its account for as long as it exists, which is what lets a rework
+session write the clone the first one made. Dispatch is capped by the pool as well as by
+`agent.max_concurrent_agents`, and `validate` says so when the pool is smaller.
+
+Turning a pool on over a `/workspaces` volume that already holds clones needs nothing of you:
+a workspace whose clone belongs to another account is re-cloned rather than handed to a
+session git would refuse, and the removal runs as whichever account owns what is there. The
+setting is re-checked on a reload, and on every poll while the hold lasts -- a pool named in
+`WORKFLOW.md` with an account that does not exist, a missing group membership or no credential
+holds dispatch and says so in `issuebot status` and on the dashboard, rather than failing every
+session it claims for. A `useradd` lifts it on the next poll; a `usermod --append`, or a
+credential added to `.env`, needs the worker restarted, because a process's supplementary
+groups and environment are fixed when it starts -- and the message says so.
+
+**A pool needs a credential in the environment.** Each account has a home of its own, and
+`claude` reads its login from there, so a pool shares no login between its accounts -- on
+purpose: two accounts refreshing one OAuth credential is a race nobody has established is safe
+(`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`). Set
+`CLAUDE_CODE_OAUTH_TOKEN` (mint one with `claude setup-token`) or `ANTHROPIC_API_KEY`; the
+worker refuses to start without one rather than claim issues every session would fail to
+authenticate, and `validate` says the same. A single account is unaffected and keeps using the
+`claude-home` login below.
 
 To use a Claude Code login instead of an API key, log in once inside the container **as the
 session's account**: run `docker compose run --rm --user agent --entrypoint claude worker`,
@@ -923,22 +966,27 @@ that matters on your host.
   `<key>: Extra inputs are not permitted`.
 - **Safety.** The enforced boundary is the container **and**, inside it, the uid: the session
   (`claude -p`, every hook, the clone) runs as `agent` (uid 1001), a different account from the
-  worker (`issuebot`, uid 1000) that supervises and credentials it (#75). So the session runs
+  worker (`issuebot`, uid 1000) that supervises and credentials it (#75), and -- with a pool
+  configured, see "One account per concurrent session" under step 2 -- at a different uid from
+  every other session running beside it (#121). So the session runs
   with no permission prompts and may do as it likes at its own uid, but the worker's code
   (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
   in a hub checkout the dashboard password), its home and the state it keeps inside a
   workspace are all out of the session's reach, and the worker cannot become root or anything
-  but `agent`. `GH_TOKEN` is the one credential the session is given, since it clones and
-  pushes with it, which is why the token should be scoped to the repository: `validate` warns
-  when it is a classic or an OAuth token, whose reach is the account's, and says so. The
+  but a session account. `GH_TOKEN` is the one credential the session is given, since it clones
+  and pushes with it, which is why the token should be scoped to the repository: `validate`
+  warns when it is a classic or an OAuth token, whose reach is the account's, and says so. The
   session's tools are fixed the same way, by the front matter and the argv issuebot builds
   from it (`claude.disallowed_tools`, which ships with `WebFetch` and `WebSearch` in it, and
   `--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
   describe what the session may do *within* that authority rather than granting it, and the
   `<github-text>` envelope is a hint to the model, never the boundary (#109). The session's
-  login is its own, in `/home/agent/.claude`. That home is a shared volume across every session
-  and repository, so before every turn the worker sweeps the config a prior or concurrent session
-  could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
+  login is its own, in `/home/agent/.claude`. With a single session account that home is a
+  shared volume across every session and repository; with a pool (`agent.run_as` naming more
+  than one account) each member keeps its own `0700` home from the image and the volume is
+  `agent`'s alone, so the sharing is with the next session bound to that same account rather
+  than with the ones running beside it. Either way, before every turn the worker sweeps the
+  config a prior or concurrent session could have left there (#101) — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
   `agents/`, `workflows/`, `agent-memory/`, `plugins/`, `output-styles/`, `settings.json`,
   `settings.local.json` and each project's auto memory (`projects/<project>/memory/`), the
   surfaces a later `claude -p` loads as instructions or behaviour — and leaves the rest of the
@@ -951,7 +999,8 @@ that matters on your host.
   session's prompt on the same repository. So a slash command, skill or memory a hostile issue
   plants is not waiting for a session working a different issue next week. What remains: the
   window between one turn's sweep and its `claude -p` start, in which a session running beside
-  it can still plant; `/home/agent/.claude.json`, outside the volume, whose `mcpServers` no
+  it at the same uid can still plant -- which a pool closes, since no two concurrent sessions
+  share a home; `/home/agent/.claude.json`, outside the volume, whose `mcpServers` no
   session loads (`--strict-mcp-config`, #119) while its trust state persists for the container's
   lifetime; and the account's shell profile, which a login-shell hook sources (#137). The login
   recipe is unaffected: it writes `.credentials.json`, which the sweep never touches.

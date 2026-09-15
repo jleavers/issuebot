@@ -13,8 +13,10 @@ from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
 
-RetryKind = Literal["continuation", "failure", "escape", "slots", "auth", "github", "preflight"]
-DispatchHoldKind = Literal["preflight", "auth", "github"]
+RetryKind = Literal[
+    "continuation", "failure", "escape", "slots", "auth", "github", "preflight", "accounts"
+]
+DispatchHoldKind = Literal["preflight", "auth", "github", "accounts"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 
 CONTINUATION_DELAY_MS = 1_000
@@ -125,6 +127,9 @@ class RunningEntry:
     started_mono: float
     started_at: datetime
     cancel: asyncio.Event
+    # The account this session runs as (#121): the pool member bound to its workspace, the one
+    # configured account, or None on the host route. What a sibling session may not be.
+    account: str | None = None
     task: asyncio.Task[RunResult] | None = None
     session_id: str | None = None
     last_activity_mono: float | None = None
