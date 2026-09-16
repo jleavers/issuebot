@@ -337,3 +337,48 @@ def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> No
     assert not re.search(r"^\s*test .* && test ", CI, re.M)
     # And the compose side: the service selects the account rather than inheriting the image's.
     assert 'jq -r .services.web.user)" = web' in CI
+
+
+def test_the_python_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell() -> None:
+    """``uv`` is the third optional toolchain, beside the PostgreSQL server (#62) and node
+    (#64), and it is built the same way: empty is the default, so the image keeps exactly the
+    contents it has without the argument, and a deployment whose target repository is a Python
+    project sets ``ISSUEBOT_UV_VERSION``.
+
+    Both paths are needed for the same reason node needs both. The ``ENV`` covers a session's
+    own ``claude`` tools, and the ``profile.d`` line covers the hooks, which run under
+    ``bash -lc`` -- and Debian's ``/etc/profile`` *overwrites* ``PATH`` for a login shell, so
+    the ``ENV`` alone would leave ``after_create``'s ``uv sync`` looking for a binary that is
+    on the image's own ``PATH`` and not on the one it was handed.
+    """
+    assert 'ARG UV_VERSION=""' in DOCKERFILE
+    assert "${UV_VERSION:+/opt/uv/bin:}" in DOCKERFILE
+    assert "printf 'PATH=\"/opt/uv/bin:$PATH\"\\n' > /etc/profile.d/issuebot-uv.sh" in DOCKERFILE
+    # Asserted at build for the reason `initdb --version` and `node --version` are: a moved
+    # download or a renamed asset has to fail the build, not the first session that runs it.
+    assert "/opt/uv/bin/uv --version" in DOCKERFILE
+    # The checksum comes from the release's own .sha256, so a tarball that is not the one
+    # astral published fails the build rather than being installed.
+    assert "sha256sum -c uv.sha256" in DOCKERFILE
+
+
+def test_compose_offers_the_python_toolchain_to_the_worker_alone() -> None:
+    """Like the other two: the worker runs the sessions, and the web service builds from the
+    same context without it, since the dashboard runs no session and would otherwise carry the
+    binaries twice."""
+    assert 'UV_VERSION: "${ISSUEBOT_UV_VERSION:-}"' in COMPOSE
+    assert "UV_VERSION" not in yaml.safe_dump(SERVICES["web"])
+
+
+def test_ci_proves_uv_answers_on_both_paths_in_the_toolchain_image() -> None:
+    """The opt-in image is built once with every toolchain argument set (#62, #64), and each
+    one must answer on its own ``PATH`` and in a login shell. ``uv`` joins that build rather
+    than earning one of its own: the checks are about what is on ``PATH`` and under which uid,
+    not about the arguments interacting.
+    """
+    assert "UV_VERSION=" in CI
+    assert "docker run --rm --entrypoint uv issuebot:ci-toolchain --version" in CI
+    # And the other half of "off by default": the *default* build must carry none of it, which
+    # is the assertion that would catch a COPY --from placed outside the argument's guard.
+    assert "for tool in initdb node npm uv; do" in CI
+    assert "command -v initdb && command -v node && command -v npm && command -v uv" in CI

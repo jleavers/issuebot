@@ -3723,7 +3723,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
-    assert "17 checks: 1 failed, 1 warnings" in out
+    assert "18 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -3752,7 +3752,7 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     reported = [line for line in out.splitlines() if line.startswith(prefix)]
     assert len(reported) == 1
     assert str(listing) in reported[0]
-    assert "17 checks: 1 failed, 1 warnings" in out
+    assert "18 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
@@ -3772,7 +3772,7 @@ def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
-    assert "17 checks: 1 failed, 1 warnings" in out
+    assert "18 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(
