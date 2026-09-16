@@ -90,9 +90,30 @@ jobs:
           if [ -n "${pr}" ]; then
             echo "::notice::${branch} already has pull request #${pr}; nothing to do"
             changed=false
-          elif git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-            echo "::notice::${branch} exists with no pull request; reusing it"
-            reuse=true
+          else
+            # Asked of the API, not of `git ls-remote`: this checkout persists no
+            # credential, so against a private repository an unauthenticated ls-remote
+            # fails with "Repository not found" rather than reporting an absent branch,
+            # and an `elif` around it would read that failure as "the branch is not
+            # there" -- losing the reuse path, which is the one that finishes a run that
+            # pushed and then failed before opening the pull request (#148). `gh` still
+            # has GH_TOKEN, and reading a ref is contents: read.
+            #
+            # `matching-refs` answers an absent branch with 200 and an empty list, so
+            # "no branch" is a *successful* reply and every non-zero exit is a real
+            # failure -- no parsing of gh's English error text to tell them apart. It is
+            # a prefix query, hence the exact-ref filter. A failure fails the run: a
+            # 5xx or a rate limit answered "no" would have open-pr try to create a
+            # branch that is already there and be rejected on push.
+            if ! found="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${branch}" \
+                 --jq "[.[] | select(.ref == \"refs/heads/${branch}\")] | length")"; then
+              echo "::error::could not read refs/heads/${branch}"
+              exit 1
+            fi
+            if [ "${found}" != "0" ]; then
+              echo "::notice::${branch} exists with no pull request; reusing it"
+              reuse=true
+            fi
           fi
           {
             echo "branch=${branch}"

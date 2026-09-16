@@ -133,6 +133,55 @@ def _commands(script: str) -> str:
     return "\n".join(ln for ln in script.splitlines() if not ln.lstrip().startswith("#"))
 
 
+# `git` verbs that talk to a remote. A job whose checkout persists no credential can run
+# none of them against this private repository, whatever it does locally with `git diff`.
+REACHES_REMOTE = re.compile(r"\bgit\s+(?:ls-remote|fetch|pull|push|clone|remote\s+update)\b")
+
+
+def test_the_bump_jobs_look_up_their_branch_through_the_api_not_git() -> None:
+    """Neither half that executes unreviewed code can ask git about the remote (#138, #148).
+
+    ``persist-credentials: false`` is what the split above rests on, and dropping the
+    persisted credential drops git's own access to the remote with it. This repository is
+    private, so an unauthenticated ``git ls-remote`` fails to authenticate rather than
+    reporting an absent branch, and an ``if`` around it reads that failure as "the branch is
+    not there" -- so ``reuse`` is false whatever is on the remote.
+
+    That is not a lost optimisation. The reuse path is the recovery one: a branch with no
+    pull request is the wreckage of a run that pushed and then failed before opening it, and
+    reusing the branch is how the next run finishes the job. Without it the pushing half
+    branches off the default branch instead, and its push is rejected as a non-fast-forward
+    on every rerun until someone deletes the branch by hand.
+
+    So the lookup asks the API. ``gh`` still holds ``GH_TOKEN`` in that step and reading a
+    ref is ``contents: read``, which both jobs already have. ``matching-refs`` and not
+    ``git/ref``: it answers an absent branch with 200 and an empty list, so absence is a
+    *successful* reply and every non-zero exit is a real failure, with no parsing of gh's
+    English error text to tell "no branch" from "could not ask". It is a prefix query, hence
+    the exact-ref filter.
+
+    The invocation and not the word, in both directions: each of these scripts explains in a
+    comment what it deliberately does not do.
+    """
+    bumps = (("claude-code-version.yml", "build"), ("pre-commit-version.yml", "freeze"))
+    for name, runner in bumps:
+        config = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+        job = config["jobs"][runner]
+
+        check = next(step for step in job["steps"] if step.get("id") == "check")
+        commands = _commands(check["run"])
+        assert "git/matching-refs/heads/${branch}" in commands, name
+        assert 'select(.ref == \\"refs/heads/${branch}\\")' in commands, name
+        # A lookup that fails fails the run: answering "no branch" to a 5xx or a rate limit
+        # would have the pushing half create a branch that is already there.
+        assert "::error::could not read refs/heads/${branch}" in commands, name
+
+        # And nothing else in the job reaches the remote either, `git ls-remote` included.
+        for step in job["steps"]:
+            reaching = REACHES_REMOTE.search(_commands(step.get("run", "")))
+            assert not reaching, f"{name}: {runner} reaches the remote: {reaching.group()}"
+
+
 def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_token() -> None:
     """The new claude release is installed and executed in the job that cannot push (#138).
 
@@ -188,15 +237,3 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     # the job that ran the unreviewed release: it names what gets written to the repository.
     assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
-
-    # Dropping the persisted credential also drops git's own access to the remote, and this
-    # repository is private: an unauthenticated `git ls-remote` fails outright rather than
-    # reporting an absent branch, and the `if` around it would read that failure as "no
-    # branch" and lose the reuse path. So the lookup asks the API, which still has GH_TOKEN.
-    # The invocation, not the word: the line that replaced it says why in a comment.
-    check = next(step for step in build["steps"] if step.get("id") == "check")
-    # `matching-refs` answers an absent branch with 200 and an empty list, so absence is a
-    # successful reply and every non-zero exit is a real failure -- no parsing of gh's
-    # English error text to tell "no branch" from "could not ask".
-    assert "git/matching-refs/heads/${branch}" in check["run"]
-    assert "git ls-remote" not in _commands(check["run"]), "asks git for a remote ref"
