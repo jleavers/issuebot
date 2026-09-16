@@ -367,14 +367,17 @@ async def _turn_loop(
         except AgentError as exc:
             state.fail(exc.category, exc.message)
             return
-        # Immediately before every `claude -p`, not once per session: the account's ~/.claude
+        # Immediately before every `claude -p`, not once per session: the account's home
         # is shared with a prior session in this or another repository, and -- when one account
         # serves the whole deployment -- with the sessions running beside this one, each of
-        # which re-reads it on every turn. A sweep here clears what any of them planted and
-        # leaves the smallest window a concurrent one can plant into (#101). Under a pool the
+        # which re-reads it on every turn. A sweep here clears the ~/.claude config (#101) and
+        # the shell start-up files a snapshot would source (#137) that any of them planted, and
+        # leaves the smallest window a concurrent one can plant into. Under a pool the
         # concurrent half is gone (#121): each account has its own home, so this sweep's work
         # is the previous session at this account and this run's own `before_run` hook, both
-        # cleared by the pass before turn 1. Total today, so a sweep that cannot run costs a
+        # cleared by the pass before turn 1 -- and the hook itself ran after a sweep of its own,
+        # since every script in a login shell sweeps first (`_run_script`, #137). Total today,
+        # so a sweep that cannot run costs a
         # turn its hygiene, never the run.
         await workspaces.sweep_agent_home()
         turn = await runner.run_turn(

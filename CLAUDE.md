@@ -330,14 +330,25 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101), clears the loadable config a prior session
-  left in the account's `~/.claude` — `CLAUDE_HOME_SWEEP`: `CLAUDE.md`, `rules`, `skills`,
+  two blind spots; a fourth verb, `sweep` (#101, #137), clears what a prior session left in the
+  account's *home* for the next one to load. Two lists, both pinned by tests, so dropping a name
+  is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
+  `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
   `settings.local.json`, plus each project's auto memory, `CLAUDE_HOME_MEMORY_DIR`
   (`projects/<project>/memory`, walked without following a symlink at either level), the
   surfaces a later `claude -p` loads as instructions or behaviour, per the `claude-directory`
-  docs (a test pins the list, so dropping a name is a deliberate edit in both places).
-  A denylist: everything it does not name stays, `.credentials.json` (a credential
+  docs. And `SHELL_STARTUP_SWEEP`, in the home itself (#137): `.bash_profile`, `.bash_login`,
+  `.profile`, `.bashrc`, `.bash_logout`. `/home/<account>` is the account's to write and only
+  `.claude` in it is the image's, while every hook and the post-clone setup run under
+  `bash -lc` — a login shell, which sources those files, as claude's shell snapshot for the
+  session's Bash tool does — so a `~/.profile` one session leaves is a script every later
+  session at that uid runs, for the container's lifetime. Removing them costs an account nobody
+  logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
+  which are root's and where the image puts node and the PostgreSQL binaries.
+  A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
+  ran writes in the home (`gh`'s state directory, npm's cache) among them, and
+  `.credentials.json` (a credential
   authenticates the next session rather than steering it, so it is not one of those surfaces;
   and `claude` rotates its refresh token in place, so sweeping it would break a login an account
   does hold -- a container session has none, taking its credential from the environment instead)
@@ -353,18 +364,30 @@ version, and moves by hand.
   host route authenticates with, and whether it honours `CLAUDE_CODE_OAUTH_TOKEN` has never been
   measured here -- so it was never a flag to rest the sweep on.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
-  `session._turn_loop`, and logs `claude_home_sweep_failed` at WARNING when `RunAs.sweep_home`
+  `session._turn_loop`, and before *every* script the session runs in a login shell, from
+  `WorkspaceManager._run_script` — the four hooks and the post-clone setup, which is the one
+  seam because what matters is the login shell rather than which hook opened it (`_run_argv`'s
+  other caller is the clone, `gh` as an argv, which reads no start-up file). That second call
+  site is what #137 needs: `after_create` and `before_run` both run before `_turn_loop` reaches
+  its first sweep, so a per-turn sweep alone would let the previous session's `~/.profile` run
+  in this session's first hook. A hook that is not configured opens no shell and takes no sweep.
+  It logs `claude_home_sweep_failed` at WARNING when `RunAs.sweep_home`
   reports the helper did not run or exit 0 (the turn still runs; the next sweeps again); a
-  no-op on the host route (`run_as` unset), where the home is the operator's own. Which
+  no-op on the host route (`run_as` unset), where the home is the operator's own. Nothing
+  removes a developer's own `.profile` by any route: `sweep_home` refuses a home whose account
+  is the invoking process's own, #111's separation rule where the removal is, because
+  `probe_run_as` catches that at worker startup and in `validate` while `run-once` runs no
+  probe at all. Which
   sharing it is depends on the route (#121), and so does which sweep is load-bearing. With one
   account every session in the container shares that home and re-reads it each turn, so a
   session running beside this one can plant between its turns and *every* sweep is doing work.
   A pool gives each account its own home (every account, `agent` and `agent-1` .. `agent-N`
   alike, keeps the image's own `0700` one; no volume is mounted over any of them since #142),
   so the only sharing left is
-  with the *next* session bound to that account, and the sweep before turn 1 is the one that
-  matters: it clears what the previous session left and what this run's `before_run` hook left,
-  since the hook runs as the account and runs once, before the loop. The later sweeps are then
+  with the *next* session bound to that account, and the first sweep of the run is the one that
+  matters: the post-clone setup's or the first hook's, which clears what the previous session
+  left before anything of this run's runs at that uid, and then the pass before turn 1, which
+  clears what this run's own `before_run` hook left. The later sweeps are then
   defence in depth — between two turns the writer is the session itself, or at most a
   `before_remove` hook the worker runs at that uid for another, idle workspace the same account
   holds — which is why per-turn stays unconditional rather than being narrowed to the first
@@ -546,8 +569,10 @@ version, and moves by hand.
   its tag is spelled, while a template or an unwrapped value that forges an edge still does.
   `--strict-mcp-config` is unconditional for the reason
   `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
-  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/` rather than inside the
-  directory the sweep walks, so it is recreated with each container but shared by every session
+  account's `~/.claude.json`, which sits in `$HOME` beside `.claude/`: outside the directory
+  the config sweep walks, and not one of the names the home sweep removes beside it (#137) --
+  claude's own file, and a denylist keeps what it does not name. So it is recreated with each
+  container but shared by every session
   in one -- a server a session plants there is offered to whichever issue runs next. The flag
   names what survives rather than what is removed (only `--mcp-config` servers, which is
   what `claude.mcp_config` names and nothing else does), so it covers a target repository's `.mcp.json` and any MCP location a later
@@ -560,7 +585,8 @@ version, and moves by hand.
   so a release that drops any of them fails the build rather than a session. The CI `docker` job proves both
   directions against the image's own `claude`: a server planted in the agent's `~/.claude.json`
   is listed in the init line without the flag and absent with it, no credential needed since
-  that line precedes the login check. (The rest of the account home's config surfaces are #101, landed in #123: the sweep above.)
+  that line precedes the login check. (The rest of the account home's config surfaces are #101, landed in #123, and its shell
+  start-up files #137: the sweep above.)
   Two timers, and they bound different things (#110):
   `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
   output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`

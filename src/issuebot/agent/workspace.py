@@ -362,18 +362,21 @@ class WorkspaceManager:
             raise AgentError("workspace_error", f"clone produced no repository at {path}")
 
     async def sweep_agent_home(self) -> None:
-        """Clear the loadable config a prior or concurrent session may have left in the
-        account's ``~/.claude``, immediately before each of this session's turns (#101).
+        """Clear what a prior or concurrent session may have left in the account's home for
+        this one to load: the config under ``~/.claude`` (#101) and the shell start-up files a
+        login shell sources (#137). Called immediately before each of this session's turns and
+        before every script it runs in a login shell (``_run_script``: the hooks and the
+        post-clone setup).
 
         Which session that is depends on the route (#121): one account is shared by everything
         running in the container, while a pool leaves only the next session bound to this
-        member -- so under a pool the sweep before turn 1 is the load-bearing one, and it is
-        also what clears this run's own ``before_run`` hook, which runs as the account before
-        the loop starts.
+        member -- so under a pool the sweep before the first thing this run does at that uid is
+        the load-bearing one.
 
         Only under ``agent.run_as``: on the host route the home is the operator's own, so it is
-        left untouched, and the container is the boundary regardless. Off the event loop, since
-        it delegates through sudo like the removal and the kill.
+        left untouched -- nothing removes a developer's ``.profile`` -- and the container is the
+        boundary regardless. Off the event loop, since it delegates through sudo like the
+        removal and the kill.
         """
         if self._runas is None:
             return
@@ -499,6 +502,15 @@ class WorkspaceManager:
         _kill_group(process)
 
     async def _run_script(self, name: str, script: str, workspace: Path) -> HookResult:
+        # Every script -- the four hooks and the post-clone setup -- runs under
+        # ``hook_shell``, ``bash -lc``, a login shell that sources whatever shell start-up
+        # files the account's home holds. So the sweep runs here as well as before each turn
+        # (#137): this is the session's *first* command at that uid, long before ``_turn_loop``
+        # reaches its own sweep, and a ``~/.profile`` the previous session at this account left
+        # would otherwise run in it. The one seam, rather than one call per hook, because what
+        # matters is the login shell and not which hook opened it; ``_run_argv``'s other caller
+        # is the clone, which is ``gh`` as an argv and reads no start-up file.
+        await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 
     async def _run_argv(self, name: str, argv: Sequence[str], workspace: Path) -> HookResult:

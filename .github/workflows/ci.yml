@@ -426,15 +426,21 @@ jobs:
           assert RunAs("agent").probe(env) is None
           print("the session sees", sorted(seen))
           PY
-      # The session account's ~/.claude is shared by every session that account runs, across
+      # The session account's home is shared by every session that account runs, across
       # every repository
       # (#101), so a slash command, skill, rule, subagent, workflow, plugin or auto memory one
-      # session plants there is loaded by the next at the same uid. The worker sweeps that config
-      # before every turn; the credential and claude's own transcripts stay. Proved in the image
+      # session plants in ~/.claude is loaded by the next at the same uid -- and so is a shell
+      # start-up file it leaves beside it (#137), since every hook and the post-clone setup run
+      # under `bash -lc`, a login shell, and /home/agent is the account's to write. The worker
+      # sweeps both before every turn and before every such script; the credential, claude's own
+      # transcripts and everything else in the home stay. Proved in the image
       # because it is the real uid split, the real sudo rule and the real home, and through the
       # worker's own code path (`RunAs.sweep_home`, the default target) rather than the helper
       # verb by hand, so a wrong default path or an argv the sudoers rule rejects fails here.
-      - name: a session's ~/.claude config does not survive to the next session
+      # The profile half is two-sided for the reason the MCP proof above is: the same login
+      # shell is run before the sweep, where the plant must *run*, so a `bash -lc` that stopped
+      # sourcing anything could not pass this as a no-op.
+      - name: a session's config and shell profile do not survive to the next session
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -450,13 +456,36 @@ jobs:
               echo poison > projects/-workspaces-issuebot-7/memory/MEMORY.md
               echo cred > .credentials.json
               echo transcript > projects/-workspaces-issuebot-7/keep.jsonl
+              # The shell profile, and what the account keeps in its home besides.
+              echo \"echo PROFILE-RAN\" > /home/agent/.profile
+              echo \"echo BASHRC-RAN\" > /home/agent/.bashrc
+              echo \"{}\" > /home/agent/.claude.json
+              mkdir -p /home/agent/.npm
             "
+            # Before the sweep the plant runs, which is what the sweep is for: a hook is
+            # `bash -lc`, a login shell, and the home it reads belongs to the account.
+            planted=$(sudo -n -H -u agent bash -lc "echo hook-ran")
+            case "$planted" in
+              *PROFILE-RAN*) ;;
+              *) echo "the login shell did not source ~/.profile: $planted" >&2; exit 1 ;;
+            esac
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
-            # The next session finds nothing planted, but the credential and transcript remain.
+            # The next session hook finds nothing planted: it runs its own command and no more.
+            test "$(sudo -n -H -u agent bash -lc "echo hook-ran")" = hook-ran
+            # And the account can still do what it is for with its start-up files gone: `claude`
+            # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
+            # from /etc/profile and /etc/profile.d, which belong to root and are not swept.
+            sudo -n -H -u agent claude --version
+            sudo -n -H -u agent bash -lc "claude --version"
+            # And the credential, the transcript and the rest of the home remain.
             sudo -n -H -u agent bash -c "
               set -eu
+              test ! -e /home/agent/.profile
+              test ! -e /home/agent/.bashrc
+              test -f /home/agent/.claude.json
+              test -d /home/agent/.npm
               cd /home/agent/.claude
               test ! -e commands
               test ! -e skills

@@ -31,9 +31,11 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import (
+    CLAUDE_HOME_DIR,
     CLAUDE_HOME_MEMORY_DIR,
     CLAUDE_HOME_SWEEP,
     MODULE,
+    SHELL_STARTUP_SWEEP,
     RunAs,
     RunAsError,
     _sweep,
@@ -327,10 +329,23 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
             os.chmod(tree / "closed", 0o700)
 
 
-def _plant_home(claude: Path) -> None:
-    """A ``~/.claude`` a prior session poisoned: config surfaces beside the credential and
-    claude's own runtime state."""
+def _plant_home(home: Path) -> None:
+    """A home a prior session poisoned: the shell start-up files a login shell reads (#137)
+    and the ``~/.claude`` config surfaces (#101), beside the credential, claude's own runtime
+    state and the entries other tools keep there."""
+    claude = home / ".claude"
     claude.mkdir(parents=True)
+    # #137: every hook is `bash -lc`, so each of these is a script the next session runs.
+    for name in SHELL_STARTUP_SWEEP:
+        (home / name).write_text("echo poison\n")
+    # What the sweep names nothing of, and must therefore leave: claude's own `.claude.json`
+    # (#119 holds its `mcpServers` off with `--strict-mcp-config`; the file itself is claude's
+    # to keep), and whatever a tool the session ran wrote in the home -- `gh`'s state directory
+    # and npm's cache are both real.
+    (home / ".claude.json").write_text("{}")
+    (home / ".local" / "state" / "gh").mkdir(parents=True)
+    (home / ".local" / "state" / "gh" / "device-id").write_text("id")
+    (home / ".npm").mkdir()
     (claude / ".credentials.json").write_text("token")
     (claude / "commands").mkdir()
     (claude / "commands" / "pwn.md").write_text("exfiltrate")
@@ -362,9 +377,10 @@ def _plant_home(claude: Path) -> None:
 
 
 def test_sweep_removes_loadable_config_and_keeps_the_credential_and_runtime(tmp_path: Path) -> None:
-    claude = tmp_path / ".claude"
-    _plant_home(claude)
-    _sweep(claude)
+    home = tmp_path / "home"
+    claude = home / ".claude"
+    _plant_home(home)
+    _sweep(home)
     for name in CLAUDE_HOME_SWEEP:
         assert not (claude / name).exists(), name
     project = claude / "projects" / "-workspaces-issuebot-7"
@@ -374,6 +390,57 @@ def test_sweep_removes_loadable_config_and_keeps_the_credential_and_runtime(tmp_
     assert (project / "a.jsonl").exists()
     assert (claude / "projects" / "a.jsonl").exists()
     assert (claude / "history.jsonl").exists()
+
+
+def test_sweep_removes_the_shell_start_up_files_and_keeps_the_rest_of_the_home(
+    tmp_path: Path,
+) -> None:
+    """#137: the home is the account's and writable by it, so a session can leave a script
+    every later hook's login shell sources. The sweep is aimed at the home for that reason --
+    and it is still a denylist, so everything it does not name stays."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _sweep(home)
+    for name in SHELL_STARTUP_SWEEP:
+        assert not (home / name).exists(), name
+    assert (home / ".claude.json").read_text() == "{}"
+    assert (home / ".local" / "state" / "gh" / "device-id").exists()
+    assert (home / ".npm").is_dir()
+    assert (home / ".claude").is_dir()
+
+
+def test_the_shell_start_up_list_names_what_bash_and_sh_read() -> None:
+    """Pinned like ``CLAUDE_HOME_SWEEP``: a login shell reads ``/etc/profile`` (root's) and then
+    the first of these three, runs ``.bash_logout`` on the way out, and reaches ``.bashrc``
+    through Debian's own copies of them. Dropping a name here has to be a deliberate edit."""
+    assert set(SHELL_STARTUP_SWEEP) >= {
+        ".bash_profile",
+        ".bash_login",
+        ".profile",
+        ".bashrc",
+        ".bash_logout",
+    }
+    # The home is swept by name, never emptied: what the account keeps there is its own.
+    assert ".claude" not in SHELL_STARTUP_SWEEP
+    assert ".claude.json" not in SHELL_STARTUP_SWEEP
+    # And the config half of the sweep still reaches ``.claude`` from the home it is aimed at:
+    # a typo here would sweep nothing under it while every name above still passed.
+    assert CLAUDE_HOME_DIR == ".claude"
+
+
+def test_sweep_unlinks_a_symlinked_start_up_file_without_following_it(tmp_path: Path) -> None:
+    """The same rule as a symlinked config surface: a link is the session's, so the link goes
+    and whatever it pointed at is untouched."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "someone-elses-profile"
+    target.write_text("keep")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").symlink_to(target)
+    _sweep(home)
+    assert not (home / ".profile").exists()
+    assert target.read_text() == "keep"
 
 
 def test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads() -> None:
@@ -408,22 +475,23 @@ def test_sweep_unlinks_a_symlinked_project_or_projects_dir_without_following_it(
     outside = tmp_path / "outside"
     (outside / "memory").mkdir(parents=True)
     (outside / "memory" / "keep").write_text("x")
-    claude = tmp_path / ".claude"
+    home = tmp_path / "home"
+    claude = home / ".claude"
     (claude / "projects" / "real").mkdir(parents=True)
     (claude / "projects" / "real" / "a.jsonl").write_text("{}")
     (claude / "projects" / "linked").symlink_to(outside, target_is_directory=True)
-    _sweep(claude)
+    _sweep(home)
     assert (outside / "memory" / "keep").exists()
     assert not (claude / "projects" / "linked").is_symlink()
     assert (claude / "projects" / "real" / "a.jsonl").exists()
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "p" / "memory").mkdir(parents=True)
-    other = tmp_path / ".claude2"
-    other.mkdir()
-    (other / "projects").symlink_to(elsewhere, target_is_directory=True)
+    other = tmp_path / "home2"
+    (other / ".claude").mkdir(parents=True)
+    (other / ".claude" / "projects").symlink_to(elsewhere, target_is_directory=True)
     _sweep(other)
     assert (elsewhere / "p" / "memory").exists()
-    assert not (other / "projects").exists()
+    assert not (other / ".claude" / "projects").exists()
 
 
 def test_sweep_is_a_no_op_on_a_missing_home(tmp_path: Path) -> None:
@@ -434,10 +502,11 @@ def test_sweep_unlinks_a_symlinked_config_dir_without_following_it(tmp_path: Pat
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep").write_text("x")
-    claude = tmp_path / ".claude"
-    claude.mkdir()
+    home = tmp_path / "home"
+    claude = home / ".claude"
+    claude.mkdir(parents=True)
     (claude / "commands").symlink_to(outside, target_is_directory=True)
-    _sweep(claude)
+    _sweep(home)
     assert not (claude / "commands").exists()
     assert (outside / "keep").exists()  # the tree the link pointed at is untouched
 
@@ -447,35 +516,66 @@ def test_sweep_home_delegates_and_clears_the_config_through_the_wrapper(
 ) -> None:
     record = tmp_path / "sudo.jsonl"
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
-    claude = tmp_path / ".claude"
-    _plant_home(claude)
-    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(claude) is True
-    assert not (claude / "commands").exists()
-    assert (claude / ".credentials.json").exists()
+    home = tmp_path / "home"
+    _plant_home(home)
+    _account_home(monkeypatch, home)  # a sweep that really runs is one at another account
+    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(home) is True
+    assert not (home / ".claude" / "commands").exists()
+    assert not (home / ".profile").exists()
+    assert (home / ".claude" / ".credentials.json").exists()
     (call,) = [json.loads(line) for line in record.read_text().splitlines()]
     assert call["u"] == ME
     assert call["command"][:4] == [sys.executable, "-P", "-m", MODULE]
-    assert call["command"][-2:] == ["sweep", str(claude)]
+    assert call["command"][-2:] == ["sweep", str(home)]
 
 
-def test_sweep_home_defaults_to_the_accounts_own_claude_dir(
+def test_sweep_home_refuses_the_invoking_accounts_own_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No explicit path: the account's home is where the delegated command is aimed. The fake
-    # sudo is told to deny, so it records the aimed command but never execs it -- the real home
-    # is never swept.
+    """The sweep unlinks a home's dotfiles, so it is never aimed at the caller's own account.
+
+    ``probe_run_as`` refuses an ``agent.run_as`` that does not separate at worker startup and in
+    ``validate`` (#111), but ``run-once`` runs no probe: without this, an operator who pointed
+    ``ISSUEBOT_AGENT_USER`` at their own account would lose their ``~/.claude`` config and their
+    ``.profile`` to the first hook. Refused where the removal is, and before sudo is asked.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    record = tmp_path / "sudo.jsonl"
+    monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
+    assert RunAs(ME, sudo=FAKE_SUDO).sweep_home(home) is False
+    assert (home / ".profile").exists()
+    assert (home / ".claude" / "commands").is_dir()
+    assert not record.exists()
+
+
+def test_sweep_home_defaults_to_the_accounts_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No explicit path: the account's home -- `pw_dir`, not `pw_dir / ".claude"` -- is where the
+    # delegated command is aimed. The home is moved under `tmp_path` first and the fake sudo is
+    # told to deny, so what is recorded is the aim and nothing is ever unlinked.
+    home = tmp_path / "home"
+    home.mkdir()
+    _account_home(monkeypatch, home)
     record = tmp_path / "sudo.jsonl"
     monkeypatch.setenv("CLAUDE_SUDO_RECORD", str(record))
     monkeypatch.setenv("CLAUDE_SUDO_DENY", "1")
     # And a sudo that refuses is reported, not swallowed: the caller logs it.
     assert RunAs(ME, sudo=FAKE_SUDO).sweep_home() is False
     (call,) = [json.loads(line) for line in record.read_text().splitlines()]
-    assert call["command"][-2:] == ["sweep", str(Path(pwd.getpwnam(ME).pw_dir) / ".claude")]
+    assert call["command"][-2:] == ["sweep", str(home)]
+    assert pwd.getpwnam(ME).pw_dir == str(home)  # the substitution, so the aim means something
 
 
-def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises() -> None:
+def test_sweep_home_on_a_missing_account_or_sudo_reports_failure_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     assert RunAs("no-such-account-x", sudo=FAKE_SUDO).sweep_home() is False
-    assert RunAs(ME, sudo="/no/such/sudo").sweep_home(Path("/nonexistent")) is False
+    # The account is substituted so the second call reaches the delegation rather than stopping
+    # at the refusal above: what is under test is a `sudo` that cannot run, reported not raised.
+    _account_home(monkeypatch, tmp_path / "home")
+    assert RunAs(ME, sudo="/no/such/sudo").sweep_home(tmp_path / "nonexistent") is False
 
 
 def test_the_helper_refuses_an_environment_that_is_not_a_string_mapping() -> None:
@@ -558,8 +658,8 @@ async def test_sweep_agent_home_delegates_under_run_as(
 ) -> None:
     calls: list[Path | None] = []
 
-    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
-        calls.append(claude_dir)
+    def record(self: RunAs, home: Path | None = None) -> bool:
+        calls.append(home)
         return True
 
     monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", record)
@@ -573,9 +673,92 @@ async def test_sweep_agent_home_delegates_under_run_as(
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
     with capture_logs() as logs:
         await manager.sweep_agent_home()
-    # No explicit path: the account's own ~/.claude, resolved inside sweep_home.
+    # No explicit path: the account's own home, resolved inside sweep_home.
     assert calls == [None]
     assert [entry["event"] for entry in logs] == ["claude_home_swept"]
+
+
+# A uid that is not this process's, for the account entry `_account_home` substitutes. The
+# sweep refuses a home whose account is the caller's own, which is the rule that keeps a
+# misconfigured `run-once` off an operator's dotfiles -- so a test that means to sweep has to
+# look like the delegation it stands in for: another account, at another uid.
+OTHER_UID = 65534 if os.getuid() != 65534 else 65533
+
+
+def _account_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point this account's home at ``home``, at a uid that is not this process's.
+
+    Everything that resolves the session account's home and uid goes through ``pwd.getpwnam``
+    -- ``RunAs.environment``, which is the ``HOME`` a hook runs with, and ``sweep_home``, which
+    is both where the sweep is aimed and what it compares against ``os.getuid()`` -- so one
+    substitution moves all of it, and the real home of whoever runs the suite is never the
+    target of a sweep that actually happens. The fake ``sudo`` still changes no uid, so the
+    delegated command runs as this process: what is faked is the account, not the separation.
+    """
+    real = pwd.getpwnam
+
+    def fake(name: str) -> pwd.struct_passwd:
+        entry = real(name)
+        if name != ME:
+            return entry
+        return pwd.struct_passwd(
+            (
+                entry.pw_name,
+                entry.pw_passwd,
+                OTHER_UID,
+                entry.pw_gid,
+                entry.pw_gecos,
+                str(home),
+                entry.pw_shell,
+            )
+        )
+
+    monkeypatch.setattr(pwd, "getpwnam", fake)
+
+
+async def test_a_planted_profile_does_not_run_for_the_next_sessions_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#137, end to end: a session leaves a ``~/.profile`` in the account's home, and the next
+    session's hook -- ``bash -lc``, a login shell -- does not run it.
+
+    Two-sided, like the MCP proof in CI: with the sweep taken out the plant *is* what the hook
+    runs, so this cannot pass against a hook that never sourced anything in the first place.
+    The real login shell, the real wrapper and the real hook path; only sudo is a fake, and it
+    changes no uid, which is the one thing a suite cannot have.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            "hooks": {"before_run": "echo hook-ran"},
+        }
+    )
+    # The manager's own default hook shell, `bash -lc`, since that is the whole question.
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    assert result.stdout_tail.splitlines() == ["hook-ran"]
+    for name in SHELL_STARTUP_SWEEP:
+        assert not (home / name).exists(), name
+
+    (home / ".profile").write_text("echo poison\n")  # planted again, and this time not swept
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == ["poison", "hook-ran"]
+
+
+async def _no_sweep() -> None:
+    """The sweep removed, for the contrast half of the test above."""
 
 
 async def test_sweep_agent_home_warns_when_the_delegation_fails(
@@ -583,9 +766,7 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
 ) -> None:
     """A sweep that never ran must not read as one that did: the turn goes on, since the next
     turn sweeps again, but the miss is said at WARNING."""
-    monkeypatch.setattr(
-        "issuebot.agent.runas.RunAs.sweep_home", lambda self, claude_dir=None: False
-    )
+    monkeypatch.setattr("issuebot.agent.runas.RunAs.sweep_home", lambda self, home=None: False)
     cfg = Settings.model_validate(
         {
             "github": {"repo": "example/repo"},
@@ -602,7 +783,7 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
 
 
 async def test_workspace_creation_and_removal_run_as_the_account(
-    tmp_path: Path, make_issue: Callable[..., Issue]
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "workspaces"
     cfg = Settings.model_validate(
@@ -620,6 +801,11 @@ async def test_workspace_creation_and_removal_run_as_the_account(
         environ=base_env(HOME=str(tmp_path), CLAUDE_SUDO_RECORD=str(record)),
         hook_shell=("bash", "-c"),
     )
+    # Creation runs the post-clone setup and `after_create`, and every script in a login shell
+    # sweeps the account's home first (#137). That is proved above, on a home under `tmp_path`;
+    # this test is about the workspace, and the account it names is the one running the suite,
+    # so it performs no sweep at all rather than aiming one anywhere near a real home.
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert ws.created and (ws.path / ".git").is_dir()
     state = ws.path / ".issuebot"
@@ -909,7 +1095,7 @@ async def test_sweep_agent_home_follows_the_binding_under_a_pool(
     """
     swept: list[str] = []
 
-    def record(self: RunAs, claude_dir: Path | None = None) -> bool:
+    def record(self: RunAs, home: Path | None = None) -> bool:
         swept.append(self.user)
         return True
 
