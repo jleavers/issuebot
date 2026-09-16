@@ -353,13 +353,45 @@ def test_the_python_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell(
     """
     assert 'ARG UV_VERSION=""' in DOCKERFILE
     assert "${UV_VERSION:+/opt/uv/bin:}" in DOCKERFILE
-    assert "printf 'PATH=\"/opt/uv/bin:$PATH\"\\n' > /etc/profile.d/issuebot-uv.sh" in DOCKERFILE
+    assert "'PATH=\"/opt/uv/bin:$PATH\"'" in DOCKERFILE
+    assert "> /etc/profile.d/issuebot-uv.sh" in DOCKERFILE
     # Asserted at build for the reason `initdb --version` and `node --version` are: a moved
     # download or a renamed asset has to fail the build, not the first session that runs it.
     assert "/opt/uv/bin/uv --version" in DOCKERFILE
     # The checksum comes from the release's own .sha256, so a tarball that is not the one
     # astral published fails the build rather than being installed.
     assert "sha256sum -c uv.sha256" in DOCKERFILE
+
+
+def test_the_uv_profile_defaults_the_link_mode_the_deployment_can_only_copy() -> None:
+    """#161: uv's cache is under ``$HOME/.cache/uv``, in the container's own writable layer,
+    and the venv it builds is ``<workspace>/.venv``, on the mounted volume. A hardlink cannot
+    cross that, so every ``uv sync`` falls back to a full copy and warns three lines about it
+    on the stderr of ``after_create`` -- the first hook of every session, whose tail reaches
+    ``HookResult.summary`` and the run's error.
+
+    It rides on the ``UV_VERSION`` guard rather than on an ``ENV``, so a deployment that
+    installs no uv carries no variable for it, and it is a *default* rather than an
+    assignment: ``UV_LINK_MODE`` is in neither ``PASSTHROUGH_NAMES`` nor
+    ``PROTECTED_ENV_NAMES``, so a hook's ``.issuebot/env`` is how a deployment sets it, and
+    every hook runs under ``bash -lc`` -- which sources this file after that value has been
+    inherited. An unconditional export would overwrite exactly the setting an operator reached
+    for.
+    """
+    assert "': \"${UV_LINK_MODE:=copy}\"'" in DOCKERFILE
+    assert "'export UV_LINK_MODE'" in DOCKERFILE
+    # A plain assignment in that file would clobber an inherited value rather than defer to it.
+    assert "UV_LINK_MODE=copy'" not in DOCKERFILE
+    # Off with the rest of the toolchain: no ENV, so the default image is unchanged.
+    assert "ENV UV_LINK_MODE" not in DOCKERFILE
+    # The two directions, on the image CI actually builds.
+    assert (
+        "docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}'" in CI
+    )
+    assert (
+        "docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain"
+        " -lc 'echo ${UV_LINK_MODE-}'" in CI
+    )
 
 
 def test_compose_offers_the_python_toolchain_to_the_worker_alone() -> None:

@@ -156,6 +156,22 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # uv --version is asserted here for the reason initdb --version, node --version and
 # claude --version are: a moved download or a renamed asset has to fail the build, not the
 # first session that runs `uv sync`.
+# The profile script also settles uv's link mode (#161), because on a deployment shaped like
+# this one the hardlink it would rather use can never work: uv's cache defaults to
+# $HOME/.cache/uv and a session account's home is in the container's own writable layer, while
+# the venv it builds is `<workspace>/.venv` on the mounted volume. Two filesystems, and a
+# hardlink cannot cross them, so every `uv sync` falls back to a full copy and warns three
+# lines about it. The copy itself is fine -- 122 ms for this repository -- but the warning is
+# on the stderr of `after_create`, the first hook of every session, whose tail reaches
+# `HookResult.summary` and the run's error, and an unexplained warning there is something a
+# turn gets spent chasing. So the variable states that the fallback is intended, rather than
+# leaving each session to rediscover that the hardlink is impossible.
+# A default (`:=`) rather than a plain assignment: `UV_LINK_MODE` is neither passed through by
+# `agent_environment` nor protected, so the one way a deployment sets it for a session is a
+# hook writing it to `.issuebot/env` -- and every hook runs under `bash -lc`, which sources
+# this file *after* that value has been inherited, so an unconditional export would overwrite
+# exactly the setting an operator had reached for. One whose cache and workspaces do share a
+# filesystem sets `hardlink` or `clone` there and keeps it.
 ARG UV_VERSION=""
 RUN if [ -n "${UV_VERSION}" ]; then \
       case "${UV_VERSION}" in \
@@ -176,7 +192,11 @@ RUN if [ -n "${UV_VERSION}" ]; then \
    && install -d -m 0755 /opt/uv/bin \
    && install -m 0755 "/tmp/uv-${uv_arch}/uv" "/tmp/uv-${uv_arch}/uvx" /opt/uv/bin/ \
    && rm -rf "/tmp/uv-${uv_arch}" "/tmp/uv-${uv_arch}.tar.gz" /tmp/uv.sha256 \
-   && printf 'PATH="/opt/uv/bin:$PATH"\n' > /etc/profile.d/issuebot-uv.sh \
+   && printf '%s\n' \
+        'PATH="/opt/uv/bin:$PATH"' \
+        ': "${UV_LINK_MODE:=copy}"' \
+        'export UV_LINK_MODE' \
+        > /etc/profile.d/issuebot-uv.sh \
    && chmod 0644 /etc/profile.d/issuebot-uv.sh \
    && /opt/uv/bin/uv --version; \
     fi

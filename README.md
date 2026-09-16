@@ -842,6 +842,17 @@ also an ordering: **rebuild the image before the new `configs/WORKFLOW.md` reach
 worker**, since `configs/` is bind-mounted and reloads live. `docker compose stop worker`
 before pulling, and `up -d worker` after the build, closes that window entirely.
 
+The same profile script also sets `UV_LINK_MODE=copy` for a login shell. uv would rather
+hardlink a package out of its cache into the venv, and here it can never do that: the cache is
+`$HOME/.cache/uv`, in the container's own writable layer, and the venv is `<workspace>/.venv`,
+on the `workspaces` volume. A hardlink cannot cross two filesystems, so uv copies and then
+warns three lines about it on the stderr of `after_create` — the first hook of every session,
+whose tail becomes the run's error, which is a poor place to leave an unexplained warning about
+something that is working. The variable states that the copy is intended; it is a *default*, so
+a deployment whose cache and workspaces do share a filesystem can hand a hook's `.issuebot/env`
+a `UV_LINK_MODE=hardlink` (or `clone`) and have it take effect. Nothing else about the copy is
+worth paying for: it took 122 ms for this repository.
+
 If a session reports `uv: command not found`, check it in a login shell, which is what the hooks
 get: `docker compose exec worker bash -lc 'command -v uv'`. If it reports a `403` from the
 proxy instead, the image is fine and the allow-list is what is missing —
