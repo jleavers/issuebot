@@ -20,6 +20,16 @@ COMPOSE = (ROOT / "compose.yaml").read_text()
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 SERVICES = yaml.safe_load(COMPOSE)["services"]
 
+# What the `UV_VERSION` stanza writes to /etc/profile.d/issuebot-uv.sh: the `PATH` line the
+# hooks need, since Debian's /etc/profile overwrites `PATH` for a login shell, and uv's link
+# mode (#161), which is a *default* so that an inherited value still wins.
+UV_PROFILE_SCRIPT = """   && printf '%s\\n' \\
+        'PATH="/opt/uv/bin:$PATH"' \\
+        ': "${UV_LINK_MODE:=copy}"' \\
+        'export UV_LINK_MODE' \\
+        > /etc/profile.d/issuebot-uv.sh \\
+"""
+
 
 def test_two_accounts_and_one_delegation() -> None:
     assert "useradd --create-home --uid 1000 --shell /bin/bash issuebot" in DOCKERFILE
@@ -353,13 +363,55 @@ def test_the_python_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell(
     """
     assert 'ARG UV_VERSION=""' in DOCKERFILE
     assert "${UV_VERSION:+/opt/uv/bin:}" in DOCKERFILE
-    assert "printf 'PATH=\"/opt/uv/bin:$PATH\"\\n' > /etc/profile.d/issuebot-uv.sh" in DOCKERFILE
+    # The whole `printf` run, so that the `PATH` line stays tied to *this* file: two loose
+    # substrings would still pass with it written into `issuebot-node.sh`.
+    assert UV_PROFILE_SCRIPT in DOCKERFILE
     # Asserted at build for the reason `initdb --version` and `node --version` are: a moved
     # download or a renamed asset has to fail the build, not the first session that runs it.
     assert "/opt/uv/bin/uv --version" in DOCKERFILE
     # The checksum comes from the release's own .sha256, so a tarball that is not the one
     # astral published fails the build rather than being installed.
     assert "sha256sum -c uv.sha256" in DOCKERFILE
+
+
+def test_the_uv_profile_defaults_the_link_mode_the_deployment_can_only_copy() -> None:
+    """#161: uv's cache is under ``$HOME/.cache/uv``, in the container's own writable layer,
+    and the venv it builds is ``<workspace>/.venv``, on the mounted volume. A hardlink cannot
+    cross that, so every ``uv sync`` falls back to a full copy and warns three lines about it
+    on the stderr of ``after_create`` -- the first hook of every session, logged whole on
+    ``hook_finished`` and quoted into the run's error (``HookResult.summary``) when that hook
+    fails.
+
+    It rides on the ``UV_VERSION`` guard and on the profile script rather than on an ``ENV``,
+    for two separate reasons: a deployment that installs no uv then carries no variable about
+    it, and an ``ENV`` would not reach a session in any case, since ``agent_environment`` is an
+    allow-list and no ``UV_`` name is on it.
+
+    And a *default* rather than an assignment. ``UV_LINK_MODE`` is in neither
+    ``PASSTHROUGH_NAMES`` nor ``PROTECTED_ENV_NAMES``, so what a deployment overrides it with
+    is the hook line itself or an ``.issuebot/env`` written from ``before_run`` -- which is
+    inherited *before* every ``bash -lc`` sources this file, so an unconditional export would
+    overwrite exactly the setting an operator reached for.
+    """
+    assert UV_PROFILE_SCRIPT in DOCKERFILE
+    # Off with the rest of the toolchain, so an image built without `UV_VERSION` carries no
+    # variable about a tool it does not have: every mention of it in the runtime stage is a
+    # comment or one of those two lines, which is what an `ENV` -- in its own instruction or
+    # folded into the continuation of an existing one -- would fail. (The *builder* stage sets
+    # it for its own reasons, over the buildkit cache mount, and is a different image.)
+    runtime = DOCKERFILE.split("AS runtime", 1)[1]
+    mentions = [line.strip() for line in runtime.splitlines() if "UV_LINK_MODE" in line]
+    profile = {': "${UV_LINK_MODE:=copy}"', "export UV_LINK_MODE"}
+    assert profile <= {line.strip(" \\'") for line in mentions}
+    assert all(line.startswith("#") or line.strip(" \\'") in profile for line in mentions)
+    # The two directions, on the image CI actually builds.
+    assert (
+        "docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}'" in CI
+    )
+    assert (
+        "docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain"
+        " -lc 'echo ${UV_LINK_MODE-}'" in CI
+    )
 
 
 def test_compose_offers_the_python_toolchain_to_the_worker_alone() -> None:
