@@ -195,16 +195,26 @@ jobs:
           if [ "${REUSE}" = "true" ]; then
             # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
             # the checkout happens to have left and git's opportunistic update of the
-            # remote-tracking ref underneath it, and then resolved to the one commit
-            # everything below reads: the blob it compares and the change it measures.
+            # remote-tracking ref underneath it, and then resolved to the one commit the
+            # gates below read: the blob one compares and the change the other measures.
             #
-            # `--no-tags` and `refs/heads/`, because a bare `${BRANCH}` is not the branch.
-            # `gitrevisions` resolves `refs/tags/${BRANCH}` ahead of `refs/heads/${BRANCH}`,
-            # and a plain fetch follows a tag pointing into the history it just downloaded,
-            # so anyone who can push here could put the config the hooks were run over in an
-            # ancestor commit, tag it with the branch's own name, and leave anything they
-            # liked at the tip: the gates would read the tag and the pull request would
-            # propose the tip. Nothing here works from the worktree, so nothing checks it out.
+            # `refs/heads/` on both sides of the refspec, because a bare `${BRANCH}` is not
+            # the branch. `refs/tags/${BRANCH}` outranks it when the *remote* resolves the
+            # name -- `git fetch origin "${BRANCH}"` answers `* tag ${BRANCH} -> FETCH_HEAD`
+            # against a remote carrying both, with no local tag anywhere in it -- and again
+            # when this repository does, per `gitrevisions`. `--no-tags` is the second half:
+            # an ordinary fetch also follows a tag pointing into the history it just
+            # downloaded, which would leave that name resolving to the tag here afterwards.
+            # Either way, anyone who can push here could put the config the hooks were run
+            # over in an ancestor commit, tag it with the branch's own name, and leave
+            # whatever they liked at the tip.
+            #
+            # What the gates then vouch for is that commit. The pull request is opened by
+            # branch name, since that is what the API takes, so a push landing between here
+            # and the POST proposes something they have not seen -- unavoidable, and a much
+            # narrower window than a tag that can sit on the remote indefinitely.
+            #
+            # Nothing in this arm works from the worktree, so nothing checks it out.
             git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
             tip="$(git rev-parse "refs/heads/${BRANCH}")"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an

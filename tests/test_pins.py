@@ -299,7 +299,12 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
         "a reused branch is not held to the shape of the change it claims to be"
     )
-    assert "git diff --numstat" not in commands, "compares two tips rather than the change"
+    # The two-tip form, not the idiom: a local `git diff --numstat -- <path>` over what the
+    # step has just written is a different question with a right answer, and it is the very
+    # check `claude-code-version.yml` is held to for its own copied-in file.
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}"' not in commands, (
+        "compares two tips rather than the change the branch proposes"
+    )
     # The question and what is done with the answer, since each can be deleted alone: a
     # comparison nothing reads, and one whose failure reads as "no files", both leave a
     # workflow that asks and then pushes anyway.
