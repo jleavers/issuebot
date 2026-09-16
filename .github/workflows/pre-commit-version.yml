@@ -164,7 +164,7 @@ jobs:
           REUSE: ${{ needs.freeze.outputs.reuse }}
         run: |
           set -euo pipefail
-          # The artefact crossed a job boundary from the job that ran the unreviewed hooks,
+          # The config crossed a job boundary from the job that ran the unreviewed hooks,
           # so its shape is re-checked here, in the job that pushes: this one must never
           # write a tag where a digest belongs. Ahead of both arms, because a branch this
           # job did not write is reused below only when it carries this very file.
@@ -181,6 +181,17 @@ jobs:
             echo "::error::the frozen config pins no hook at a digest"
             exit 1
           fi
+          # ... and it is the config ${BRANCH} is named for. `freeze` took that name from the
+          # config it had just frozen and *before* it ran the hooks over the tree, so a hook
+          # that rewrote the file afterwards would arrive here as an artefact of the right
+          # shape that nothing had named. The name is this job's one link between the two:
+          # it is the branch pushed, the head of the pull request, and what the arm below
+          # compares a branch already on the remote against.
+          hash="$(git hash-object /tmp/frozen/pre-commit-config.yaml | cut -c1-12)"
+          if [ "${BRANCH}" != "pre-commit-hooks-${hash}" ]; then
+            echo "::error::the artefact is not the config ${BRANCH} is named for"
+            exit 1
+          fi
           if [ "${REUSE}" = "true" ]; then
             # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
             # the checkout happens to have left and git's opportunistic update of the
@@ -194,7 +205,11 @@ jobs:
             # hooks over the config it froze, and the body below says so, so the branch is
             # reused only when it carries that very file and moves nothing else. This arm
             # could not run at all until #148, so nothing had ever looked at what it reuses.
-            if ! cmp -s /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml; then
+            # Read out of the branch rather than off the disk, because `cmp` follows a
+            # symlink: a `.pre-commit-config.yaml` that is one, pointed at the artefact this
+            # step holds, would otherwise compare equal to itself.
+            if ! git cat-file blob "${BRANCH}:.pre-commit-config.yaml" \
+                 | cmp -s - /tmp/frozen/pre-commit-config.yaml; then
               echo "::error::${BRANCH} does not carry the config the hooks were run over." \
                 "Delete the branch and rerun this workflow to rebuild it."
               exit 1
@@ -209,7 +224,7 @@ jobs:
             # as the pull request itself will, and needs no history in this shallow
             # checkout to do it. A failure fails the run rather than reading as "no files".
             if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}" \
-                 --jq '[.files[].filename] | join(" ")')"; then
+                 --jq '[.files[].filename] | join(" ")' | tr -d '\r\n')"; then
               echo "::error::could not compare ${BRANCH} with ${GITHUB_REF_NAME}"
               exit 1
             fi
@@ -251,6 +266,8 @@ jobs:
             echo "::error::could not open the pull request. If this is HTTP 403, turn on" \
               "Settings > Actions > General > Workflow permissions >" \
               "'Allow GitHub Actions to create and approve pull requests'." \
-              "The branch ${BRANCH} is pushed; re-running this job will reuse it."
+              "The branch ${BRANCH} is pushed. Re-run the whole workflow -- not just this" \
+              "job, which would reuse freeze's answer of 'no branch' and push again -- and" \
+              "the lookup will find it and reuse it."
             exit 1
           fi

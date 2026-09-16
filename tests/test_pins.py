@@ -175,6 +175,10 @@ def test_the_bump_jobs_look_up_their_branch_through_the_api_not_git() -> None:
         # A lookup that fails fails the run: answering "no branch" to a 5xx or a rate limit
         # would have the pushing half create a branch that is already there.
         assert "::error::could not read refs/heads/${branch}" in commands, name
+        # ... and that the answer is acted on. Asserting the question alone would hold with
+        # the arm that sets `reuse` deleted, which is the state this issue found it in.
+        assert '[ "${found}" != "0" ]' in commands, f"{name}: the lookup's answer is not used"
+        assert "reuse=true" in commands, name
 
         # And nothing else in the job reaches the remote either, `git ls-remote` included.
         for step in job["steps"]:
@@ -270,7 +274,12 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
 
     # Each check named separately: they guard different things, and one assertion over the
     # pair would let either be deleted while the other kept the test green.
-    assert "cmp -s /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml" in commands, (
+    # Read out of the branch, since `cmp` follows a symlink and the artefact is a path on
+    # this runner: a `.pre-commit-config.yaml` that links to it would compare equal to itself.
+    assert 'git cat-file blob "${BRANCH}:.pre-commit-config.yaml"' in commands, (
+        "a reused branch's config is read off the disk rather than out of the branch"
+    )
+    assert "cmp -s - /tmp/frozen/pre-commit-config.yaml" in commands, (
         "a reused branch's config is not compared with the one the hooks were run over"
     )
     # Measured from the merge base, which is what the pull request will show and what a
@@ -283,6 +292,19 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
         "a reused branch is not held to the shape of the change it claims to be"
     )
     assert "git diff --numstat" not in commands, "compares two tips rather than the change"
+    # The question and what is done with the answer, since each can be deleted alone: a
+    # comparison nothing reads, and one whose failure reads as "no files", both leave a
+    # workflow that asks and then pushes anyway.
+    assert '[ "${moved}" != ".pre-commit-config.yaml" ]' in commands, "the answer is not used"
+    assert "::error::could not compare" in commands, "a failed comparison is not a failure"
+
+    # And the artefact is the config the branch name was taken from -- the one link between
+    # the name `freeze` committed to before it ran the hooks and the file that arrives here
+    # after they have run.
+    assert "git hash-object /tmp/frozen/pre-commit-config.yaml | cut -c1-12" in commands
+    assert '[ "${BRANCH}" != "pre-commit-hooks-${hash}" ]' in commands, (
+        "the artefact is not tied to the branch name it is pushed under"
+    )
 
     # And the branch has to arrive under a name before any of that can look at it. An
     # explicit refspec, so what the checkout resolves is a ref this step wrote, rather than
