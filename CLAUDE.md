@@ -769,7 +769,17 @@ version, and moves by hand.
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
   otherwise, plus `PrOpened`). `actions.py`: `claim` (`in_progress`, markers cleared),
   `blocked_escape` (workpad block then
-  `review`, idempotent per run id), `finish_terminal` (`complete`, `no_change` or `cancelled`,
+  `review`, idempotent per run id -- and label-first when the workpad lookup fails
+  non-retryably, #128: that read *is* the idempotence, so a `response` error on a page past
+  `MAX_COMMENT_PAGES` or a malformed one used to keep the issue in `in_progress` for the life
+  of the process while the orchestrator retried every five minutes, and the escape's purpose is
+  the label move rather than the note explaining it. So the label moves and the block is then
+  appended blind, as a fresh marker comment, on a best-effort basis
+  (`blocked_escape_workpad_unreadable` names the read that failed,
+  `blocked_escape_note_failed` the write), trading a possible duplicate note for an issue that
+  never leaves `in_progress`. A retryable failure -- `transport`, `rate_limited` -- is still the
+  next tick's to retry, since that read is likely to answer),
+  `finish_terminal` (`complete`, `no_change` or `cancelled`,
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
   counts include triage, and only a genuine abandonment still clears the label).

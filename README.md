@@ -209,7 +209,9 @@ ignored.
 Each timer above says which layer it bounds, and a few more ceilings are fixed in the code
 rather than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
 the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
-first, and a longer thread with no workpad in it fails the run rather than reading as "none";
+first, and a longer thread with no workpad in it fails the run rather than reading as "none"
+(the blocked escape is the exception: it moves the label anyway and notes the block
+best-effort, since an issue that never leaves `in-progress` is worse than a duplicate note);
 the conflict bounce reads at most the first 1,000 label additions of an issue's history, and a
 bounce that fails past a cap is not tried again until the issue changes; a
 running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,

@@ -134,6 +134,39 @@ async def _append_workpad(
         await adapter.update_comment(workpad.id, workpad.body.rstrip("\n") + "\n\n" + block + "\n")
 
 
+async def _blocked_note(
+    adapter: GitHubAdapter, number: int, context: BlockedContext, block: str
+) -> GitHubError | None:
+    """Write the escape's block, before the label moves; the error when it could not be read.
+
+    The block's idempotence is the run marker already in the workpad's body, so the read is
+    what the note needs and the read is what can fail (#128). A retryable failure is worth
+    another tick and is raised, since the same read a minute later is likely to answer. A
+    non-retryable one -- a page past ``MAX_COMMENT_PAGES`` (#110), a malformed page -- is a
+    property of the issue rather than of the moment, and it would keep answering the same way
+    for the life of the process while the issue sat in ``in_progress`` waiting for a human. So
+    it is *returned* instead: the escape's purpose is the label move, the block is only the
+    note explaining it, and the caller moves the label and then writes the note blind.
+
+    The split is on ``retryable`` where ``conflict_rework``'s is on the category, and the two
+    rules answer different questions about the same read. The bounce's is "is this worth
+    asking again *on every poll*", where a broken token is, because nothing else in that path
+    would report it. This one is "does the label move now", and it moves for every answer that
+    is not going to change in a minute -- an ``auth`` or ``config`` read among them, since the
+    ``set_state`` right behind it fails on the same fault and takes the escape back to
+    ``failed`` and its retry anyway.
+    """
+    try:
+        workpad = await adapter.find_workpad_comment(number)
+    except GitHubError as exc:
+        if exc.retryable:
+            raise
+        return exc
+    if workpad is None or _run_marker(context) not in workpad.body:
+        await _append_workpad(adapter, number, workpad, block)
+    return None
+
+
 async def blocked_escape(
     adapter: GitHubAdapter,
     bus: EventBus,
@@ -142,7 +175,15 @@ async def blocked_escape(
     *,
     now: datetime,
 ) -> EscapeOutcome:
-    """Roadmap §1's blocked escape: workpad block, then ``review``; retried by the caller."""
+    """Roadmap §1's blocked escape: workpad block, then ``review``; retried by the caller.
+
+    Label-first when the workpad cannot be read (#128). ``_blocked_note`` above raises what is
+    worth retrying and returns what is not, and a non-retryable read leaves this function with
+    the label to move and no idempotent way to write the note -- so it moves the label, then
+    appends the block as a *fresh* marker comment on a best-effort basis, its own failure
+    logged and no more. The trade-off is deliberate and stated in the issue: a possible
+    duplicate note against an issue that never leaves ``in_progress``.
+    """
     log = get_logger(__name__)
     try:
         issues = await adapter.fetch_issues_by_ids([issue_id])
@@ -160,9 +201,7 @@ async def blocked_escape(
             )
             return "skipped"
         block = blocked_block(context, now, adapter.labels)
-        workpad = await adapter.find_workpad_comment(issue.number)
-        if workpad is None or _run_marker(context) not in workpad.body:
-            await _append_workpad(adapter, issue.number, workpad, block)
+        read_error = await _blocked_note(adapter, issue.number, context, block)
         await adapter.set_state(issue.number, StateLabel.REVIEW)
     except GitHubError as exc:
         log.warning(
@@ -182,6 +221,28 @@ async def blocked_escape(
     bus.publish(
         Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=context.reason)
     )
+    if read_error is not None:
+        # The label has moved and the issue is a human's now; the note is what is left, and it
+        # is written blind because the read that would have made it idempotent is the one that
+        # failed. Both halves are logged, since either can be why there is no block to read.
+        log.warning(
+            "blocked_escape_workpad_unreadable",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            run_id=context.run_id,
+            error=str(read_error),
+            category=read_error.category,
+        )
+        try:
+            await _append_workpad(adapter, issue.number, None, block)
+        except GitHubError as exc:
+            log.warning(
+                "blocked_escape_note_failed",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                run_id=context.run_id,
+                error=str(exc),
+            )
     log.info(
         "blocked_escape_applied",
         issue_number=issue.number,
