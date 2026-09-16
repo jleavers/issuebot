@@ -1083,16 +1083,10 @@ that matters on your host.
   overlay existed, move those edits into the overlay and `git checkout configs/WORKFLOW.md`
   first. `configs/` is mounted into the container, but the code is baked into the
   image: after pulling a new version of issuebot, run `docker compose build` (or
-  `docker compose up --build -d`) before anything else. Upgrading across the egress proxy
-  (#126) needs the second shared network before anything starts --
-  `docker network create --internal issuebot-internal`, once per host -- because the worker now
-  joins that one instead of `issuebot` and compose refuses a network it did not create. Then
-  `docker compose up -d` in the hub checkout (which recreates `db` onto both networks) and in
-  every worker checkout. Until the hub has been recreated, a worker on the new network cannot
-  resolve `db` and restarts with `[FAIL] database:`. If anything in a session reaches a registry, put it
+  `docker compose up --build -d`) before anything else. If anything in a session reaches a registry, put it
   in `ISSUEBOT_EGRESS_ALLOW` in the same pass -- a hook's `uv sync` or `npm ci`, and equally the
   `uv run pytest` or `pip install` the session runs in its own shell to validate a change.
-  After the upgrade the session reaches Anthropic and GitHub and nothing else, so an unlisted
+  Without amending `ISSUEBOT_EGRESS_ALLOW` the session reaches Anthropic and GitHub and nothing else, so an unlisted
   registry surfaces as a failing hook or a failing test mid-run rather than as a configuration
   error (see "What a session may reach"). A setting that a newer
   `WORKFLOW.md` introduces fails against a stale image at `validate`, as
