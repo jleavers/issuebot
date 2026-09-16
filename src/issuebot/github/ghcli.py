@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from issuebot.config import GitHubLabels, GitHubSettings
-from issuebot.github.errors import ErrorCategory, GitHubError
+from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.models import (
     AuthStatus,
     Comment,
@@ -38,6 +38,23 @@ MAX_COMMENT_PAGES = 10
 # asks for it fails loudly and is retried, rather than reading a history anyone with triage
 # can lengthen for as long as it grows.
 MAX_TIMELINE_PAGES = 10
+
+# How many pages of issues carrying one state label the board poll reads (#139). The cursor
+# loop below paginates as surely as ``gh api --paginate`` does, it runs once per role on every
+# tick, and the pages -- and the bodies in them, 64 KiB each -- are grown by anyone who can get
+# issues labelled. A thousand open issues under one state label is a bound no board reaches by
+# working: the three claimable roles hold a working set a human queues and
+# ``agent.max_concurrent_agents`` drains, and ``review`` is a queue a human closes.
+MAX_ISSUE_PAGES = 10
+
+# The same ceiling for the terminal sweep's read of *closed* issues, and a looser one, because
+# it bounds a different resource (#139). A closed issue rests in ``complete`` for ever --
+# ``finish_terminal`` leaves the label where it is -- so that role grows with everything
+# issuebot has ever finished rather than with a working set, and one number for both would
+# either strangle the sweep on a long-lived deployment or leave the poll with a ceiling far
+# above what it needs. Five thousand is years of completed issues; that the figure grows at all
+# is the sweep's own defect and not this cap's, and it is filed separately (#149).
+MAX_TERMINAL_PAGES = 50
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body state url createdAt updatedAt closedAt
@@ -146,11 +163,13 @@ class GhCliAdapter:
         self._log.debug("fetch_issues_by_states", states=[role.value for role in roles])
         if not roles:
             return []
-        return await self._collect(roles, OPEN_ISSUES_QUERY)
+        return await self._collect(roles, OPEN_ISSUES_QUERY, max_pages=MAX_ISSUE_PAGES)
 
     async def fetch_terminal_issues(self) -> list[Issue]:
         self._log.debug("fetch_terminal_issues")
-        return await self._collect(list(StateLabel), CLOSED_ISSUES_QUERY)
+        return await self._collect(
+            list(StateLabel), CLOSED_ISSUES_QUERY, max_pages=MAX_TERMINAL_PAGES, per_role=True
+        )
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         numbers = sorted(
@@ -441,19 +460,64 @@ class GhCliAdapter:
         except (TypeError, KeyError) as exc:
             raise GitHubError("response", "unexpected repository response") from exc
 
-    async def _collect(self, roles: Sequence[StateLabel], query: str) -> list[Issue]:
+    async def _collect(
+        self, roles: Sequence[StateLabel], query: str, *, max_pages: int, per_role: bool = False
+    ) -> list[Issue]:
+        """Every issue carrying any of ``roles``, deduplicated and oldest first.
+
+        ``per_role`` decides what one role over its page ceiling costs the others (#139).
+        Off, for the board poll: any role's refusal refuses the whole read, because the answer
+        is a board to claim from and four roles of it are not a board. On, for the terminal
+        sweep, where the answer is a list of closed issues to finish one at a time, and the
+        role that can actually reach the ceiling is ``complete``, which grows with everything
+        issuebot has ever finished. Letting that one void the other four would stop the sweep
+        closing *any* issue out, removing any workspace and releasing any session account --
+        `terminal_sweep` is the only path to `finish_terminal` -- on a deployment that had
+        merely succeeded often enough, and from a warning line, since the sweep's failures
+        reach no dispatch hold and no health surface. Skipping the one role costs less: the
+        issues in it are already closed and already labelled, and what is lost is
+        `finish_terminal`'s retry of a workspace removal that failed at the time, for issues
+        in that role alone. A skipped role is a warning naming it, and the sweep repeats.
+        """
         login = await self.own_login()
         found: dict[int, Issue] = {}
         for role in roles:
             label = label_name(self.labels, role)
-            for issue in await self._issues_with_label(label, query, login):
+            try:
+                page = await self._issues_with_label(label, query, login, max_pages)
+            except PageCeilingError as exc:
+                if not per_role:
+                    raise
+                # This cap and nothing else. Not the `response` *category*, which also covers
+                # a GraphQL errors payload -- how a server-side query timeout arrives, which a
+                # large label-filtered query is what provokes -- and a malformed answer: those
+                # are the whole read's to fail on, as they were before.
+                self._log.warning("issue_role_skipped", label=label, reason=exc.message)
+                continue
+            for issue in page:
                 found.setdefault(issue.number, issue)
         return sorted(found.values(), key=lambda issue: (issue.created_at, issue.number))
 
-    async def _issues_with_label(self, label: str, query: str, login: str) -> list[Issue]:
+    async def _issues_with_label(
+        self, label: str, query: str, login: str, max_pages: int
+    ) -> list[Issue]:
+        """Every issue carrying ``label``, oldest first, at most ``max_pages`` pages of them.
+
+        Past the ceiling the read *fails* with a ``response`` error, as the workpad and
+        timeline reads do (#110, #139), rather than returning what it has. The decision is
+        recorded in ``docs/superpowers/specs/2026-09-14-resource-ceilings-design.md``, and it
+        turns on this read being different from those two: a refused answer is obviously not
+        an answer, while a short board is one the worker would claim from believing it had
+        seen the whole thing. The query orders oldest first, so truncation would silently
+        starve the newest issues for as long as the board stayed over the ceiling -- with
+        nothing in any log, on any dashboard, or on the issues themselves to say so. Failing
+        is loud and already handled: consecutive failures hold dispatch with a ``github``
+        hold (#88), which is on ``issuebot status``, ``/healthz`` and the dashboard, so the
+        board stops moving *and says why*.
+        """
         issues: list[Issue] = []
         cursor: str | None = None
-        while True:
+        for _page_number in range(max_pages):
             variables = {"owner": self._owner, "name": self._name, "label": label}
             if cursor:
                 variables["cursor"] = cursor
@@ -481,6 +545,7 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+        raise PageCeilingError(f"more than {max_pages * PAGE_SIZE} issues carry {label}")
 
     # --- plumbing ----------------------------------------------------------------
 

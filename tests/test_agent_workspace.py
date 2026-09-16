@@ -1,9 +1,13 @@
 """Tests for workspaces: keys, containment, clone, hooks, removal and session.json."""
 
 import asyncio
+import contextlib
+import io
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -13,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent import workspace as workspace_module
 from issuebot.agent.errors import AgentError
 from issuebot.agent.workspace import (
+    MAX_HOOK_OUTPUT_BYTES,
     SessionRecord,
     WorkspaceManager,
     _remove_path,
@@ -24,6 +30,7 @@ from issuebot.agent.workspace import (
 )
 from issuebot.config import Settings
 from issuebot.github import GhResult, GhRunner, GitHubError, Issue
+from issuebot.log import configure_logging
 
 posix = pytest.mark.skipif(sys.platform == "win32", reason="hooks and git run through bash")
 FAKE_GH = Path(__file__).parent / "fakes" / "gh"
@@ -369,6 +376,166 @@ async def test_hook_output_is_truncated(tmp_path: Path, make_issue: Callable[...
     result = await manager.run_hook("before_run", ws.path)
     assert result is not None
     assert len(result.stdout_tail) == 2000
+
+
+@posix
+@pytest.mark.parametrize("stream", ["1", "2"])
+async def test_hook_output_over_the_cap_kills_the_group(
+    tmp_path: Path, make_issue: Callable[..., Issue], stream: str
+) -> None:
+    """A hook that floods is killed as the bytes arrive, not buffered whole first (#139).
+
+    ``after_create`` is where the target repository's dependency install runs, so the party
+    growing this is the one the deployment invites, and the process holding the buffer is the
+    worker, which supervises every concurrent session.
+    """
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    pidfile = tmp_path / "pid"
+    flood = MAX_HOOK_OUTPUT_BYTES + (1 << 20)
+    # The writer is a grandchild of the hook shell, as a dependency install's own child
+    # processes are: killing the shell alone would leave it holding the pipe.
+    script = f"( head -c {flood} /dev/zero | tr '\\0' x >&{stream} ) & echo $! > {pidfile}; wait"
+    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=60_000)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+
+    assert result is not None
+    assert result.overrun
+    assert not result.ok
+    assert not result.timed_out  # the cap cut it short, long before the timer would have
+    assert result.summary == f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
+    await assert_gone(int(pidfile.read_text()))
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    failure = next(r for r in records if r.get("event") == "hook_failed")
+    assert failure["overrun"] is True
+    assert failure["max_output_bytes"] == MAX_HOOK_OUTPUT_BYTES
+
+
+@posix
+async def test_hook_output_at_the_cap_is_not_an_overrun(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A chatty-but-honest install runs to its end: the cap refuses the byte past it."""
+    script = f"head -c {MAX_HOOK_OUTPUT_BYTES} /dev/zero | tr '\\0' a; echo done >&2"
+    manager, _ = make_manager(tmp_path, hooks={"before_run": script}, timeout_ms=60_000)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    result = await manager.run_hook("before_run", ws.path)
+    assert result is not None
+    assert not result.overrun
+    assert result.ok
+    assert result.returncode == 0
+    assert result.stderr_tail == "done\n"
+
+
+@posix
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid to escape the group")
+@pytest.mark.parametrize("kill_fails", [False, True])
+async def test_a_flood_whose_writer_escapes_the_kill_is_still_an_overrun(
+    tmp_path: Path,
+    make_issue: Callable[..., Issue],
+    monkeypatch: pytest.MonkeyPatch,
+    kill_fails: bool,
+) -> None:
+    """A hook killed for flooding whose pipes then stay open past the timeout reports the
+    cause and not the symptom (#139).
+
+    The group kill is what usually ends the read, but a writer in a session of its own
+    outlives it, and then the timer is what stops the hook. The bytes are bounded either
+    way -- the reads have been dropping them since the cap -- so the run's error should say
+    the hook flooded, not that it was slow.
+
+    ``kill_fails`` is the same path with ``os.killpg`` refusing, which is what it does for a
+    group at another uid: this is the one route that reaches ``_kill_quietly`` from the
+    timeout branch, where a raised exception would take the place of the ``HookResult`` that
+    reports the overrun.
+    """
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    pidfile = tmp_path / "pid"
+    flood = MAX_HOOK_OUTPUT_BYTES + (1 << 20)
+    escaped = f"echo $$ > {pidfile}; head -c {flood} /dev/zero | tr '\\0' x; sleep 20"
+    manager, _ = make_manager(
+        tmp_path, hooks={"before_run": f"setsid bash -c {shlex.quote(escaped)}"}, timeout_ms=3000
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    if kill_fails:
+        monkeypatch.setattr(
+            workspace_module, "_kill_group", lambda process: _raise(PermissionError(1, "denied"))
+        )
+
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+
+    assert result is not None
+    assert result.overrun
+    assert not result.timed_out
+    assert not result.ok
+    assert result.summary == f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    failure = next(r for r in records if r.get("event") == "hook_failed")
+    assert failure["overrun"] is True
+    assert failure["timed_out"] is False
+    assert failure["max_output_bytes"] == MAX_HOOK_OUTPUT_BYTES
+    assert [r for r in records if r.get("event") == "hook_kill_failed"] or not kill_fails
+    # Not the manager's to reap: it escaped the group on purpose, so the test cleans up.
+    with contextlib.suppress(ProcessLookupError, ValueError):
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@posix
+async def test_a_kill_that_cannot_land_is_a_warning_not_an_exception(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.killpg`` raises ``PermissionError`` for a group at another uid -- every hook's
+    group under ``agent.run_as`` where the delegated kill did not take. From the killer task
+    that exception would replace the cancellation the timeout raises, leaving ``_run_argv``
+    to raise where a ``HookResult`` belongs, so it is logged instead (#139)."""
+    log = io.StringIO()
+    configure_logging(level="DEBUG", stream=log)
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={"before_run": f"head -c {MAX_HOOK_OUTPUT_BYTES + (1 << 20)} /dev/zero"},
+        timeout_ms=10_000,
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    monkeypatch.setattr(
+        workspace_module, "_kill_group", lambda process: _raise(PermissionError(1, "denied"))
+    )
+
+    try:
+        result = await manager.run_hook("before_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+
+    assert result is not None
+    assert result.overrun  # the hook still failed for the reason it failed for
+    records = [json.loads(line) for line in log.getvalue().splitlines() if line]
+    assert any(r.get("event") == "hook_kill_failed" for r in records)
+
+
+def _raise(exc: BaseException) -> None:
+    raise exc
+
+
+@posix
+async def test_a_flooding_hook_fails_the_run_with_the_overrun_in_the_error(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """``after_create``'s failure is an ``AgentError`` quoting the summary, so the overrun
+    reaches the run's error rather than being a log line nobody reads."""
+    script = f"head -c {MAX_HOOK_OUTPUT_BYTES + (1 << 20)} /dev/zero | tr '\\0' x"
+    manager, _ = make_manager(tmp_path, hooks={"after_create": script}, timeout_ms=60_000)
+    with pytest.raises(AgentError) as excinfo:
+        await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert str(MAX_HOOK_OUTPUT_BYTES) in excinfo.value.message
+    assert "output exceeded" in excinfo.value.message
 
 
 # --- session.json -----------------------------------------------------------------------

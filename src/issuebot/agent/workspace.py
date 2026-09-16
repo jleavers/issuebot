@@ -33,6 +33,7 @@ from issuebot.config import Settings
 from issuebot.events.types import RunOutcome
 from issuebot.github import GhRunner, GhRunnerLike, GitHubError, Issue
 from issuebot.log import get_logger
+from issuebot.pipes import read_capped
 
 HookName = Literal["after_create", "before_run", "after_run", "before_remove"]
 SESSION_FILE_VERSION = 1
@@ -54,6 +55,19 @@ STATE_DIR = ".issuebot"
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
+# What one hook, or the clone, may write to stdout, and separately to stderr, before its
+# process group is killed (#139). ``hooks.timeout_ms`` bounds how long the process may run and
+# never how much it may write inside that time, and ``communicate()`` buffered both pipes in
+# the worker -- the process that supervises every concurrent session, so a flood there is not
+# one session's. The party growing it is the one the deployment invites: ``hooks.after_create``
+# is where the *target* repository's dependency install runs, and a ``postinstall`` that
+# prints, or a build that warns per file over a large tree, can produce gigabytes inside sixty
+# seconds. Much smaller than ``GhRunner``'s 32 MiB, because a hook's output is diagnostic
+# rather than a response to parse: only ``_OUTPUT_TAIL`` of either stream survives into
+# ``HookResult``, so the cap is what a chatty-but-honest install may print (a verbose
+# dependency install or build log is tens of KiB, a pathological one a few MiB) and not what
+# issuebot needs to keep.
+MAX_HOOK_OUTPUT_BYTES = 4 * 1024 * 1024
 _OUTCOMES: frozenset[str] = frozenset(get_args(RunOutcome))
 
 
@@ -89,13 +103,26 @@ class HookResult:
     duration_ms: int
     stdout_tail: str
     stderr_tail: str
+    # The hook wrote more than ``MAX_HOOK_OUTPUT_BYTES`` to one of its streams, and its process
+    # group was killed for it (#139) -- or the kill was tried and refused, which is
+    # ``_kill_quietly``'s case. Its own exit status is therefore the kill's, or its own where it
+    # exited inside the pipe buffer before the reader caught up, or the timeout's where the kill
+    # did not land: which is why the overrun is a fact of its own and not read off
+    # ``returncode``.
+    overrun: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out
+        return self.returncode == 0 and not self.timed_out and not self.overrun
 
     @property
     def summary(self) -> str:
+        if self.overrun:
+            # Before the timeout: a kill whose pipes then took the rest of the timeout to close
+            # is an overrun, and the cause is what the run's error should quote, not the
+            # symptom. It does not claim the kill, which a hook that exited inside the pipe
+            # buffer before the reader caught up never received.
+            return f"output exceeded {MAX_HOOK_OUTPUT_BYTES} bytes"
         if self.timed_out:
             return f"timed out after {self.duration_ms} ms"
         lines = [line for line in self.stderr_tail.splitlines() if line.strip()]
@@ -443,6 +470,27 @@ class WorkspaceManager:
             )
         return accounts
 
+    async def _kill_quietly(self, process: asyncio.subprocess.Process) -> None:
+        """``_kill_group`` with the failure logged rather than raised (#139).
+
+        ``os.killpg`` raises ``PermissionError`` for a group at another uid, which is every
+        hook's group under ``agent.run_as`` where the delegated kill did not take. All three
+        callers are places an exception must not reach: the overrun killer runs as a task,
+        whose exception would surface from the shielded await in place of the read's result;
+        the timeout branch is building the ``HookResult`` that reports the failure; and the
+        cancellation branch is on its way to re-raising. In each the hook has already failed
+        and the caller is saying so, so ``Exception`` deliberately rather than ``OSError``:
+        what must not happen here is *any* exception, and the one known today is only the one
+        known today. ``CancelledError`` is not one, which is what leaves the cancellation
+        branch re-raising what it was given. A kill that did not land leaves
+        ``hooks.timeout_ms`` to bound what the cap could not, while the reads go on dropping
+        the bytes -- so the memory stays bounded whether or not the signal is deliverable.
+        """
+        try:
+            await self._kill_group(process)
+        except Exception as exc:
+            self._log.warning("hook_kill_failed", pid=process.pid, error=str(exc))
+
     async def _kill_group(self, process: asyncio.subprocess.Process) -> None:
         # Off the event loop: the delegated kill is a sudo subprocess with its own timeout,
         # and this is the single orchestrator task supervising every concurrent session (#75).
@@ -484,15 +532,21 @@ class WorkspaceManager:
             )
             self._log.warning("hook_failed", hook=name, error=result.stderr_tail)
             return result
+        overrun = asyncio.Event()
         try:
-            out, err = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+            out, err = await asyncio.wait_for(
+                self._read_output(process, overrun), timeout=timeout_s
+            )
         except TimeoutError:
-            await self._kill_group(process)
+            await self._kill_quietly(process)
             await process.wait()
             result = HookResult(
                 name=name,
                 returncode=None,
-                timed_out=True,
+                # A hook whose group was killed for flooding and whose pipes then stayed open
+                # past the timeout is an overrun, and that is what the run's error quotes.
+                timed_out=not overrun.is_set(),
+                overrun=overrun.is_set(),
                 duration_ms=_elapsed_ms(started),
                 stdout_tail="",
                 stderr_tail="",
@@ -500,13 +554,17 @@ class WorkspaceManager:
             self._log.warning(
                 "hook_failed",
                 hook=name,
-                timed_out=True,
+                timed_out=result.timed_out,
+                overrun=result.overrun,
+                max_output_bytes=MAX_HOOK_OUTPUT_BYTES if result.overrun else None,
                 timeout_ms=self._settings.hooks.timeout_ms,
                 duration_ms=result.duration_ms,
             )
             return result
         except BaseException:
-            await self._kill_group(process)
+            # Quietly here too: this is on its way to re-raising something -- a cancellation,
+            # most often -- and a failed kill must not replace it.
+            await self._kill_quietly(process)
             with contextlib.suppress(Exception):
                 await process.wait()
             raise
@@ -514,6 +572,7 @@ class WorkspaceManager:
             name=name,
             returncode=process.returncode,
             timed_out=False,
+            overrun=overrun.is_set(),
             duration_ms=_elapsed_ms(started),
             stdout_tail=self._output_tail(out),
             stderr_tail=self._output_tail(err),
@@ -535,8 +594,47 @@ class WorkspaceManager:
                 duration_ms=result.duration_ms,
                 stdout=result.stdout_tail,
                 stderr=result.stderr_tail,
+                overrun=result.overrun,
+                max_output_bytes=MAX_HOOK_OUTPUT_BYTES if result.overrun else None,
             )
         return result
+
+    async def _read_output(
+        self, process: asyncio.subprocess.Process, overrun: asyncio.Event
+    ) -> tuple[bytes, bytes]:
+        """The child's stdout and stderr, each bounded at ``MAX_HOOK_OUTPUT_BYTES`` as the
+        bytes arrive rather than after (#139).
+
+        ``communicate()`` buffered both pipes in the worker before anything looked at them,
+        which made ``hooks.timeout_ms`` the only bound on a hook that prints -- a timer over
+        the step, never a ceiling on the resource. Past the cap ``overrun`` is set and the
+        process *group* is killed: the writer is as often a grandchild of the shell as the
+        shell itself, and under ``agent.run_as`` it runs at a uid the worker cannot signal,
+        so the kill is the delegated one. Both streams are then read to their end and the
+        excess dropped, since a full pipe is what would keep the child from exiting.
+        """
+
+        async def kill_on_overrun() -> None:
+            await overrun.wait()
+            await self._kill_quietly(process)
+
+        killer = asyncio.create_task(kill_on_overrun())
+        try:
+            out, err = await asyncio.gather(
+                read_capped(process.stdout, MAX_HOOK_OUTPUT_BYTES, overrun.set),
+                read_capped(process.stderr, MAX_HOOK_OUTPUT_BYTES, overrun.set),
+            )
+        finally:
+            if overrun.is_set():
+                # Shielded: the kill is what let the streams above end, and dropping it
+                # half-done on a cancellation would leave the group behind.
+                await asyncio.shield(killer)
+            else:
+                killer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await killer
+        await process.wait()
+        return out, err
 
     def _prepared(
         self, argv: Sequence[str], env: Mapping[str, str]

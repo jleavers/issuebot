@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -12,6 +12,7 @@ from pydantic import SecretStr
 
 from issuebot.github.errors import GitHubError
 from issuebot.log import get_logger
+from issuebot.pipes import read_capped
 
 _FIXED_ENVIRONMENT = {
     "GH_PROMPT_DISABLED": "1",
@@ -32,7 +33,6 @@ _LOGGED_ARG_LENGTH = 120
 # 26 MiB, and the cap is the power of two above it. No request issuebot makes can reach it,
 # whatever the text is made of.
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
-_READ_CHUNK = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,8 +157,8 @@ class GhRunner:
                     process.kill()
 
         out, err, _ = await asyncio.gather(
-            _read_capped(process.stdout, self._max_output_bytes, on_overrun),
-            _read_capped(process.stderr, self._max_output_bytes, on_overrun),
+            read_capped(process.stdout, self._max_output_bytes, on_overrun),
+            read_capped(process.stderr, self._max_output_bytes, on_overrun),
             _feed(process, payload),
         )
         await process.wait()
@@ -180,30 +180,6 @@ class GhRunner:
         return GitHubError(
             "response", f"gh output exceeded {self._max_output_bytes} bytes: {summary}"
         )
-
-
-async def _read_capped(
-    stream: asyncio.StreamReader | None, limit: int, on_overrun: Callable[[], None]
-) -> bytes:
-    """Read a stream to its end, keeping at most ``limit`` bytes; ``on_overrun`` fires once,
-    at the first byte past the cap, and the rest is read and dropped so the child can exit."""
-    if stream is None:
-        return b""
-    chunks: list[bytes] = []
-    size = 0
-    overrun = False
-    while True:
-        chunk = await stream.read(_READ_CHUNK)
-        if not chunk:
-            return b"".join(chunks)
-        if overrun:
-            continue
-        size += len(chunk)
-        if size > limit:
-            overrun = True
-            on_overrun()
-            continue
-        chunks.append(chunk)
 
 
 async def _feed(process: asyncio.subprocess.Process, payload: bytes | None) -> None:

@@ -183,10 +183,10 @@ ignored.
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.todo|in_progress|review|rework|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
-| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 32 MiB per response, and the workpad is looked for in an issue's first 1,000 comments | `30000` |
+| `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 32 MiB per response, the workpad is looked for in an issue's first 1,000 comments, and a board poll reads at most 1,000 open issues under one state label. A board past that is a failed read -- which, repeated, holds dispatch and says so -- rather than a short one the worker would claim from; a held worker claims nothing, so getting under the ceiling again is a human's to do, by closing or un-labelling. The sweep that finishes closed issues reads 5,000 per label and, past that, skips *that* label with a warning and sweeps the rest | `30000` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
-| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
+| `hooks.after_create`, `hooks.before_run`, `hooks.after_run`, `hooks.before_remove` | Bash run inside the workspace at those moments (`after_create` is where the target repository's dependencies get installed); `hooks.timeout_ms` bounds each. What a hook may *print* is bounded separately, by the code, because the buffer is the worker's: 4 MiB each of stdout and stderr, past which its process group is killed and the run's error says so. A hook hands the agent variables by writing `KEY=VALUE` lines to [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent) | none; `60000` |
 | `agent.max_concurrent_agents` | issues worked on in parallel | `3` |
 | `agent.max_turns` | `claude -p` invocations per run before the issue is escalated | `5` |
 | `agent.max_attempts` | failed runs for one issue before it is escalated; the count is the issue's, so no label change resets it | `3` |
@@ -727,7 +727,12 @@ Neither extra line is decoration. An overlay hook *replaces* the base one rather
 to it, and the shipped `after_create` is that `git fetch --unshallow`, which the self-review's
 `git diff origin/HEAD...HEAD` needs. And `hooks.timeout_ms` bounds *each* hook at 60 s by
 default, which a real `npm ci` from a cold cache will overrun; a hook that times out fails the
-session and burns an attempt, so raise it once here for all four. Raising it past about 100 s
+session and burns an attempt, so raise it once here for all four. The other bound on a hook is
+not a setting: 4 MiB of stdout and 4 MiB of stderr, past which its process group is killed and
+the run fails saying so, since `hooks.timeout_ms` bounds how long a hook runs and never how
+much it writes inside that time, and the process holding what it writes is the worker that
+supervises every session. An ordinary install log is tens of KiB; a build that wants to print
+more than four megabytes wants `> build.log` rather than a larger cap. Raising it past about 100 s
 also means raising `ISSUEBOT_STOP_GRACE_PERIOD` in this checkout's `.env`, which is the
 `worker` service's `stop_grace_period` and has to exceed the shutdown wait (`hooks.timeout_ms`
 + 20 s) so that Docker never SIGKILLs a worker still running `after_run`; 600 s here wants

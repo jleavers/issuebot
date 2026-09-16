@@ -1,7 +1,7 @@
 """GitHub integration: normalised issue model, the label state machine and adapters."""
 
 from issuebot.github.adapter import GitHubAdapter
-from issuebot.github.errors import ErrorCategory, GitHubError
+from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.fake import FakeGitHub
 from issuebot.github.ghcli import GhCliAdapter
 from issuebot.github.models import (
@@ -69,6 +69,7 @@ __all__ = [
     "LabelStyle",
     "LinkedPr",
     "Mergeable",
+    "PageCeilingError",
     "RateLimit",
     "RepoInfo",
     "StateLabel",
