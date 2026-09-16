@@ -1,7 +1,8 @@
 # The session's authority is fixed outside the prompt
 
 Date: 2026-09-14
-Status: implemented (tools, credentials, the envelope); egress filed as #126, `--restricted` as #127
+Status: implemented (tools, credentials, the envelope); egress landed in #126
+(`2026-09-15-session-egress-design.md`), `--restricted` filed as #127
 Issue: #109 (security sweep findings `hostile-issue-1`, `hostile-issue-3`)
 
 ## Problem

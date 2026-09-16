@@ -180,6 +180,13 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # to all of them and theirs to it, and /app is root's. `nologin` because no shell is ever opened
 # as it: `issuebot web` is the one process, and a `docker compose exec web` still runs whatever
 # command it names.
+# A fourth kind, `egress` (uid 1003), for the allow-listing proxy (#126), on the same reasoning
+# as `web` and for a sharper reason. Under compose the worker's networks are all internal, so the proxy
+# container is the one process in the deployment with a route to the open internet; it reads a
+# host name out of a CONNECT line and relays bytes it never looks at. It holds no credential,
+# runs no session and touches no workspace, so it gets an account that can reach none of them:
+# outside group issuebot it cannot execute sudo, outside `agents` the rule names nothing it
+# could become, and its home is its own. `nologin` for the reason `web` has it.
 # The split needs one thing of git. A workspace directory is the worker's and sticky, so the
 # session cannot unlink the state kept there, while the clone inside it is the session's own --
 # and git refuses to work in a repository whose worktree belongs to another account (`detected
@@ -210,6 +217,7 @@ RUN set -eu; \
     useradd --create-home --uid 1000 --shell /bin/bash issuebot; \
     useradd --create-home --uid 1001 --groups agents --shell /bin/bash agent; \
     useradd --create-home --uid 1002 --shell /usr/sbin/nologin web; \
+    useradd --create-home --uid 1003 --shell /usr/sbin/nologin egress; \
     pool=''; \
     for n in $(seq 1 "${ISSUEBOT_AGENT_POOL_SIZE}"); do \
       useradd --create-home --uid "$((1010 + n))" --groups agents --shell /bin/bash "agent-${n}"; \
@@ -223,7 +231,7 @@ RUN set -eu; \
     install -d -m 0755 /etc/issuebot; \
     printf '%s\n' ${pool:-agent} > /etc/issuebot/session-accounts; \
     chmod 0444 /etc/issuebot/session-accounts; \
-    chmod 0750 /home/issuebot /home/web; \
+    chmod 0750 /home/issuebot /home/web /home/egress; \
     install -d -m 0755 -o issuebot -g issuebot /workspaces; \
     git config --system --add safe.directory '/workspaces/*'; \
     printf '%s\n' \

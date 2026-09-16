@@ -38,11 +38,19 @@ uv run issuebot refresh              # NOTIFY the repository's channel: its work
                                      #   (at most one refresh-driven tick every 5 s)
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL and
                                      #   ISSUEBOT_WEB_PASSWORD, reads no workflow; binds 127.0.0.1 by default)
+uv run issuebot egress [--port N] [--bind HOST]   # the allow-listing CONNECT proxy the worker's egress
+                                     #   goes through (#126; reads ISSUEBOT_EGRESS_ALLOW, no workflow,
+                                     #   no credential; compose runs it as the `egress` service)
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set)
-docker compose up                    # db + web (profile hub) + worker (profile worker), COMPOSE_PROFILES in .env
+docker compose up                    # db + web (profile hub) + worker + egress (profile worker),
+                                     #   COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
+docker network create issuebot && docker network create --internal issuebot-internal
+                                     # once per host, before any of the above (#126): the worker
+                                     #   joins internal networks alone, so its only route off the
+                                     #   host is the egress proxy
 ```
 
 **Run the DB tests against `test-db`, not against the long-lived `db`.** It sits behind a
@@ -148,6 +156,68 @@ floor, not the shipped version, and moves by hand.
   spelling of the password a DSN carries: userinfo and `?password=` raw and percent-decoded
   whatever the scheme, plus a `password=` keyword bare or quoted in anything that is not a
   URL issuebot takes, so a refused spelling is still masked in the line that refuses it).
+- `issuebot.egress`: the allow-listing `CONNECT` proxy that bounds the session's network
+  egress (#126, spec `2026-09-15-session-egress-design.md`), a leaf module importing
+  `issuebot.log` alone, so `agent/runner.py` and `cli.py` can both take `PROXY_ENV_NAMES` from
+  it. Two halves, and neither is sufficient: the *network* is what makes the proxy
+  unavoidable -- compose gives `worker` `internal` networks only (`issuebot-internal`, external
+  and created `--internal`, for the hub's database; the project-local `egress` for the proxy),
+  and a container with no non-internal network has no default route -- and the *allow-list* is
+  what makes the route narrow. `DEFAULT_ALLOW` is every host issuebot's own
+  tools reach and no other (`api.anthropic.com`; `platform.claude.com` and `claude.ai`, where
+  `claude` authenticates and *refreshes* the OAuth credential it runs with -- the
+  `CLAUDE_CODE_OAUTH_TOKEN` a container session is handed, or the host route's own login -- so a list without them
+  works until an access token expires and then fails every session; `github.com`,
+  `api.github.com`, `objects.githubusercontent.com`; `www.githubstatus.com` for #88's
+  annotation; `hooks.slack.com`, since `urllib_post` never raises and a refused webhook would
+  cost a deployment every notification with only a log line to say so), and the operator
+  extends it with
+  `ISSUEBOT_EGRESS_ALLOW` (`ALLOW_ENV`; commas or whitespace, `host`, `host:port`, or
+  `.domain` for a domain and everything under it). Pure first: `split_allow`, `parse_rule`,
+  `parse_allow` (total -- a typo costs its own entry and a complaint, never the service),
+  `allow_rules`, `normalise_host` (lower-cased, bracket- and root-dot-stripped, restricted to
+  the characters of a host name, so a name the proxy cannot spell plainly is one it refuses),
+  `parse_connect_target` (the port is mandatory, as RFC 9110 requires of `authority-form`) and
+  `allowed`. Then `Proxy.handle`, one client connection from its request line to the end of its
+  tunnel and never raising: 200 and a bidirectional relay for a name on the list, 403 for one
+  off it (logged `egress_denied` at WARNING, the record of an attempt), 405 for any other
+  method (`CONNECT` only, so egress is HTTPS only and the proxy never sees a URL, a header or
+  a body -- and so never needs a certificate authority), 400, 408, 431 and 502 for the rest.
+  `_tunnel` waits on the *reply* direction and cancels the request direction with it, rather
+  than on the first of the two to finish: a client that half-closes after its request is
+  waiting for an answer, and ending the pair there would hand it an empty response. Nothing
+  bounds an established tunnel's time, because one turn of `claude -p` is a single long
+  CONNECT.
+  `probe_proxy` (blocking, stdlib, the status line and nothing more) is what `validate` and the
+  compose healthcheck both ask, so the two can never drift; `reachable_directly` is the other
+  half, the question the proxy cannot answer -- an allow-list bounds egress only while there is
+  no route round it. `MAX_TUNNELS` (256) bounds established relays and
+  `MAX_CONNECTIONS` (2048) bounds accepted sockets, both answering 503 past it. The second is
+  what bounds *sustained* descriptor growth: a tunnel counts only once its upstream is open, so
+  a peer that connects and says nothing would otherwise hold a descriptor for
+  `REQUEST_TIMEOUT_S` (10 s, short for this reason) against no limit at all. Neither is a
+  reservation for the worker, and none can be: the session shares the worker's container and
+  the proxy sees only sockets, so a shared ceiling is a shared *availability* ceiling and a
+  session that reaches it refuses the worker too. Both numbers are therefore set well above
+  this deployment's load rather than close to it -- a limit tight enough to be reached is a
+  denial of service an attacker gets for free -- and what they buy is a definite 503 rather
+  than `accept()` failing with EMFILE, which asyncio answers by removing the reader and
+  re-arming it a second later (`ACCEPT_RETRY_DELAY`), so the listener stutters and drops its
+  backlog: every client degraded rather than one refused plainly.
+  `egress_connections_exhausted` is logged on the saturation *edge* rather than per refusal,
+  since that refusal is the cheapest line in the process to provoke -- with hysteresis, the
+  count falling to three quarters of the ceiling, because at the ceiling a slot frees
+  constantly and a single-step edge would re-arm on each one and log per refusal after all.
+  An exception `handle` does not anticipate is swallowed to keep the service up, but logged
+  with its traceback at ERROR.
+  `PROXY_ENV_NAMES` is both cases of all three variables, because they are
+  not interchangeable: curl deliberately ignores an upper-case `HTTP_PROXY` (a CGI script's
+  environment carries the request's `Proxy:` header under that name) while other clients read
+  only the upper-case spelling; `configured_proxy` reads `https_proxy` then `HTTPS_PROXY`.
+  The service runs as its own account (`egress`, uid 1003, `nologin`, in no group the sudo
+  binary or the sudo rule names), since it is the one process in the deployment with a leg on
+  the open network. The CI `docker` job brings the `hub,worker` profile up and asks a real
+  session both questions.
 - `issuebot.events`: frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
   (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
   carries the run's log directory.
@@ -445,12 +515,18 @@ floor, not the shipped version, and moves by hand.
   event, a message naming the setting), and no turn starts past it. The orchestrator escapes
   a `run_timeout` while `in_progress` at once, as it does `max_turns`: a retry never resumes
   the session, so the issue's ceiling is the setting and not `max_attempts` times it;
+  `PASSTHROUGH_NAMES` carries `PROXY_ENV_NAMES` (#126), so the address of the egress proxy
+  reaches `claude`, every hook and the clone; it is passed through rather than fixed, since the
+  address is the deployment's and the host route has none -- the absence is what `validate`
+  warns about. The proxy names are protected in `.issuebot/env` for the reason `PATH` is and no
+  stronger one: what bounds egress is the container's lack of a route, not a variable a hook
+  could rewrite.
   `workspace_environment` layers the
   workspace's `.issuebot/env` (`KEY=VALUE` lines a hook writes, an optional `export `
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
   reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
-  `HOME`) keeps `gh` and `claude` running through a typo, and `PROTECTED_ENV_PREFIXES`
+  `HOME`, `PROXY_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and `PROTECTED_ENV_PREFIXES`
   (`ANTHROPIC_`, `CLAUDE_`) is the trust boundary: the file sits in the agent's own
   workspace, so the session can write it, and it must not re-point the `claude` issuebot
   launches next. Everything else warns rather than fails, a null byte included, since
@@ -1026,7 +1102,7 @@ floor, not the shipped version, and moves by hand.
   fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
   reach. Both themes' marks and text are held to WCAG contrast floors by
   `tests/test_web_theme.py`.
-- `issuebot.cli`: argparse; `validate` (seventeen checks: the `workflow` check naming the
+- `issuebot.cli`: argparse; `validate` (eighteen checks: the `workflow` check naming the
   overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
   overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
   App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
@@ -1059,6 +1135,16 @@ floor, not the shipped version, and moves by hand.
   whichever member is free, so one that cannot read it fails whichever issue lands there,
   which is worse than one that fails always; an inline JSON
   document is on the command line already and only earns a warning, since `ps` reads it),
+  an `egress` check that reads the deployment's proxy out of the environment (#126) and asks
+  it three questions, graded by how definite each is about a proxy this project did not write:
+  a *tunnel* to a name reserved by RFC 2606 is a proxy that cannot be filtering by name at all
+  and fails, while a refusal that is not 403 is somebody else's proxy refusing in its own words
+  and only warns; `api.github.com` must come back 200, since every poll and label move goes
+  there; and then the *network* is asked whether `example.com` answers a direct connection,
+  which warns rather than fails (under compose it means the shared network was created without
+  `--internal`; on the host an operator's own proxy is entitled to sit beside a working
+  route). With no proxy configured at all it warns that egress is unbounded, as it warns about
+  an unset `agent.run_as`,
   a `database.url` check that connects and
   reports the server and schema versions (behind warns, ahead or unreachable fails),
   a `github.status` check that reads githubstatus.com through the `_github_status` seam and
@@ -1084,6 +1170,9 @@ floor, not the shipped version, and moves by hand.
   ISSUEBOT_WEB_PASSWORD` without the second, which no flag supplies since a flag shows in
   `ps`; `--bind` defaults to `WEB_DEFAULT_BIND`, `127.0.0.1`, and compose passes `0.0.0.0`
   explicitly behind the port it publishes on the host's loopback (#73));
+  `egress [--bind HOST] [--port N]` (the allow-listing proxy until SIGTERM or SIGINT; reads no
+  workflow and holds no credential, and an entry it cannot parse is a WARNING and not a refusal
+  to start, since a proxy that will not serve is a worker with no egress at all);
   `run-once` and `worker` migrate first when `database.url` is set and then register the
   workflow's repository (`Database.register_repo`: labels and workflow path, refreshed every
   start so a label rename reaches the dashboard) before starting the Slack and PostgreSQL

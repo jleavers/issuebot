@@ -6,7 +6,13 @@ services:
   db:
     image: postgres:18
     profiles: ["hub"]
-    networks: [issuebot]
+    # Two networks, and the second is the whole of #126 as far as this service is concerned.
+    # `issuebot` is what it has always been: the dashboard's route to it, and the network the
+    # published port below belongs to. `issuebot-internal` is the same shared, cross-checkout
+    # network with no route off the host, and it exists so that the *worker* can reach this
+    # database without joining a network that would also carry it to anywhere else. Nothing
+    # here changes for db: it publishes on `issuebot` exactly as before.
+    networks: [issuebot, issuebot-internal]
     environment:
       POSTGRES_USER: issuebot
       # The one credential of the shared store, and a superuser's: every repository's history
@@ -90,7 +96,14 @@ services:
         # the dashboard runs no session.
         ISSUEBOT_AGENT_POOL_SIZE: "${ISSUEBOT_AGENT_POOL_SIZE:-3}"
     profiles: ["worker"]
-    networks: [issuebot]
+    # Internal networks only, which is what bounds the session's egress (#126). A container
+    # with no non-internal network has no default route, so `claude`, `gh`, `git` and a
+    # session's own `curl` cannot leave the host except through `egress` below -- the proxy is
+    # not a policy the session is asked to observe, it is the only way out. `issuebot-internal`
+    # carries the hub's database and nothing else; `egress` carries the proxy and nothing else,
+    # and is this project's own rather than the shared one so that two checkouts' proxies
+    # cannot answer to the same name.
+    networks: [issuebot-internal, egress]
     # The worker applies pending database migrations when it starts (issuebot migrate is the
     # manual equivalent) and fails fast if DATABASE_URL is set but the server is unusable.
     command: ["worker"]
@@ -113,6 +126,20 @@ services:
       # The directory below is what is mounted; this names the file inside it. Keep the two
       # in step if you rename either.
       ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
+      # The one way off the host, for the worker and -- through `agent_environment`'s
+      # pass-through -- for every session and every hook (#126). Both cases of each name on
+      # purpose: curl deliberately ignores an upper-case `HTTP_PROXY`, since a CGI script's
+      # environment carries the request's `Proxy:` header under that name, while other clients
+      # read only the upper-case spelling.
+      HTTP_PROXY: http://egress:3128
+      HTTPS_PROXY: http://egress:3128
+      http_proxy: http://egress:3128
+      https_proxy: http://egress:3128
+      # The names that are *not* a proxy's business: the store is PostgreSQL rather than HTTP,
+      # and a client that tried to CONNECT to it would be refused by a proxy that speaks only
+      # to the allow-list. localhost is here for a hook that starts a server in its workspace.
+      NO_PROXY: localhost,127.0.0.1,::1,db,egress
+      no_proxy: localhost,127.0.0.1,::1,db,egress
     volumes:
       # The DIRECTORY, not the file. A single-file bind mount resolves to the inode, so an
       # editor that saves by writing a temporary file and renaming it over the original --
@@ -122,9 +149,78 @@ services:
       # an atomic save is picked up by the worker's next tick.
       - ./configs:/configs:ro
       - workspaces:/workspaces
-    # No depends_on: the database may be in another checkout's project (the hub). A worker
-    # that starts first fails its migration, prints [FAIL] database: and exits 1, and
+    # No depends_on for the database: it may be in another checkout's project (the hub). A
+    # worker that starts first fails its migration, prints [FAIL] database: and exits 1, and
     # restart: unless-stopped brings it back until the hub answers.
+    #
+    # `egress` is the opposite case and does get one (#126). It is project-local and in this
+    # same profile, so compose can order it -- and the worker has no route off the host without
+    # it, so a worker that starts first has no GitHub, no Anthropic and a failing `validate`
+    # rather than a degraded one. `service_healthy` rather than `service_started`, because the
+    # proxy answering at all is the thing being waited for; the health check is the allow-list's
+    # own contract, below. This is what makes `docker compose run --rm worker validate` -- the
+    # README's step 2, before anything is up -- start the proxy it is about to be asked about.
+    depends_on:
+      egress:
+        condition: service_healthy
+
+  # The worker's one route off the host (#126): a forward proxy that speaks `CONNECT` alone and
+  # answers it only for a host on its allow-list, so the session's egress is the operator's
+  # list rather than the container's routing table. `issuebot egress` is the same image and the
+  # same package as the worker -- it reads no workflow and holds no credential -- which is why
+  # there is no third-party proxy to pin here.
+  #
+  # Two networks, and it is the only service with one of each kind: `egress` is internal and
+  # shared with the worker alone, `outside` is this project's own bridge and is where the
+  # default route is. A CONNECT arrives on the first and leaves on the second, and only for a
+  # name on the list.
+  egress:
+    build: .
+    profiles: ["worker"]
+    # A fourth account (#102's reasoning, applied here): the proxy is the one process in the
+    # deployment with a leg on the open network, so it runs as an account that can do nothing
+    # else -- no sudo, no session's home, no workspace, nothing of the worker's.
+    user: egress
+    command: ["egress", "--bind", "0.0.0.0", "--port", "3128"]
+    init: true
+    restart: unless-stopped
+    networks: [egress, outside]
+    environment:
+      # The operator's extension of the shipped default, which covers Anthropic and GitHub and
+      # nothing else: a comma- or space-separated list of host names, `name:port` for a port
+      # other than 443, and a leading dot for a domain and everything under it. See the
+      # README, "What a session may reach".
+      ISSUEBOT_EGRESS_ALLOW: ${ISSUEBOT_EGRESS_ALLOW:-}
+    healthcheck:
+      # The proxy's own contract rather than a port probe: a name reserved by RFC 2606, on no
+      # allow-list and resolving nowhere, has to come back 403. A proxy answering anything else
+      # to that is worse than one that is down, since every session is pointed at it. Asked
+      # through `probe_proxy`, the same function `issuebot validate` uses, so the health check
+      # and the check an operator runs can never drift apart -- and so nothing here depends on
+      # which exit code this release of curl gives a refused CONNECT.
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - |
+          import sys
+          from issuebot.egress import PROBE_DENIED_HOST, probe_proxy
+          answer = probe_proxy("http://127.0.0.1:3128", PROBE_DENIED_HOST, timeout_s=5)
+          sys.exit(0 if answer[:1] == (403,) else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # The proxy is listening in well under a second, and `depends_on` above waits for this
+      # check to pass before the worker runs at all -- so without a start period the first
+      # `docker compose run --rm worker ...` would sit through a whole 30 s interval before its
+      # first probe. During the start period failures do not count against `retries`, which is
+      # why it is 10s and not longer: a proxy that can *never* pass (a stale image without
+      # `issuebot.egress`, say) has to reach `unhealthy` quickly too, or the worker's first
+      # command fails with compose's "dependency failed to start" instead of the `[FAIL]
+      # egress:` line validate was about to print. `start_interval` needs Docker Engine 25.0 or
+      # newer, which the README's requirements name.
+      start_period: 10s
+      start_interval: 1s
 
   web:
     build: .
@@ -171,10 +267,29 @@ volumes:
   pgdata:
   workspaces:
 
-# Every project on the host joins one network, created once with `docker network create
-# issuebot`, so a worker in another checkout resolves the hub's database as `db`. External
-# in every project rather than owned by the hub: a single compose file cannot declare it
-# both ways, and a project that finds a network it did not create refuses to start.
+# Two shared networks, created once per host (README, step 1), external in every project
+# rather than owned by the hub: a single compose file cannot declare a network both ways, and
+# a project that finds a network it did not create refuses to start.
+#
+#   docker network create issuebot
+#   docker network create --internal issuebot-internal
+#
+# `issuebot` is the original one and carries the dashboard's reads of the hub's database.
+# `issuebot-internal` carries the worker's, and `--internal` is the point of it: Docker gives a
+# container on internal networks alone no default route, so the worker -- which runs the
+# session, its hooks and its clone -- can reach the hub's database and the proxy below and
+# nothing else (#126). The flag is the operator's to set and cannot be asserted here, since
+# compose rejects any other attribute beside `external: true`; `issuebot validate` probes for a
+# route round the proxy and says so when the network was created without it.
 networks:
   issuebot:
     external: true
+  issuebot-internal:
+    external: true
+  # This project's own, between the worker and its proxy. Internal, so joining it adds no route
+  # to the worker, and project-local rather than shared so that every checkout's `egress`
+  # resolves to its own proxy rather than round-robin across the host's.
+  egress:
+    internal: true
+  # And the proxy's other leg, the only default route in the worker profile.
+  outside:

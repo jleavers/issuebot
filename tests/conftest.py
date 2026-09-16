@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.github.models import Issue, StateLabel
 
 # Read before the clean_env fixture removes it from the environment for every test.
@@ -33,6 +34,12 @@ _ENV_VARS = (
     "ISSUEBOT_AGENT_USER",
     "ISSUEBOT_LOG_LEVEL",
     "ISSUEBOT_LOG_FORMAT",
+    "ISSUEBOT_EGRESS_ALLOW",
+    # The six proxy variables (#126). Two reasons, and either alone would be enough: a
+    # developer or a runner behind a proxy would otherwise send `validate`'s egress check at a
+    # real one, which is a test reaching the network; and the check's verdict -- and so every
+    # assertion on the tally of checks -- would depend on whose shell ran the suite.
+    *PROXY_ENV_NAMES,
 )
 
 
