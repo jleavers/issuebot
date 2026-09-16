@@ -161,17 +161,26 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # $HOME/.cache/uv and a session account's home is in the container's own writable layer, while
 # the venv it builds is `<workspace>/.venv` on the mounted volume. Two filesystems, and a
 # hardlink cannot cross them, so every `uv sync` falls back to a full copy and warns three
-# lines about it. The copy itself is fine -- 122 ms for this repository -- but the warning is
-# on the stderr of `after_create`, the first hook of every session, whose tail reaches
-# `HookResult.summary` and the run's error, and an unexplained warning there is something a
-# turn gets spent chasing. So the variable states that the fallback is intended, rather than
-# leaving each session to rediscover that the hardlink is impossible.
-# A default (`:=`) rather than a plain assignment: `UV_LINK_MODE` is neither passed through by
-# `agent_environment` nor protected, so the one way a deployment sets it for a session is a
-# hook writing it to `.issuebot/env` -- and every hook runs under `bash -lc`, which sources
-# this file *after* that value has been inherited, so an unconditional export would overwrite
-# exactly the setting an operator had reached for. One whose cache and workspaces do share a
-# filesystem sets `hardlink` or `clone` there and keeps it.
+# lines about it. The copy itself is fine -- 122 ms for this repository -- and what the warning
+# costs is the position it lands in: the stderr of `after_create`, the first hook of every
+# session, which is logged in full on `hook_finished` and is what the run's error quotes
+# (`HookResult.summary`) when that hook fails. An unexplained warning there is something a turn
+# gets spent chasing. So the variable states that the fallback is intended, rather than leaving
+# each session to rediscover that the hardlink is impossible. What the copy does still cost --
+# a duplicated venv per workspace, and a cache discarded with the container -- is #164, which
+# would move the cache onto the volume and make the hardlink work.
+# Here and not in the runtime `ENV`, which is where `PATH` needs a second mechanism: an `ENV`
+# would not reach a session at all, since `agent_environment` is an allow-list and no `UV_`
+# name is on it. The login shell is the route, and it is the one that matters, because every
+# hook runs under `bash -lc`. (The builder stage sets the same variable for the same reason,
+# above: that one is the buildkit cache mount, a different filesystem again.)
+# A default (`:=`) rather than a plain assignment, so that a deployment whose cache and
+# workspaces do share a filesystem can still ask for `hardlink` or `clone`: `UV_LINK_MODE` is
+# neither passed through by `agent_environment` nor protected, so what a deployment sets it
+# with is the hook line itself (`uv sync --link-mode=hardlink`) or `.issuebot/env` written from
+# `before_run`, which covers the later hooks and every turn -- and that file is inherited
+# *before* this script is sourced, so an unconditional export here would overwrite exactly the
+# setting an operator had reached for.
 ARG UV_VERSION=""
 RUN if [ -n "${UV_VERSION}" ]; then \
       case "${UV_VERSION}" in \
