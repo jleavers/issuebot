@@ -36,6 +36,8 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   session open a second workpad on every turn. The blocked escape and the conflict bounce go
   through the same call, so a thread past the cap fails those loudly too
   (`blocked_escape_failed`) rather than reading forever.
+  *Amended by #128:* only the conflict bounce still fails loudly past the cap. The escape
+  moves the label first and logs `blocked_escape_workpad_unreadable`; see below.
 - **`GhCliAdapter.count_own_label_additions`** (`github/ghcli.py`, landed by #104 while this
   was in review): the conflict bounce's read of the issue's `LABELED_EVENT` timeline, one
   GraphQL page at a time, under the same rule: at most `MAX_TIMELINE_PAGES` (10) pages, past
@@ -162,6 +164,11 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   thread has outgrown `MAX_COMMENT_PAGES` before the escape is bounded (ten pages every five
   minutes, each failure logged) but not escaped. Whether the escape should move the label
   first and note the block best-effort is a separate decision.
+  *Amended by #128:* it is, and the answer is label-first. A non-retryable read -- the cap, a
+  malformed page -- moves the issue to `review` on the first attempt and then appends the
+  block blind, as a fresh marker comment, best-effort; a retryable one keeps the retry. The
+  read is the block's run-marker idempotence, so the trade-off taken is a possible duplicate
+  note against an issue that never leaves `in_progress`.
 - #104's `WORKSPACE_ENV_LIMIT` and blocking read are the same defect in a different resource
   and are fixed there.
 - **The terminal sweep re-reads every issue issuebot has ever completed.** `finish_terminal`
