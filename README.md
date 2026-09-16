@@ -772,6 +772,79 @@ survive between sessions and are gone when the container is recreated. If a sess
 `node: command not found`, check it in a login shell, which is what the hooks get:
 `docker compose exec worker bash -lc 'command -v node'`.
 
+### uv for the target repository's tests
+
+The third of these, and the one issuebot needs against its own repository. A Python target
+repository's suite, linter and formatter are run through `uv`, and nothing in the container
+stands in for it: `/app/.venv` is the *worker's* virtualenv — root-owned, built `--no-dev`, and
+so carrying neither pytest nor ruff — and the base image's `pip` is not what a project with a
+`uv.lock` is reproduced from. A session that cannot run the suite cannot show its own commit
+green, which is how this started: a session working on issuebot reported itself blocked with
+"no `uv`/`pytest`/`ruff` with PyPI refused by the egress proxy".
+
+Three things have to be true together, and the failure looks different depending on which one
+is missing.
+
+**1. Build the worker image with `uv`.** Set `ISSUEBOT_UV_VERSION` in this checkout's `.env` —
+`.env.example` carries the key, empty — and rebuild:
+
+```bash
+docker compose build worker
+docker compose up -d worker
+```
+
+An exact release (`0.12.11`), not a major, which is where this differs from
+`ISSUEBOT_NODE_VERSION`: uv is pre-1.0 and its minors are not interchangeable, so pin the
+version the target repository's own CI runs. The build downloads that release's tarball for the
+image's architecture from `github.com/astral-sh/uv/releases` and verifies it against the
+`.sha256` published beside it. As with the other two, only the `worker` service takes the
+argument, empty installs nothing, and changing it needs `docker compose build worker` rather
+than a restart. The pin moves by hand: a tarball fetched by URL is invisible to Dependabot.
+(The `ghcr.io/astral-sh/uv` pin in the builder stage is a different thing and Dependabot's own
+— that one builds issuebot, this one runs the target repository's suite, and they are entitled
+to differ.)
+
+**2. Let the session reach PyPI.** The [shipped allow-list](#what-a-session-may-reach) carries
+the hosts the workflow itself needs and no registry, so `uv sync` is refused with a `403` until
+this checkout's `.env` says otherwise:
+
+```bash
+ISSUEBOT_EGRESS_ALLOW=pypi.org,files.pythonhosted.org
+```
+
+Then `docker compose up -d egress`, which is a restart of the proxy rather than a rebuild — the
+allow-list is read from its environment at start, and the worker needs nothing. Both hosts are
+required: the index lives on the first and the wheels on the second. Add
+`registry.npmjs.org` and the rest to the same line if the repository also needs them.
+
+**3. Install in `after_create`.** That is the hook where a target repository's dependencies get
+installed, and it runs once per workspace. The shipped `configs/WORKFLOW.md` already carries it,
+because this repository is itself a Python project:
+
+```yaml
+hooks:
+  after_create: |
+    if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
+    uv sync
+```
+
+If your deployment overrides `after_create` in `configs/WORKFLOW.local.md`, remember that an
+overlay hook **replaces** the base one rather than appending to it — both lines have to be
+repeated there, along with anything else that checkout's hook already does. This is the single
+most likely way to end up with a worker that installs nothing and says nothing about it.
+
+There is no `command -v uv` guard on that line on purpose. A hook that quietly skipped the
+install would leave the session to discover a missing pytest several turns in and guess at why,
+where a failed `after_create` fails the run with the reason in it. So the three steps above are
+also an ordering: **rebuild the image before the new `configs/WORKFLOW.md` reaches a running
+worker**, since `configs/` is bind-mounted and reloads live. `docker compose stop worker`
+before pulling, and `up -d worker` after the build, closes that window entirely.
+
+If a session reports `uv: command not found`, check it in a login shell, which is what the hooks
+get: `docker compose exec worker bash -lc 'command -v uv'`. If it reports a `403` from the
+proxy instead, the image is fine and the allow-list is what is missing —
+`docker compose logs egress | grep egress_denied` names the host it wanted.
+
 ### `.issuebot/env`: what a hook hands the agent
 
 The agent and the hooks run under a filtered environment — `PASSTHROUGH_NAMES` and

@@ -516,6 +516,21 @@ def test_after_create_unshallows_a_shallow_clone() -> None:
     assert "git fetch --unshallow" in hook
 
 
+def test_after_create_installs_the_suites_own_dependencies() -> None:
+    """The clone is this repository, whose suite, lint and format all run through ``uv``, and
+    the container has no venv the session can use: ``/app/.venv`` is the worker's, root-owned
+    and built ``--no-dev``, so it carries neither pytest nor ruff. Without this a session
+    cannot show its own commit green, which is what blocked #128.
+
+    It fails loudly rather than skipping when ``uv`` is absent. A hook guarded by
+    ``command -v uv`` would leave the session to discover the missing pytest several turns in,
+    where a failed ``after_create`` names the cause in the run's error instead.
+    """
+    hook = load().config.hooks.after_create
+    assert hook is not None
+    assert "uv sync" in hook
+
+
 def test_keeps_the_branch_mergeable(make_issue: Callable[..., Issue]) -> None:
     """Sibling sessions fork from the same default branch, so the second PR to land conflicts.
 
