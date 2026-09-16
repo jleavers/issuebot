@@ -11,6 +11,7 @@ import errno
 import json
 import os
 import pwd
+import shutil
 import signal
 import stat
 import subprocess
@@ -692,6 +693,72 @@ async def test_a_removal_runs_as_every_account_that_owns_something_in_the_tree(
     # sealed directory it arrived as.
     assert passes == [(ME, WORKSPACE_DIR_MODE), ("nobody", WORKSPACE_DIR_MODE)]
     assert not path.exists()
+
+
+async def test_a_removal_the_delegated_pass_completed_is_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delegated half is best-effort by construction and takes everything the account owns
+    (#143). Where the workspace directory is not the worker's own -- an operator clearing
+    ``/workspaces``, a second remover, a ``run-once`` beside a live worker -- that pass can
+    unlink the directory as well as empty it, and the worker's own pass then finds nothing.
+    That is the state the removal asked for, so it is not a ``workspace_error``; and with no
+    error there is nothing to re-seal, so the reseal's own ENOENT goes with it.
+
+    The sibling above stubs ``remove_tree`` with a recorder, so there the worker's pass always
+    finds the tree intact; this one lets the stub actually remove it.
+    """
+    root = tmp_path / "workspaces"
+    path = root / "example-42"
+    (path / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        runas_module.RunAs, "remove_tree", lambda self, target: shutil.rmtree(target)
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env(), hook_shell=("bash", "-c"))
+    with capture_logs() as logs:
+        assert await manager.remove("example-42") is True
+    assert not path.exists()
+    events = [entry["event"] for entry in logs]
+    assert "workspace_removed" in events
+    assert "workspace_seal_failed" not in events
+
+
+async def test_a_remnant_the_delegated_pass_took_entirely_is_re_cloned(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other caller #143 changes an end-to-end outcome for: a remnant is removed on the way
+    to a fresh clone, so a delegated pass that took the whole tree used to abort the issue at
+    exactly the point the removal had succeeded."""
+    root = tmp_path / "workspaces"
+    path = root / "example-42"
+    # A clone whose creation never finished: `.git` but no `created` marker, so not reusable.
+    (path / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        runas_module.RunAs, "remove_tree", lambda self, target: shutil.rmtree(target)
+    )
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(
+        cfg,
+        gh=object(),  # never used: the clone goes through the account, not the worker's gh
+        environ=base_env(HOME=str(tmp_path)),
+        hook_shell=("bash", "-c"),
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert ws.created and (ws.path / ".git").is_dir()
+    assert (ws.path / ".issuebot" / "created").is_file()
 
 
 def test_the_owners_a_removal_delegates_to_come_from_the_tree_not_the_binding(

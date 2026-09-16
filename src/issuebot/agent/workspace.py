@@ -675,13 +675,33 @@ def _owned_by(path: Path, account: str | None) -> bool:
 
 
 def _remove_path(path: Path, what: str) -> None:
-    """Delete a directory tree or a plain file; every OSError becomes a workspace_error."""
+    """Delete a tree or a plain file; an OSError is a workspace_error unless it is already gone.
+
+    A path that is *already gone* is the state this was asked to reach, so it is
+    not an error, exactly as it is not one at ``remove``'s front door (#143). ``_remove_tree``
+    delegates a best-effort ``RunAs(account).remove_tree(path)`` per removing account before
+    this runs, and the accounts' pass can take the whole tree -- an operator clearing
+    ``/workspaces``, a second remover, a ``run-once`` beside a live worker, or any deployment
+    whose workspace directory is not the worker's own, where the delegated ``shutil.rmtree``
+    can unlink the directory as well as empty it. Failing there would fail the removal that
+    asked for it.
+
+    The tolerance is deliberately narrow, and is not ``ignore_errors``: it is ENOENT *and*
+    nothing at the path afterwards. An ENOENT raised for an entry inside the tree leaves the
+    directory on disk and still fails, as does every other ``OSError`` -- an ``EACCES`` on a
+    remnant the worker cannot unlink is the failure this whole path exists to report, and
+    swallowing it would leave a session's files behind silently. ``lexists``, not ``exists``:
+    the guard is only ever read after something else raced this removal, and the conservative
+    reading of whatever is at the name by then -- a dangling symlink included -- is a remnant.
+    """
     try:
         if path.is_dir():
             shutil.rmtree(path)
         else:
             path.unlink()
     except OSError as exc:
+        if isinstance(exc, FileNotFoundError) and not os.path.lexists(path):
+            return
         raise AgentError("workspace_error", f"{what} {path}: {exc}") from exc
 
 

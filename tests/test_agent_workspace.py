@@ -17,6 +17,7 @@ from issuebot.agent.errors import AgentError
 from issuebot.agent.workspace import (
     SessionRecord,
     WorkspaceManager,
+    _remove_path,
     run_log_dir,
     session_path,
     workspace_key,
@@ -511,6 +512,53 @@ async def test_remove_failure_is_workspace_error(
     assert exc.value.category == "workspace_error"
     assert "refused" in exc.value.message
     assert ws.path.is_dir()
+
+
+@posix
+def test_a_path_already_gone_is_not_a_removal_failure(tmp_path: Path) -> None:
+    """The delegated pass runs before the worker's and can take the whole tree (#143), so the
+    goal state is not a failure to reach it. `remove` says as much at its front door."""
+    _remove_path(tmp_path / "gone", "cannot remove workspace")
+
+
+@posix
+def test_an_enoent_inside_a_surviving_tree_is_still_a_removal_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#143's tolerance is ENOENT *and* nothing left at the path, not `ignore_errors`. An entry
+    that vanished from under `rmtree` leaves the directory on disk, so the removal did not
+    happen and saying it did would lose a session's files quietly."""
+    remnant = tmp_path / "remnant"
+    remnant.mkdir()
+
+    def vanished_entry(path: object, *args: object, **kwargs: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory", str(remnant / "inner"))
+
+    monkeypatch.setattr(shutil, "rmtree", vanished_entry)
+    with pytest.raises(AgentError) as exc:
+        _remove_path(remnant, "cannot remove workspace")
+    assert exc.value.category == "workspace_error"
+    assert remnant.is_dir()
+
+
+@posix
+@pytest.mark.skipif(os.geteuid() == 0, reason="root unlinks anything")
+def test_a_remnant_the_worker_cannot_unlink_is_still_a_removal_failure(tmp_path: Path) -> None:
+    """The EACCES half: the failure this whole path exists to report (#143). A session's files
+    the worker cannot remove must be said out loud, not tolerated along with a vanished tree."""
+    closed = tmp_path / "closed"
+    (closed / "inner").mkdir(parents=True)
+    (closed / "inner" / "file").write_text("x")
+    # Unlinking `inner` needs write on `closed`, which this does not give: rmtree empties what
+    # it can and then fails, exactly as it does on another account's remnant.
+    os.chmod(closed, 0o500)
+    try:
+        with pytest.raises(AgentError) as exc:
+            _remove_path(closed, "cannot remove workspace")
+        assert exc.value.category == "workspace_error"
+        assert closed.is_dir()
+    finally:
+        os.chmod(closed, 0o700)
 
 
 # --- the boundary (#104): what the worker reads back ---------------------------------------
