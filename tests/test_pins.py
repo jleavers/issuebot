@@ -237,3 +237,45 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     # the job that ran the unreviewed release: it names what gets written to the repository.
     assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
+
+
+def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
+    """A reused branch is whatever is on the remote, so it is held to what ``freeze`` proved.
+
+    The reuse arm is the recovery path for a run that pushed and then failed before opening
+    the pull request, and until #148 it could never run: the lookup that sets ``reuse`` asked
+    git for a ref it had no credential for and always answered "no branch". So nothing had
+    ever looked at what that arm checks out, and it is live now.
+
+    What it checks out is not this job's work. The branch is on the remote, where anyone who
+    can push here could have written it, and the pull request body this step goes on to write
+    says the hooks were run over the whole tree at these digests. That claim is true of the
+    config ``freeze`` froze and of no other, so the branch is reused only when it carries
+    that file byte for byte and differs from the base by it alone -- the rule
+    ``claude-code-version.yml`` holds its own reused branch to (#138).
+    """
+    _, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # The artefact's shape is re-checked in the job that pushes, ahead of both arms: it is
+    # what the reuse arm compares against, so a tag smuggled into it would be a tag accepted
+    # on the branch as well as one written to a fresh branch.
+    assert "grep -E '^ *rev:' /tmp/frozen/pre-commit-config.yaml" in commands
+
+    # Each check named separately: they guard different things, and one assertion over the
+    # pair would let either be deleted while the other kept the test green.
+    assert "cmp -s /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml" in commands, (
+        "a reused branch's config is not compared with the one the hooks were run over"
+    )
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in commands, (
+        "a reused branch is not held to the shape of the change it claims to be"
+    )
+
+    # And the branch has to arrive under a name before any of that can look at it.
+    # `actions/checkout` configures the default branch alone, so a bare
+    # `git fetch origin "${BRANCH}"` leaves it in FETCH_HEAD and the checkout after it fails
+    # with "pathspec ... did not match any file(s) known to git" -- which, since the arm had
+    # never run, is what the recovery path would have done the first time it was needed.
+    assert "+refs/heads/${BRANCH}:refs/heads/${BRANCH}" in commands, "no explicit refspec"
+    assert 'git fetch origin "${BRANCH}"' not in commands, "fetches under no name"

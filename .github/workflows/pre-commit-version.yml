@@ -164,18 +164,42 @@ jobs:
           REUSE: ${{ needs.freeze.outputs.reuse }}
         run: |
           set -euo pipefail
+          # The artefact crossed a job boundary from the job that ran the unreviewed hooks,
+          # so its shape is re-checked here, in the job that pushes: this one must never
+          # write a tag where a digest belongs. Ahead of both arms, because a branch this
+          # job did not write is reused below only when it carries this very file.
+          if grep -E '^ *rev:' /tmp/frozen/pre-commit-config.yaml \
+               | grep -Ev '^ *rev: [0-9a-f]{40}  # frozen: '; then
+            echo "::error::the frozen config carries a rev that is not a digest"
+            exit 1
+          fi
           if [ "${REUSE}" = "true" ]; then
-            git fetch origin "${BRANCH}"
+            # An explicit refspec, since `actions/checkout` configures the default branch
+            # alone: a bare `git fetch origin "${BRANCH}"` leaves the branch in FETCH_HEAD
+            # and under no name, and the checkout after it fails with "pathspec ... did not
+            # match any file(s) known to git".
+            git fetch origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
             git checkout "${BRANCH}"
-          else
-            cp /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml
-            # The artefact crossed a job boundary, so the shape is re-checked here, in the
-            # job that pushes: this one must never write a tag where a digest belongs.
-            if grep -E '^ *rev:' .pre-commit-config.yaml \
-                 | grep -Ev '^ *rev: [0-9a-f]{40}  # frozen: '; then
-              echo "::error::the frozen config carries a rev that is not a digest"
+            # A branch left on the remote is whatever is on the remote -- the wreckage of an
+            # earlier run, and writable by anyone who can push here -- so it is held to the
+            # same rule as one this job writes, and to the same *shape*. `freeze` ran the
+            # hooks over the config it froze, and the body below says so, so the branch is
+            # reused only when it carries that very file and moves nothing else. This arm
+            # could not run at all until #148, so nothing had ever looked at what it reuses.
+            if ! cmp -s /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml; then
+              echo "::error::${BRANCH} does not carry the config the hooks were run over." \
+                "Delete the branch and rerun this workflow to rebuild it."
               exit 1
             fi
+            if [ "$(git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}" | cut -f3)" \
+                 != ".pre-commit-config.yaml" ]; then
+              echo "::error::${BRANCH} differs from ${GITHUB_REF_NAME} by more than the hook" \
+                "pins, so it is not what was proved. Delete the branch and rerun this workflow."
+              git diff --stat "origin/${GITHUB_REF_NAME}" "${BRANCH}"
+              exit 1
+            fi
+          else
+            cp /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git checkout -b "${BRANCH}"
