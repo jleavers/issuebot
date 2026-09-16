@@ -173,11 +173,19 @@ jobs:
             echo "::error::the frozen config carries a rev that is not a digest"
             exit 1
           fi
+          # ... and it has to carry one. The grep above reports the lines that are *not*
+          # digests, so a config with no `rev:` line at all passes it saying nothing, and
+          # since the reuse arm below accepts a branch by comparing it with this file, that
+          # silence would be the only thing either arm checked.
+          if ! grep -qE '^ *rev: [0-9a-f]{40}  # frozen: ' /tmp/frozen/pre-commit-config.yaml; then
+            echo "::error::the frozen config pins no hook at a digest"
+            exit 1
+          fi
           if [ "${REUSE}" = "true" ]; then
-            # An explicit refspec, since `actions/checkout` configures the default branch
-            # alone: a bare `git fetch origin "${BRANCH}"` leaves the branch in FETCH_HEAD
-            # and under no name, and the checkout after it fails with "pathspec ... did not
-            # match any file(s) known to git".
+            # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
+            # the checkout happens to have left and git's opportunistic update of the
+            # remote-tracking ref underneath it. The branch is then a local ref that exists
+            # or a `git fetch` that failed, with no third answer for the checkout to DWIM.
             git fetch origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
             git checkout "${BRANCH}"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
@@ -191,11 +199,23 @@ jobs:
                 "Delete the branch and rerun this workflow to rebuild it."
               exit 1
             fi
-            if [ "$(git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}" | cut -f3)" \
-                 != ".pre-commit-config.yaml" ]; then
-              echo "::error::${BRANCH} differs from ${GITHUB_REF_NAME} by more than the hook" \
-                "pins, so it is not what was proved. Delete the branch and rerun this workflow."
-              git diff --stat "origin/${GITHUB_REF_NAME}" "${BRANCH}"
+            # ... and it moves that file and no other. Asked of the API, because the
+            # question is what the branch *changes*, which is measured from where it left
+            # the default branch and not from wherever that branch has since got to: a
+            # local `git diff origin/${GITHUB_REF_NAME} ${BRANCH}` compares two tips, so
+            # every commit merged since the branch was pushed reads as another path the
+            # branch touches, and a week-old branch -- the ordinary case for a rerun -- is
+            # refused for someone else's change. `compare` measures from the merge base,
+            # as the pull request itself will, and needs no history in this shallow
+            # checkout to do it. A failure fails the run rather than reading as "no files".
+            if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}" \
+                 --jq '[.files[].filename] | join(" ")')"; then
+              echo "::error::could not compare ${BRANCH} with ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            if [ "${moved}" != ".pre-commit-config.yaml" ]; then
+              echo "::error::${BRANCH} changes more than the hook pins, so it is not what" \
+                "was proved: ${moved}. Delete the branch and rerun this workflow."
               exit 1
             fi
           else

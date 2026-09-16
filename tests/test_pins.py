@@ -251,8 +251,8 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     can push here could have written it, and the pull request body this step goes on to write
     says the hooks were run over the whole tree at these digests. That claim is true of the
     config ``freeze`` froze and of no other, so the branch is reused only when it carries
-    that file byte for byte and differs from the base by it alone -- the rule
-    ``claude-code-version.yml`` holds its own reused branch to (#138).
+    that file byte for byte and changes it alone -- the rule ``claude-code-version.yml``
+    holds its own reused branch to (#138).
     """
     _, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
@@ -260,22 +260,32 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
 
     # The artefact's shape is re-checked in the job that pushes, ahead of both arms: it is
     # what the reuse arm compares against, so a tag smuggled into it would be a tag accepted
-    # on the branch as well as one written to a fresh branch.
+    # on the branch as well as one written to a fresh branch. Both halves of that check, since
+    # the first reports only the lines that are *wrong* and says nothing about a config with
+    # no `rev:` line at all.
     assert "grep -E '^ *rev:' /tmp/frozen/pre-commit-config.yaml" in commands
+    assert (
+        "grep -qE '^ *rev: [0-9a-f]{40}  # frozen: ' /tmp/frozen/pre-commit-config.yaml" in commands
+    ), "a config pinning no hook at a digest passes the shape check"
 
     # Each check named separately: they guard different things, and one assertion over the
     # pair would let either be deleted while the other kept the test green.
     assert "cmp -s /tmp/frozen/pre-commit-config.yaml .pre-commit-config.yaml" in commands, (
         "a reused branch's config is not compared with the one the hooks were run over"
     )
-    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in commands, (
+    # Measured from the merge base, which is what the pull request will show and what a
+    # shallow checkout cannot compute for itself. A local `git diff <base tip> <branch>`
+    # reads every commit merged since the branch was pushed as another path the branch
+    # touches, so it refuses a week-old branch -- the ordinary case for a rerun -- for
+    # somebody else's change, and demands by hand exactly the deletion the reuse path exists
+    # to spare.
+    assert "/compare/${GITHUB_REF_NAME}...${BRANCH}" in commands, (
         "a reused branch is not held to the shape of the change it claims to be"
     )
+    assert "git diff --numstat" not in commands, "compares two tips rather than the change"
 
-    # And the branch has to arrive under a name before any of that can look at it.
-    # `actions/checkout` configures the default branch alone, so a bare
-    # `git fetch origin "${BRANCH}"` leaves it in FETCH_HEAD and the checkout after it fails
-    # with "pathspec ... did not match any file(s) known to git" -- which, since the arm had
-    # never run, is what the recovery path would have done the first time it was needed.
+    # And the branch has to arrive under a name before any of that can look at it. An
+    # explicit refspec, so what the checkout resolves is a ref this step wrote, rather than
+    # whatever `remote.origin.fetch` the checkout left behind and git's opportunistic update
+    # of a remote-tracking ref under it.
     assert "+refs/heads/${BRANCH}:refs/heads/${BRANCH}" in commands, "no explicit refspec"
-    assert 'git fetch origin "${BRANCH}"' not in commands, "fetches under no name"
