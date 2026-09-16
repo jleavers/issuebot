@@ -195,10 +195,18 @@ jobs:
           if [ "${REUSE}" = "true" ]; then
             # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
             # the checkout happens to have left and git's opportunistic update of the
-            # remote-tracking ref underneath it. The branch is then a local ref that exists
-            # or a `git fetch` that failed, with no third answer for the checkout to DWIM.
-            git fetch origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
-            git checkout "${BRANCH}"
+            # remote-tracking ref underneath it, and then resolved to the one commit
+            # everything below reads: the blob it compares and the change it measures.
+            #
+            # `--no-tags` and `refs/heads/`, because a bare `${BRANCH}` is not the branch.
+            # `gitrevisions` resolves `refs/tags/${BRANCH}` ahead of `refs/heads/${BRANCH}`,
+            # and a plain fetch follows a tag pointing into the history it just downloaded,
+            # so anyone who can push here could put the config the hooks were run over in an
+            # ancestor commit, tag it with the branch's own name, and leave anything they
+            # liked at the tip: the gates would read the tag and the pull request would
+            # propose the tip. Nothing here works from the worktree, so nothing checks it out.
+            git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
+            tip="$(git rev-parse "refs/heads/${BRANCH}")"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
             # earlier run, and writable by anyone who can push here -- so it is held to the
             # same rule as one this job writes, and to the same *shape*. `freeze` ran the
@@ -208,22 +216,23 @@ jobs:
             # Read out of the branch rather than off the disk, because `cmp` follows a
             # symlink: a `.pre-commit-config.yaml` that is one, pointed at the artefact this
             # step holds, would otherwise compare equal to itself.
-            if ! git cat-file blob "${BRANCH}:.pre-commit-config.yaml" \
+            if ! git cat-file blob "${tip}:.pre-commit-config.yaml" \
                  | cmp -s - /tmp/frozen/pre-commit-config.yaml; then
               echo "::error::${BRANCH} does not carry the config the hooks were run over." \
                 "Delete the branch and rerun this workflow to rebuild it."
               exit 1
             fi
-            # ... and it moves that file and no other. Asked of the API, because the
-            # question is what the branch *changes*, which is measured from where it left
-            # the default branch and not from wherever that branch has since got to: a
+            # ... and it moves that file and no other -- of the commit just resolved and
+            # not of the name, so both gates are about one object. Asked of the API, because
+            # the question is what the branch *changes*, which is measured from where it
+            # left the default branch and not from wherever that branch has since got to: a
             # local `git diff origin/${GITHUB_REF_NAME} ${BRANCH}` compares two tips, so
             # every commit merged since the branch was pushed reads as another path the
             # branch touches, and a week-old branch -- the ordinary case for a rerun -- is
-            # refused for someone else's change. `compare` measures from the merge base,
-            # as the pull request itself will, and needs no history in this shallow
-            # checkout to do it. A failure fails the run rather than reading as "no files".
-            if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}" \
+            # refused for someone else's change. `compare` measures from the merge base, as
+            # the pull request itself will, and needs no history this shallow checkout does
+            # not have. A failure fails the run rather than reading as "no files".
+            if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${tip}" \
                  --jq '[.files[].filename] | join(" ")' | tr -d '\r\n')"; then
               echo "::error::could not compare ${BRANCH} with ${GITHUB_REF_NAME}"
               exit 1

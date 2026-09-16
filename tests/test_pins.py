@@ -276,9 +276,17 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     # pair would let either be deleted while the other kept the test green.
     # Read out of the branch, since `cmp` follows a symlink and the artefact is a path on
     # this runner: a `.pre-commit-config.yaml` that links to it would compare equal to itself.
-    assert 'git cat-file blob "${BRANCH}:.pre-commit-config.yaml"' in commands, (
-        "a reused branch's config is read off the disk rather than out of the branch"
+    # And out of the *commit*, resolved once from the fully qualified ref: `gitrevisions`
+    # resolves `refs/tags/${BRANCH}` ahead of `refs/heads/${BRANCH}`, and an ordinary fetch
+    # follows a tag pointing into the history it downloads, so a bare `${BRANCH}` would let a
+    # tag of the same name -- writable by anyone who can push here -- hand these gates one
+    # commit while the pull request proposed another.
+    assert 'git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"' in commands
+    assert 'tip="$(git rev-parse "refs/heads/${BRANCH}")"' in commands, "the ref is not resolved"
+    assert 'git cat-file blob "${tip}:.pre-commit-config.yaml"' in commands, (
+        "a reused branch's config is read off the disk, or through an ambiguous name"
     )
+    assert "${BRANCH}:.pre-commit-config.yaml" not in commands, "reads an ambiguous name"
     assert "cmp -s - /tmp/frozen/pre-commit-config.yaml" in commands, (
         "a reused branch's config is not compared with the one the hooks were run over"
     )
@@ -288,7 +296,7 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     # touches, so it refuses a week-old branch -- the ordinary case for a rerun -- for
     # somebody else's change, and demands by hand exactly the deletion the reuse path exists
     # to spare.
-    assert "/compare/${GITHUB_REF_NAME}...${BRANCH}" in commands, (
+    assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
         "a reused branch is not held to the shape of the change it claims to be"
     )
     assert "git diff --numstat" not in commands, "compares two tips rather than the change"
@@ -305,9 +313,3 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     assert '[ "${BRANCH}" != "pre-commit-hooks-${hash}" ]' in commands, (
         "the artefact is not tied to the branch name it is pushed under"
     )
-
-    # And the branch has to arrive under a name before any of that can look at it. An
-    # explicit refspec, so what the checkout resolves is a ref this step wrote, rather than
-    # whatever `remote.origin.fetch` the checkout left behind and git's opportunistic update
-    # of a remote-tracking ref under it.
-    assert "+refs/heads/${BRANCH}:refs/heads/${BRANCH}" in commands, "no explicit refspec"
