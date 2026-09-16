@@ -9,8 +9,15 @@ workspace:
 hooks:
   # The built-in clone is shallow; the self-review's `git diff origin/HEAD...HEAD` and the
   # merges of the default branch (before the push, and on a rework) need the merge base.
+  # Then this repository's own dependencies: the suite, ruff and the formatter are all run
+  # through `uv`, and nothing in the container stands in for them -- /app/.venv is the
+  # worker's, root-owned and built --no-dev. It needs `uv` on the session's PATH
+  # (ISSUEBOT_UV_VERSION at build) and a route to PyPI (ISSUEBOT_EGRESS_ALLOW); without
+  # either, this hook fails and says so, which is the point. A session that cannot run the
+  # suite should not reach turn 1 believing it can.
   after_create: |
     if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
+    uv sync
 agent:
   max_concurrent_agents: 2
   max_turns: 5

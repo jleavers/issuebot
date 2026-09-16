@@ -134,6 +134,53 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
    && PATH="/opt/node/bin:${PATH}" /opt/node/bin/npm --version; \
     fi
 
+# Optional Python toolchain, for a target repository whose tests are run with `uv` (#128's
+# blocker). Empty -- the default -- installs nothing, so the image keeps exactly the contents
+# it has without the argument. The third of these, and deliberately the same shape as the two
+# above: an operator whose target repository is a Python project sets ISSUEBOT_UV_VERSION and
+# rebuilds the worker, and one whose target repository is not carries none of it.
+# The official build from the project's own releases rather than the `uv` image used by the
+# builder stage: a COPY --from would put the binaries in every image and then remove them
+# again, which leaves the layer behind and costs the default image ~35 MB for a toolchain it
+# was told not to install. UV_VERSION is an exact release (`0.12.11`), not a major: uv is
+# pre-1.0 and its minors are not interchangeable, so an operator pins the version their target
+# repository's own CI runs rather than whatever is newest at build time.
+# The pin moves by hand, for the reason NODE_VERSION's does: a tarball fetched by URL is
+# invisible to Dependabot. The builder stage's `ghcr.io/astral-sh/uv` pin is Dependabot's and
+# is a different thing -- that one builds issuebot, this one runs the target repository's
+# suite, and they are entitled to differ.
+# The checksum comes from the release's own .sha256 beside the tarball, so a download that is
+# not what astral published fails the build rather than being installed.
+# --no-same-owner for the reason the node tarball has it: tar honours stored ownership when it
+# runs as root, and the agent runs unattended, model-authored code.
+# uv --version is asserted here for the reason initdb --version, node --version and
+# claude --version are: a moved download or a renamed asset has to fail the build, not the
+# first session that runs `uv sync`.
+ARG UV_VERSION=""
+RUN if [ -n "${UV_VERSION}" ]; then \
+      case "${UV_VERSION}" in \
+        ''|*[!0-9.]*|.*|*.) echo "UV_VERSION is a release version, e.g. 0.12.11, not ${UV_VERSION}" >&2; exit 1 ;; \
+      esac \
+   && arch="$(dpkg --print-architecture)" \
+   && case "${arch}" in \
+        amd64) uv_arch=x86_64-unknown-linux-gnu ;; \
+        arm64) uv_arch=aarch64-unknown-linux-gnu ;; \
+        *) echo "no astral-sh/uv build for ${arch}" >&2; exit 1 ;; \
+      esac \
+   && dist="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}" \
+   && cd /tmp \
+   && curl -fsSLO "${dist}/uv-${uv_arch}.tar.gz" \
+   && curl -fsSL "${dist}/uv-${uv_arch}.tar.gz.sha256" -o uv.sha256 \
+   && sha256sum -c uv.sha256 \
+   && tar --no-same-owner -xzf "uv-${uv_arch}.tar.gz" -C /tmp \
+   && install -d -m 0755 /opt/uv/bin \
+   && install -m 0755 "/tmp/uv-${uv_arch}/uv" "/tmp/uv-${uv_arch}/uvx" /opt/uv/bin/ \
+   && rm -rf "/tmp/uv-${uv_arch}" "/tmp/uv-${uv_arch}.tar.gz" /tmp/uv.sha256 \
+   && printf 'PATH="/opt/uv/bin:$PATH"\n' > /etc/profile.d/issuebot-uv.sh \
+   && chmod 0644 /etc/profile.d/issuebot-uv.sh \
+   && /opt/uv/bin/uv --version; \
+    fi
+
 # The worker and the session are different accounts (#75), and so is one session from the
 # next (#121). `issuebot` (uid 1000) is the worker: it holds GH_TOKEN, the database URL and
 # the Slack webhook, parses what the session writes and decides every label move. `agent`
@@ -281,7 +328,7 @@ USER issuebot
 # that could outlive the accounts (#142). The variable still overrides it for an operator who
 # wants one account, and WORKFLOW.md overrides both.
 ENV LANG=C.UTF-8 \
-    PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${PATH}"
+    PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${UV_VERSION:+/opt/uv/bin:}${PATH}"
 
 # The flag assertions are the point of pinning: a release that drops --permission-prompts
 # or --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting

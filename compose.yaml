@@ -89,6 +89,11 @@ services:
         # own client-side code (README, "Node for the target repository's tests"). Empty bakes
         # nothing; `docker compose build worker` to pick a change up.
         NODE_VERSION: "${ISSUEBOT_NODE_VERSION:-}"
+        # And likewise for `uv`, when the target repository is a Python project whose suite is
+        # run with it (README, "uv for the target repository's tests"). Empty bakes nothing;
+        # `docker compose build worker` to pick a change up. An exact release, not a major:
+        # uv is pre-1.0 and its minors are not interchangeable.
+        UV_VERSION: "${ISSUEBOT_UV_VERSION:-}"
         # How many session accounts the image builds (#121): `agent-1` .. `agent-N`, which is
         # what `agent.run_as` may then name as a pool. The image's own default is 3, matching
         # `agent.max_concurrent_agents`; raise both together, and `docker compose build worker`

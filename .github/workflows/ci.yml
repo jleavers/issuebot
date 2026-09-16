@@ -114,7 +114,7 @@ jobs:
       - run: docker run --rm issuebot:ci --version
       - name: the default build bakes in no optional toolchain
         run: |
-          for tool in initdb node npm; do
+          for tool in initdb node npm uv; do
             if docker run --rm --entrypoint sh issuebot:ci -c "command -v $tool"; then
               echo "the optional build args default to empty; the default image must not carry $tool" >&2
               exit 1
@@ -510,6 +510,7 @@ jobs:
           build-args: |
             POSTGRES_VERSION=18
             NODE_VERSION=24
+            UV_VERSION=0.12.11
           cache-from: |
             type=gha
             type=gha,scope=toolchain
@@ -522,7 +523,8 @@ jobs:
           docker run --rm --entrypoint initdb issuebot:ci-toolchain --version
           docker run --rm --entrypoint node issuebot:ci-toolchain --version
           docker run --rm --entrypoint npm issuebot:ci-toolchain --version
-          docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm'
+          docker run --rm --entrypoint uv issuebot:ci-toolchain --version
+          docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm && command -v uv'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
           test "$(docker run --rm --user agent --entrypoint id issuebot:ci-toolchain -un)" = agent
       - name: the opt-in build's locale is UTF-8

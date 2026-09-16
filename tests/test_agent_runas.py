@@ -942,6 +942,13 @@ async def test_a_remnant_the_delegated_pass_took_entirely_is_re_cloned(
         environ=base_env(HOME=str(tmp_path)),
         hook_shell=("bash", "-c"),
     )
+    # The re-clone runs the post-clone setup, and every script in a login shell sweeps the
+    # account's home first (#137) -- at `pw_dir`, which is the account's passwd entry and not
+    # the `HOME` above. The account named here is the one running the suite, so the sweep is
+    # taken out rather than aimed at a real home, as in the creation test above; where the
+    # sweep sits in the order is proved in `tests/test_agent_session.py`, and that it clears
+    # what it is for on a home under `tmp_path` by the `~/.profile` test in this file.
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     assert ws.created and (ws.path / ".git").is_dir()
     assert (ws.path / ".issuebot" / "created").is_file()
