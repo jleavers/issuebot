@@ -36,8 +36,9 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   session open a second workpad on every turn. The blocked escape and the conflict bounce go
   through the same call, so a thread past the cap fails those loudly too
   (`blocked_escape_failed`) rather than reading forever.
-  *Amended by #128:* only the conflict bounce still fails loudly past the cap. The escape
-  moves the label first and logs `blocked_escape_workpad_unreadable`; see below.
+  *Amended by #128:* the conflict bounce and the budget escape still fail loudly past the cap
+  (the latter is #157's to revisit); the blocked escape no longer does -- it moves the label
+  first and logs `blocked_escape_workpad_unreadable`. See below.
 - **`GhCliAdapter.count_own_label_additions`** (`github/ghcli.py`, landed by #104 while this
   was in review): the conflict bounce's read of the issue's `LABELED_EVENT` timeline, one
   GraphQL page at a time, under the same rule: at most `MAX_TIMELINE_PAGES` (10) pages, past

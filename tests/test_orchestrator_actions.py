@@ -552,6 +552,11 @@ async def test_escape_moves_the_label_when_the_workpad_will_not_read(
     The read is the block's idempotence, so the escape gives that up rather than the label
     move: the issue reaches `review` on the *first* attempt, the block is appended blind as a
     fresh marker comment, and a log line names the error that stopped the read.
+
+    The split is on `retryable`, so every non-retryable category belongs here -- but `auth`
+    and `config` pin the *rule* rather than a reachable end state: `fail_on` fails the one
+    call, where a real fault of either kind would fail the `set_state` behind it too and take
+    the escape back to `failed` and its retry, as `_blocked_note`'s docstring says.
     """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)

@@ -352,7 +352,28 @@ sees the label it will find on its first refresh without a second request.
 
 A `GitHubError` at any step logs `blocked_escape_failed` and returns
 `"failed"`; the caller retries with backoff and counts only `"applied"`
-escapes. The block:
+escapes.
+
+*Amended by #128:* that is still the rule for every step but the *read* in
+step 2, which is the block's own idempotence and so the one failure that
+used to cost the label move. A `find_workpad_comment` that fails
+**retryably** (`transport`, `rate_limited`) is unchanged: nothing is
+written, `blocked_escape_failed` is logged and the escape returns
+`"failed"` for the caller to retry. One that fails **non-retryably** -- a
+page past `MAX_COMMENT_PAGES` (#110), a malformed one -- would answer the
+same way for the life of the process, leaving the issue in `in_progress`
+with no human asked, so the order reverses: step 3 runs first, then step 4,
+and only then is the block appended *blind* as a fresh marker comment
+(`comment`, never `update_comment`), best-effort. The read that failed is
+logged `blocked_escape_workpad_unreadable` with its category, a failure of
+the blind write is logged `blocked_escape_note_failed`, and neither changes
+the `"applied"` outcome. The trade-off is stated in #128: the run-marker
+check of step 2 cannot be made without the read, so a duplicate note is
+possible, and that is preferred to an issue that never leaves
+`in_progress`. `find_workpad_comment` returns the lowest-id marker comment,
+so a real workpad stays the workpad and the blind note sits beside it.
+
+The block:
 
 ```markdown
 ### Issuebot blocked (2026-09-03T14:02:11Z)
