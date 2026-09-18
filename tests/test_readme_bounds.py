@@ -15,12 +15,16 @@ Matching is over whitespace-collapsed text, so rewrapping a paragraph -- which h
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-README = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+ROOT = Path(__file__).resolve().parents[1]
+_RAW = (ROOT / "README.md").read_text(encoding="utf-8")
+README = " ".join(_RAW.split())
+# Blank-line-delimited blocks, whitespace-collapsed. A numbered prerequisite is one block, so
+# "the same block" is "the thing the reader is currently reading".
+BLOCKS = [" ".join(block.split()) for block in _RAW.split("\n\n")]
 
 # Seven wrapped lines or so: far enough to let the note be a sentence rather than a clause,
 # close enough that a reader who has just read the incentive has not moved on. The largest
-# real distance today is ~520 characters.
+# real distance today is 600 characters, in the host-route case.
 POINT_OF_USE = 700
 
 
@@ -36,18 +40,43 @@ def _consequence_travels_with(incentive: str, *consequences: str) -> None:
         )
 
 
+def _qualified_in_the_same_block(incentive: str, *qualifiers: str) -> None:
+    """A qualifier on the consequence shares the incentive's block, but is not distance-bound.
+
+    It is the tail of the note rather than the note, so holding it to `POINT_OF_USE` would mean
+    raising that constant for every case and blunting the guard the primary phrases need.
+    Sharing the block is the claim that actually matters: the qualifier must not drift off into
+    a section of its own, where a reader weighing the grant would never meet it.
+    """
+    blocks = [block for block in BLOCKS if incentive in block]
+    assert len(blocks) == 1, f"{incentive!r} matches {len(blocks)} blocks; re-anchor this test"
+    for qualifier in qualifiers:
+        assert qualifier in blocks[0], (
+            f"{incentive!r} no longer carries {qualifier!r} in its own block (#74)"
+        )
+
+
 def test_workflows_write_names_the_review_gate_it_removes() -> None:
     """copycat-6. Workflows write is offered because a push touching `.github/workflows/` is
-    rejected without it. What it removes is human review as the gate on what CI runs: the
-    session pushes to a branch of the target repository itself, and GitHub withholds secrets
-    from a fork's ref but not from a same-repository one, so the workflow the session wrote
-    runs with that repository's Actions secrets before the diff is read."""
+    rejected without it. What it removes is human review over what CI *is* -- a job definition
+    the session wrote, its triggers and the secrets it names, runs as written on a
+    same-repository ref, where a fork's would be withheld them.
+
+    The correction is pinned too, because the obvious way to write this note overclaims: with
+    Contents write alone the session already pushes a branch, so wherever a workflow runs
+    repository code (this repository's own `uv run pytest`, say) that code is the session's and
+    reaches those secrets already. Leaving Workflows off narrows the blast radius; it does not
+    close it, and an operator must not read the note as saying otherwise."""
     _consequence_travels_with(
         "also grant Workflows",
-        "human review as the gate on what CI runs",
-        "Actions secrets",
+        "removes is human review over what CI",
         "before anyone has read the diff",
         "Nothing in issuebot replaces that gate",
+    )
+    _qualified_in_the_same_block(
+        "also grant Workflows",
+        "Leaving it off narrows that blast radius rather than closing it",
+        "already runs with those secrets",
     )
 
 
@@ -64,11 +93,12 @@ def test_classic_token_names_the_repository_scoping_it_removes() -> None:
 def test_host_route_names_the_container_it_removes() -> None:
     """copycat-3. The host route is offered because it needs no Docker. What it removes is the
     container, which is the sandbox -- the session runs at the operator's own uid, with their
-    `$HOME`, no permission prompts and no egress allow-list, on an issue body anyone can
-    write."""
+    `$HOME` and no egress allow-list, on an issue body anyone can write. Not the permission
+    prompts: `--permission-prompts none` is unconditional on every route, so the note says so
+    rather than crediting the container with a control it does not supply."""
     _consequence_travels_with(
         "Running the CLI outside a container",
         "calls the sandbox",
         "your own uid",
-        "no permission prompts and no allow-list",
+        "no allow-list between it and the network",
     )

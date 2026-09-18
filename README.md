@@ -95,14 +95,18 @@ issues that triage is most of the value.
    why the workflow's "wait for checks" step is performable at all. If the agent may edit files
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
    without it any push touching those files is rejected. Grant it deliberately, because what it
-   removes is human review as the gate on what CI runs: the session pushes its branch to the
-   target repository itself, and GitHub trusts a same-repository ref where it withholds secrets
-   from a fork's, so a workflow the session wrote runs with that repository's Actions secrets
-   and its `GITHUB_TOKEN` as soon as the push or the pull request fires it -- before anyone has
-   read the diff. Nothing in issuebot replaces that gate: the session's uid, the token it holds
-   and the egress allow-list all bound the *session*, and this is GitHub's runner afterwards. So
-   leave Workflows off unless the agent's issues really do change those files, and where you
-   grant it, treat every secret that repository's Actions can read as one the agent can reach.
+   removes is human review over what CI *is*: the session pushes its branch to the target
+   repository itself, and GitHub trusts a same-repository ref where it withholds secrets from a
+   fork's, so a job definition the session wrote -- its triggers, its `permissions:`, the
+   secrets it names -- runs as written when the push or the pull request fires it, before
+   anyone has read the diff. Nothing in issuebot replaces that gate: the session's uid, the
+   token it holds and the egress allow-list all bound the *session*, and this is GitHub's
+   runner afterwards. Leaving it off narrows that blast radius rather than closing it, though,
+   and the difference is worth being exact about: wherever your existing workflows run
+   repository code -- a test file, a build script -- that code is already the session's, and it
+   already runs with those secrets. So grant Workflows only where the agent's issues really do
+   change those files, and either way treat every secret that repository's Actions can read as
+   one the agent can reach.
    A classic token with the `repo` scope works too; it needs `workflow` adding for the same
    reason and with the same consequence, and it reads check runs where a fine-grained token
    cannot -- and `validate` warns on it, because the session holds the token and a classic
@@ -1201,12 +1205,13 @@ route, which is what `agent.run_as` unset means and how the test suite runs — 
 `git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
 2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
 use WSL. It is a development convenience rather than a deployment, and what it removes is the
-container that the Safety note above calls the sandbox: the session runs at your own uid,
-with your `$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), with no
-permission prompts and no allow-list between it and the network. Nothing replaces those --
-`validate` warns about it twice, at `agent.run_as` and at `egress`, and a warning is all
-issuebot can do here. Anyone can open an issue, so run the host route against work you would
-run yourself, and keep a real deployment in the container with a repository-scoped token.
+container that the Safety note above calls the sandbox: the session runs at your own uid, with
+your `$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), and with no
+allow-list between it and the network -- while still running, as it does everywhere, with no
+permission prompts. Nothing replaces those. `validate` warns at `agent.run_as`, and at `egress`
+unless you have pointed a proxy of your own there, and a warning is all issuebot can do about a
+route it is not on. Anyone can open an issue, so run the host route against work you would run
+yourself, and keep a real deployment in the container with a repository-scoped token.
 
 ```bash
 uv sync
