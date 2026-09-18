@@ -352,8 +352,8 @@ version, and moves by hand.
   `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
   git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
   `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
-  (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so
-  never reaches a session) *before* `~/.gitconfig`, so sweeping the second alone would leave the
+  (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
+  not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
   name git looks at first. That no deployment has a reason to leave one of these in a session
   account's home is what made it a sweep rather than a documented residual: commit identity comes
   from `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (`PASSTHROUGH_PREFIXES`), `safe.directory` is the image's
@@ -365,6 +365,12 @@ version, and moves by hand.
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
+  A mode is not a defence against the owner and no longer a gap either: the sweep runs as the
+  account whose home it is clearing, so a target still there after the first attempt is tried
+  again with the modes put back (`_relax`/`_relax_tree`, the repair `_remove` already made for a
+  workspace tree). Without it a session could keep any planted file by dropping write on the
+  directory holding it -- `git`, `ssh` and `claude` only read -- and the sweep would report
+  success; that covers all three lists, not just the new one.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential

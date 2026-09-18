@@ -137,8 +137,8 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   ``credential.helper``, ``[alias] x = !sh -c ...``, ``diff.<driver>.textconv``). Both
 #   spellings, because git reads both: ``$XDG_CONFIG_HOME/git/config`` first -- which is
 #   ``~/.config/git/config`` here, since ``XDG_CONFIG_HOME`` is not in ``PASSTHROUGH_NAMES``
-#   and so never reaches a session -- and then ``~/.gitconfig``. Sweeping one and not the other
-#   would leave the channel open at the name git looks at first.
+#   and so is not inherited from the worker's environment -- and then ``~/.gitconfig``. Sweeping
+#   one and not the other would leave the channel open at the name git looks at first.
 #   ``.ssh/config``: ``ProxyCommand``, ``LocalCommand`` and ``Match exec`` run a shell command
 #   for a matching host. issuebot's own clone is HTTPS through ``gh`` and the default image
 #   installs no ssh client, so nothing issuebot does reads it today; a target repository's hook
@@ -449,20 +449,39 @@ def _kill(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
 
 
+def _relax(path: Path) -> None:
+    """Restore this uid's own access to the directory ``path``, if it is one and it owns it.
+
+    A mode is the owner's to set and the owner's to put back, so a directory this account owns
+    can never be a directory it cannot open. Anything else -- another account's, a symlink, a
+    file -- is left exactly as it is, and a failure is skipped like every other step of a
+    best-effort removal.
+    """
+    with contextlib.suppress(OSError):
+        st = os.lstat(path)
+        if st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+            os.chmod(path, st.st_mode | stat.S_IRWXU)
+
+
+def _relax_tree(path: Path) -> None:
+    """``_relax`` for ``path`` and every directory under it, top down.
+
+    Top down because ``os.walk`` has to read a directory to reach what is inside it: each level
+    is opened before the level below is listed.
+    """
+    _relax(path)
+    for dirpath, dirnames, _filenames in os.walk(path):
+        for name in dirnames:
+            _relax(Path(dirpath) / name)
+
+
 def _remove(path: Path) -> None:
     """Remove every entry the caller owns under ``path``, opening its own directories first.
 
     Anything else -- the worker's ``.issuebot`` state, a directory it cannot empty -- is left
     for the worker, and no failure is reported: the worker's own removal is what decides.
     """
-    me = os.getuid()
-    for dirpath, dirnames, _filenames in os.walk(path):
-        for name in dirnames:
-            child = os.path.join(dirpath, name)
-            with contextlib.suppress(OSError):
-                st = os.lstat(child)
-                if st.st_uid == me and not stat.S_ISLNK(st.st_mode):
-                    os.chmod(child, st.st_mode | stat.S_IRWXU)
+    _relax_tree(path)
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
@@ -530,13 +549,41 @@ def _sweep(home: Path) -> None:
     removes.
     Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
     unlinked rather than followed, so the tree it points at is never touched.
+
+    A target that is still there after the first attempt is tried once more with the modes put
+    back first (``_relax``), because this runs as the account whose home it is clearing and
+    every directory in it is that account's own. Unlinking a file needs write on the directory
+    holding it, while ``git`` and ``ssh`` -- and ``claude`` -- need only to read it, so a
+    session that plants ``~/.ssh/config`` and then drops write on ``~/.ssh`` would otherwise
+    keep its plant at no cost to itself, and the sweep would report success. The modes are the
+    plant's, not a deployment's: the repair is the one ``_remove`` already makes for a
+    workspace tree, and the retry is what makes the removal the account's decision rather than
+    the previous session's.
     """
     for target in _sweep_targets(home):
-        with contextlib.suppress(OSError):
-            if target.is_symlink() or not target.is_dir():
-                target.unlink()
-            else:
-                shutil.rmtree(target, onexc=lambda *_: None)
+        _remove_swept(target)
+        if _exists(target):
+            _relax(target.parent)
+            _relax_tree(target)
+            _remove_swept(target)
+
+
+def _remove_swept(target: Path) -> None:
+    """One attempt at one swept path: the link or file unlinked, the directory removed whole."""
+    with contextlib.suppress(OSError):
+        if target.is_symlink() or not target.is_dir():
+            target.unlink()
+        else:
+            shutil.rmtree(target, onexc=lambda *_: None)
+
+
+def _exists(path: Path) -> bool:
+    """Whether anything is at ``path``, a broken or unreadable symlink included."""
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
 
 
 def main(argv: Sequence[str] | None = None) -> int:

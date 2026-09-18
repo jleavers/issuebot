@@ -104,18 +104,33 @@ one, which is a worse trade than three entries in a list.
 
 ## Residuals
 
+- **A mode is not a defence, and now neither is it a gap.** The sweep runs as the account whose
+  home it is clearing, so a directory it cannot open would be one the account chose not to open:
+  `~/.ssh` at `0500` leaves `git` and `ssh` reading the plant while the unlink fails with EACCES
+  and `_sweep`'s `suppress(OSError)` skips it, with `sweep_home` still reporting success. `_sweep`
+  therefore retries a target that is still there with the modes put back (`_relax`/`_relax_tree`,
+  the repair `_remove` already made for a workspace tree), which closes the same hole for the two
+  older lists: `~/.claude` at `0500` protected a planted `CLAUDE.md` in exactly the same way
+  before this change, and `$HOME` at `0500` protected a planted `~/.profile`.
+
 - **The denylist**, as in #101 and #137: a tool config file nobody has named is not on the list.
   `~/.gitmodules` and `~/.config/git/attributes` are deliberately absent -- an attributes file
   names a *driver*, and the driver's command comes from the config this does sweep, so without it
   there is no command to run.
 
-- **`XDG_CONFIG_HOME` pointed somewhere else.** The variable does not reach a session
-  (`PASSTHROUGH_NAMES`), but a session can put one in its workspace `.issuebot/env`, which is not
-  a protected name, and plant a config under whatever directory it names. That plant only reaches
-  a later session whose own env file names the same directory, so it is a channel a session opens
-  to itself rather than one it leaves for the next -- and the sweep would have to sweep an
-  arbitrary path to close it, which is not something a fixed list can do. Named here rather than
-  guarded.
+- **The environment variables that re-point these files, through `.issuebot/env`.** Three of
+  them, and none is in `PROTECTED_ENV_NAMES`: `XDG_CONFIG_HOME` moves the second git spelling
+  under a directory the list does not name, `GIT_CONFIG_GLOBAL` replaces *both* git spellings
+  with a path of its own, and `GIT_SSH_COMMAND` names a command outright with no file at all.
+  None is inherited from the worker (`PASSTHROUGH_NAMES`), so the only way one reaches a session
+  is the workspace's own `.issuebot/env` -- which a hook writes and which, as the README says,
+  outlives the session: a retry or a rework session on the *same workspace* reads what the last
+  one left. So the reach is that workspace and the issue it belongs to, rather than the account's
+  every later session, which is what the home is; and the account's *other* workspaces are
+  another account's or sealed `0700` (#121, #75). Closing it is not something this list can do,
+  since the path is whatever the variable says. Named here, and filed as #171 rather than
+  folded in: protecting those names is a decision about what a hook may configure, which is not
+  this issue's to make.
 
 - **Concurrency**, exactly as in #101 and #137: with one account for the deployment a session
   running beside this one can plant between a sweep and the command it protects. A pool closes it,
@@ -127,11 +142,14 @@ one, which is a worse trade than three entries in a list.
 
 ## Tests
 
-`tests/test_agent_runas.py`: the sweep removes all three files and leaves their neighbours
+`tests/test_agent_runas.py`: a plant locked behind a directory mode the session set is still
+removed -- a file, a tree, and a directory locked inside a swept tree -- while the neighbours and
+the credential survive it; the sweep removes all three files and leaves their neighbours
 (`~/.config/gh/hosts.yml`, `~/.ssh/known_hosts`) and the directories themselves; the list is
 pinned, including the fact that `XDG_CONFIG_HOME` is not passed through, which is what makes the
 second git spelling the path git actually reads; a symlinked `.ssh` is unlinked rather than
-stepped through; a home that never held any of it is untouched. And, end to end beside #137's
+stepped through, at the first component and at the second; a home that never held any of it is
+untouched, which `_walk` is asked directly rather than inferred from a suppressed unlink. And, end to end beside #137's
 profile proof, a planted `~/.gitconfig` alias does not run for the next session's `git` -- the
 real wrapper, the real hook path, the real `bash -lc` and the real `git`, only sudo a fake --
 two-sided, so with the sweep removed the alias *is* what `git` runs.

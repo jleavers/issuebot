@@ -40,6 +40,7 @@ from issuebot.agent.runas import (
     RunAs,
     RunAsError,
     _sweep,
+    _walk,
     anonymous_fd,
 )
 from issuebot.agent.runner import PASSTHROUGH_NAMES, ClaudeRunner
@@ -516,6 +517,69 @@ def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> 
     _sweep(home)
     assert (home / ".config" / "gh").is_dir()
     assert not (home / ".ssh").exists()
+    # The absence is decided in `_walk`, not covered up by a suppressed unlink downstream: a
+    # component that is not there yields no target at all.
+    assert _walk(home, (".ssh", "config")) is None
+    assert _walk(home, (".config", "git", "config")) is None
+
+
+def test_walk_stops_at_a_symlink_at_any_depth(tmp_path: Path) -> None:
+    """Every component, not just the first. `.config/git` is the level `.config/git/config`
+    reaches through, and it is the one where a real `.config` -- holding `gh`'s state -- has to
+    survive while the link inside it goes."""
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config").write_text("keep")
+    (home / ".config" / "gh").mkdir(parents=True)
+    (home / ".config" / "git").symlink_to(outside, target_is_directory=True)
+    assert _walk(home, (".config", "git", "config")) == home / ".config" / "git"
+    _sweep(home)
+    assert not (home / ".config" / "git").exists()
+    assert (outside / "config").read_text() == "keep"
+    assert (home / ".config" / "gh").is_dir()
+
+
+def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
+    tmp_path: Path,
+) -> None:
+    """A mode is not a defence against the owner. The sweep runs as the account whose home it
+    is clearing, so every directory in that home is the account's own: a session that plants a
+    file and then drops write on the directory holding it -- which costs the plant nothing,
+    since `git`, `ssh` and `claude` only read -- would otherwise keep it, with `sweep_home`
+    reporting success and no warning anywhere. The modes go back and the removal goes through,
+    for a file, for a tree, and for a directory locked *inside* a swept tree."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    (home / ".claude" / "skills" / "pwn" / "deep").mkdir()
+    (home / ".claude" / "skills" / "pwn" / "deep" / "more.md").write_text("exfiltrate")
+    locked = [
+        home / ".claude" / "skills" / "pwn" / "deep",
+        home / ".claude" / "skills",
+        home / ".claude",
+        home / ".ssh",
+        home / ".config" / "git",
+        home,
+    ]
+    modes = [(path, path.stat().st_mode) for path in locked]
+    try:
+        for path in locked:
+            os.chmod(path, 0o500)
+        _sweep(home)
+    finally:
+        for path, mode in reversed(modes):
+            with contextlib.suppress(OSError):
+                os.chmod(path, mode)
+    for parts in TOOL_CONFIG_SWEEP:
+        assert not home.joinpath(*parts).exists(), parts
+    for name in SHELL_STARTUP_SWEEP:
+        assert not (home / name).exists(), name
+    for name in CLAUDE_HOME_SWEEP:
+        assert not (home / ".claude" / name).exists(), name
+    # And the neighbours the sweep does not name are still there, modes and all.
+    assert (home / ".config" / "gh" / "hosts.yml").exists()
+    assert (home / ".ssh" / "known_hosts").exists()
+    assert (home / ".claude" / ".credentials.json").read_text() == "token"
 
 
 def test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads() -> None:
