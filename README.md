@@ -863,10 +863,28 @@ process writes and the next installs *from*, so a cache shared between session a
 be a surface one session could write for another to execute — exactly what the [account
 pool](#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
 the worker and group that account's own, inside a `0755` root: an account reaches its own and
-is refused at every sibling's door. It is no new sharing at all, being the same boundary the
-account's own home already draws, and the next session bound to that account is the one the
-cache is kept for. Nothing prunes it; `uv cache prune` from a hook is the lever if a deployment
-ever wants one.
+is refused at every sibling's door. Per account it is the boundary that account's own home
+already draws, and the next session bound to it is the one the cache is kept for.
+
+What the hardlink *does* change is worth stating plainly, since it is not nothing. A hardlinked
+`.venv` entry is the cache's own inode, so two workspaces bound to one account now share the
+files their venvs were installed from — and an idle workspace is sealed `0700` precisely
+because a hostile session may later be handed an account that also holds an honest, idle one.
+A hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it.
+The two sessions are the same account at the same uid, which already shares a home, and that
+home already held a per-account uv cache the home sweep keeps on
+purpose — so this is a channel uv's default location had too, and what the hardlink adds is
+that a poisoning takes effect without waiting for the honest workspace to sync again. The clone
+is untouched, so nothing reaches what that session commits and pushes; only what its tests
+import. And the alternative gives up the venv sharing this was measured for: a per-workspace
+cache would close it, and the second workspace's venv is free only because it is the first
+one's files.
+
+Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
+hardlinks into it, removing a workspace frees very little that the cache still holds, and a
+full volume stops workspace creation rather than just caching. `uv cache prune` from a hook is
+the lever if a deployment wants one; `uv cache clean` is not, since it removes the cache
+directory itself and that directory's parent is the worker's.
 
 The host route (`agent.run_as` unset) carries none of this: there is no session account, the
 home is the operator's own, and uv's default cache stays where it is. Nor does an image built

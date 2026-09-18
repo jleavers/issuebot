@@ -14,9 +14,26 @@ volume, beside the venvs, where the hardlink works and the cache outlives the co
 directory one process writes and the next installs *from*: a package uv hardlinks out of it
 lands in the venv the next session's tests import. Shared between session accounts it would be
 a surface one session could write for another to execute, which is precisely what the account
-pool (#121) exists to prevent. Per account it is no new sharing at all -- it is exactly the
-boundary the account's own home already draws, which has held npm's cache since #101 decided
-what the home sweep removes and what it deliberately keeps.
+pool (#121) exists to prevent. Per account it is the boundary the account's own home already
+draws, which has held npm's cache and uv's own since #101 decided what the home sweep removes
+and what it deliberately keeps.
+
+**What the hardlink does change, since it is not nothing.** A hardlinked ``.venv`` entry *is*
+the cache's inode, so two workspaces bound to one account now share the files their venvs were
+installed from. The seal (``accounts.py``) puts an idle workspace back to ``0700`` exactly
+because accounts are fewer than workspaces and a hostile session would otherwise be handed an
+account that also holds an honest, idle one; a hardlink reaches past that seal into the
+honest workspace's ``.venv``, which the seal used to cover. Three things bound it, and they
+are why this is the shape #164 asked for rather than an argument against it. The two sessions
+are the *same account* at the *same uid*, which already shares a home, and that home already
+holds a per-account uv cache the sweep keeps on purpose -- so the channel is one uv's own
+default location had too, and what the hardlink adds is that a poisoning takes effect without
+waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches
+what the honest session commits and pushes; only what its tests import. And the alternative --
+keeping ``UV_LINK_MODE=copy`` and taking the persistence half alone -- gives up the venv
+sharing this was measured for. A per-*workspace* cache would close it and would also give up
+the sharing, since the second workspace's venv is free only because it is the first one's
+files.
 
 The root is the worker's (``/workspaces``, ``0755``, ``issuebot:issuebot``), so a session
 account cannot create a directory in it unaided. The worker therefore makes each one the way
@@ -100,24 +117,33 @@ def ensure_uv_cache_dir(
     Idempotent, and called on the way into every turn and every hook rather than once, so that
     a cache removed out of band comes back and an account whose group moved is re-shared. That
     is ``create_or_reuse``'s rule for a workspace directory, for the same reason.
+
+    A permanent failure here -- no such account, the worker not in its group -- is one
+    ``probe_run_as`` and ``credential_complaint`` already refuse to start a worker on, so the
+    warning it would otherwise repeat per hook and per turn is a state this deployment is not
+    supposed to reach; what is left for it to say is transient.
     """
     path = uv_cache_dir(root, account)
     if path is None or account is None:
         return None
-    if which(UV_COMMAND, path=environ.get("PATH")) is None:
+    # The empty string rather than ``None``: ``shutil.which(path=None)`` falls back to this
+    # *process's* ``PATH``, and the question is about the one the session will be handed.
+    if which(UV_COMMAND, path=environ.get("PATH", "")) is None:
         return None
     log = get_logger(__name__)
     created = False
     try:
-        try:
-            # ``mode=`` is masked by the umask, so the mode is set outright afterwards -- and
-            # only on the directory this call created, so a root an operator narrowed by hand
-            # is not re-widened on every turn.
-            path.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True)
-        except FileExistsError:
-            pass
-        else:
-            os.chmod(path.parent, CACHE_ROOT_MODE)
+        # ``parents=True`` only ever finds ``workspace.root``: ``create_or_reuse`` makes it
+        # before the clone, and nothing calls this before a workspace has been acquired.
+        path.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True, exist_ok=True)
+        # Unconditionally, and not only on the directory this call created: ``mode=`` is masked
+        # by the umask, and a cache root that ended up narrower than this is one no session
+        # account can traverse -- so ``UV_CACHE_DIR`` would name a directory uv cannot reach and
+        # every ``uv`` command in the session would fail with the variable set. That is worse
+        # than the failure this function does catch, and it does not heal itself, so the mode is
+        # re-applied rather than trusted. A root an operator narrowed by hand is not a
+        # configuration: it is this directory, made for this, and the accounts have to enter it.
+        os.chmod(path.parent, CACHE_ROOT_MODE)
         try:
             # Created closed and opened by ``share_with``, so it is never briefly wider than it
             # ends up, exactly as a workspace is.

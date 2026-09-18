@@ -487,8 +487,16 @@ version, and moves by hand.
   group alone) inside a `0755` root the accounts traverse and cannot write. A cache is a
   directory one process writes and the next installs *from*, so a shared one would be a
   surface one session writes for another to execute, which is what the pool exists to
-  prevent; per account it is no new sharing, being the boundary the account's own home
-  already draws, and the next session bound to it is what the cache is kept for.
+  prevent; per account it is the boundary the account's own home already draws, and the next
+  session bound to it is what the cache is kept for. What the hardlink does change is that a
+  `.venv` entry *is* the cache's inode, so two workspaces bound to one account share the files
+  their venvs were installed from, and a hardlink reaches past the seal an idle workspace
+  carries -- bounded by the two sessions being the same account at the same uid, which already
+  shares a home holding a per-account uv cache the sweep keeps on purpose (so the channel is
+  one uv's default location had too, and what the hardlink adds is that it takes effect without
+  waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
+  session commits and pushes. The alternative gives up what the shape was measured for: the
+  second workspace's venv is free only because it is the first one's files.
   `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
   turn (`ClaudeRunner.child_environment`) and every hook
   (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an
@@ -500,10 +508,8 @@ version, and moves by hand.
   allow-list carries no `UV_` name and the value is per account and per deployment; it is
   deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
   -- which the image no longer sets at all, the `copy` default of #161 having existed only
-  because the cache could not be on the venv's filesystem. What it buys, measured on the live
-  worker over this repository's own dependencies: two workspaces' venvs are 152 MB copied and
-  77 MB hardlinked out of one 78 MB cache, and the cache survives `docker compose up -d
-  worker`. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
+  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
   `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
   them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
   every account can reach its own directory, and sealing it at each worker start would take

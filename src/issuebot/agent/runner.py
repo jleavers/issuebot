@@ -804,6 +804,11 @@ class ClaudeRunner:
         return argv
 
     def child_environment(self) -> dict[str, str]:
+        """What one turn's ``claude -p`` is run with.
+
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+        """
         return agent_environment(self._environ, token=self._token, uv_cache=self._ensure_uv_cache())
 
     def _ensure_uv_cache(self) -> Path | None:

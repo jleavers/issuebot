@@ -529,6 +529,9 @@ class WorkspaceManager:
     def _hook_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
         """What every hook, and the clone, is run with, and the complaints about the env file.
 
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+
         The later hooks see what ``before_run`` wrote: ``after_run`` and ``before_remove`` tend
         to want the same DSN. ``after_create`` runs before any file can exist, which is fine.
 

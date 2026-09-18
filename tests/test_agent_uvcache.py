@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from issuebot.agent import accounts
 from issuebot.agent.accounts import (
     SEALED_DIR_MODE,
     WORKSPACE_DIR_MODE,
@@ -156,17 +157,47 @@ def test_an_unknown_account_is_refused_rather_than_left_world_readable(tmp_path:
     assert mode(stranded) == SEALED_DIR_MODE, "created sealed, and never opened to anyone"
 
 
-def test_two_accounts_get_two_directories_neither_can_enter(tmp_path: Path) -> None:
+def test_each_account_gets_its_own_directory_opened_to_its_own_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A shared cache is the failure mode, not the goal: it is a directory one session writes
-    and the next installs *from*, which is what the account pool (#121) exists to prevent."""
-    mine = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
-    assert mine is not None
-    other = tmp_path / UV_CACHE_ROOT_NAME / "agent-other"
-    other.mkdir(mode=WORKSPACE_DIR_MODE)
-    assert mine.parent == other.parent and mine != other
-    # Group, and nothing for everyone else: an account reaches its own directory through the
-    # `0755` root above and is refused at every sibling's door.
-    assert mode(mine) & stat.S_IRWXO == 0
+    and the next installs *from*, which is what the account pool (#121) exists to prevent.
+
+    The gid oracle is faked because a test host has one account it may chgrp to, not two -- so
+    what is proved here is that each directory is opened to *its own* account's group and to
+    nobody else, which with ``pool_complaint``'s rule that no two pool accounts share a primary
+    group is the whole of "closed to the others".
+    """
+    asked: list[str] = []
+
+    def gid(account: str) -> int:
+        asked.append(account)
+        return account_gid(ME)  # the real one, so the chgrp this test makes is permitted
+
+    monkeypatch.setattr(accounts, "account_gid", gid)
+    first = ensure_uv_cache_dir(tmp_path, "agent-1", HAS_UV, which=found)
+    second = ensure_uv_cache_dir(tmp_path, "agent-2", HAS_UV, which=found)
+    assert first is not None and second is not None
+    assert first != second and first.parent == second.parent
+    assert asked == ["agent-1", "agent-2"], "each is opened to its own account's group"
+    for path in (first, second):
+        assert mode(path) == WORKSPACE_DIR_MODE
+        # Group, and nothing for everyone else: an account reaches its own directory through
+        # the `0755` root above and is refused at every sibling's door.
+        assert mode(path) & stat.S_IRWXO == 0
+
+
+def test_a_cache_root_narrowed_out_from_under_the_accounts_is_put_back(tmp_path: Path) -> None:
+    """The failure this one guards against is worse than the one the warning covers: a `0700`
+    cache root is still the worker's, so the directory is made, ``share_with`` succeeds and
+    ``UV_CACHE_DIR`` is exported -- naming a path no session account can traverse, which fails
+    every ``uv`` command in the session rather than costing a hardlink. It does not heal
+    itself, so the mode is re-applied on every call rather than trusted."""
+    first = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    assert first is not None
+    os.chmod(first.parent, 0o0700)
+    assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) == first
+    assert mode(first.parent) == CACHE_ROOT_MODE
 
 
 # --- how it reaches the session ------------------------------------------------------------
@@ -181,6 +212,21 @@ def test_the_variable_reaches_the_session_and_every_hook(tmp_path: Path) -> None
     assert UV_CACHE_ENV not in agent_environment(parent, token=None)
     env = agent_environment(parent, token=None, uv_cache=tmp_path / "cache")
     assert env[UV_CACHE_ENV] == str(tmp_path / "cache")
+
+
+def test_a_hook_can_point_uv_somewhere_else_from_the_workspace_env_file(tmp_path: Path) -> None:
+    """The override is new for ``UV_CACHE_DIR`` and works differently from ``UV_LINK_MODE``'s
+    old one: the worker now *computes* a value into the base environment, so the file has to
+    layer **over** it rather than fill a gap. That is ``merge_workspace_env``'s rule for
+    anything not on the protected list, and it is what four paragraphs of documentation rest
+    on, so it is pinned here rather than inferred."""
+    workspaces = manager(tmp_path, ME)
+    workspace = tmp_path / "example_repo-1"
+    (workspace / ".issuebot").mkdir(parents=True)
+    (workspace / ".issuebot" / "env").write_text("UV_CACHE_DIR=/tmp/elsewhere\n")
+    env, applied = workspaces._hook_environment(workspace)
+    assert applied == [UV_CACHE_ENV], "the file layered over the worker's value, not under it"
+    assert env[UV_CACHE_ENV] == "/tmp/elsewhere"
 
 
 def test_a_deployment_can_still_point_uv_somewhere_else(tmp_path: Path) -> None:
@@ -205,8 +251,8 @@ def test_every_hook_is_handed_the_cache_directory(tmp_path: Path) -> None:
     created, so the directory is ensured where the hook environment is built rather than at
     workspace creation, and every hook gets the same one."""
     workspaces = manager(tmp_path, ME)
-    env, complaints = workspaces._hook_environment(tmp_path / "example_repo-1")
-    assert complaints == []
+    env, applied = workspaces._hook_environment(tmp_path / "example_repo-1")
+    assert applied == []
     assert env[UV_CACHE_ENV] == str(tmp_path / UV_CACHE_ROOT_NAME / ME)
     assert (tmp_path / UV_CACHE_ROOT_NAME / ME).is_dir()
 
