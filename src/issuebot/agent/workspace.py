@@ -53,6 +53,7 @@ STATE_DIR = ".issuebot"
 # the worker reads back out of them is declared, and guarded, in ``issuebot.agent.boundary``.
 # The mode and the group come from ``share_with`` (#121): the bound account's group and nobody
 # else's, so a sibling session at another uid cannot enter the directory at all.
+
 # Names directly under ``workspace.root`` that are not workspaces, and must not be treated as
 # one. The worker's account registry (#121) and the per-account uv caches (#164): both are the
 # worker's own directories beside the workspace keys, and both would be damaged by being taken

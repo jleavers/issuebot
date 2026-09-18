@@ -3574,7 +3574,7 @@ async def test_the_uv_cache_beside_the_workspaces_survives_startup_and_the_sweep
     """#164 puts one uv cache directory per session account under ``workspace.root``, beside
     the workspace keys. Two things there work over the root and had to be shown not to mind it:
     ``seal_idle``, which at every worker start chmods each worker-owned directory under the
-    root to ``0700`` so that a workspace an killed worker left open cannot be entered, and
+    root to ``0700`` so that a workspace a killed worker left open cannot be entered, and
     ``AccountRegistry.prune``, which expires a binding whose workspace is gone.
 
     The first is the load-bearing one: the cache root is ``0755`` precisely so that every

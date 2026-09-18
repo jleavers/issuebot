@@ -872,8 +872,8 @@ files their venvs were installed from — and an idle workspace is sealed `0700`
 because a hostile session may later be handed an account that also holds an honest, idle one.
 A hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it.
 The two sessions are the same account at the same uid, which already shares a home, and that
-home already held a per-account uv cache the home sweep keeps on
-purpose — so this is a channel uv's default location had too, and what the hardlink adds is
+home already held a per-account uv cache the home sweep does not
+touch (it is a denylist of instruction surfaces and shell start-up files, and names no cache) — so this is a channel uv's default location had too, and what the hardlink adds is
 that a poisoning takes effect without waiting for the honest workspace to sync again. The clone
 is untouched, so nothing reaches what that session commits and pushes; only what its tests
 import. And the alternative gives up the venv sharing this was measured for: a per-workspace

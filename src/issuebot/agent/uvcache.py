@@ -15,8 +15,9 @@ directory one process writes and the next installs *from*: a package uv hardlink
 lands in the venv the next session's tests import. Shared between session accounts it would be
 a surface one session could write for another to execute, which is precisely what the account
 pool (#121) exists to prevent. Per account it is the boundary the account's own home already
-draws, which has held npm's cache and uv's own since #101 decided what the home sweep removes
-and what it deliberately keeps.
+draws, which has held npm's cache and uv's own for as long as there has been one: the home
+sweep (#101, #137) is a denylist of instruction surfaces and shell start-up files, and names no
+cache.
 
 **What the hardlink does change, since it is not nothing.** A hardlinked ``.venv`` entry *is*
 the cache's inode, so two workspaces bound to one account now share the files their venvs were
@@ -26,7 +27,7 @@ account that also holds an honest, idle one; a hardlink reaches past that seal i
 honest workspace's ``.venv``, which the seal used to cover. Three things bound it, and they
 are why this is the shape #164 asked for rather than an argument against it. The two sessions
 are the *same account* at the *same uid*, which already shares a home, and that home already
-holds a per-account uv cache the sweep keeps on purpose -- so the channel is one uv's own
+holds a per-account uv cache the home sweep does not touch -- so the channel is one uv's own
 default location had too, and what the hardlink adds is that a poisoning takes effect without
 waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches
 what the honest session commits and pushes; only what its tests import. And the alternative --
@@ -55,8 +56,10 @@ Two gates, and a deployment that fails either carries none of this:
   argument's guard and nowhere else.
 """
 
+import errno
 import os
 import shutil
+import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -122,6 +125,11 @@ def ensure_uv_cache_dir(
     ``probe_run_as`` and ``credential_complaint`` already refuse to start a worker on, so the
     warning it would otherwise repeat per hook and per turn is a state this deployment is not
     supposed to reach; what is left for it to say is transient.
+
+    Synchronous, on the event loop, unlike ``sweep_agent_home``: a ``PATH`` scan and at most
+    three metadata syscalls on a path this process just resolved, beside the env-file read both
+    call sites already make there. ``sweep_agent_home`` goes through a thread because it is a
+    ``sudo`` to another uid, which is a different order of thing.
     """
     path = uv_cache_dir(root, account)
     if path is None or account is None:
@@ -149,7 +157,17 @@ def ensure_uv_cache_dir(
             # ends up, exactly as a workspace is.
             path.mkdir(mode=SEALED_DIR_MODE)
         except FileExistsError:
-            pass
+            # What is already there has to be a directory, and its own: ``chown`` and ``chmod``
+            # both follow a symbolic link, so a link or a regular file at the name would be
+            # shared, returned and exported -- naming something uv cannot use, which is the
+            # failure this function exists not to produce. ``lstat``, so a link *to* a directory
+            # is refused with the rest. Only the worker can write the ``0755`` root, so this is
+            # the same defence ``boundary.py`` applies to every name the worker did not just
+            # create rather than a session's reach.
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise NotADirectoryError(
+                    errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path)
+                ) from None
         else:
             created = True
         share_with(path, account)

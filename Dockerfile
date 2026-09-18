@@ -171,11 +171,14 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # here would now be the thing standing in its way: measured on the live worker, two workspaces'
 # venvs came to 152 MB copied and 77 MB hardlinked from one cache, and the cache itself now
 # outlives `docker compose up -d worker`.
-# What is left for the login shell is `PATH`, and it needs this file rather than the runtime
-# `ENV` because Debian's /etc/profile *overwrites* `PATH` for a login shell, which is what
-# every hook runs under. The cache directory takes the other route -- the environment issuebot
-# builds -- since it is per account and derived from `workspace.root`, so no static file could
-# state it; it is `agent_environment`'s one computed entry, beside `GH_TOKEN`.
+# What is left for the login shell is `PATH`, and it needs this file *in addition to* the
+# runtime `ENV`, not instead of it: Debian's /etc/profile overwrites `PATH` for a login shell,
+# which is what every hook runs under, while the `ENV` is what the worker's own process carries
+# -- and that is precisely what #164's second gate reads, since `ensure_uv_cache_dir` asks
+# `which` about the `PATH` the session will be handed. The cache directory itself takes neither
+# route but the environment issuebot builds, since it is per account and derived from
+# `workspace.root`, so no static file could state it; it is `agent_environment`'s one computed
+# entry, beside `GH_TOKEN`.
 # A deployment that wants something else still has both routes #161 documented, and they are
 # unchanged: `uv sync --link-mode=copy` in the hook line itself, or `UV_LINK_MODE=copy` in an
 # `.issuebot/env` written from `before_run`, which covers the later hooks and every turn.

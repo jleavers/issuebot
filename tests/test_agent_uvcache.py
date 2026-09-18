@@ -148,6 +148,27 @@ def test_a_cache_that_cannot_be_made_is_a_warning_and_uvs_own_default(
     assert warning["account"] == ME
 
 
+@pytest.mark.parametrize("plant", ["file", "symlink"])
+def test_a_name_that_is_not_a_directory_is_refused_rather_than_shared(
+    tmp_path: Path, plant: str
+) -> None:
+    """``chown`` and ``chmod`` both follow a symbolic link, so a link or a regular file at the
+    account's name would be shared, returned and exported -- naming something uv cannot use,
+    which is the one outcome this function exists not to produce. Only the worker can write the
+    ``0755`` root, so this is the defence ``boundary.py`` applies to every name the worker did
+    not just create rather than a session's reach."""
+    stranger = tmp_path / UV_CACHE_ROOT_NAME / ME
+    stranger.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if plant == "file":
+        stranger.write_text("not a directory")
+    else:
+        stranger.symlink_to(elsewhere)  # a link *to* a directory is refused with the rest
+    assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) is None
+    assert mode(elsewhere) != WORKSPACE_DIR_MODE, "and nothing it points at was opened up"
+
+
 def test_an_unknown_account_is_refused_rather_than_left_world_readable(tmp_path: Path) -> None:
     """``share_with`` is what closes the directory, so a name with no account behind it must
     leave nothing usable behind: the directory stays at the sealed mode it was created with,

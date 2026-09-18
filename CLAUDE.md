@@ -492,7 +492,7 @@ version, and moves by hand.
   `.venv` entry *is* the cache's inode, so two workspaces bound to one account share the files
   their venvs were installed from, and a hardlink reaches past the seal an idle workspace
   carries -- bounded by the two sessions being the same account at the same uid, which already
-  shares a home holding a per-account uv cache the sweep keeps on purpose (so the channel is
+  shares a home holding a per-account uv cache the home sweep names nowhere (so the channel is
   one uv's default location had too, and what the hardlink adds is that it takes effect without
   waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
   session commits and pushes. The alternative gives up what the shape was measured for: the
