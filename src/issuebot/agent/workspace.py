@@ -45,6 +45,11 @@ POST_CLONE_SCRIPT = (
 # Written last into ``.issuebot`` by the worker: its presence marks a workspace whose creation
 # completed, so a clone whose hooks were cut short is recreated rather than reused.
 CREATED_MARKER = "created"
+# Written by the worker before the unlink that removes a workspace (#149): a workspace
+# carrying it is one issuebot is done with, so a removal that failed at the time leaves
+# the record of its own retry behind on disk. Cleared when a workspace is reused, since a
+# reopened issue is not one issuebot is done with.
+FINISHED_MARKER = "finished"
 STATE_DIR = ".issuebot"
 # Under ``agent.run_as`` (#75) the workspace directory and ``.issuebot`` are the worker's, and
 # sticky: the agent creates what it likes inside them but can neither unlink nor rename the
@@ -190,7 +195,10 @@ class WorkspaceManager:
     # --- paths --------------------------------------------------------------------
 
     def path_for(self, identifier: str) -> Path:
-        path = (self.root / workspace_key(identifier)).resolve()
+        return self._path_for_key(workspace_key(identifier))
+
+    def _path_for_key(self, key: str) -> Path:
+        path = (self.root / key).resolve()
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
         if path.name == REGISTRY_DIR:
@@ -216,6 +224,11 @@ class WorkspaceManager:
             # not enter. Idempotent, and the directories are the worker's either way.
             self._share(path)
             self._share(path / ".issuebot")
+            # A workspace whose removal failed keeps the mark that asks for it to be retried
+            # (#149). Reusing it is the statement that issuebot is *not* done with the issue
+            # after all -- it reopened, or a human put it back on the board -- so the mark goes
+            # before the session starts, and the sweep leaves the clone alone.
+            self._unmark_finished(path)
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
@@ -389,9 +402,23 @@ class WorkspaceManager:
             self._log.warning("claude_home_sweep_failed", user=self._runas.user)
 
     async def remove(self, identifier: str) -> bool:
-        path = self.path_for(identifier)
+        return await self.remove_key(workspace_key(identifier))
+
+    async def remove_key(self, key: str) -> bool:
+        """Remove the workspace stored under ``key``, whatever issue put it there.
+
+        Addressed by key rather than by identifier because the sweep's retry reads its
+        candidates off the disk (#149): a workspace that outlived the removal that should have
+        taken it is a directory name, and the issue it belongs to is no longer being asked
+        for. ``remove`` is the same operation reached from an identifier.
+        """
+        path = self._path_for_key(key)
         if not path.exists():
             return False
+        # Before the unlink, not after it: a removal that fails leaves the directory, and the
+        # mark is what asks the next terminal sweep to try again (#149). Marking afterwards
+        # would only ever record removals that had already succeeded.
+        self._mark_finished(path)
         # Open again: `before_remove` runs as the account and the delegated unlink is its own,
         # and a workspace reaching this is a sealed one nine times in ten (#121).
         with contextlib.suppress(AgentError):
@@ -407,6 +434,61 @@ class WorkspaceManager:
                 self.seal(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
+
+    def finished_keys(self) -> list[str]:
+        """The keys of workspaces issuebot finished with and could not remove (#149).
+
+        A removal writes ``.issuebot/finished`` before it unlinks anything, so what is left
+        here is exactly the removals that did not complete -- a resource bounded by the disk,
+        and by the failures that put it there, rather than by everything issuebot has ever
+        completed. The terminal sweep used to find these by re-reading the ``complete`` role
+        for issues whose only outcome was ``unchanged``; asking the workspaces instead costs
+        one ``readdir`` and answers for a workspace whose issue nobody is asking about any
+        more, across restarts, since the record is on disk rather than in this process.
+
+        Every step goes through the boundary (#104): the workspace and its state directory
+        must be the worker's own directories reached without following a link, and the mark
+        must be the worker's own regular file. A session that plants the name in a directory
+        of its own therefore asks for nothing. Never raises: this runs inside a sweep.
+        """
+        try:
+            children = sorted(child.name for child in self.root.iterdir())
+        except FileNotFoundError:
+            # The root is created with the first workspace, so its absence is "none yet".
+            return []
+        except OSError as exc:
+            self._log.warning("workspace_scan_failed", root=str(self.root), error=str(exc))
+            return []
+        return [
+            name
+            for name in children
+            if name != REGISTRY_DIR
+            and self._boundary.is_own_dir(self.root, (name,))
+            and self._boundary.is_own_file(self.root, (name, STATE_DIR, FINISHED_MARKER))
+        ]
+
+    def _mark_finished(self, path: Path) -> None:
+        """Record that this workspace is issuebot's to remove, before the unlink (#149).
+
+        Exclusive, like the ``created`` sentinel and for the same reason: ``.issuebot`` is
+        shared with the session under ``agent.run_as`` (#75), so a name already there may be
+        the session's. A mark already present is this removal's own second attempt and is
+        left alone; anything else that stops the write costs the retry and not the removal,
+        which is why it is a warning and the removal goes on.
+        """
+        try:
+            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
+        except FileExistsError:
+            return
+        except OSError as exc:
+            self._log.warning("workspace_mark_failed", workspace=str(path), error=str(exc))
+
+    def _unmark_finished(self, path: Path) -> None:
+        """Drop the removal mark from a workspace that is being reused (#149)."""
+        try:
+            self._boundary.remove_marker(path, (STATE_DIR, FINISHED_MARKER))
+        except OSError as exc:
+            self._log.warning("workspace_unmark_failed", workspace=str(path), error=str(exc))
 
     # --- hooks --------------------------------------------------------------------
 

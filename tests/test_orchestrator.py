@@ -1779,6 +1779,112 @@ async def test_terminal_sweep_runs_on_the_first_and_every_tenth_tick(tmp_path: P
     assert len(h.recorder.of(IssueCompleted)) == 1
 
 
+async def test_terminal_sweep_never_asks_for_the_issues_it_has_already_completed(
+    tmp_path: Path,
+) -> None:
+    """#149: the sweep's cost stops growing with the deployment's own successful work.
+
+    ``complete`` is where a closed issue rests -- ``finish_terminal`` leaves the label alone,
+    since it is how the dashboard's closed column is built -- so the role held everything
+    issuebot had ever finished and every issue in it was read only to be classified
+    ``unchanged``. The sweep no longer asks, so such an issue reaches neither the store nor
+    ``finish_terminal``, while a closed issue in any other role is still finished.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "complete")
+    h.github.close_issue(1)
+    h.add_issue(2, "review")
+    h.github.close_issue(2)
+
+    await h.orchestrator.terminal_sweep()
+
+    reported = {issue.number for batch in h.polled for issue in batch}
+    assert reported == {2}
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.github.issue(2).state is None
+    assert [args[0] for args in h.calls("set_state")] == []
+    assert [args[0] for args in h.calls("clear_state")] == [2]
+
+
+async def test_terminal_sweep_reads_back_only_the_issues_it_moved(tmp_path: Path) -> None:
+    """What `_report_issues` refreshes in the store is kept, at a cost bounded by the sweep's
+    own work rather than by the deployment's history (#149).
+
+    The sweep reports each issue as it *found* it, carrying the label `finish_terminal` is
+    about to take off it; the re-read of every completed issue is what used to put that right.
+    Now the issues this sweep relabelled are read back by number -- and a sweep that moved
+    nothing spends no request at all, which is the steady state.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    await h.orchestrator.terminal_sweep()
+
+    assert h.calls("fetch_issues_by_ids") == [(("1",),)]
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1], [1]]
+    assert h.polled[0][0].state is StateLabel.REVIEW
+    assert h.polled[1][0].state is StateLabel.COMPLETE
+
+    h.github.calls.clear()
+    await h.orchestrator.terminal_sweep()
+    assert h.calls("fetch_issues_by_ids") == []
+
+
+async def test_a_read_back_that_fails_costs_the_refresh_and_not_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The label move reaches the store through `state_changed` either way (#149)."""
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+    h.workspace_dir("repo-1")
+
+    with monkeypatch.context() as patch:
+        h.fail_on("fetch_issues_by_ids", patch)
+        await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert len(h.recorder.of(IssueCompleted)) == 1
+    assert not (h.root / "repo-1").exists()
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
+
+
+async def test_terminal_sweep_retries_a_workspace_removal_that_failed(tmp_path: Path) -> None:
+    """The one thing the re-read of ``complete`` was load-bearing for (#149).
+
+    `WorkspaceManager.remove` writes `.issuebot/finished` before it unlinks anything, so a
+    workspace whose removal failed asks for its own retry, off the disk and across restarts,
+    rather than by having the sweep read every issue issuebot has ever finished.
+    """
+    h = Harness(tmp_path)
+    left_behind = h.workspace_dir("repo-9")
+    (left_behind / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert not left_behind.exists()
+
+
+async def test_the_retry_leaves_a_marked_workspace_its_own_session_is_using(
+    tmp_path: Path,
+) -> None:
+    """A reused workspace has its mark cleared before its session starts, but the sweep does
+    not rely on that: a key with a session running or a retry pending is skipped (#149)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert list(h.orchestrator.running) == ["1"]
+    running = h.workspace_dir("repo-1")
+    (running / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert running.is_dir()
+
+
 async def test_terminal_sweep_failure_only_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2313,9 +2419,12 @@ async def test_on_issues_receives_every_fetch(tmp_path: Path) -> None:
     h.github.merge_pr(7)
     h.github.close_issue(3)
     await h.tick()
-    # the first tick: the sweep's closed issue, then the candidate fetch (review included)
-    assert [[issue.number for issue in batch] for batch in h.polled] == [[3], [1, 2]]
+    # The first tick: the sweep's closed issue as it was found, the same issue read back after
+    # the sweep relabelled it (#149), then the candidate fetch (review included).
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[3], [3], [1, 2]]
     assert h.polled[0][0].github_state == "closed"
+    assert h.polled[0][0].state is StateLabel.REVIEW
+    assert h.polled[1][0].state is StateLabel.COMPLETE
     assert closed.number == 3
     assert list(h.orchestrator.running) == ["1"]
     assert h.calls("fetch_issues_by_states")[-1] == (
@@ -2323,8 +2432,8 @@ async def test_on_issues_receives_every_fetch(tmp_path: Path) -> None:
     )
     await h.tick()
     # the second tick: reconcile's refresh of the running issue, then the candidate fetch
-    assert [[issue.number for issue in batch] for batch in h.polled[2:]] == [[1], [1, 2]]
-    assert h.polled[2][0].state is StateLabel.IN_PROGRESS
+    assert [[issue.number for issue in batch] for batch in h.polled[3:]] == [[1], [1, 2]]
+    assert h.polled[3][0].state is StateLabel.IN_PROGRESS
 
 
 async def test_on_issues_receives_a_fired_retry_refresh(tmp_path: Path) -> None:

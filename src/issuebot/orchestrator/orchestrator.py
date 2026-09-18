@@ -58,6 +58,7 @@ from issuebot.github import (
 )
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
+from issuebot.orchestrator.actions import FinishOutcome
 from issuebot.orchestrator.admission import (
     Admission,
     AdmissionRequest,
@@ -1417,23 +1418,86 @@ class Orchestrator:
         entry.stop(cause, detail)
 
     async def terminal_sweep(self) -> None:
-        """Symphony §8.6, repeated: closed issues still carrying a state label."""
+        """Symphony §8.6, repeated: closed issues still carrying a state label.
+
+        Not every state label: ``complete`` is where a closed issue rests, so the adapter
+        stopped asking for that role in #149 and the sweep's cost stopped growing with
+        everything the deployment had ever finished. Two things the re-read was quietly doing
+        are done here instead. The store keeps its refreshed snapshot of a closed issue,
+        because the issues this sweep *moved* are read back once by number and reported --
+        bounded by the work of one sweep rather than by the history of all of them. And the
+        retry of a workspace removal that failed at the time is now the workspace's own
+        business: `_retry_finished_workspaces` asks the disk, which knows about a workspace
+        whose issue nobody is asking about any more.
+        """
         try:
             issues = await self._adapter.fetch_terminal_issues()
         except GitHubError as exc:
             self._log.warning("terminal_sweep_failed", error=str(exc))
             return
         self._report_issues(issues)
+        moved: list[str] = []
         for issue in issues:
             if issue.id in self._running:
                 continue
             self._retries.pop(issue.id, None)
-            await self._finish(issue)
+            if await self._finish(issue) != "failed":
+                moved.append(issue.id)
+        await self._report_moved(moved)
+        await self._retry_finished_workspaces()
         # After the removals above, so a workspace this sweep deleted gives its account back
         # now rather than on the next one (#121).
         self._prune_accounts()
 
-    async def _finish(self, issue: Issue) -> None:
+    async def _report_moved(self, ids: Sequence[str]) -> None:
+        """Re-read the issues this sweep relabelled, so the store holds them as they now are.
+
+        What `_report_issues` hands the store above is each issue as the sweep *found* it,
+        carrying the label `finish_terminal` is about to take off it. Until #149 the next
+        sweep put that right, by re-reading every completed issue there had ever been; this
+        reads back only what this sweep changed, which in a steady state is nothing and costs
+        no request at all. A read that fails is a warning and leaves the row as the sweep
+        found it -- the label move itself reaches the store through `state_changed` either
+        way, so what a failure costs is the issue's stored label list and title, not its
+        state.
+        """
+        if not ids:
+            return
+        try:
+            refreshed = await self._adapter.fetch_issues_by_ids(ids)
+        except GitHubError as exc:
+            self._log.warning("terminal_refresh_failed", error=str(exc), count=len(ids))
+            return
+        self._report_issues(refreshed)
+
+    async def _retry_finished_workspaces(self) -> None:
+        """Remove again every workspace a previous removal marked and did not take (#149).
+
+        `WorkspaceManager.remove` writes `.issuebot/finished` before it unlinks anything, so a
+        workspace still carrying the mark is one whose removal failed -- the case the sweep's
+        re-read of the `complete` role used to cover, at the price of asking GitHub for every
+        issue issuebot had ever finished. The candidates come off the disk instead, which is
+        bounded by the failures that put them there and survives a restart, and each is
+        removed as the account bound to it (#121), since the unlink is the session's files'.
+
+        A key the worker is still using is skipped: a running session's, and a pending retry's
+        -- the same set `_prune_accounts` keeps a binding for. A reused workspace has had its
+        mark cleared by `create_or_reuse` before its session started, so an issue that reopened
+        is not swept out from under the run working it.
+        """
+        keys = self._workspaces.finished_keys()
+        if not keys:
+            return
+        busy = self._pool_keys()
+        for key in keys:
+            if key in busy:
+                continue
+            try:
+                await self._workspaces_for_key(key).remove_key(key)
+            except AgentError as exc:
+                self._log.warning("workspace_remove_failed", workspace_key=key, error=exc.message)
+
+    async def _finish(self, issue: Issue) -> FinishOutcome:
         """Close the issue out, and drop what this worker remembered about it.
 
         Both conflict memos go whatever GitHub answered: a closed issue is never a bounce
@@ -1458,6 +1522,7 @@ class Orchestrator:
             self._counters = self._counters.bump(issues_completed=1)
         elif outcome == "cancelled":
             self._counters = self._counters.bump(issues_cancelled=1)
+        return outcome
 
     def _prune_accounts(self) -> None:
         """Forget the bindings of workspaces that are gone, on the sweep that removes them.
@@ -1489,17 +1554,20 @@ class Orchestrator:
         the right trade: the hook is the operator's own script and a wrong uid makes it fail,
         while no account at all makes the *removal* fail and leaves the workspace for ever.
         """
+        return self._workspaces_for_key(workspace_key(issue.identifier))
+
+    def _workspaces_for_key(self, key: str) -> WorkspaceManager:
+        """The same, for a workspace named by its key alone: the sweep's removal retry has a
+        directory on disk and no issue to look the binding up from (#149)."""
         settings = self._workflow.config
         account = session_account(settings)
         if self._pool is not None:
             try:
-                account = self._pool.bound(workspace_key(issue.identifier)) or account
+                account = self._pool.bound(key) or account
             except AgentError as exc:
                 # The record is unreadable, so the binding is unknown; the first member still
                 # delegates, and the manager finds the files' real owner from the tree.
-                self._log.warning(
-                    "account_lookup_failed", issue_number=issue.number, error=exc.message
-                )
+                self._log.warning("account_lookup_failed", workspace_key=key, error=exc.message)
         return self._workspaces_factory(settings_with_run_as(settings, account))
 
     # --- worker exits and retries -----------------------------------------------------

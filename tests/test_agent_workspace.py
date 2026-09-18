@@ -20,6 +20,7 @@ import pytest
 from issuebot.agent import workspace as workspace_module
 from issuebot.agent.errors import AgentError
 from issuebot.agent.workspace import (
+    FINISHED_MARKER,
     MAX_HOOK_OUTPUT_BYTES,
     SessionRecord,
     WorkspaceManager,
@@ -844,3 +845,127 @@ def test_the_managers_boundary_is_exposed_for_reads_made_outside_it(tmp_path: Pa
     assert isinstance(manager.boundary, Boundary)
     assert manager.boundary.worker_uid == os.getuid()
     assert manager.boundary.session_uid is None  # no agent.run_as here
+
+
+# --- the removal mark and its retry (#149) ------------------------------------------------
+
+
+@posix
+async def test_a_failed_removal_leaves_the_mark_that_asks_for_a_retry(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry the terminal sweep used to buy by re-reading every completed issue (#149).
+
+    `remove` writes `.issuebot/finished` before it unlinks anything, so a removal that failed
+    leaves a workspace that says what should have happened to it. `finished_keys` is what the
+    sweep asks instead of GitHub, and it is bounded by the disk.
+    """
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert manager.finished_keys() == []
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert manager.finished_keys() == ["example-42"]
+
+    monkeypatch.undo()
+    assert await manager.remove_key("example-42") is True
+    assert not ws.path.exists()
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_a_successful_removal_leaves_nothing_to_retry(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert await manager.remove("example-42") is True
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_reusing_a_workspace_clears_the_removal_mark(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reopened issue is not one issuebot is done with, so its clone stops asking to be
+    removed before the session that reuses it starts (#149)."""
+    manager, _ = make_manager(tmp_path)
+    issue = make_issue(identifier="example-42")
+    ws = await manager.create_or_reuse(issue)
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+    monkeypatch.undo()
+    assert manager.finished_keys() == ["example-42"]
+
+    reused = await manager.create_or_reuse(issue)
+
+    assert reused.created is False
+    assert reused.path == ws.path
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_finished_keys_ignores_what_the_worker_did_not_write(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A workspace is the worker's directory and the mark is the worker's file, both reached
+    without following a link (#104). Anything else asks for nothing."""
+    manager, _ = make_manager(tmp_path)
+    await manager.create_or_reuse(make_issue(identifier="example-42"))
+    root = manager.root
+
+    # The account registry, which is not a workspace at all (#121).
+    (root / ".issuebot").mkdir(exist_ok=True)
+    (root / ".issuebot" / FINISHED_MARKER).touch()
+    # A plain file where a workspace would be.
+    (root / "not-a-workspace").write_text("", encoding="utf-8")
+    # A mark that is a symbolic link rather than a file.
+    linked = root / "linked"
+    (linked / ".issuebot").mkdir(parents=True)
+    (linked / ".issuebot" / FINISHED_MARKER).symlink_to(tmp_path / "elsewhere")
+    # A workspace directory that is a link to somewhere else entirely.
+    outside = tmp_path / "outside"
+    (outside / ".issuebot").mkdir(parents=True)
+    (outside / ".issuebot" / FINISHED_MARKER).touch()
+    (root / "escaped").symlink_to(outside)
+    # And one genuine mark, so the assertion is about what is refused and not about an
+    # answer that is empty whatever it is given.
+    (root / "example-42" / ".issuebot" / FINISHED_MARKER).touch()
+
+    assert manager.finished_keys() == ["example-42"]
+
+
+@posix
+async def test_finished_keys_survives_a_root_that_is_not_there_yet(tmp_path: Path) -> None:
+    manager, _ = make_manager(tmp_path)
+    assert not manager.root.exists()
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_a_workspace_whose_state_directory_is_gone_is_still_removed(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """The mark is best effort: what it buys is the retry, and a workspace too damaged to
+    carry it is still a workspace to remove (#149)."""
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    shutil.rmtree(ws.path / ".issuebot")
+
+    assert await manager.remove("example-42") is True
+    assert not ws.path.exists()
+    assert "workspace_mark_failed" in stream.getvalue()
