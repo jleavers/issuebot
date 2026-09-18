@@ -869,17 +869,17 @@ already draws, and the next session bound to it is the one the cache is kept for
 What the hardlink *does* change is worth stating plainly, since it is not nothing. A hardlinked
 `.venv` entry is the cache's own inode, so two workspaces bound to one account now share the
 files their venvs were installed from — and an idle workspace is sealed `0700` precisely
-because a hostile session may later be handed an account that also holds an honest, idle one.
-A hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it.
-The two sessions are the same account at the same uid, which already shares a home, and that
-home already held a per-account uv cache the home sweep does not
-touch (it is a denylist of instruction surfaces and shell start-up files, and names no cache) — so this is a channel uv's default location had too, and what the hardlink adds is
-that a poisoning takes effect without waiting for the honest workspace to sync again. The clone
-is untouched, so nothing reaches what that session commits and pushes; only what its tests
-import. And the alternative gives up the venv sharing this was measured for: a per-workspace
-cache would close it, and the second workspace's venv is free only because it is the first
-one's files. Whether the residual is worth closing is
-[#176](https://github.com/jleavers/issuebot/issues/176).
+because a hostile session may later be handed an account that also holds an honest, idle one. A
+hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it. The
+two sessions are the same account at the same uid, which already shares a home, and that home
+already held a per-account uv cache the home sweep does not touch (it is a denylist of
+instruction surfaces and shell start-up files, and names no cache) — so this is a channel uv's
+default location had too, and what the hardlink adds is that a poisoning takes effect without
+waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
+that session commits and pushes; only what its tests import. And the alternative gives up the
+venv sharing this was measured for: a per-workspace cache would close it, and the second
+workspace's venv is free only because it is the first one's files. Whether the residual is
+worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
 
 Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
 hardlinks into it, removing a workspace frees very little that the cache still holds, and a

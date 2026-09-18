@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.agent import accounts
+from issuebot.agent import accounts, uvcache
 from issuebot.agent.accounts import (
     SEALED_DIR_MODE,
     WORKSPACE_DIR_MODE,
@@ -148,25 +148,53 @@ def test_a_cache_that_cannot_be_made_is_a_warning_and_uvs_own_default(
     assert warning["account"] == ME
 
 
-@pytest.mark.parametrize("plant", ["file", "symlink"])
-def test_a_name_that_is_not_a_directory_is_refused_rather_than_shared(
-    tmp_path: Path, plant: str
+@pytest.mark.parametrize("at", ["leaf", "root"])
+@pytest.mark.parametrize("plant", ["file", "symlink", "stranger"])
+def test_a_name_that_is_not_this_worker_s_directory_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], at: str, plant: str
 ) -> None:
-    """``chown`` and ``chmod`` both follow a symbolic link, so a link or a regular file at the
-    account's name would be shared, returned and exported -- naming something uv cannot use,
-    which is the one outcome this function exists not to produce. Only the worker can write the
-    ``0755`` root, so this is the defence ``boundary.py`` applies to every name the worker did
-    not just create rather than a session's reach."""
-    stranger = tmp_path / UV_CACHE_ROOT_NAME / ME
-    stranger.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
+    """``chmod`` and ``chown`` follow a symbolic link, and so does ``Path.mkdir(exist_ok=True)``,
+    whose own test is ``is_dir()``. So an entry either name already holds is checked before
+    either mode is applied, or a link planted at one of them would have this function widening
+    whatever it points at -- ``1770`` and an account's group at the leaf, and ``0755`` at the
+    root, which is the worse of the two, since a sealed idle workspace is exactly such a target.
+
+    Only the worker can write the ``0755`` root, so this is defence in depth of the kind
+    ``boundary.py`` applies to every name the worker did not just create, rather than anything a
+    session can reach. Both names, and all three of the things that are not a directory of this
+    worker's.
+    """
+    configure_logging()
+    root = tmp_path / UV_CACHE_ROOT_NAME
+    name = root if at == "root" else root / ME
+    if at == "leaf":
+        root.mkdir(mode=CACHE_ROOT_MODE)
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=SEALED_DIR_MODE)
     if plant == "file":
-        stranger.write_text("not a directory")
+        name.write_text("not a directory")
+    elif plant == "symlink":
+        name.symlink_to(victim)  # a link *to* a directory is refused with the rest
     else:
-        stranger.symlink_to(elsewhere)  # a link *to* a directory is refused with the rest
+        name.mkdir(mode=SEALED_DIR_MODE)
+        os.chown(name, os.getuid(), -1)  # a real directory, and this is the owner check's turn
+
+    if plant == "stranger":
+        # The one case the test host cannot produce: a directory owned by somebody else needs a
+        # second uid. The check is pinned directly instead.
+        with pytest.raises(PermissionError):
+            uvcache._require_own_directory(name, os.getuid() + 1)
+        return
+
     assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) is None
-    assert mode(elsewhere) != WORKSPACE_DIR_MODE, "and nothing it points at was opened up"
+    assert mode(victim) == SEALED_DIR_MODE, "nothing a link pointed at was opened up"
+    assert mode(name) != WORKSPACE_DIR_MODE and mode(name) != CACHE_ROOT_MODE, (
+        "and the planted entry itself was left as it was found"
+    )
+    lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert [line["event"] for line in lines if line["level"] == "warning"] == [
+        "uv_cache_unavailable"
+    ], "refusal falls into the warning-and-uv's-own-default path, not a silent None"
 
 
 def test_an_unknown_account_is_refused_rather_than_left_world_readable(tmp_path: Path) -> None:

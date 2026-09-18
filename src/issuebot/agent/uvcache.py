@@ -102,6 +102,31 @@ def uv_cache_dir(root: Path, account: str | None) -> Path | None:
     return root / UV_CACHE_ROOT_NAME / account
 
 
+def _require_own_directory(path: Path, uid: int) -> None:
+    """Refuse anything at ``path`` that is not a real directory owned by ``uid``.
+
+    Both of the modes this module applies go on with ``chmod``, and ``chmod`` and ``chown``
+    follow a symbolic link -- as does ``Path.mkdir(exist_ok=True)``, whose own test is
+    ``is_dir()``. So an entry the worker did not just create is checked before either is
+    applied, or a link planted at one of these two names would have this function widening
+    whatever it points at: ``1770`` and an account's group at the leaf, and ``0755`` at the
+    root, which is the worse of the two -- a sealed idle workspace is exactly such a target.
+
+    ``lstat``, so a link *to* a directory is refused with a link to anything else, and the
+    owner, so a directory somebody else left here is refused too. That pair is
+    ``boundary.py``'s, and this is the same rule for the same reason: only the worker can write
+    the ``0755`` root, so it is defence in depth rather than a session's reach, and it is the
+    kind that costs one ``lstat``.
+    """
+    entry = os.lstat(path)
+    if not stat.S_ISDIR(entry.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path)) from None
+    if entry.st_uid != uid:
+        raise PermissionError(
+            errno.EPERM, f"owned by uid {entry.st_uid}, not this worker's {uid}", str(path)
+        ) from None
+
+
 def ensure_uv_cache_dir(
     root: Path,
     account: str | None,
@@ -126,9 +151,11 @@ def ensure_uv_cache_dir(
     warning it would otherwise repeat per hook and per turn is a state this deployment is not
     supposed to reach; what is left for it to say is transient.
 
-    Synchronous, on the event loop, unlike ``sweep_agent_home``: a ``PATH`` scan and at most
-    three metadata syscalls on a path this process just resolved, beside the env-file read both
-    call sites already make there. ``sweep_agent_home`` goes through a thread because it is a
+    Synchronous, on the event loop, unlike ``sweep_agent_home``: a ``PATH`` scan, half a dozen
+    metadata syscalls on a path this process just resolved, and the ``getpwnam`` inside
+    ``share_with`` -- which is the only one of them that can block for a noticeable time, on a
+    deployment whose accounts come from a directory service -- beside the env-file read both
+    call sites already make here. ``sweep_agent_home`` goes through a thread because it is a
     ``sudo`` to another uid, which is a different order of thing.
     """
     path = uv_cache_dir(root, account)
@@ -139,11 +166,18 @@ def ensure_uv_cache_dir(
     if which(UV_COMMAND, path=environ.get("PATH", "")) is None:
         return None
     log = get_logger(__name__)
+    worker = os.getuid()
     created = False
     try:
-        # ``parents=True`` only ever finds ``workspace.root``: ``create_or_reuse`` makes it
-        # before the clone, and nothing calls this before a workspace has been acquired.
-        path.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True, exist_ok=True)
+        try:
+            # ``parents=True`` only ever finds ``workspace.root``: ``create_or_reuse`` makes it
+            # before the clone, and nothing calls this before a workspace has been acquired.
+            # ``exist_ok`` is *not* passed, so an entry already at the name goes through
+            # ``_require_own_directory`` rather than through ``mkdir``'s own ``is_dir()``, which
+            # follows a symbolic link and would admit one here.
+            path.parent.mkdir(mode=CACHE_ROOT_MODE, parents=True)
+        except FileExistsError:
+            _require_own_directory(path.parent, worker)
         # Unconditionally, and not only on the directory this call created: ``mode=`` is masked
         # by the umask, and a cache root that ended up narrower than this is one no session
         # account can traverse -- so ``UV_CACHE_DIR`` would name a directory uv cannot reach and
@@ -151,23 +185,15 @@ def ensure_uv_cache_dir(
         # than the failure this function does catch, and it does not heal itself, so the mode is
         # re-applied rather than trusted. A root an operator narrowed by hand is not a
         # configuration: it is this directory, made for this, and the accounts have to enter it.
+        # Guarded by the check above, since this is the wider of the two modes this function
+        # applies and a link here would be the worse of the two to follow.
         os.chmod(path.parent, CACHE_ROOT_MODE)
         try:
             # Created closed and opened by ``share_with``, so it is never briefly wider than it
             # ends up, exactly as a workspace is.
             path.mkdir(mode=SEALED_DIR_MODE)
         except FileExistsError:
-            # What is already there has to be a directory, and its own: ``chown`` and ``chmod``
-            # both follow a symbolic link, so a link or a regular file at the name would be
-            # shared, returned and exported -- naming something uv cannot use, which is the
-            # failure this function exists not to produce. ``lstat``, so a link *to* a directory
-            # is refused with the rest. Only the worker can write the ``0755`` root, so this is
-            # the same defence ``boundary.py`` applies to every name the worker did not just
-            # create rather than a session's reach.
-            if not stat.S_ISDIR(os.lstat(path).st_mode):
-                raise NotADirectoryError(
-                    errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path)
-                ) from None
+            _require_own_directory(path, worker)
         else:
             created = True
         share_with(path, account)
