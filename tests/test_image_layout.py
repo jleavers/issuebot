@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,13 +22,10 @@ CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 SERVICES = yaml.safe_load(COMPOSE)["services"]
 
 # What the `UV_VERSION` stanza writes to /etc/profile.d/issuebot-uv.sh: the `PATH` line the
-# hooks need, since Debian's /etc/profile overwrites `PATH` for a login shell, and uv's link
-# mode (#161), which is a *default* so that an inherited value still wins.
-UV_PROFILE_SCRIPT = """   && printf '%s\\n' \\
-        'PATH="/opt/uv/bin:$PATH"' \\
-        ': "${UV_LINK_MODE:=copy}"' \\
-        'export UV_LINK_MODE' \\
-        > /etc/profile.d/issuebot-uv.sh \\
+# hooks need, since Debian's /etc/profile overwrites `PATH` for a login shell, and nothing
+# else. It carried a `UV_LINK_MODE=copy` default until #164 moved uv's cache onto the
+# workspaces volume, where the hardlink uv would rather use finally works.
+UV_PROFILE_SCRIPT = """   && printf 'PATH="/opt/uv/bin:$PATH"\\n' > /etc/profile.d/issuebot-uv.sh \\
 """
 
 
@@ -376,44 +374,62 @@ def test_the_python_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell(
     assert "sha256sum -c uv.sha256" in DOCKERFILE
 
 
-def test_the_uv_profile_defaults_the_link_mode_the_deployment_can_only_copy() -> None:
-    """#161: uv's cache is under ``$HOME/.cache/uv``, in the container's own writable layer,
-    and the venv it builds is ``<workspace>/.venv``, on the mounted volume. A hardlink cannot
-    cross that, so every ``uv sync`` falls back to a full copy and warns three lines about it
-    on the stderr of ``after_create`` -- the first hook of every session, logged whole on
-    ``hook_finished`` and quoted into the run's error (``HookResult.summary``) when that hook
-    fails.
+def test_the_uv_profile_states_no_link_mode_now_the_cache_is_on_the_volume() -> None:
+    """#161 defaulted uv's link mode to ``copy``, because uv's cache was under
+    ``$HOME/.cache/uv`` -- in the container's own writable layer -- while the venv it builds is
+    ``<workspace>/.venv`` on the mounted volume, and a hardlink cannot cross the two. Every
+    ``uv sync`` fell back to a full copy and warned three lines about it on the stderr of
+    ``after_create``, the first hook of every session.
 
-    It rides on the ``UV_VERSION`` guard and on the profile script rather than on an ``ENV``,
-    for two separate reasons: a deployment that installs no uv then carries no variable about
-    it, and an ``ENV`` would not reach a session in any case, since ``agent_environment`` is an
-    allow-list and no ``UV_`` name is on it.
+    #164 removed the reason instead: the worker puts the cache on the workspaces volume, one
+    directory per session account (``agent/uvcache.py``), and hands it to every hook and every
+    turn as ``UV_CACHE_DIR``. One filesystem, so uv's own default -- hardlink -- is what works,
+    and a ``copy`` default written into the image would now be the one thing stopping it. So
+    the profile script is the ``PATH`` line and nothing else, and the runtime stage states
+    nothing about the link mode at all.
 
-    And a *default* rather than an assignment. ``UV_LINK_MODE`` is in neither
-    ``PASSTHROUGH_NAMES`` nor ``PROTECTED_ENV_NAMES``, so what a deployment overrides it with
-    is the hook line itself or an ``.issuebot/env`` written from ``before_run`` -- which is
-    inherited *before* every ``bash -lc`` sources this file, so an unconditional export would
-    overwrite exactly the setting an operator reached for.
+    A deployment that does want ``copy`` back still has both of #161's routes, unchanged:
+    ``uv sync --link-mode=copy`` in the hook line, or ``UV_LINK_MODE=copy`` in an
+    ``.issuebot/env`` written from ``before_run``. Neither ``UV_LINK_MODE`` nor
+    ``UV_CACHE_DIR`` is in ``PASSTHROUGH_NAMES`` or ``PROTECTED_ENV_NAMES``, which is what
+    makes that file the override.
     """
     assert UV_PROFILE_SCRIPT in DOCKERFILE
-    # Off with the rest of the toolchain, so an image built without `UV_VERSION` carries no
-    # variable about a tool it does not have: every mention of it in the runtime stage is a
-    # comment or one of those two lines, which is what an `ENV` -- in its own instruction or
-    # folded into the continuation of an existing one -- would fail. (The *builder* stage sets
-    # it for its own reasons, over the buildkit cache mount, and is a different image.)
+    # Not a line of the runtime stage mentions it any more: every remaining occurrence is a
+    # comment. (The *builder* stage sets it for itself, over the buildkit cache mount, and is a
+    # different image.)
     runtime = DOCKERFILE.split("AS runtime", 1)[1]
     mentions = [line.strip() for line in runtime.splitlines() if "UV_LINK_MODE" in line]
-    profile = {': "${UV_LINK_MODE:=copy}"', "export UV_LINK_MODE"}
-    assert profile <= {line.strip(" \\'") for line in mentions}
-    assert all(line.startswith("#") or line.strip(" \\'") in profile for line in mentions)
-    # The two directions, on the image CI actually builds.
+    assert mentions, "the reasoning for not setting it belongs in the file"
+    assert all(line.startswith("#") for line in mentions)
+    # And the same on the image CI actually builds: the opt-in build states nothing, while a
+    # value handed in still arrives, which is the `.issuebot/env` route.
     assert (
-        "docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}'" in CI
+        'toolchain="$(docker run --rm --entrypoint bash issuebot:ci-toolchain'
+        ' -lc \'echo ${UV_LINK_MODE-}\')"\n          test -z "$toolchain"' in CI
     )
     assert (
         "docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain"
         " -lc 'echo ${UV_LINK_MODE-}'" in CI
     )
+
+
+def test_the_uv_cache_sits_on_the_volume_that_outlives_the_container() -> None:
+    """Half of what #164 is for: a cache in the container's own writable layer is discarded on
+    every ``docker compose up -d worker``, so the next session re-downloads it from PyPI.
+
+    The worker keeps it at ``<workspace.root>/.uv-cache/<account>``, and the default root is
+    ``/workspaces`` -- which compose mounts from a *named* volume rather than binding or
+    tmpfs'ing, so recreating the container remounts the same cache. That is the whole claim,
+    and it rests on those three facts together.
+    """
+    assert Settings.model_validate({"github": {"repo": "o/r"}}).workspace.root == Path(
+        "/workspaces"
+    )
+    assert 'VOLUME ["/workspaces"]' in DOCKERFILE
+    assert "workspaces:/workspaces" in SERVICES["worker"]["volumes"]
+    volumes = yaml.safe_load(COMPOSE)["volumes"]
+    assert "workspaces" in volumes and not volumes["workspaces"]
 
 
 def test_compose_offers_the_python_toolchain_to_the_worker_alone() -> None:

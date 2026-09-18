@@ -530,19 +530,22 @@ jobs:
           docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm && command -v uv && command -v pwsh'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
           test "$(docker run --rm --user agent --entrypoint id issuebot:ci-toolchain -un)" = agent
-      # #161: on this deployment uv can never hardlink out of its cache -- the cache is under
-      # $HOME/.cache/uv, in the container's writable layer, and the venv is on the workspaces
-      # volume -- so every `uv sync` copies and warns three lines about it on the stderr of
-      # `after_create`, which is logged in full and quoted into the run's error when that hook
-      # fails. The profile script says the copy is intended. Three readings: the default; an
-      # inherited value, which is what an `.issuebot/env` written from `before_run` hands over
-      # and what an unconditional export in that file would have overwritten; and the default
-      # build, which installs no uv and so must carry no variable about it either. The third is
-      # an assignment on its own line, since `test -z "$(docker run ...)"` would also pass for a
-      # `docker run` that failed and printed nothing.
-      - name: the opt-in build's login shell defaults uv's link mode and defers to one set
+      # #164: the image states nothing about uv's link mode any more. It used to default it to
+      # `copy` (#161), because the cache was under $HOME/.cache/uv in the container's writable
+      # layer while the venv was on the workspaces volume, and a hardlink cannot cross the two;
+      # the worker now puts the cache on that volume itself, one directory per session account,
+      # so uv's own default is both what it wants and what works and a `copy` here would be in
+      # its way. Three readings, and each is a different mistake: the opt-in build's login
+      # shell, which must state nothing; an inherited value, which must still arrive, since
+      # `UV_LINK_MODE` is on no allow-list and an `.issuebot/env` written from `before_run` is
+      # how a deployment overrides it; and the default build, which installs no uv and so must
+      # carry no variable about it either. The first and third are assignments on their own
+      # line, since `test -z "$(docker run ...)"` would also pass for a `docker run` that
+      # failed and printed nothing.
+      - name: the opt-in build's login shell states no uv link mode and defers to one set
         run: |
-          test "$(docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')" = copy
+          toolchain="$(docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')"
+          test -z "$toolchain"
           test "$(docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')" = hardlink
           default="$(docker run --rm --entrypoint bash issuebot:ci -lc 'echo ${UV_LINK_MODE-}')"
           test -z "$default"

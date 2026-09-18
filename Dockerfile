@@ -156,31 +156,33 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # uv --version is asserted here for the reason initdb --version, node --version and
 # claude --version are: a moved download or a renamed asset has to fail the build, not the
 # first session that runs `uv sync`.
-# The profile script also settles uv's link mode (#161), because on a deployment shaped like
-# this one the hardlink it would rather use can never work: uv's cache defaults to
-# $HOME/.cache/uv and a session account's home is in the container's own writable layer, while
-# the venv it builds is `<workspace>/.venv` on the mounted volume. Two filesystems, and a
-# hardlink cannot cross them, so every `uv sync` falls back to a full copy and warns three
-# lines about it. The copy itself is fine -- 122 ms for this repository -- and what the warning
-# costs is the position it lands in: the stderr of `after_create`, the first hook of every
-# session, which is logged in full on `hook_finished` and is what the run's error quotes
-# (`HookResult.summary`) when that hook fails. An unexplained warning there is something a turn
-# gets spent chasing. So the variable states that the fallback is intended, rather than leaving
-# each session to rediscover that the hardlink is impossible. What the copy does still cost --
-# a duplicated venv per workspace, and a cache discarded with the container -- is #164, which
-# would move the cache onto the volume and make the hardlink work.
-# Here and not in the runtime `ENV`, which is where `PATH` needs a second mechanism: an `ENV`
-# would not reach a session at all, since `agent_environment` is an allow-list and no `UV_`
-# name is on it. The login shell is the route, and it is the one that matters, because every
-# hook runs under `bash -lc`. (The builder stage sets the same variable for the same reason,
-# above: that one is the buildkit cache mount, a different filesystem again.)
-# A default (`:=`) rather than a plain assignment, so that a deployment whose cache and
-# workspaces do share a filesystem can still ask for `hardlink` or `clone`: `UV_LINK_MODE` is
-# neither passed through by `agent_environment` nor protected, so what a deployment sets it
-# with is the hook line itself (`uv sync --link-mode=hardlink`) or `.issuebot/env` written from
-# `before_run`, which covers the later hooks and every turn -- and that file is inherited
-# *before* this script is sourced, so an unconditional export here would overwrite exactly the
-# setting an operator had reached for.
+# The profile script is the `PATH` line and nothing else. It used to carry a
+# `UV_LINK_MODE=copy` default as well (#161), because on a deployment shaped like this one the
+# hardlink uv would rather use could never work: uv's cache defaulted to $HOME/.cache/uv and a
+# session account's home is in the container's own writable layer, while the venv it builds is
+# `<workspace>/.venv` on the mounted volume. Two filesystems, and a hardlink cannot cross them,
+# so every `uv sync` fell back to a full copy and warned three lines about it on the stderr of
+# `after_create` -- the first hook of every session, logged in full on `hook_finished` and
+# quoted into the run's error (`HookResult.summary`) when that hook fails.
+# #164 removed the reason rather than the warning: the worker now puts uv's cache on the
+# workspaces volume beside the venvs, one directory per session account, and hands it to every
+# hook and every turn as `UV_CACHE_DIR` (`agent/uvcache.py`). One filesystem, so uv's own
+# default link mode -- hardlink -- is both what it wants and what works, and a `copy` default
+# here would now be the thing standing in its way: measured on the live worker, two workspaces'
+# venvs came to 152 MB copied and 77 MB hardlinked from one cache, and the cache itself now
+# outlives `docker compose up -d worker`.
+# What is left for the login shell is `PATH`, and it needs this file rather than the runtime
+# `ENV` because Debian's /etc/profile *overwrites* `PATH` for a login shell, which is what
+# every hook runs under. The cache directory takes the other route -- the environment issuebot
+# builds -- since it is per account and derived from `workspace.root`, so no static file could
+# state it; it is `agent_environment`'s one computed entry, beside `GH_TOKEN`.
+# A deployment that wants something else still has both routes #161 documented, and they are
+# unchanged: `uv sync --link-mode=copy` in the hook line itself, or `UV_LINK_MODE=copy` in an
+# `.issuebot/env` written from `before_run`, which covers the later hooks and every turn.
+# `UV_LINK_MODE` is in neither `PASSTHROUGH_NAMES` nor `PROTECTED_ENV_NAMES`, and nor is
+# `UV_CACHE_DIR`, so both are the deployment's to override from there. (The builder stage sets
+# `UV_LINK_MODE=copy` for itself, above: that one is the buildkit cache mount, a different
+# filesystem again, and a different image.)
 ARG UV_VERSION=""
 RUN if [ -n "${UV_VERSION}" ]; then \
       case "${UV_VERSION}" in \
@@ -201,11 +203,7 @@ RUN if [ -n "${UV_VERSION}" ]; then \
    && install -d -m 0755 /opt/uv/bin \
    && install -m 0755 "/tmp/uv-${uv_arch}/uv" "/tmp/uv-${uv_arch}/uvx" /opt/uv/bin/ \
    && rm -rf "/tmp/uv-${uv_arch}" "/tmp/uv-${uv_arch}.tar.gz" /tmp/uv.sha256 \
-   && printf '%s\n' \
-        'PATH="/opt/uv/bin:$PATH"' \
-        ': "${UV_LINK_MODE:=copy}"' \
-        'export UV_LINK_MODE' \
-        > /etc/profile.d/issuebot-uv.sh \
+   && printf 'PATH="/opt/uv/bin:$PATH"\n' > /etc/profile.d/issuebot-uv.sh \
    && chmod 0644 /etc/profile.d/issuebot-uv.sh \
    && /opt/uv/bin/uv --version; \
     fi
