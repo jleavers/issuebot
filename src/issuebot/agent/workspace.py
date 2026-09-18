@@ -401,6 +401,21 @@ class WorkspaceManager:
             # WARNING, since a control that silently never ran is no control.
             self._log.warning("claude_home_sweep_failed", user=self._runas.user)
 
+    def mark_finished(self, identifier: str) -> None:
+        """Record that issuebot is done with this issue's workspace (#149).
+
+        Called by `finish_terminal` *before* it moves the label, so a worker killed between
+        the label move and the removal still leaves a workspace that asks to be removed --
+        the window the sweep's re-read of the `complete` role used to cover. `remove` marks
+        again on its own account, since a removal is a removal whoever asked for it.
+        """
+        try:
+            path = self._path_for_key(workspace_key(identifier))
+        except AgentError:
+            return
+        if path.exists():
+            self._mark_finished(path)
+
     async def remove(self, identifier: str) -> bool:
         return await self.remove_key(workspace_key(identifier))
 
@@ -431,6 +446,14 @@ class WorkspaceManager:
             # readable by the next session bound to the same account (#121). The caller only
             # logs the failure, so closing it again is this method's job.
             if path.exists():
+                # And so is putting the mark back. `rmtree` is not atomic: it walks the
+                # workspace's entries in readdir order and stops at the first it cannot
+                # unlink, having already taken everything it reached -- which on half the
+                # orderings is `.issuebot`, mark and all. The mark is the only thing that asks
+                # for another attempt, so a partial removal that ate it would leave a
+                # workspace nothing ever removes again, and under a pool an account bound to
+                # it for ever (#121). Re-asserted here, where the failure is known.
+                self._mark_finished(path)
                 self.seal(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
@@ -468,23 +491,51 @@ class WorkspaceManager:
         ]
 
     def _mark_finished(self, path: Path) -> None:
-        """Record that this workspace is issuebot's to remove, before the unlink (#149).
+        """Record that this workspace is issuebot's to remove (#149).
 
-        Exclusive, like the ``created`` sentinel and for the same reason: ``.issuebot`` is
-        shared with the session under ``agent.run_as`` (#75), so a name already there may be
-        the session's. A mark already present is this removal's own second attempt and is
-        left alone; anything else that stops the write costs the retry and not the removal,
-        which is why it is a warning and the removal goes on.
+        Never raises: what the mark buys is the retry, so a workspace too damaged to carry
+        one is still a workspace to remove, and the failure is said rather than propagated.
         """
         try:
-            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
-        except FileExistsError:
-            return
+            self._write_finished(path)
         except OSError as exc:
             self._log.warning("workspace_mark_failed", workspace=str(path), error=str(exc))
 
+    def _write_finished(self, path: Path) -> None:
+        """Create the mark, making room for it where the name or its directory is not free.
+
+        Exclusive, like the ``created`` sentinel and for the same reason: ``.issuebot`` is
+        shared with the session under ``agent.run_as`` (#75), so a name already there may be
+        the session's -- and ``finished_keys`` refuses a mark that is not the worker's own
+        file, so leaving one in place would silently cost the retry it looks like it bought.
+        The directory is the worker's, so the worker takes the name back. A mark that *is* the
+        worker's own is this removal's earlier attempt and is left alone.
+
+        A missing state directory is the other case: a removal that failed part way may have
+        taken it with the mark inside. It is recreated closed, as ``_make_state_dir`` creates
+        it, and never shared -- an unlink needs no hook of the session's.
+        """
+        if not self._boundary.is_own_dir(path, (STATE_DIR,)):
+            # Anything at the name that is not the worker's directory stays: `create_marker`
+            # walks through it and refuses, which is the answer this method wants.
+            with contextlib.suppress(OSError):
+                (path / STATE_DIR).mkdir(mode=SEALED_DIR_MODE)
+        try:
+            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
+        except FileExistsError:
+            if self._boundary.is_own_file(path, (STATE_DIR, FINISHED_MARKER)):
+                return
+            self._log.warning("workspace_mark_replaced", workspace=str(path))
+            self._boundary.remove_marker(path, (STATE_DIR, FINISHED_MARKER))
+            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
+
     def _unmark_finished(self, path: Path) -> None:
-        """Drop the removal mark from a workspace that is being reused (#149)."""
+        """Drop the removal mark from a workspace that is being reused (#149).
+
+        A failure here is said and not raised: the worker owns the directory, so there is
+        little that can stop the unlink, and what an uncleared mark costs is a clone the next
+        sweep removes and the run after that re-makes -- never work, which is pushed.
+        """
         try:
             self._boundary.remove_marker(path, (STATE_DIR, FINISHED_MARKER))
         except OSError as exc:

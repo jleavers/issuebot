@@ -206,11 +206,19 @@ a moment out of date, and what put it right was the next sweep re-reading the is
 role -- at the price of re-reading every other completed issue with it. The sweep now reads
 back, by number, only the issues it actually relabelled (`_report_moved` →
 `fetch_issues_by_ids`), which is bounded by the work of one sweep and costs no request at all
-in the steady state, where a sweep moves nothing. Nothing is dropped from what the store used
-to be refreshed with. A read-back that fails is `terminal_refresh_failed` at WARNING and
-leaves the row as the sweep found it: the label move itself reaches the store through
-`state_changed` and `issue_completed`, so what a failure costs is an issue's stored label list
-and title, never its state or the board.
+in the steady state, where a sweep moves nothing. A read-back that fails is
+`terminal_refresh_failed` at WARNING and leaves the row as the sweep found it: the label move
+itself reaches the store through `state_changed` and `issue_completed`, so what a failure
+costs is an issue's stored label list and title, never its state or the board.
+
+Every answer is checked against the state the sweep moved the issue *to*, and one that still
+shows the old role is dropped (`terminal_refresh_stale`). The move is written through `gh
+issue edit` and read back over GraphQL milliseconds later, so an answer from a replica that
+has not caught up is a real possibility -- and it would carry the newest `seen_at`, which is
+what `UPSERT_ISSUE` orders by, so reporting it would overwrite the state `state_changed` had
+just recorded. The old scheme repaired that on the next sweep; nothing reads a `complete`
+issue again now, so it would be permanent. The refresh is the cheap half and the state is the
+load-bearing half: when they disagree the refresh gives way.
 
 What *does* stop happening is the periodic re-read of an issue that is already `complete` and
 that this sweep did not touch -- so a title or label edited on a closed issue, months after
@@ -225,28 +233,55 @@ while its tree is on disk (#121). Simply dropping the role would have dropped th
 it, which is the part of #149 that is not visible from the query.
 
 The answer is that the retry is a property of the workspace, not of the issue list.
-`WorkspaceManager.remove` writes `.issuebot/finished` before it unlinks anything -- the intent
-recorded ahead of the act, so a removal that failed leaves a workspace that says what should
-have happened to it -- and `finished_keys()` reads the candidates off the disk. The sweep then
-removes each again through `_workspaces_for_key`, as the account bound to that workspace,
-since the unlink is the session's files'. The resource is now bounded by the failures that put
-those directories there rather than by everything issuebot has ever completed, and the record
-is on disk, so it survives a restart where a memo in the process would not.
+`.issuebot/finished` is the intent recorded ahead of the act, so a removal that failed leaves
+a workspace that says what should have happened to it, and `finished_keys()` reads the
+candidates off the disk. The sweep then removes each again through `_workspaces_for_key`, as
+the account bound to that workspace, since the unlink is the session's files'. The resource is
+now bounded by the failures that put those directories there rather than by everything
+issuebot has ever completed, and the record is on disk, so it survives a restart where a memo
+in the process would not.
+
+It is written at two moments, and both are needed. `finish_terminal` marks *before* it moves
+the label, because a worker killed between the move and the removal would otherwise leave an
+issue at rest in `complete` -- which nothing reads again -- beside a workspace nothing would
+remove. And `remove` re-asserts the mark in its `finally`, where a removal is known to have
+failed, because `rmtree` is not atomic: it walks the workspace's entries in readdir order and
+stops at the first it cannot unlink, having already taken everything it reached, which on half
+the orderings is `.issuebot` with the mark inside it. A partial removal that ate its own mark
+would leave a workspace nothing ever removes again, and under a pool an account bound to it
+for ever. The state directory is recreated, closed, when that is what is missing.
 
 The marker is created exclusively, through `Boundary.create_marker`, for the reason the
 `created` sentinel is (#75): `.issuebot` is shared with the session under `agent.run_as`, so a
 name already there may be the session's, and `finished_keys` re-checks that the workspace is
 the worker's own directory and the mark the worker's own regular file, reached through no
-symbolic link (#104). Writing it is best effort: what it buys is the retry, so a workspace too
-damaged to carry one is still a workspace to remove, and the failure is
-`workspace_mark_failed` at WARNING.
+symbolic link (#104). Those two together would be a trap on their own -- a session that
+pre-placed the name would make `create_marker` fail while `finished_keys` refused what it
+found, and the retry would be silently gone -- so a name that is not the worker's own file is
+taken back (`workspace_mark_replaced`, then `remove_marker` and create). The directory is the
+worker's; only the names inside it are shared. Writing the mark is still best effort: what it
+buys is the retry, so a workspace too damaged to carry one is still a workspace to remove, and
+the failure is `workspace_mark_failed` at WARNING.
 
 `create_or_reuse` clears the mark on the reuse path (`Boundary.remove_marker`), because a
 reopened issue is not one issuebot is done with; and the sweep skips any key with a session
 running or a retry pending -- the same set `_prune_accounts` keeps a binding for -- so a run
-in flight is never swept out from under. `_retry_finished_workspaces` runs before
-`_prune_accounts`, so a workspace this sweep finally removed gives its account back on the
-same sweep.
+in flight is never swept out from under. A clear that fails is said and not raised
+(`workspace_unmark_failed`): what an uncleared mark costs is a clone the next sweep removes
+and the run after that re-makes, never work, which is pushed.
+`_retry_finished_workspaces` runs before `_prune_accounts`, so a workspace this sweep finally
+removed gives its account back on the same sweep.
+
+### What this does not cover
+
+Two cases the `complete` re-read reached and the mark does not, both stated rather than
+closed. A removal whose *mark* could not be written and which then fails is not retried; the
+two failures are independent and both are logged, and the second attempt in `remove`'s
+`finally` is a third chance at the first. And a workspace already orphaned when a deployment
+takes this change carries no mark, since nothing wrote one: the old sweep was retrying those
+for as long as their issues sat in `complete`, and after the upgrade an operator removes what
+is left under `workspace.root` by hand. Neither is a growing resource -- both are bounded by
+failures that have already happened -- which is what makes them acceptable here.
 
 ## Not done here
 

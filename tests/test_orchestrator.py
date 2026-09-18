@@ -1852,6 +1852,55 @@ async def test_a_read_back_that_fails_costs_the_refresh_and_not_the_sweep(
     assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
 
 
+async def test_a_read_back_that_has_not_caught_up_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The move is written through `gh issue edit` and read back over GraphQL milliseconds
+    later, so a replica that has not seen the edit is a real answer to get (#149).
+
+    It would carry the newest `seen_at`, which is what `UPSERT_ISSUE` orders by, so reporting
+    it would overwrite the state `state_changed` had just recorded -- permanently, since
+    nothing reads a `complete` issue again. The refresh gives way to the state.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    found = h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    async def stale(ids: Any) -> list[Issue]:
+        return [found]
+
+    monkeypatch.setattr(h.github, "fetch_issues_by_ids", stale)
+    await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
+
+
+async def test_the_removal_mark_is_written_before_the_label_moves(tmp_path: Path) -> None:
+    """A worker killed between the move and the removal would otherwise leave an issue at
+    rest in `complete`, which nothing reads again, beside a workspace nothing removes (#149).
+    """
+    h = Harness(tmp_path)
+    workspace = h.workspace_dir("repo-1")
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    marks: list[bool] = []
+    original = h.github.set_state
+
+    async def record(*args: Any, **kwargs: Any) -> None:
+        marks.append((workspace / ".issuebot" / "finished").is_file())
+        await original(*args, **kwargs)
+
+    h.github.set_state = record  # type: ignore[method-assign]
+    await h.orchestrator.terminal_sweep()
+
+    assert marks == [True]
+    assert not workspace.exists()
+
+
 async def test_terminal_sweep_retries_a_workspace_removal_that_failed(tmp_path: Path) -> None:
     """The one thing the re-read of ``complete`` was load-bearing for (#149).
 
@@ -3671,6 +3720,41 @@ async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path:
     # load for ever.
     for _ in range(10):
         await h.tick()
+    assert orchestrator._pool.bound(identifier) is None
+
+
+async def test_the_sweep_retries_a_pooled_workspace_and_gives_its_account_back(
+    tmp_path: Path,
+) -> None:
+    """The retry removes as the account bound to *that* workspace, since the unlink is the
+    session's files' (#121), and `_prune_accounts` runs after it, so the account comes back on
+    the same sweep rather than the next one (#149)."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    await h.tick()
+    identifier = h.github.issue(1).identifier
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(identifier) == "agent-1"
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(2)
+    # A clone the run left behind, marked by a removal that did not take.
+    left_behind = h.workspace_dir(identifier)
+    (left_behind / ".issuebot" / "finished").touch()
+    accounts: list[str | None] = []
+    factory = orchestrator._workspaces_factory
+
+    def record(settings: Any) -> Any:
+        accounts.append(settings.agent.run_as[0] if settings.agent.run_as else None)
+        return factory(settings)
+
+    orchestrator._workspaces_factory = record  # type: ignore[method-assign]
+
+    await orchestrator.terminal_sweep()
+
+    assert not left_behind.exists()
+    assert accounts == ["agent-1"]
     assert orchestrator._pool.bound(identifier) is None
 
 

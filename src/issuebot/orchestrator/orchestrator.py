@@ -1436,20 +1436,23 @@ class Orchestrator:
             self._log.warning("terminal_sweep_failed", error=str(exc))
             return
         self._report_issues(issues)
-        moved: list[str] = []
+        moved: dict[str, StateLabel | None] = {}
         for issue in issues:
             if issue.id in self._running:
                 continue
             self._retries.pop(issue.id, None)
-            if await self._finish(issue) != "failed":
-                moved.append(issue.id)
+            outcome = await self._finish(issue)
+            if outcome in ("complete", "no_change"):
+                moved[issue.id] = StateLabel.COMPLETE
+            elif outcome == "cancelled":
+                moved[issue.id] = None
         await self._report_moved(moved)
         await self._retry_finished_workspaces()
         # After the removals above, so a workspace this sweep deleted gives its account back
         # now rather than on the next one (#121).
         self._prune_accounts()
 
-    async def _report_moved(self, ids: Sequence[str]) -> None:
+    async def _report_moved(self, moved: Mapping[str, StateLabel | None]) -> None:
         """Re-read the issues this sweep relabelled, so the store holds them as they now are.
 
         What `_report_issues` hands the store above is each issue as the sweep *found* it,
@@ -1460,15 +1463,36 @@ class Orchestrator:
         found it -- the label move itself reaches the store through `state_changed` either
         way, so what a failure costs is the issue's stored label list and title, not its
         state.
+
+        Every answer is checked against the state this sweep moved the issue *to*, and one
+        that still shows the old role is dropped with a warning. The write went through `gh
+        issue edit` and this read comes back over GraphQL milliseconds later, so an answer
+        from a replica that has not caught up is a real possibility -- and it would carry the
+        newest `seen_at`, which is what `UPSERT_ISSUE` orders by, so it would overwrite the
+        state `state_changed` had just recorded. Under the old scheme the next sweep repaired
+        that; nothing reads a `complete` issue again now, so a stale row would be permanent.
+        The refresh is the cheap half of this and the state is the load-bearing half: when
+        they disagree the refresh is what gives way.
         """
-        if not ids:
+        if not moved:
             return
         try:
-            refreshed = await self._adapter.fetch_issues_by_ids(ids)
+            refreshed = await self._adapter.fetch_issues_by_ids(list(moved))
         except GitHubError as exc:
-            self._log.warning("terminal_refresh_failed", error=str(exc), count=len(ids))
+            self._log.warning("terminal_refresh_failed", error=str(exc), count=len(moved))
             return
-        self._report_issues(refreshed)
+        fresh = []
+        for issue in refreshed:
+            if issue.id in moved and issue.state is moved[issue.id]:
+                fresh.append(issue)
+            else:
+                self._log.warning(
+                    "terminal_refresh_stale",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    state=issue.state.value if issue.state is not None else None,
+                )
+        self._report_issues(fresh)
 
     async def _retry_finished_workspaces(self) -> None:
         """Remove again every workspace a previous removal marked and did not take (#149).
@@ -1554,9 +1578,9 @@ class Orchestrator:
         the right trade: the hook is the operator's own script and a wrong uid makes it fail,
         while no account at all makes the *removal* fail and leaves the workspace for ever.
         """
-        return self._workspaces_for_key(workspace_key(issue.identifier))
+        return self._workspaces_for_key(workspace_key(issue.identifier), issue_number=issue.number)
 
-    def _workspaces_for_key(self, key: str) -> WorkspaceManager:
+    def _workspaces_for_key(self, key: str, *, issue_number: int | None = None) -> WorkspaceManager:
         """The same, for a workspace named by its key alone: the sweep's removal retry has a
         directory on disk and no issue to look the binding up from (#149)."""
         settings = self._workflow.config
@@ -1567,7 +1591,12 @@ class Orchestrator:
             except AgentError as exc:
                 # The record is unreadable, so the binding is unknown; the first member still
                 # delegates, and the manager finds the files' real owner from the tree.
-                self._log.warning("account_lookup_failed", workspace_key=key, error=exc.message)
+                self._log.warning(
+                    "account_lookup_failed",
+                    issue_number=issue_number,
+                    workspace_key=key,
+                    error=exc.message,
+                )
         return self._workspaces_factory(settings_with_run_as(settings, account))
 
     # --- worker exits and retries -----------------------------------------------------

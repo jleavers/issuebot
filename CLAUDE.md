@@ -496,14 +496,21 @@ version, and moves by hand.
   `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`).
-  `remove`/`remove_key` write `.issuebot/finished` before they unlink anything (#149): the
-  intent recorded ahead of the act, so a removal that failed leaves a workspace that says what
-  should have happened to it, and `finished_keys()` reads the terminal sweep's retry
-  candidates off the disk instead of off a re-read of every issue issuebot has ever completed.
-  Bounded by the failures that put those directories there, and durable across a restart.
-  Best effort, since what the mark buys is the retry and not the removal
-  (`workspace_mark_failed`); exclusive, like the `created` sentinel, because `.issuebot` is
-  shared with the session; and cleared by `create_or_reuse` on the reuse path, because a
+  `mark_finished`/`remove`/`remove_key` write `.issuebot/finished` (#149): the intent recorded
+  ahead of the act, so a removal that failed leaves a workspace that says what should have
+  happened to it, and `finished_keys()` reads the terminal sweep's retry candidates off the
+  disk instead of off a re-read of every issue issuebot has ever completed. Bounded by the
+  failures that put those directories there, and durable across a restart. Written at two
+  moments, both needed: `finish_terminal` marks before it moves the label, since a worker
+  killed between the move and the removal would leave an issue at rest in `complete` -- which
+  nothing reads again -- beside a workspace nothing would remove; and `remove` re-asserts it
+  in its `finally`, since `rmtree` stops at the first entry it cannot unlink having already
+  taken everything it reached, which on half the readdir orderings is `.issuebot` with the
+  mark in it. Exclusive, like the `created` sentinel, because `.issuebot` is shared with the
+  session -- and a name there that is not the worker's own file is taken back
+  (`workspace_mark_replaced`), since `finished_keys` would refuse it and the retry would be
+  silently gone. Best effort otherwise (`workspace_mark_failed`): what the mark buys is the
+  retry and not the removal. Cleared by `create_or_reuse` on the reuse path, because a
   reopened issue is not one issuebot is done with.
   The hook cap is #139: `_run_argv` reads both pipes through `read_capped` and kills the
   process *group* past `MAX_HOOK_OUTPUT_BYTES` (4 MiB each, much smaller than `GhRunner`'s
@@ -837,8 +844,11 @@ version, and moves by hand.
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
   tick -- which reads the four non-`complete` roles, reads back by number only the issues it
-  relabelled so the store keeps what `_report_issues` refreshed, and then retries every
-  workspace a removal marked and did not take (#149); reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
+  relabelled so the store keeps what `_report_issues` refreshed (dropping an answer that still
+  shows the old role, `terminal_refresh_stale`: a replica that has not caught up would carry
+  the newest `seen_at` and overwrite the state `state_changed` had just written, permanently,
+  since nothing reads a `complete` issue again), and then retries every workspace a removal
+  marked and did not take (#149); reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
   slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is

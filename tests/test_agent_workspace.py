@@ -955,17 +955,81 @@ async def test_finished_keys_survives_a_root_that_is_not_there_yet(tmp_path: Pat
 
 
 @posix
+async def test_a_partial_removal_that_ate_the_mark_gets_it_back(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rmtree` is not atomic, and the mark lives inside the tree it is about to delete.
+
+    It walks the workspace's entries in readdir order and stops at the first it cannot unlink,
+    having already taken everything it reached -- `.issuebot`, mark and all, on half the
+    orderings. The mark is the only thing that asks for another attempt, so `remove` puts it
+    back where the directory survived (#149).
+    """
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    (ws.path / "keep").mkdir()
+
+    real_rmtree = shutil.rmtree
+
+    def half(path: object, *args: object, **kwargs: object) -> None:
+        """Take `.issuebot` with the mark in it, then refuse, as an interrupted walk does."""
+        real_rmtree(Path(str(path)) / ".issuebot")
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", half)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+    monkeypatch.undo()
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert manager.finished_keys() == ["example-42"]
+    assert await manager.remove_key("example-42") is True
+    assert not ws.path.exists()
+
+
+@posix
+async def test_a_mark_the_worker_did_not_write_is_taken_back(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.issuebot` is shared with the session under `agent.run_as` (#75), so the session can
+    put the name there -- and `finished_keys` refuses a mark that is not the worker's own
+    file, so leaving one would silently cost the retry. The directory is the worker's."""
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    (ws.path / ".issuebot" / FINISHED_MARKER).symlink_to(tmp_path / "nowhere")
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert not (tmp_path / "nowhere").exists()
+    assert manager.finished_keys() == ["example-42"]
+    assert "workspace_mark_replaced" in stream.getvalue()
+
+
+@posix
 async def test_a_workspace_whose_state_directory_is_gone_is_still_removed(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
-    """The mark is best effort: what it buys is the retry, and a workspace too damaged to
-    carry it is still a workspace to remove (#149)."""
-    stream = io.StringIO()
-    configure_logging(level="WARNING", stream=stream)
+    """A workspace too damaged to carry a mark is still a workspace to remove (#149): the
+    state directory is recreated for it, closed, and the removal goes on either way."""
     manager, _ = make_manager(tmp_path)
     ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
     shutil.rmtree(ws.path / ".issuebot")
 
     assert await manager.remove("example-42") is True
     assert not ws.path.exists()
-    assert "workspace_mark_failed" in stream.getvalue()
+
+
+@posix
+async def test_marking_a_workspace_is_a_no_op_when_there_is_none(tmp_path: Path) -> None:
+    """`finish_terminal` marks before it moves the label, and most issues have no clone."""
+    manager, _ = make_manager(tmp_path)
+    manager.mark_finished("example-42")
+    assert manager.finished_keys() == []
