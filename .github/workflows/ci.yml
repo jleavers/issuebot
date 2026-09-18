@@ -114,7 +114,7 @@ jobs:
       - run: docker run --rm issuebot:ci --version
       - name: the default build bakes in no optional toolchain
         run: |
-          for tool in initdb node npm uv; do
+          for tool in initdb node npm uv pwsh; do
             if docker run --rm --entrypoint sh issuebot:ci -c "command -v $tool"; then
               echo "the optional build args default to empty; the default image must not carry $tool" >&2
               exit 1
@@ -496,10 +496,11 @@ jobs:
             "
           '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
-      # nothing else in CI would notice the PGDG stanza or the nodejs.org download rotting. One
-      # build carries both, since the checks below are about what is on PATH and under which
-      # uid, not about the two arguments interacting. Its own cache scope: writing mode=max to
-      # the default one would replace the cache the build above depends on.
+      # nothing else in CI would notice the PGDG stanza, the nodejs.org download or either
+      # GitHub release rotting. One build carries all four, since the checks below are about
+      # what is on PATH and under which uid, not about the arguments interacting. Its own cache
+      # scope: writing mode=max to the default one would replace the cache the build above
+      # depends on.
       - name: build with the optional toolchain
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
@@ -511,6 +512,7 @@ jobs:
             POSTGRES_VERSION=18
             NODE_VERSION=24
             UV_VERSION=0.12.11
+            PWSH_VERSION=7.6.6
           cache-from: |
             type=gha
             type=gha,scope=toolchain
@@ -524,7 +526,8 @@ jobs:
           docker run --rm --entrypoint node issuebot:ci-toolchain --version
           docker run --rm --entrypoint npm issuebot:ci-toolchain --version
           docker run --rm --entrypoint uv issuebot:ci-toolchain --version
-          docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm && command -v uv'
+          docker run --rm --entrypoint pwsh issuebot:ci-toolchain --version
+          docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm && command -v uv && command -v pwsh'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
           test "$(docker run --rm --user agent --entrypoint id issuebot:ci-toolchain -un)" = agent
       # #161: on this deployment uv can never hardlink out of its cache -- the cache is under
@@ -596,6 +599,28 @@ jobs:
             cp /npm-smoke/package.json /npm-smoke/package-lock.json .
             npm ci --no-audit --no-fund --registry=http://127.0.0.1:1/
             test -d "$HOME/.npm"
+          '
+      # And the same question of pwsh, which `--version` cannot answer either: it runs a script
+      # from a read-only mount as the uid a session runs as, writing its module cache and its
+      # history under $HOME. The format assertion is the ICU one -- under invariant
+      # globalization `{0:N2}` renders 1234.5 as `1234.50` with no group separator, which is a
+      # runtime that starts, answers `pwsh --version` and then quietly changes what a target
+      # repository's suite asserts.
+      - name: pwsh runs a script as the session's account with globalization data
+        run: |
+          mkdir -p /tmp/pwsh-smoke
+          cat > /tmp/pwsh-smoke/smoke.ps1 <<'PS1'
+          $formatted = [string]::Format([cultureinfo]::GetCultureInfo('en-US'), '{0:N2}', 1234.5)
+          if ($formatted -ne '1,234.50') { throw "invariant globalization: $formatted" }
+          if ($PSVersionTable.PSEdition -ne 'Core') { throw "not PowerShell Core" }
+          'ok'
+          PS1
+          chmod -R a+rX /tmp/pwsh-smoke
+          docker run --rm --user agent -v /tmp/pwsh-smoke:/pwsh-smoke:ro --entrypoint bash issuebot:ci-toolchain -lc '
+            set -eu
+            cd "$(mktemp -d)"
+            cp /pwsh-smoke/smoke.ps1 .
+            test "$(pwsh -NoProfile -File ./smoke.ps1)" = ok
           '
       # initdb --version prints a string constant, so on its own it proves almost nothing. The
       # hooks the README tells an operator to paste are pulled straight out of README.md and

@@ -44,7 +44,8 @@ uv run issuebot egress [--port N] [--bind HOST]   # the allow-listing CONNECT pr
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set,
-                                     #    + uv when ISSUEBOT_UV_VERSION is set)
+                                     #    + uv when ISSUEBOT_UV_VERSION is set,
+                                     #    + pwsh when ISSUEBOT_PWSH_VERSION is set)
 docker compose up                    # db + web (profile hub) + worker + egress (profile worker),
                                      #   COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
@@ -88,13 +89,17 @@ CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) an
 `docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
 under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
 before the Docker build, on every PR. That job builds the image twice (#62, #64): the default
-one, which must carry no `initdb`, `node` or `npm`, and a second, `issuebot:ci-toolchain`, with
-`POSTGRES_VERSION=18`, `NODE_VERSION=24` and `UV_VERSION` in its own `type=gha` cache scope (one build,
+one, which must carry no `initdb`, `node`, `npm`, `uv` or `pwsh`, and a second,
+`issuebot:ci-toolchain`, with `POSTGRES_VERSION=18`, `NODE_VERSION=24`, `UV_VERSION` and
+`PWSH_VERSION` in its own `type=gha` cache scope (one build,
 not two: the checks are about what is on `PATH` and under which uid, not about the arguments
-interacting), which must answer `initdb --version`, `node --version`, `npm --version` and
-`uv --version` on its own `PATH` and in a login shell, still run as `issuebot`, run one `npm ci` over a
+interacting), which must answer `initdb --version`, `node --version`, `npm --version`,
+`uv --version` and `pwsh --version` on its own `PATH` and in a login shell, still run as
+`issuebot`, run one `npm ci` over a
 dependency-free fixture as `issuebot` with the registry pointed at a dead port (so the writable
-`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), and survive
+`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), run one `.ps1`
+as `agent` whose assertion is a culture-formatted number (so the ICU the PowerShell arm
+installs beside the runtime is proved, not just that the binary answers), and survive
 the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `bash -lc` with
