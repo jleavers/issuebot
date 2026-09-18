@@ -496,7 +496,8 @@ version, and moves by hand.
   one uv's default location had too, and what the hardlink adds is that it takes effect without
   waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
   session commits and pushes. The alternative gives up what the shape was measured for: the
-  second workspace's venv is free only because it is the first one's files.
+  second workspace's venv is free only because it is the first one's files (#176 asks
+  whether the residual is worth closing).
   `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
   turn (`ClaudeRunner.child_environment`) and every hook
   (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an

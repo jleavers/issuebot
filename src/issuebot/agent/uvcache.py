@@ -33,7 +33,7 @@ what the honest session commits and pushes; only what its tests import. And the 
 keeping ``UV_LINK_MODE=copy`` and taking the persistence half alone -- gives up the venv
 sharing this was measured for. A per-*workspace* cache would close it and would also give up
 the sharing, since the second workspace's venv is free only because it is the first one's
-files.
+files. Whether the residual is worth closing is #176, a judgement about this deployment.
 
 The root is the worker's (``/workspaces``, ``0755``, ``issuebot:issuebot``), so a session
 account cannot create a directory in it unaided. The worker therefore makes each one the way

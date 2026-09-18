@@ -878,7 +878,8 @@ that a poisoning takes effect without waiting for the honest workspace to sync a
 is untouched, so nothing reaches what that session commits and pushes; only what its tests
 import. And the alternative gives up the venv sharing this was measured for: a per-workspace
 cache would close it, and the second workspace's venv is free only because it is the first
-one's files.
+one's files. Whether the residual is worth closing is
+[#176](https://github.com/jleavers/issuebot/issues/176).
 
 Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
 hardlinks into it, removing a workspace frees very little that the cache still holds, and a
