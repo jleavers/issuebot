@@ -121,9 +121,11 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "--user agent --entrypoint sudo issuebot:ci" in CI
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
-    # The npm smoke test, the README's cluster recipe, and the MCP probe (#119): three steps
-    # that mount a script from the runner and run it as the session's own account.
-    assert CI.count("docker run --rm --user agent -v /tmp/") == 3
+    # The npm smoke test, the pwsh smoke test, the README's cluster recipe, and the MCP probe
+    # (#119): four steps that mount a script from the runner and run it as the session's own
+    # account. Counted rather than listed, so a step that quietly stops running as `agent` --
+    # the uid every one of them exists to exercise -- fails here.
+    assert CI.count("docker run --rm --user agent -v /tmp/") == 4
 
 
 def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -> None:
@@ -432,5 +434,86 @@ def test_ci_proves_uv_answers_on_both_paths_in_the_toolchain_image() -> None:
     assert "docker run --rm --entrypoint uv issuebot:ci-toolchain --version" in CI
     # And the other half of "off by default": the *default* build must carry none of it, which
     # is the assertion that would catch a COPY --from placed outside the argument's guard.
-    assert "for tool in initdb node npm uv; do" in CI
+    assert "for tool in initdb node npm uv pwsh; do" in CI
     assert "command -v initdb && command -v node && command -v npm && command -v uv" in CI
+
+
+def test_the_powershell_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell() -> None:
+    """``pwsh`` is the fourth optional toolchain, beside the PostgreSQL server (#62), node
+    (#64) and uv (#128), and it is built the same way: empty is the default, so the image
+    keeps exactly the contents it has without the argument, and a deployment whose target
+    repository is a PowerShell project sets ``ISSUEBOT_PWSH_VERSION``.
+
+    Both paths are needed for the reason uv needs both. The ``ENV`` covers a session's own
+    ``claude`` tools, and the ``profile.d`` line covers the hooks, which run under
+    ``bash -lc`` -- and Debian's ``/etc/profile`` *overwrites* ``PATH`` for a login shell, so
+    the ``ENV`` alone would leave a hook's ``pwsh`` looking for a binary that is on the
+    image's own ``PATH`` and not on the one it was handed.
+    """
+    assert 'ARG PWSH_VERSION=""' in DOCKERFILE
+    assert "${PWSH_VERSION:+/opt/powershell/bin:}" in DOCKERFILE
+    # The whole `printf`, so that the `PATH` line stays tied to *this* file: two loose
+    # substrings would still pass with it written into `issuebot-uv.sh`.
+    assert (
+        "printf 'PATH=\"/opt/powershell/bin:$PATH\"\\n' > /etc/profile.d/issuebot-pwsh.sh"
+        in DOCKERFILE
+    )
+    # Asserted at build for the reason `initdb --version`, `node --version` and `uv --version`
+    # are: a moved download or a renamed asset has to fail the build, not the first session
+    # that runs the target repository's suite.
+    assert "/opt/powershell/bin/pwsh --version" in DOCKERFILE
+    # The checksum comes from the release's own `hashes.sha256` beside the tarball, so an
+    # archive that is not the one Microsoft published fails the build rather than being
+    # installed. That file is UTF-16, and `sha256sum -c` reads bytes: without the transcode
+    # every line is unparseable and the check passes over an empty list of digests, which is
+    # the failure mode worth pinning -- it is silent.
+    assert "iconv -f UTF-16 -t UTF-8" in DOCKERFILE
+    assert "sha256sum -c --ignore-missing hashes.sha256" in DOCKERFILE
+
+
+def test_the_icu_runtime_rides_on_the_powershell_guard() -> None:
+    """.NET reads globalization data from ICU, and the base image carries none: without it
+    ``pwsh`` falls back to invariant mode, where ``"{0:N2}"`` stops grouping and a suite that
+    formats numbers or compares strings by culture quietly changes its answers.
+
+    So the package is installed *inside* the ``PWSH_VERSION`` guard -- an image built without
+    the argument carries no ICU either, which is what "off by default" has to mean for the
+    whole arm and not just the tarball -- and it is resolved by name rather than pinned,
+    because the package is named after the ABI (``libicu76`` on trixie) and a ``PYTHON_IMAGE``
+    bump to the next Debian renames it.
+    """
+    runtime = DOCKERFILE.split("AS runtime", 1)[1]
+    stanza = runtime.split('ARG PWSH_VERSION=""', 1)[1].split("\n    fi", 1)[0]
+    assert "apt-cache --names-only search '^libicu[0-9][0-9]*$'" in stanza
+    mentions = [
+        line
+        for line in runtime.splitlines()
+        if "libicu" in line and not line.strip().startswith("#")
+    ]
+    assert mentions and all(line in stanza for line in mentions)
+
+
+def test_compose_offers_the_powershell_toolchain_to_the_worker_alone() -> None:
+    """Like the other three: the worker runs the sessions, and the web service builds from the
+    same context without it, since the dashboard runs no session and would otherwise carry a
+    180 MB runtime twice."""
+    assert 'PWSH_VERSION: "${ISSUEBOT_PWSH_VERSION:-}"' in COMPOSE
+    assert "PWSH_VERSION" not in yaml.safe_dump(SERVICES["web"])
+
+
+def test_ci_proves_pwsh_answers_on_both_paths_and_at_a_session_account() -> None:
+    """``pwsh`` joins the one opt-in build rather than earning its own, for the reason uv did:
+    the checks are about what is on ``PATH`` and under which uid, not about the arguments
+    interacting.
+
+    And it runs a script as ``agent``, which is the half ``--version`` cannot prove. ``pwsh``
+    writes a history file and a module cache under ``$HOME`` on first use, so a session
+    account whose home it cannot write is a suite that fails at the session's uid and nowhere
+    else -- the same shape as the ``npm ci`` fixture (#64), which exists for ``$HOME/.npm``.
+    """
+    assert "PWSH_VERSION=" in CI
+    assert "docker run --rm --entrypoint pwsh issuebot:ci-toolchain --version" in CI
+    assert "command -v pwsh" in CI
+    assert "docker run --rm --user agent -v /tmp/pwsh-smoke:/pwsh-smoke:ro" in CI
+    # And the other half of "off by default": the *default* build must carry none of it.
+    assert "for tool in initdb node npm uv pwsh; do" in CI

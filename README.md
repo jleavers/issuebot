@@ -867,6 +867,77 @@ get: `docker compose exec worker bash -lc 'command -v uv'`. If it reports a `403
 proxy instead, the image is fine and the allow-list is what is missing —
 `docker compose logs egress | grep egress_denied` names the host it wanted.
 
+### PowerShell for the target repository's tests
+
+The fourth of these, for a target repository whose deliverables and suites are PowerShell. It
+is the simplest of the four to operate and the largest to carry: one build argument, no
+registry, and about 220 MB of image.
+
+**1. Build the worker image with `pwsh`.** Set `ISSUEBOT_PWSH_VERSION` in this checkout's
+`.env` — `.env.example` carries the key, empty — and rebuild:
+
+```bash
+docker compose build worker
+docker compose up -d worker
+```
+
+An exact release (`7.6.6`), not a major. That is uv's reason — pin what the target
+repository's own CI runs — plus a harder one: GitHub publishes releases under their tags and
+there is no `latest-v7.x` to resolve, so a major on its own names nothing to download. The
+build fetches `powershell-<version>-linux-<arch>.tar.gz` from
+`github.com/PowerShell/PowerShell/releases` and verifies it against the `hashes.sha256`
+published for that release. As with the other three, only the `worker` service takes the
+argument, empty installs nothing, and changing it needs `docker compose build worker` rather
+than a restart. The pin moves by hand, for the reason `ISSUEBOT_NODE_VERSION`'s and
+`ISSUEBOT_UV_VERSION`'s do.
+
+The build also installs the ICU runtime, inside the same guard, so an image built without the
+argument carries neither. .NET reads its globalization data from ICU and the base image has
+none; without it `pwsh` starts in invariant mode, where `'{0:N2}'` formats `1234.5` as
+`1234.50` with no group separator and culture-aware string comparison changes its answers. A
+runtime that starts and then quietly disagrees with the developer's machine is worse than one
+that does not start, so CI asserts the formatting rather than the version.
+
+**2. There is no step 2.** Unlike node and uv, PowerShell needs nothing added to
+[the allow-list](#what-a-session-may-reach): the runtime ships in the image, and a repository
+of plain `.ps1` deliverables installs nothing to run its tests. The exception is a suite that
+pulls modules from the PowerShell Gallery — `Install-Module`, or a `#Requires -Modules` that
+is not already vendored — which needs
+
+```bash
+ISSUEBOT_EGRESS_ALLOW=www.powershellgallery.com,psg-prod-eastus.azureedge.net
+```
+
+and then `docker compose up -d egress`, a restart of the proxy rather than a rebuild. Both
+hosts: the gallery answers the search and the CDN serves the `.nupkg`.
+
+**3. `after_create` is usually empty.** A PowerShell repository typically has no dependency
+install, so the hook has only the base workflow's unshallow in it — which still earns its
+place, since the clone is `--depth 1` and both the self-review's `git diff origin/HEAD...HEAD`
+and the merge of the default branch need the merge base:
+
+```yaml
+hooks:
+  after_create: |
+    if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
+```
+
+Remember that an overlay hook **replaces** the base one rather than appending to it. The
+shipped `configs/WORKFLOW.md` ends its `after_create` with `uv sync`, because this repository
+is itself a Python project; a deployment pointed at a PowerShell repository that leaves that
+in place fails every session at `uv: command not found` before turn 1, and one that overrides
+it has to repeat the unshallow line above.
+
+**What this does not give you.** `pwsh` on Linux is PowerShell 7 on .NET, which is not Windows
+PowerShell 5.1 and is not Windows. A suite that shells out to `w32tm`, `DISM` or `netsh`, or
+that reaches a Windows-only module, still needs a Windows runner — so the session's local run
+proves the parts that are pure logic, and the repository's own `windows-latest` checks remain
+the authority on the rest. That division is already how the workflow reads a pull request: a
+check that ran steps and failed holds the issue.
+
+If a session reports `pwsh: command not found`, check it in a login shell, which is what the
+hooks get: `docker compose exec worker bash -lc 'command -v pwsh'`.
+
 ### `.issuebot/env`: what a hook hands the agent
 
 The agent and the hooks run under a filtered environment — `PASSTHROUGH_NAMES` and
