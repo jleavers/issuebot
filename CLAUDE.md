@@ -365,12 +365,19 @@ version, and moves by hand.
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
-  A mode is not a defence against the owner and no longer a gap either: the sweep runs as the
-  account whose home it is clearing, so a target still there after the first attempt is tried
-  again with the modes put back (`_relax`/`_relax_tree`, the repair `_remove` already made for a
-  workspace tree). Without it a session could keep any planted file by dropping write on the
-  directory holding it -- `git`, `ssh` and `claude` only read -- and the sweep would report
-  success; that covers all three lists, not just the new one.
+  A mode is not a defence against the owner: the sweep runs as the account whose home it is
+  clearing, so a target still there after the first attempt is tried again with the modes put
+  back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), and
+  `_walk` does the same for an intermediate directory it cannot stat. Without both a session
+  could keep any planted file by locking the directory holding it -- dropping write fails the
+  unlink, dropping *search* hides what is inside from the sweep, and `git`, `ssh` and `claude`
+  need neither bit -- with `sweep_home` reporting success; the home itself is such a directory,
+  so that reaches all three lists rather than only the new one. `_exists` is where the two
+  failures are told apart: only `FileNotFoundError` is an absence, and anything else is an
+  answer this process cannot get until the modes go back. A symlinked `.claude` is yielded as
+  the target rather than descended into, the rule `projects/<project>` already had: following
+  one would have the *next* session's sweep delete the named entries inside whatever tree the
+  link points at.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential

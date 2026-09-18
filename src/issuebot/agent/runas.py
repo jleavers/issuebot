@@ -458,8 +458,10 @@ def _relax(path: Path) -> None:
     best-effort removal.
     """
     with contextlib.suppress(OSError):
+        # `lstat`, so `S_ISDIR` is false for a symlink to a directory and the chmod below can
+        # never travel down one.
         st = os.lstat(path)
-        if st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+        if st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode):
             os.chmod(path, st.st_mode | stat.S_IRWXU)
 
 
@@ -503,7 +505,20 @@ def _walk(root: Path, parts: Sequence[str]) -> Path | None:
         if current.is_symlink():
             return current
         if not current.is_dir():
-            return None
+            # `is_dir` answers False for a directory this process cannot stat as well as for
+            # one that is not there, and the difference matters: a session that plants
+            # `~/.config/git/config` and closes `~/.config` to search would otherwise have the
+            # sweep yield no target at all, where `_sweep`'s retry cannot reach it. The modes
+            # are this account's own (`_relax`), so put them back and ask again; a component
+            # that is really absent, or really not a directory, still ends the walk.
+            if not _exists(current):
+                return None
+            _relax(current.parent)
+            _relax(current)
+            if current.is_symlink():
+                return current
+            if not current.is_dir():
+                return None
     return current / parts[-1]
 
 
@@ -522,6 +537,13 @@ def _sweep_targets(home: Path) -> Iterator[Path]:
         if target is not None:
             yield target
     claude_dir = home / CLAUDE_HOME_DIR
+    if claude_dir.is_symlink():
+        # The rule `projects/<project>` has always had, applied one level up. The image creates
+        # `.claude` as a real directory owned by the account, so a link there is a session's,
+        # and following it would have the *next* session's sweep delete the entries inside
+        # whatever it points at -- any tree the account can write. The link is the target.
+        yield claude_dir
+        return
     yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
     projects = claude_dir / projects_name
@@ -553,12 +575,12 @@ def _sweep(home: Path) -> None:
     A target that is still there after the first attempt is tried once more with the modes put
     back first (``_relax``), because this runs as the account whose home it is clearing and
     every directory in it is that account's own. Unlinking a file needs write on the directory
-    holding it, while ``git`` and ``ssh`` -- and ``claude`` -- need only to read it, so a
-    session that plants ``~/.ssh/config`` and then drops write on ``~/.ssh`` would otherwise
-    keep its plant at no cost to itself, and the sweep would report success. The modes are the
-    plant's, not a deployment's: the repair is the one ``_remove`` already makes for a
-    workspace tree, and the retry is what makes the removal the account's decision rather than
-    the previous session's.
+    holding it and reaching one needs search, while ``git``, ``ssh`` and ``claude`` need only to
+    read, so a session that plants ``~/.ssh/config`` and then drops either bit on ``~/.ssh`` --
+    or on the home itself, which reaches every list at once -- would otherwise keep its plant at
+    no cost to itself, and the sweep would report success. The modes are the plant's, not a
+    deployment's: the repair is the one ``_remove`` already makes for a workspace tree, and the
+    retry is what makes the removal the account's decision rather than the previous session's.
     """
     for target in _sweep_targets(home):
         _remove_swept(target)
@@ -578,11 +600,21 @@ def _remove_swept(target: Path) -> None:
 
 
 def _exists(path: Path) -> bool:
-    """Whether anything is at ``path``, a broken or unreadable symlink included."""
+    """Whether anything may be at ``path``: ``False`` only for a definite absence.
+
+    The question this answers is "is there still something here to retry", so the two failures
+    have to be told apart. A directory the session closed to *search* (``chmod 0600``, ``0000``)
+    answers ``EACCES`` rather than ``ENOENT`` for everything inside it, and reading that as an
+    empty home would skip the very retry the mode is what makes necessary. Only
+    ``FileNotFoundError`` is an absence; anything else is an answer this process cannot get yet,
+    and the retry is what gets it. A broken symlink is present, since ``lstat`` does not follow.
+    """
     try:
         os.lstat(path)
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
     return True
 
 

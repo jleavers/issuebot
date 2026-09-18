@@ -540,15 +540,22 @@ def test_walk_stops_at_a_symlink_at_any_depth(tmp_path: Path) -> None:
     assert (home / ".config" / "gh").is_dir()
 
 
+@pytest.mark.parametrize("locked_mode", [0o500, 0o600, 0o400, 0o000])
 def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
-    tmp_path: Path,
+    tmp_path: Path, locked_mode: int
 ) -> None:
     """A mode is not a defence against the owner. The sweep runs as the account whose home it
     is clearing, so every directory in that home is the account's own: a session that plants a
-    file and then drops write on the directory holding it -- which costs the plant nothing,
-    since `git`, `ssh` and `claude` only read -- would otherwise keep it, with `sweep_home`
-    reporting success and no warning anywhere. The modes go back and the removal goes through,
-    for a file, for a tree, and for a directory locked *inside* a swept tree."""
+    file and then locks the directory holding it -- which costs the plant nothing, since `git`,
+    `ssh` and `claude` only read -- would otherwise keep it, with `sweep_home` reporting success
+    and no warning anywhere. The modes go back and the removal goes through, for a file, for a
+    tree, and for a directory locked *inside* a swept tree.
+
+    Every way of locking one, because they fail differently and only one of them is the obvious
+    case: without write (`0500`) the unlink fails, and without *search* (`0600`, `0400`, `0000`)
+    the sweep cannot even stat what is inside, which is the reading that decides whether there
+    is anything left to retry. The home itself is in the list, since locking that one reaches
+    every sweep list at once."""
     home = tmp_path / "home"
     _plant_home(home)
     (home / ".claude" / "skills" / "pwn" / "deep").mkdir()
@@ -564,7 +571,7 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     modes = [(path, path.stat().st_mode) for path in locked]
     try:
         for path in locked:
-            os.chmod(path, 0o500)
+            os.chmod(path, locked_mode)
         _sweep(home)
     finally:
         for path, mode in reversed(modes):
@@ -576,10 +583,28 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         assert not (home / name).exists(), name
     for name in CLAUDE_HOME_SWEEP:
         assert not (home / ".claude" / name).exists(), name
-    # And the neighbours the sweep does not name are still there, modes and all.
+    # And the neighbours the sweep does not name are still there.
     assert (home / ".config" / "gh" / "hosts.yml").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".claude" / ".credentials.json").read_text() == "token"
+
+
+def test_sweep_unlinks_a_symlinked_claude_dir_without_following_it(tmp_path: Path) -> None:
+    """The rule `projects/<project>` has always had, one level up. The image creates `.claude`
+    as a real directory owned by the account, so a link there is a session's -- and following it
+    would have the *next* session's sweep delete the named entries inside whatever it points
+    at, which is any tree the account can write. The link is what goes."""
+    outside = tmp_path / "outside"
+    (outside / "skills").mkdir(parents=True)
+    (outside / "CLAUDE.md").write_text("someone else's")
+    (outside / "skills" / "a.md").write_text("keep")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude").symlink_to(outside, target_is_directory=True)
+    _sweep(home)
+    assert not (home / ".claude").exists()
+    assert (outside / "CLAUDE.md").read_text() == "someone else's"
+    assert (outside / "skills" / "a.md").read_text() == "keep"
 
 
 def test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads() -> None:
