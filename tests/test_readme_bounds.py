@@ -1,7 +1,7 @@
 """Every instruction that widens the agent's reach says, where the reader acts on it, which
 boundary it removes (#74).
 
-The three grants below cannot be defaulted shut -- a token scope and a CI permission are the
+The four choice points below cannot be defaulted shut -- a token scope and a CI permission are the
 operator's to choose, and the host route is how the suite itself runs -- so the note beside
 each one *is* the enforcement, and it has to travel with the capability rather than live in
 the Safety bullet the reader reaches later or not at all. That is a property of the README's
@@ -95,10 +95,44 @@ def test_host_route_names_the_container_it_removes() -> None:
     container, which is the sandbox -- the session runs at the operator's own uid, with their
     `$HOME` and no egress allow-list, on an issue body anyone can write. Not the permission
     prompts: `--permission-prompts none` is unconditional on every route, so the note says so
-    rather than crediting the container with a control it does not supply."""
+    rather than crediting the container with a control it does not supply.
+
+    The uid split of #75 goes with the container too -- raised on the issue after it was filed,
+    since #74 predates #75 landing -- and is pinned as a qualifier: it is the elaboration on
+    "your own uid" rather than a consequence of its own."""
     _consequence_travels_with(
         "Running the CLI outside a container",
         "calls the sandbox",
         "your own uid",
         "no allow-list between it and the network",
+    )
+    _qualified_in_the_same_block(
+        "Running the CLI outside a container",
+        "the split #75 rests on is gone with the container",
+    )
+
+
+def test_claude_credential_names_the_scoping_it_has_none_of() -> None:
+    """The fourth choice point, raised on the issue after it was filed. Every other credential
+    in the getting-started guide is scoped down on purpose -- a dedicated bot account, a
+    repository-scoped token, a generated database password -- and the Claude one is the
+    operator's own subscription, minted by `claude setup-token`, held by the session directly
+    and refreshing itself rather than expiring. There is no scope to narrow it with, so what
+    the note has to name instead is the pair of spend ceilings that do bound it and the
+    dedicated account or cappable API key that bounds it outside issuebot.
+
+    The recipe the comment cited (logging in interactively *as the session's account*, with the
+    credential in a mounted `claude-home` volume) no longer exists -- #142 made a session
+    account one nobody logs into, taking its credential from the environment -- so this pins
+    what is still live rather than that recipe.
+    """
+    _consequence_travels_with(
+        "long-lived OAuth token minted from a",
+        "the one credential here with no scoping to narrow it",
+        "carries your subscription's whole reach",
+    )
+    _qualified_in_the_same_block(
+        "long-lived OAuth token minted from a",
+        "`claude.max_budget_usd` per turn and `agent.max_issue_cost_usd` per issue",
+        "its own Anthropic account, or an API key you can cap",
     )

@@ -120,7 +120,15 @@ issues that triage is most of the value.
 2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
-   credential comes from the environment (see step 2 below).
+   credential comes from the environment (see step 2 below) -- which means the session holds
+   this one *directly*, and it is the one credential here with no scoping to narrow it. There
+   is no equivalent of the token's "restricted to this repository" above: a `setup-token`
+   credential carries your subscription's whole reach, refreshes itself rather than expiring,
+   and nothing in issuebot bounds what it is spent on beyond the ceilings under "Cost" --
+   `claude.max_budget_usd` per turn and `agent.max_issue_cost_usd` per issue, both off or
+   generous by default. So set those deliberately, and if you want a bound the deployment
+   cannot talk its way past, give the bot its own Anthropic account, or an API key you can cap
+   and revoke on its own, rather than the login you use yourself.
 3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
@@ -1199,19 +1207,21 @@ that matters on your host.
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and,
-for the container stack, Docker with Compose. Running the CLI outside a container — the host
-route, which is what `agent.run_as` unset means and how the test suite runs — also wants
-`git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
-2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
-use WSL. It is a development convenience rather than a deployment, and what it removes is the
-container that the Safety note above calls the sandbox: the session runs at your own uid, with
-your `$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), and with no
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and, for the
+container stack, Docker with Compose. Running the CLI outside a container — the host route,
+which is what `agent.run_as` unset means and how the test suite runs — also wants `git`, the
+[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
+newer on `PATH`, where `claude` uses whatever login you already have. On Windows, use WSL. It
+is a development convenience rather than a deployment, and what it removes is the container
+that the Safety note above calls the sandbox: the session runs at your own uid, with your
+`$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), and with no
 allow-list between it and the network -- while still running, as it does everywhere, with no
-permission prompts. Nothing replaces those. `validate` warns at `agent.run_as`, and at `egress`
-unless you have pointed a proxy of your own there, and a warning is all issuebot can do about a
-route it is not on. Anyone can open an issue, so run the host route against work you would run
-yourself, and keep a real deployment in the container with a repository-scoped token.
+permission prompts. That uid is the worker's too, so the split #75 rests on is gone with the
+container, and the workspace defences resting on that split go with it. Nothing replaces any of
+this. `validate` warns at `agent.run_as`, and at `egress` unless you have pointed a proxy of
+your own there, and a warning is all issuebot can do about a route it is not on. Anyone can
+open an issue, so run the host route against work you would run yourself, and keep a real
+deployment in the container with a repository-scoped token.
 
 ```bash
 uv sync
