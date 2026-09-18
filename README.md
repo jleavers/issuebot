@@ -104,9 +104,9 @@ issues that triage is most of the value.
    runner afterwards. Leaving it off narrows that blast radius rather than closing it, though,
    and the difference is worth being exact about: wherever your existing workflows run
    repository code -- a test file, a build script -- that code is already the session's, and it
-   already runs with those secrets. So grant Workflows only where the agent's issues really do
-   change those files, and either way treat every secret that repository's Actions can read as
-   one the agent can reach.
+   already runs with whatever secrets that job is given. So grant Workflows only where the
+   agent's issues really do change those files, and either way treat every secret that
+   repository's Actions can read as one the agent can reach.
    A classic token with the `repo` scope works too; it needs `workflow` adding for the same
    reason and with the same consequence, and it reads check runs where a fine-grained token
    cannot -- and `validate` warns on it, because the session holds the token and a classic
@@ -121,14 +121,16 @@ issues that triage is most of the value.
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
    credential comes from the environment (see step 2 below) -- which means the session holds
-   this one *directly*, and it is the one credential here with no scoping to narrow it. There
-   is no equivalent of the token's "restricted to this repository" above: a `setup-token`
-   credential carries your subscription's whole reach, refreshes itself rather than expiring,
-   and nothing in issuebot bounds what it is spent on beyond the ceilings under "Cost" --
-   `claude.max_budget_usd` per turn and `agent.max_issue_cost_usd` per issue, both off or
-   generous by default. So set those deliberately, and if you want a bound the deployment
-   cannot talk its way past, give the bot its own Anthropic account, or an API key you can cap
-   and revoke on its own, rather than the login you use yourself.
+   this one *directly*. Choose between the two knowing what can bound each. A `setup-token`
+   credential carries your subscription's whole reach, with no equivalent of the token's
+   "restricted to this repository" to narrow it, and the spend ceilings are no substitute:
+   a subscription reports no per-token cost, so `agent.max_issue_cost_usd` never fires and
+   `claude.max_budget_usd` acts as an effort limit rather than money. What
+   bounds a runaway issue there is `agent.max_turns` and `agent.max_attempts` (see "Cost"). An
+   API key is the one you can bound from outside issuebot -- capped and revoked on its own, and
+   better still on an account dedicated to the bot rather than the login you use yourself --
+   and there `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run)
+   and `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
 3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy

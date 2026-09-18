@@ -13,18 +13,27 @@ Matching is over whitespace-collapsed text, so rewrapping a paragraph -- which h
 -- never fails this; only dropping the words does.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _RAW = (ROOT / "README.md").read_text(encoding="utf-8")
 README = " ".join(_RAW.split())
-# Blank-line-delimited blocks, whitespace-collapsed. A numbered prerequisite is one block, so
-# "the same block" is "the thing the reader is currently reading".
-BLOCKS = [" ".join(block.split()) for block in _RAW.split("\n\n")]
+# The units a reader takes in as one thing, whitespace-collapsed. Splitting on blank lines
+# alone is not enough: a markdown numbered list has none between its items, so the whole of
+# Prerequisites collapses into a single ~5.8k-character run and a "same block" check over it
+# would pass for a note parked in a different prerequisite entirely. Each numbered item starts
+# a block of its own as well.
+BLOCKS = [
+    " ".join(part.split())
+    for block in _RAW.split("\n\n")
+    for part in re.split(r"\n(?=\d+\. )", block)
+]
 
 # Seven wrapped lines or so: far enough to let the note be a sentence rather than a clause,
 # close enough that a reader who has just read the incentive has not moved on. The largest
-# real distance today is 600 characters, in the host-route case.
+# real distance today is 640 characters (a consequence must *fit* in the window, not merely
+# start in it), in the host-route case.
 POINT_OF_USE = 700
 
 
@@ -45,8 +54,9 @@ def _qualified_in_the_same_block(incentive: str, *qualifiers: str) -> None:
 
     It is the tail of the note rather than the note, so holding it to `POINT_OF_USE` would mean
     raising that constant for every case and blunting the guard the primary phrases need.
-    Sharing the block is the claim that actually matters: the qualifier must not drift off into
-    a section of its own, where a reader weighing the grant would never meet it.
+    Sharing the block is the claim that actually matters: the qualifier must not drift off to
+    where a reader weighing the grant would never meet it. See `BLOCKS` for why a block is not
+    simply what sits between two blank lines.
     """
     blocks = [block for block in BLOCKS if incentive in block]
     assert len(blocks) == 1, f"{incentive!r} matches {len(blocks)} blocks; re-anchor this test"
@@ -76,7 +86,7 @@ def test_workflows_write_names_the_review_gate_it_removes() -> None:
     _qualified_in_the_same_block(
         "also grant Workflows",
         "Leaving it off narrows that blast radius rather than closing it",
-        "already runs with those secrets",
+        "already runs with whatever secrets that job is given",
     )
 
 
@@ -128,11 +138,12 @@ def test_claude_credential_names_the_scoping_it_has_none_of() -> None:
     """
     _consequence_travels_with(
         "long-lived OAuth token minted from a",
-        "the one credential here with no scoping to narrow it",
+        "the session holds this one *directly*",
         "carries your subscription's whole reach",
+        "a subscription reports no per-token cost",
     )
     _qualified_in_the_same_block(
         "long-lived OAuth token minted from a",
-        "`claude.max_budget_usd` per turn and `agent.max_issue_cost_usd` per issue",
-        "its own Anthropic account, or an API key you can cap",
+        "`agent.max_issue_cost_usd` never fires",
+        "an account dedicated to the bot rather than the login you use yourself",
     )
