@@ -127,6 +127,40 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
     ".bash_logout",
 )
 
+# The same class again, one tool further out (#151): the config files a *tool* the session runs
+# reads out of the account's home, each of which can name a command to execute. Not shell
+# start-up files, which is why they are a list of their own rather than entries in the one
+# above, but the same residual -- a file the account may write, in a home the container keeps
+# for its lifetime, read by the next session at that uid -- and so the same sweep.
+#   ``.gitconfig`` and ``.config/git/config``: every session runs ``git`` as the account, and
+#   user-level git config names commands (``core.pager``, ``core.editor``, ``core.fsmonitor``,
+#   ``credential.helper``, ``[alias] x = !sh -c ...``, ``diff.<driver>.textconv``). Both
+#   spellings, because git reads both: ``$XDG_CONFIG_HOME/git/config`` first -- which is
+#   ``~/.config/git/config`` here, since ``XDG_CONFIG_HOME`` is not in ``PASSTHROUGH_NAMES``
+#   and so never reaches a session -- and then ``~/.gitconfig``. Sweeping one and not the other
+#   would leave the channel open at the name git looks at first.
+#   ``.ssh/config``: ``ProxyCommand``, ``LocalCommand`` and ``Match exec`` run a shell command
+#   for a matching host. issuebot's own clone is HTTPS through ``gh`` and the default image
+#   installs no ssh client, so nothing issuebot does reads it today; a target repository's hook
+#   or a submodule URL in an image built ``FROM`` this one can, and a name on this list costs
+#   nothing where the file does not exist.
+# No deployment has a reason to leave any of them in a session account's home, which is what
+# makes this a sweep rather than a residual: the session's commit identity comes from the
+# ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` variables (``PASSTHROUGH_PREFIXES``), the workspace's
+# ``safe.directory`` entry is the image's ``--system`` one, and the post-clone setup's
+# credential helper is ``git config --local`` inside the clone. A deployment that does want
+# global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
+# session's privilege domain, in the image or in one built ``FROM`` it.
+# A denylist like the two above: named paths, and everything else in the home is left alone.
+# Each is the sequence of its path components, because every one of them is nested and the
+# sweep walks rather than follows -- ``.ssh`` or ``.config`` replaced with a symlink is
+# unlinked as the plant it is, not stepped through to whatever it points at.
+TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
+    (".gitconfig",),
+    (".config", "git", "config"),
+    (".ssh", "config"),
+)
+
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
 # it carries -- GH_TOKEN, the Anthropic credential, any DSN a ``before_run`` hook wrote --
@@ -327,8 +361,8 @@ class RunAs:
 
     def sweep_home(self, home: Path | None = None) -> bool:
         """Clear what a prior session could steer the next one with from the account's home:
-        the loadable config under ``~/.claude`` (#101) and the shell start-up files a login
-        shell reads (#137).
+        the loadable config under ``~/.claude`` (#101), the shell start-up files a login
+        shell reads (#137) and the tool config files that can name a command (#151).
 
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
         like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
@@ -432,15 +466,42 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
+def _walk(root: Path, parts: Sequence[str]) -> Path | None:
+    """The path ``parts`` names under ``root``, or the first symlink on the way to it.
+
+    The sweep removes what it is pointed at, so a nested target has to be resolved one
+    component at a time: with ``.ssh`` replaced by a symlink, ``root / ".ssh" / "config"``
+    names a file inside whatever it points at, and unlinking that would reach outside the home
+    -- while the symlink itself is what a session planted and what ``ssh`` would read through.
+    So an intermediate symlink is returned instead, to be unlinked like a symlinked surface,
+    and ``None`` comes back when a component below one is missing, which is the ordinary case
+    of a home that never held the file. Never resolves the final component: whether *that* is a
+    symlink is ``_sweep``'s to decide, and it unlinks either way.
+    """
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return current
+        if not current.is_dir():
+            return None
+    return current / parts[-1]
+
+
 def _sweep_targets(home: Path) -> Iterator[Path]:
-    """Every path the sweep removes under ``home``: the shell start-up files, the named
-    ``.claude`` surfaces and each project's auto memory directory.
+    """Every path the sweep removes under ``home``: the shell start-up files, the tool config
+    files, the named ``.claude`` surfaces and each project's auto memory directory.
 
     ``projects`` and each entry in it are walked, never followed: claude
     creates real directories there, so a symlink at either level is a session's, planted to
     point claude's memory read at a tree the sweep would not visit, and it is yielded as the
-    target -- unlinked like a symlinked surface -- rather than stepped through."""
+    target -- unlinked like a symlinked surface -- rather than stepped through. ``_walk``
+    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP``."""
     yield from (home / name for name in SHELL_STARTUP_SWEEP)
+    for parts in TOOL_CONFIG_SWEEP:
+        target = _walk(home, parts)
+        if target is not None:
+            yield target
     claude_dir = home / CLAUDE_HOME_DIR
     yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
@@ -460,8 +521,9 @@ def _sweep_targets(home: Path) -> Iterator[Path]:
 
 def _sweep(home: Path) -> None:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
-    its shell start-up files (``SHELL_STARTUP_SWEEP``) and the loadable config surfaces under
-    ``.claude`` (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
+    its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
+    command (``TOOL_CONFIG_SWEEP``) and the loadable config surfaces under ``.claude``
+    (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
     Keeps the credential and claude's own runtime state -- and everything else in the home,
     ``.claude.json``, a tool's cache or state directory included -- by naming only what it

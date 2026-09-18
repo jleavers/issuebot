@@ -36,12 +36,13 @@ from issuebot.agent.runas import (
     CLAUDE_HOME_SWEEP,
     MODULE,
     SHELL_STARTUP_SWEEP,
+    TOOL_CONFIG_SWEEP,
     RunAs,
     RunAsError,
     _sweep,
     anonymous_fd,
 )
-from issuebot.agent.runner import ClaudeRunner
+from issuebot.agent.runner import PASSTHROUGH_NAMES, ClaudeRunner
 from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
@@ -330,14 +331,27 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 
 def _plant_home(home: Path) -> None:
-    """A home a prior session poisoned: the shell start-up files a login shell reads (#137)
-    and the ``~/.claude`` config surfaces (#101), beside the credential, claude's own runtime
-    state and the entries other tools keep there."""
+    """A home a prior session poisoned: the shell start-up files a login shell reads (#137),
+    the tool config files that can name a command (#151) and the ``~/.claude`` config surfaces
+    (#101), beside the credential, claude's own runtime state and the entries other tools keep
+    there."""
     claude = home / ".claude"
     claude.mkdir(parents=True)
     # #137: every hook is `bash -lc`, so each of these is a script the next session runs.
     for name in SHELL_STARTUP_SWEEP:
         (home / name).write_text("echo poison\n")
+    # #151: a tool's own config, one directory out from the shell's, naming a command for the
+    # next session's `git` or `ssh` to run.
+    (home / ".gitconfig").write_text("[alias]\n\tx = !echo poison\n")
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "config").write_text("[core]\n\tpager = sh -c 'echo poison'\n")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "config").write_text("Host *\n  ProxyCommand sh -c 'echo poison'\n")
+    # `.config` and `.ssh` are other tools' directories as well: `gh`'s config lives beside
+    # git's, and an `.ssh` a deployment gave the account keys in is not the sweep's to empty.
+    (home / ".config" / "gh").mkdir()
+    (home / ".config" / "gh" / "hosts.yml").write_text("github.com:\n")
+    (home / ".ssh" / "known_hosts").write_text("github.com ssh-ed25519 AAAA\n")
     # What the sweep names nothing of, and must therefore leave: claude's own `.claude.json`
     # (#119 holds its `mcpServers` off with `--strict-mcp-config`; the file itself is claude's
     # to keep), and whatever a tool the session ran wrote in the home -- `gh`'s state directory
@@ -441,6 +455,67 @@ def test_sweep_unlinks_a_symlinked_start_up_file_without_following_it(tmp_path: 
     _sweep(home)
     assert not (home / ".profile").exists()
     assert target.read_text() == "keep"
+
+
+def test_sweep_removes_the_tool_config_files_and_keeps_their_neighbours(tmp_path: Path) -> None:
+    """#151: `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config` each name a command for
+    a tool the session runs, so each is a plant the next session at that uid would execute.
+    Still a denylist: the directories they sit in belong to other tools too, and what the sweep
+    does not name stays."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _sweep(home)
+    for parts in TOOL_CONFIG_SWEEP:
+        assert not home.joinpath(*parts).exists(), parts
+    assert (home / ".config" / "gh" / "hosts.yml").exists()
+    assert (home / ".ssh" / "known_hosts").exists()
+    assert (home / ".config" / "git").is_dir()
+    assert (home / ".ssh").is_dir()
+
+
+def test_the_tool_config_list_names_both_spellings_git_reads_and_ssh_config() -> None:
+    """Pinned like the two lists above. `git` reads `$XDG_CONFIG_HOME/git/config` -- which is
+    `~/.config/git/config`, since `XDG_CONFIG_HOME` never reaches a session -- *before*
+    `~/.gitconfig`, so a sweep naming only the second would leave the channel open at the name
+    git looks at first. Dropping either has to be a deliberate edit."""
+    assert set(TOOL_CONFIG_SWEEP) >= {
+        (".gitconfig",),
+        (".config", "git", "config"),
+        (".ssh", "config"),
+    }
+    # The sweep names files, never the directories other tools share with them: `~/.config`
+    # holds `gh`'s configuration and `~/.ssh` may hold keys a deployment put there.
+    assert (".config",) not in TOOL_CONFIG_SWEEP
+    assert (".ssh",) not in TOOL_CONFIG_SWEEP
+    # `XDG_CONFIG_HOME` is not passed through, which is what makes the second entry the path
+    # git actually reads; a change there would need a third spelling here.
+    assert "XDG_CONFIG_HOME" not in PASSTHROUGH_NAMES
+
+
+def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_path: Path) -> None:
+    """A nested target is walked a component at a time. With `.ssh` replaced by a link, the
+    file the sweep would otherwise unlink is outside the home altogether: the link is what the
+    session planted and what `ssh` would read through, so the link goes and the tree it points
+    at is untouched."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config").write_text("keep")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".ssh").symlink_to(outside, target_is_directory=True)
+    _sweep(home)
+    assert not (home / ".ssh").exists()
+    assert (outside / "config").read_text() == "keep"
+
+
+def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> None:
+    """The ordinary case: nothing under `.config` or `.ssh` at all. Best-effort, as the rest of
+    the sweep is -- a missing component is not a failure, and nothing beside it is touched."""
+    home = tmp_path / "home"
+    (home / ".config" / "gh").mkdir(parents=True)
+    _sweep(home)
+    assert (home / ".config" / "gh").is_dir()
+    assert not (home / ".ssh").exists()
 
 
 def test_the_sweep_list_names_every_surface_the_docs_say_a_session_loads() -> None:
@@ -755,6 +830,50 @@ async def test_a_planted_profile_does_not_run_for_the_next_sessions_hook(
     unswept = await manager.run_hook("before_run", workspace)
     assert unswept is not None and unswept.ok, unswept.summary
     assert unswept.stdout_tail.splitlines() == ["poison", "hook-ran"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git to read the planted config")
+async def test_a_planted_gitconfig_alias_does_not_run_for_the_next_sessions_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#151, end to end and shaped like the ``~/.profile`` proof above: a session leaves a
+    ``~/.gitconfig`` naming a command, and the next session's ``git`` -- run at the same uid,
+    with the account's own ``HOME`` -- does not run it.
+
+    Two-sided for the same reason: with the sweep taken out the alias *is* what ``git`` runs,
+    so this cannot pass against a git that was never going to read the file. The real wrapper,
+    the real hook path and the real ``git``; only sudo is a fake.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    (home / ".gitconfig").write_text("[alias]\n\tpwn = !echo PLANTED-GITCONFIG-ALIAS-RAN\n")
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            # `git pwn` is the alias if the plant is still there, and an unknown subcommand if
+            # it is not; either way the hook goes on to say it ran.
+            "hooks": {"before_run": "git pwn 2>/dev/null; echo hook-ran"},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    assert result.stdout_tail.splitlines() == ["hook-ran"]
+    assert not (home / ".gitconfig").exists()
+
+    # Planted again, and this time not swept: the alias runs, which is what the sweep prevents.
+    (home / ".gitconfig").write_text("[alias]\n\tpwn = !echo PLANTED-GITCONFIG-ALIAS-RAN\n")
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == ["PLANTED-GITCONFIG-ALIAS-RAN", "hook-ran"]
 
 
 async def _no_sweep() -> None:

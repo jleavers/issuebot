@@ -931,6 +931,14 @@ hook that would truncate it again or append a duplicate per session.
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
+- **Nor through `git config --global`.** The session account's `~/.gitconfig`,
+  `~/.config/git/config` and `~/.ssh/config` are swept on the same schedule (#151), so a hook
+  that writes user-level git or ssh config finds it gone before the next login shell — again
+  between two sessions and within one. Commit identity is already handled: set the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
+  the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
+  `git config --local` inside the clone, which is what the post-clone setup does.
 
 ### More than one repository
 
@@ -1150,12 +1158,22 @@ that matters on your host.
   session's Bash tool, so a `~/.profile` one session leaves is a script every later session
   runs at that uid. That is why the sweep runs before each of those scripts as well as before
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-  before turn 1. It leaves the rest of the
+  before turn 1. The same home holds the config a *tool* the session runs reads, and that is
+  swept with it (#151): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
+  second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
+  `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
+  to run. Nothing a deployment needs goes there: the bot's identity is the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
+  entry is the image's system-wide one, the clone's credential helper is written into the clone,
+  and global git or ssh config for every session belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-  tool the session ran keeps there (`gh`'s state, npm's cache). It is a
-  denylist of what is loaded, not an allowlist of what is kept, so a new claude location has to
-  be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+  tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
+  sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
+  `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
+  denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
+  new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next

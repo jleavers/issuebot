@@ -331,8 +331,8 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101, #137), clears what a prior session left in the
-  account's *home* for the next one to load. Two lists, both pinned by tests, so dropping a name
+  two blind spots; a fourth verb, `sweep` (#101, #137, #151), clears what a prior session left in the
+  account's *home* for the next one to load. Three lists, all pinned by tests, so dropping a name
   is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
   `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
@@ -347,6 +347,24 @@ version, and moves by hand.
   session at that uid runs, for the container's lifetime. Removing them costs an account nobody
   logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
   which are root's and where the image puts node and the PostgreSQL binaries.
+  And `TOOL_CONFIG_SWEEP`, the same home one tool further out (#151, spec
+  `2026-09-18-session-tool-config-design.md`): `.gitconfig`, `.config/git/config` and
+  `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
+  git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
+  `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
+  (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so
+  never reaches a session) *before* `~/.gitconfig`, so sweeping the second alone would leave the
+  name git looks at first. That no deployment has a reason to leave one of these in a session
+  account's home is what made it a sweep rather than a documented residual: commit identity comes
+  from `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (`PASSTHROUGH_PREFIXES`), `safe.directory` is the image's
+  `--system` entry, the post-clone setup's credential helper is `git config --local` inside the
+  clone, and a deployment that does want global git or ssh config for its sessions has root's
+  `/etc/gitconfig` and `/etc/ssh/ssh_config`, outside the session's privilege domain. The entries
+  are path components rather than names, since each is nested: `_walk` resolves one component at a
+  time and yields the first symlink it meets instead of descending through it, so a `.ssh`
+  replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
+  -- and the directories themselves stay, with `gh`'s configuration beside git's and
+  `known_hosts` beside ssh's.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential
