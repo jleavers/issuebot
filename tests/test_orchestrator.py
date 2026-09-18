@@ -1852,6 +1852,21 @@ async def test_a_read_back_that_fails_costs_the_refresh_and_not_the_sweep(
     assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
 
 
+async def test_no_read_back_without_a_store_to_read_it_back_for(tmp_path: Path) -> None:
+    """The re-read exists for the store alone, so a deployment without one does not make it
+    (#149): in a change about avoidable GitHub reads, one nobody reads is the same defect."""
+    h = Harness(tmp_path)
+    assert h.orchestrator._on_issues is None
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.calls("fetch_issues_by_ids") == []
+
+
 async def test_a_read_back_that_has_not_caught_up_is_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1932,6 +1947,53 @@ async def test_the_retry_leaves_a_marked_workspace_its_own_session_is_using(
     await h.orchestrator.terminal_sweep()
 
     assert running.is_dir()
+
+
+async def test_the_retry_leaves_a_marked_workspace_whose_issue_is_waiting_to_retry(
+    tmp_path: Path,
+) -> None:
+    """The other half of the busy set: a pending retry's workspace is the run's, not the
+    sweep's, exactly as a running session's is (#149)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await fail_once(h, 1)
+    assert list(h.orchestrator._retries) == ["1"]
+    waiting = h.workspace_dir("repo-1")
+    (waiting / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert waiting.is_dir()
+
+
+async def test_a_retry_that_cannot_remove_says_so_and_sweeps_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal that fails again is a warning naming the key, and the next one is still
+    tried: the sweep is the only thing that removes anything (#149)."""
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    h = Harness(tmp_path)
+    for key in ("repo-8", "repo-9"):
+        (h.workspace_dir(key) / ".issuebot" / "finished").touch()
+
+    from issuebot.agent import AgentError
+
+    async def refuse(self: Any, key: str) -> bool:
+        raise AgentError("workspace_error", f"{key}: refused")
+
+    monkeypatch.setattr(WorkspaceManager, "remove_key", refuse)
+
+    await h.orchestrator.terminal_sweep()
+
+    failed = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if json.loads(line)["event"] == "workspace_retry_failed"
+    ]
+    assert [record["workspace_key"] for record in failed] == ["repo-8", "repo-9"]
+    assert (h.root / "repo-8").is_dir()
 
 
 async def test_terminal_sweep_failure_only_warns(

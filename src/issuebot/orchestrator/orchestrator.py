@@ -58,7 +58,6 @@ from issuebot.github import (
 )
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
-from issuebot.orchestrator.actions import FinishOutcome
 from issuebot.orchestrator.admission import (
     Admission,
     AdmissionRequest,
@@ -1473,8 +1472,13 @@ class Orchestrator:
         that; nothing reads a `complete` issue again now, so a stale row would be permanent.
         The refresh is the cheap half of this and the state is the load-bearing half: when
         they disagree the refresh is what gives way.
+
+        The read exists for the store alone, so a deployment without one does not make it:
+        `_report_issues` is a no-op without an observer, and in a change whose subject is
+        avoidable GitHub reads, spending a request per sweep on an answer nobody reads would
+        be the same defect in miniature. The same gate `fetch_states` uses for `review`.
         """
-        if not moved:
+        if not moved or self._on_issues is None:
             return
         try:
             refreshed = await self._adapter.fetch_issues_by_ids(list(moved))
@@ -1507,7 +1511,10 @@ class Orchestrator:
         A key the worker is still using is skipped: a running session's, and a pending retry's
         -- the same set `_prune_accounts` keeps a binding for. A reused workspace has had its
         mark cleared by `create_or_reuse` before its session started, so an issue that reopened
-        is not swept out from under the run working it.
+        is not swept out from under the run working it. That clear is best effort, and this
+        skip is about *this* worker's keys, so a `run-once` beside a live worker (#121) rests
+        on it having succeeded: the two together would have to fail for a live clone to be
+        removed, and what that costs is a re-clone, since the work is pushed.
         """
         keys = self._workspaces.finished_keys()
         if not keys:
@@ -1519,9 +1526,11 @@ class Orchestrator:
             try:
                 await self._workspaces_for_key(key).remove_key(key)
             except AgentError as exc:
-                self._log.warning("workspace_remove_failed", workspace_key=key, error=exc.message)
+                # Its own event name: `actions.remove_workspace` logs `workspace_remove_failed`
+                # with the issue's identifier, and this retry has a directory and no issue.
+                self._log.warning("workspace_retry_failed", workspace_key=key, error=exc.message)
 
-    async def _finish(self, issue: Issue) -> FinishOutcome:
+    async def _finish(self, issue: Issue) -> actions.FinishOutcome:
         """Close the issue out, and drop what this worker remembered about it.
 
         Both conflict memos go whatever GitHub answered: a closed issue is never a bounce

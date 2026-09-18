@@ -221,10 +221,11 @@ issue again now, so it would be permanent. The refresh is the cheap half and the
 load-bearing half: when they disagree the refresh gives way.
 
 What *does* stop happening is the periodic re-read of an issue that is already `complete` and
-that this sweep did not touch -- so a title or label edited on a closed issue, months after
-issuebot finished with it, no longer reaches `issues`. Nothing in issuebot reads those columns
-to make a decision (the board and its counts are `state`, written by the event), and a closed
-issue's row is not a live thing to keep polling. That is the trade, stated plainly.
+that this sweep did not touch -- so a title, a label, a URL or a linked pull request's state
+and merge time, edited or moved on a closed issue months after issuebot finished with it, no
+longer reaches `issues`. Those are columns the dashboard displays and nothing in issuebot
+reads to make a decision: the board and its counts are `state`, written by the event, and a
+closed issue's row is not a live thing to keep polling. That is the trade, stated plainly.
 
 **The retry of a failed workspace removal.** `remove_workspace` runs outside
 `finish_terminal`'s `unchanged` branch, so re-reading the role was also the only thing that
