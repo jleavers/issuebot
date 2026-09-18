@@ -94,10 +94,21 @@ issues that triage is most of the value.
    `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` — which is what Actions read buys, and
    why the workflow's "wait for checks" step is performable at all. If the agent may edit files
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
-   without it any push touching those files is rejected. A classic token with the `repo` scope
-   works too; it needs `workflow` adding for the same reason, and it reads check runs where a
-   fine-grained token cannot -- and `validate` warns on it, because the session holds the
-   token and a classic token's reach is the whole account's, not one repository's (#109).
+   without it any push touching those files is rejected. Grant it deliberately, because what it
+   removes is human review as the gate on what CI runs: the session pushes its branch to the
+   target repository itself, and GitHub trusts a same-repository ref where it withholds secrets
+   from a fork's, so a workflow the session wrote runs with that repository's Actions secrets
+   and its `GITHUB_TOKEN` as soon as the push or the pull request fires it -- before anyone has
+   read the diff. Nothing in issuebot replaces that gate: the session's uid, the token it holds
+   and the egress allow-list all bound the *session*, and this is GitHub's runner afterwards. So
+   leave Workflows off unless the agent's issues really do change those files, and where you
+   grant it, treat every secret that repository's Actions can read as one the agent can reach.
+   A classic token with the `repo` scope works too; it needs `workflow` adding for the same
+   reason and with the same consequence, and it reads check runs where a fine-grained token
+   cannot -- and `validate` warns on it, because the session holds the token and a classic
+   token's reach is the whole account's, not one repository's (#109). That is the boundary
+   *that* choice removes: the scoping to a single repository which the Safety note below names
+   as the control, so one repository's compromise becomes the account's.
    The account needs permission to push branches and open PRs in the target repository.
    Where the token can be *sent* is bounded separately, by the network allow-list under step 2
    ("What a session may reach"): under Compose a session can open a connection to Anthropic,
@@ -1189,8 +1200,13 @@ for the container stack, Docker with Compose. Running the CLI outside a containe
 route, which is what `agent.run_as` unset means and how the test suite runs — also wants
 `git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
 2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
-use WSL. It is a development convenience rather than a deployment: the session then runs as
-your own user with none of the container's boundaries, and `validate` warns about it.
+use WSL. It is a development convenience rather than a deployment, and what it removes is the
+container that the Safety note above calls the sandbox: the session runs at your own uid,
+with your `$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), with no
+permission prompts and no allow-list between it and the network. Nothing replaces those --
+`validate` warns about it twice, at `agent.run_as` and at `egress`, and a warning is all
+issuebot can do here. Anyone can open an issue, so run the host route against work you would
+run yourself, and keep a real deployment in the container with a repository-scoped token.
 
 ```bash
 uv sync
