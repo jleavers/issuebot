@@ -123,14 +123,14 @@ issues that triage is most of the value.
    credential comes from the environment (see step 2 below) -- which means the session holds
    this one *directly*. Choose between the two knowing what can bound each. A `setup-token`
    credential carries your subscription's whole reach, with no equivalent of the token's
-   "restricted to this repository" to narrow it, and the spend ceilings are no substitute:
-   a subscription reports no per-token cost, so `agent.max_issue_cost_usd` never fires and
-   `claude.max_budget_usd` acts as an effort limit rather than money. What
-   bounds a runaway issue there is `agent.max_turns` and `agent.max_attempts` (see "Cost"). An
-   API key is the one you can bound from outside issuebot -- capped and revoked on its own, and
-   better still on an account dedicated to the bot rather than the login you use yourself --
-   and there `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run)
-   and `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
+   "restricted to this repository" to narrow it, and the spend ceilings are no substitute: a
+   subscription reports no per-token cost, so `agent.max_issue_cost_usd` never fires and
+   `claude.max_budget_usd` acts as an effort limit rather than money. What bounds a runaway
+   issue there is `agent.max_turns` and `agent.max_attempts` (see "Cost"). An API key is the
+   one you can bound from outside issuebot -- capped and revoked on its own, and better still
+   on an account dedicated to the bot rather than the login you use yourself -- and there
+   `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run) and
+   `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
 3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
