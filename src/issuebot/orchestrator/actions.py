@@ -219,7 +219,7 @@ async def _report_note_failure(
             error = exc
         else:
             return
-    log.warning(f"{prefix}_note_failed", **common, error=str(error))
+    log.warning(f"{prefix}_note_failed", **common, error=str(error), category=error.category)
 
 
 async def blocked_escape(

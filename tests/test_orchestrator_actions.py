@@ -534,9 +534,15 @@ async def test_escape_is_idempotent_per_run(
 async def test_escape_failure_on_the_workpad_write_leaves_the_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A *retryable* write is the next tick's, and #157 kept it that way deliberately.
+
+    The category is spelled out because it is the whole of the rule: a non-retryable write of
+    the same first block moves the label instead, which is
+    `test_escape_moves_the_label_when_a_first_block_cannot_be_written` below.
+    """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
-    fail_on(h, "comment", monkeypatch)
+    fail_on(h, "comment", monkeypatch, "transport")
     assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "failed"
     assert h.github.issue(42).state is StateLabel.IN_PROGRESS
     assert h.github.comments_for(42) == []
@@ -1127,6 +1133,28 @@ async def test_budget_escape_retries_a_retryable_workpad_failure(
     assert h.recorder.events == []
     assert [e["event"] for e in logs] == ["budget_escape_failed"]
     # And the retry the next tick makes still lands one block, in the workpad it can now read.
+    outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_budget_escape_retries_a_retryable_block_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The write half of the same rule: nothing moves, and the retry lands one block."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    with monkeypatch.context() as patch:
+        fail_on(h, "update_comment", patch, category)
+        outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.github.comments_for(42)[0].body == f"{WORKPAD_MARKER}\n\nnotes\n"
+    assert h.recorder.events == []
     outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
     assert outcome == "applied"
     assert len(h.github.comments_for(42)) == 1
