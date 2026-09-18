@@ -509,6 +509,31 @@ def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_pat
     assert (outside / "config").read_text() == "keep"
 
 
+def test_sweep_does_not_walk_the_tree_a_symlinked_target_points_at(tmp_path: Path) -> None:
+    """`os.walk` refuses a link below its top but follows the top itself, so the retry's
+    `_relax_tree` would widen modes right across whatever tree a planted link points at --
+    any size, any place, chosen by the session, before every turn and every hook. Unlinking a
+    link needs the parent's bits and nothing of its target's, so the tree is never visited."""
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "keep.txt").write_text("keep")
+    home = tmp_path / "home"
+    (home / ".config").mkdir(parents=True)
+    (home / ".config" / "git").symlink_to(outside, target_is_directory=True)
+    os.chmod(outside / "deep", 0o000)
+    os.chmod(home / ".config", 0o500)  # so the unlink needs the retry, which is what walks
+    try:
+        _sweep(home)
+        # Read before the restore below, since that is what the sweep must not have done.
+        walked = stat.S_IMODE((outside / "deep").stat().st_mode) != 0o000
+    finally:
+        os.chmod(home / ".config", 0o700)
+        os.chmod(outside / "deep", 0o700)
+    assert not (home / ".config" / "git").exists()
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert not walked
+
+
 def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> None:
     """The ordinary case: nothing under `.config` or `.ssh` at all. Best-effort, as the rest of
     the sweep is -- a missing component is not a failure, and nothing beside it is touched."""
@@ -540,7 +565,7 @@ def test_walk_stops_at_a_symlink_at_any_depth(tmp_path: Path) -> None:
     assert (home / ".config" / "gh").is_dir()
 
 
-@pytest.mark.parametrize("locked_mode", [0o500, 0o600, 0o400, 0o000])
+@pytest.mark.parametrize("locked_mode", [0o500, 0o600, 0o400, 0o100, 0o000])
 def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     tmp_path: Path, locked_mode: int
 ) -> None:
@@ -552,10 +577,13 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     tree, and for a directory locked *inside* a swept tree.
 
     Every way of locking one, because they fail differently and only one of them is the obvious
-    case: without write (`0500`) the unlink fails, and without *search* (`0600`, `0400`, `0000`)
-    the sweep cannot even stat what is inside, which is the reading that decides whether there
-    is anything left to retry. The home itself is in the list, since locking that one reaches
-    every sweep list at once."""
+    case: without write (`0500`) the unlink fails, without *search* (`0600`, `0400`, `0000`) the
+    sweep cannot even stat what is inside, which is the reading that decides whether there is
+    anything left to retry, and without *read* (`0100`, `0300`) it cannot list one -- which is
+    how `projects/<project>/memory` is reached, while `claude` opens a planted path by name and
+    needs no listing at all. The home itself is in the list, since locking that one reaches every
+    sweep list at once, and so is `.config`, which is the only directory a swept path passes
+    *through*: locking it is what `_walk` has to see past rather than read as an empty home."""
     home = tmp_path / "home"
     _plant_home(home)
     (home / ".claude" / "skills" / "pwn" / "deep").mkdir()
@@ -563,9 +591,12 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     locked = [
         home / ".claude" / "skills" / "pwn" / "deep",
         home / ".claude" / "skills",
+        home / ".claude" / "projects" / "-workspaces-issuebot-7",
+        home / ".claude" / "projects",
         home / ".claude",
         home / ".ssh",
         home / ".config" / "git",
+        home / ".config",
         home,
     ]
     modes = [(path, path.stat().st_mode) for path in locked]
@@ -583,10 +614,15 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         assert not (home / name).exists(), name
     for name in CLAUDE_HOME_SWEEP:
         assert not (home / ".claude" / name).exists(), name
+    # Auto memory is reached by *listing* `projects`, which is the one target a mode can hide
+    # without hiding the path claude would open.
+    project = home / ".claude" / "projects" / "-workspaces-issuebot-7"
+    assert not (project / "memory").exists()
     # And the neighbours the sweep does not name are still there.
     assert (home / ".config" / "gh" / "hosts.yml").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".claude" / ".credentials.json").read_text() == "token"
+    assert (project / "a.jsonl").exists()
 
 
 def test_sweep_unlinks_a_symlinked_claude_dir_without_following_it(tmp_path: Path) -> None:

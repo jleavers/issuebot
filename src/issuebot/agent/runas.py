@@ -469,7 +469,14 @@ def _relax_tree(path: Path) -> None:
     """``_relax`` for ``path`` and every directory under it, top down.
 
     Top down because ``os.walk`` has to read a directory to reach what is inside it: each level
-    is opened before the level below is listed.
+    is opened before the level below is listed. ``os.walk`` does not follow a link below its
+    top, and ``_relax`` reads an ``lstat``, so no chmod travels down one; the *top* is the
+    caller's to check, since ``os.walk`` does follow that one (``_sweep`` does).
+
+    ``path`` itself is relaxed, where ``_remove``'s inline loop used to start one level down.
+    That reaches one directory more than before on the workspace path, and only ever a
+    directory the calling account owns -- a workspace root is the worker's (``SEALED_DIR_MODE``,
+    ``WorkspaceManager``), so the uid check declines it there and the removal is unchanged.
     """
     _relax(path)
     for dirpath, dirnames, _filenames in os.walk(path):
@@ -536,28 +543,59 @@ def _sweep_targets(home: Path) -> Iterator[Path]:
         target = _walk(home, parts)
         if target is not None:
             yield target
-    claude_dir = home / CLAUDE_HOME_DIR
-    if claude_dir.is_symlink():
-        # The rule `projects/<project>` has always had, applied one level up. The image creates
-        # `.claude` as a real directory owned by the account, so a link there is a session's,
-        # and following it would have the *next* session's sweep delete the entries inside
-        # whatever it points at -- any tree the account can write. The link is the target.
-        yield claude_dir
-        return
-    yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
+    # Through ``_walk`` as well, rather than by joining: the image creates ``.claude`` as a real
+    # directory owned by the account, so a link there is a session's, and following it would have
+    # this sweep delete the named entries inside whatever tree it points at -- the rule
+    # ``projects/<project>`` has always had, applied one level up. Going through ``_walk`` is
+    # also what keeps that check from resting on the home being readable by luck: it relaxes a
+    # component it cannot stat rather than answering ``False`` for it.
+    for name in CLAUDE_HOME_SWEEP:
+        target = _walk(home, (CLAUDE_HOME_DIR, name))
+        if target is not None:
+            yield target
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
-    projects = claude_dir / projects_name
+    projects = _walk(home, (CLAUDE_HOME_DIR, projects_name))
+    if projects is None:
+        return
+    # A link at either level -- ``.claude`` itself, which ``_walk`` returns in place of what is
+    # under it, or ``projects`` -- is the target, and nothing below it is visited.
     if projects.is_symlink():
         yield projects
         return
     if not projects.is_dir():
         return
+    # Relaxed before it is read rather than after the read failed, which is the one place the
+    # sweep does that: reaching auto memory needs both *read* on ``projects``, to list the
+    # project directories, and *search*, to tell a directory from a link -- and a session can
+    # drop either one on its own, leaving a listing whose names cannot be classified and so a
+    # target that is never yielded for ``_sweep``'s retry to repair. One chmod on a directory
+    # this account owns, against a mode game with no other cost to the plant: ``claude`` opens
+    # a path it already knows and lists nothing.
+    _relax(projects)
+    for project in _entries(projects):
+        if project.is_symlink():
+            yield project
+        elif project.is_dir():
+            yield project / memory_name
+
+
+def _entries(path: Path) -> list[Path]:
+    """What ``path`` holds, with the modes put back if it will not list.
+
+    Listing a directory needs *read* on it, where opening a file inside one by name needs only
+    search -- so a session that plants ``projects/<project>/memory/`` and drops read on
+    ``projects`` would keep it: the listing this walk depends on fails, no target is yielded and
+    ``_sweep``'s retry never sees one, while ``claude`` opens the planted path by name as
+    before. The mode is the account's own, like every other in this home, so the repair is the
+    same one (``_relax``) and the listing is asked again. Empty when it still will not answer,
+    which is the best-effort rule the rest of the sweep keeps.
+    """
     with contextlib.suppress(OSError):
-        for project in projects.iterdir():
-            if project.is_symlink():
-                yield project
-            elif project.is_dir():
-                yield project / memory_name
+        return list(path.iterdir())
+    _relax(path)
+    with contextlib.suppress(OSError):
+        return list(path.iterdir())
+    return []
 
 
 def _sweep(home: Path) -> None:
@@ -586,7 +624,13 @@ def _sweep(home: Path) -> None:
         _remove_swept(target)
         if _exists(target):
             _relax(target.parent)
-            _relax_tree(target)
+            if not target.is_symlink():
+                # ``os.walk`` refuses to follow a link *below* its top but follows the top
+                # itself, and a swept target that is a link is one a session chose: walking it
+                # would widen modes across whatever tree it points at -- any size, any place --
+                # for no gain, since unlinking a link needs the parent's bits and nothing of
+                # its target's. Relaxing the parent above is the whole repair for that case.
+                _relax_tree(target)
             _remove_swept(target)
 
 

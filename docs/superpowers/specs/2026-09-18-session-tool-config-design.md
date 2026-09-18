@@ -102,24 +102,34 @@ one, which is a worse trade than three entries in a list.
   of that schedule are what a `git` invoked by a hook, by the post-clone setup or by the session
   itself sits behind.
 
-## Residuals
-
 ## A mode is not a defence, and neither is a link
 
 Two things found by the self-review, both closed here, and neither of them new to this issue --
 they are what the older lists were resting on without saying so.
 
 - **A locked directory.** The sweep runs as the account whose home it is clearing, so a directory
-  it cannot open is one the account chose not to open, and the plant needs neither bit: `git`,
-  `ssh` and `claude` only read. `~/.ssh` at `0500` failed the unlink with `EACCES` and `_sweep`'s
-  `suppress(OSError)` skipped it; `~/.ssh` at `0600` was worse, because without *search* nothing
-  inside could even be stat'ed, so `_walk` concluded there was no target and `_sweep` concluded
-  there was nothing left to retry. `$HOME` itself at `0000` did it to all three lists at once, and
-  `sweep_home` reported success every time. Now `_sweep` retries a surviving target with the modes
-  put back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree),
-  `_walk` relaxes an intermediate it cannot stat before concluding it is absent, and `_exists`
-  tells "not there" (`FileNotFoundError`) from "cannot tell" (anything else), which is the reading
-  both of those turn on. One extra attempt, never a loop.
+  it cannot open is one the account chose not to open, and the plant needs none of the bits it
+  drops: `git`, `ssh` and `claude` only read a path they already know. Three bits, each hiding a
+  different step. Without **write**, `~/.ssh` at `0500` failed the unlink with `EACCES` and
+  `_sweep`'s `suppress(OSError)` skipped it. Without **search**, nothing inside could be stat'ed:
+  `~/.ssh` at `0600` left `_exists` reading the plant as absent, so `_sweep` concluded there was
+  nothing to retry, and a closed `~/.config` -- the one directory a swept path passes *through* --
+  left `_walk` concluding there was no target to yield at all. Without **read**,
+  `~/.claude/projects` at `0100` could not be listed, and listing it is how auto memory is
+  reached. `$HOME` itself did the first two to all three lists at once, and `sweep_home` reported
+  success every time. Now `_sweep` retries a surviving target with the modes put back
+  (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
+  relaxes an intermediate it cannot stat before concluding it is absent, `projects` is relaxed
+  before it is read rather than after the read failed, and `_exists` tells "not there"
+  (`FileNotFoundError`) from "cannot tell" (anything else), which is the reading the retry turns
+  on. One extra attempt, never a loop.
+
+- **A symlinked target's tree.** `os.walk` refuses a link below its top but follows the top
+  itself, so the retry's `_relax_tree` would have widened modes right across whatever tree a
+  planted `~/.ssh` or `~/.config/git` link points at -- any size, any place, the session's choice,
+  before every turn and every hook, against a worker whose only bound on the sweep is the ten
+  seconds it waits for sudo. Unlinking a link needs the parent's bits and nothing of its
+  target's, so the target is not visited at all.
 
 - **A symlinked `~/.claude`.** `_sweep_targets` walked `projects/<project>` without following a
   link at either level but reached `.claude` itself by joining, so a session could point `.claude`
@@ -147,6 +157,8 @@ they are what the older lists were resting on without saying so.
   protected. Filed rather than folded in, since `config.yml` is also the file `gh config set`
   writes and taking it would be a decision about what a hook may configure. Filed as #173.
 
+## Residuals
+
 - **The environment variables that re-point these files, through `.issuebot/env`.** Three of
   them, and none is in `PROTECTED_ENV_NAMES`: `XDG_CONFIG_HOME` moves the second git spelling
   under a directory the list does not name, `GIT_CONFIG_GLOBAL` replaces *both* git spellings
@@ -172,9 +184,11 @@ they are what the older lists were resting on without saying so.
 ## Tests
 
 `tests/test_agent_runas.py`: a plant locked behind a directory mode the session set is still
-removed -- a file, a tree, and a directory locked inside a swept tree, over every way of locking
-one (`0500`, `0600`, `0400`, `0000`, the home itself among the directories) -- while the
-neighbours and the credential survive it; a symlinked `.claude` is unlinked and the tree it
+removed -- a file, a tree, a directory locked inside a swept tree, and auto memory behind a
+`projects` that will not list -- over every way of locking one (`0500`, `0600`, `0400`, `0100`,
+`0000`), with the home and `.config` among the locked directories, since those are the two a
+target passes through rather than sits in; the tree a symlinked target points at is neither
+removed nor walked; the neighbours, the credential and the transcripts survive all of it; a symlinked `.claude` is unlinked and the tree it
 pointed at is untouched; the sweep removes all three files and leaves their neighbours
 (`~/.config/gh/hosts.yml`, `~/.ssh/known_hosts`) and the directories themselves; the list is
 pinned, including the fact that `XDG_CONFIG_HOME` is not passed through, which is what makes the

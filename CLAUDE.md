@@ -367,17 +367,21 @@ version, and moves by hand.
   `known_hosts` beside ssh's.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
-  back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), and
-  `_walk` does the same for an intermediate directory it cannot stat. Without both a session
-  could keep any planted file by locking the directory holding it -- dropping write fails the
-  unlink, dropping *search* hides what is inside from the sweep, and `git`, `ssh` and `claude`
-  need neither bit -- with `sweep_home` reporting success; the home itself is such a directory,
-  so that reaches all three lists rather than only the new one. `_exists` is where the two
-  failures are told apart: only `FileNotFoundError` is an absence, and anything else is an
-  answer this process cannot get until the modes go back. A symlinked `.claude` is yielded as
-  the target rather than descended into, the rule `projects/<project>` already had: following
-  one would have the *next* session's sweep delete the named entries inside whatever tree the
-  link points at.
+  back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
+  does the same for an intermediate directory it cannot stat, and `projects` is relaxed before it
+  is read. Each bit hides a different step and the plant needs none of them: without write the
+  unlink fails, without search nothing inside can be stat'ed (so `_exists` reads the plant as
+  absent and `_walk` yields no target through a closed `~/.config`), and without read
+  `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
+  `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
+  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
+  is an absence, and anything else is an answer this process cannot get until the modes go back.
+  A symlinked `.claude` is yielded as the target rather than descended into, the rule
+  `projects/<project>` already had -- following one would have the *next* session's sweep delete
+  the named entries inside whatever tree the link points at -- and a symlinked target's tree is
+  not walked by the retry either, since `os.walk` follows its own top and the session chooses
+  where that points.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential
