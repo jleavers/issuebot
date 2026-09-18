@@ -113,10 +113,13 @@ def _require_own_directory(path: Path, uid: int) -> None:
     root, which is the worse of the two -- a sealed idle workspace is exactly such a target.
 
     ``lstat``, so a link *to* a directory is refused with a link to anything else, and the
-    owner, so a directory somebody else left here is refused too. That pair is
-    ``boundary.py``'s, and this is the same rule for the same reason: only the worker can write
-    the ``0755`` root, so it is defence in depth rather than a session's reach, and it is the
-    kind that costs one ``lstat``.
+    owner, so a directory somebody else left here is refused too. The same pair of questions
+    ``boundary.py`` asks, for the same reason -- though not with its rigour: that one asks them
+    of a descriptor opened ``O_NOFOLLOW|O_DIRECTORY`` and keeps it, where this asks them of a
+    path and then re-resolves it, leaving a window between the check and the ``chmod``. The
+    window is unreachable, since only the worker can write the ``0755`` root, which is also why
+    the whole check is defence in depth rather than a session's reach -- and it costs one
+    ``lstat``.
     """
     entry = os.lstat(path)
     if not stat.S_ISDIR(entry.st_mode):
@@ -148,8 +151,10 @@ def ensure_uv_cache_dir(
 
     A permanent failure here -- no such account, the worker not in its group -- is one
     ``probe_run_as`` and ``credential_complaint`` already refuse to start a worker on, so the
-    warning it would otherwise repeat per hook and per turn is a state this deployment is not
-    supposed to reach; what is left for it to say is transient.
+    warning it would otherwise repeat per hook and per turn is mostly a state this deployment is
+    not supposed to reach. The one exception is a cache directory left by a *different* uid,
+    which the volume can outlive an image rebuild holding: that warns on every turn and every
+    hook until an operator clears it, and says which uid owns it, which is the answer.
 
     Synchronous, on the event loop, unlike ``sweep_agent_home``: a ``PATH`` scan, half a dozen
     metadata syscalls on a path this process just resolved, and the ``getpwnam`` inside

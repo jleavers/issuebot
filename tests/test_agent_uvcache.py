@@ -151,7 +151,11 @@ def test_a_cache_that_cannot_be_made_is_a_warning_and_uvs_own_default(
 @pytest.mark.parametrize("at", ["leaf", "root"])
 @pytest.mark.parametrize("plant", ["file", "symlink", "stranger"])
 def test_a_name_that_is_not_this_worker_s_directory_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], at: str, plant: str
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    at: str,
+    plant: str,
 ) -> None:
     """``chmod`` and ``chown`` follow a symbolic link, and so does ``Path.mkdir(exist_ok=True)``,
     whose own test is ``is_dir()``. So an entry either name already holds is checked before
@@ -176,19 +180,19 @@ def test_a_name_that_is_not_this_worker_s_directory_is_refused(
     elif plant == "symlink":
         name.symlink_to(victim)  # a link *to* a directory is refused with the rest
     else:
+        # A directory of somebody else's. A test host has one uid to offer, so what moves is the
+        # worker's idea of its own -- which is the argument the production path passes, so this
+        # goes through `ensure_uv_cache_dir` like the other two rather than round it.
         name.mkdir(mode=SEALED_DIR_MODE)
-        os.chown(name, os.getuid(), -1)  # a real directory, and this is the owner check's turn
-
-    if plant == "stranger":
-        # The one case the test host cannot produce: a directory owned by somebody else needs a
-        # second uid. The check is pinned directly instead.
-        with pytest.raises(PermissionError):
-            uvcache._require_own_directory(name, os.getuid() + 1)
-        return
+        stranger = os.getuid() + 1  # read before the patch, or the lambda would call itself
+        monkeypatch.setattr(uvcache.os, "getuid", lambda: stranger)
 
     assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) is None
+    # One of these two is the one that bites, depending on the plant: `chmod` and `chown` follow
+    # a link, so an unguarded symlink case would show in the *target's* mode and leave the link
+    # itself untouched, while an unguarded file or foreign directory shows in its own.
     assert mode(victim) == SEALED_DIR_MODE, "nothing a link pointed at was opened up"
-    assert mode(name) != WORKSPACE_DIR_MODE and mode(name) != CACHE_ROOT_MODE, (
+    assert stat.S_IMODE(name.lstat().st_mode) not in (WORKSPACE_DIR_MODE, CACHE_ROOT_MODE), (
         "and the planted entry itself was left as it was found"
     )
     lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()]
