@@ -349,12 +349,18 @@ def test_the_pre_commit_bump_job_derives_the_rev_list_its_body_quotes() -> None:
     for step in freeze["steps"]:
         commands = _commands(step.get("run", ""))
         assert "revs" not in commands, f"freeze still derives a rev list: {commands}"
-        assert "/tmp/frozen/" not in commands or (
-            "cp .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml" in commands
-        )
     collect = next(s for s in freeze["steps"] if "/tmp/frozen" in _commands(s.get("run", "")))
     assert _commands(collect["run"]).count("/tmp/frozen/") == 1, (
         "a second file crosses the boundary beside the config"
+    )
+
+    # Finding 1 of this change's own review: `mkdir -p` is not what keeps the artefact to
+    # one file -- a hook that has already created that directory and filled it loses nothing
+    # to it, and the step runs after the hooks. The upload names the file, so the artefact
+    # has one entry whatever else is sitting in /tmp/frozen.
+    upload = next(s for s in freeze["steps"] if "actions/upload-artifact@" in s.get("uses", ""))
+    assert upload["with"]["path"] == "/tmp/frozen/pre-commit-config.yaml", (
+        "the artefact is uploaded as a directory, so a hook's file rides along in it"
     )
 
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
@@ -370,10 +376,14 @@ def test_the_pre_commit_bump_job_derives_the_rev_list_its_body_quotes() -> None:
     derive = ".pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml > /tmp/revs.diff"
     assert "git diff -U0 --no-index" in commands, "the rev list is not derived here"
     assert derive in commands, "the rev list is not derived from the verified config"
-    # A comparison git could not make must not read as a list of no revs: 0 is "identical"
-    # and 1 is "they differ", which is the answer the step exists for.
+    # A comparison git could not make must not read as a list of no revs. The status alone
+    # does not say the comparison happened: 0 is "identical" and 1 is "they differ", which is
+    # the answer the step exists for, and git reports a path it could not read as 1 with an
+    # empty diff -- so the empty diff is the check and the status only catches a usage error.
     assert "status=$?" in commands, "git's status is not kept"
-    assert '[ "${status}" -gt 1 ]' in commands, "a failed comparison is not a failure"
+    assert '[ "${status}" -gt 1 ] || [ ! -s /tmp/revs.diff ]' in commands, (
+        "an unreadable artefact reads as a diff that moves no rev"
+    )
     assert "::error::could not diff the frozen config" in commands
 
     # The filter and the gate in one, and each can be deleted alone: a grep whose output

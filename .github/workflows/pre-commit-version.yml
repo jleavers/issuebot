@@ -128,11 +128,16 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
       # The config, and nothing beside it (#168). This step runs *after* the hooks, so
-      # whatever it copies off this runner is a file they have had the chance to rewrite --
-      # as the same user, with /tmp writable. `open-pr` gates the config three ways and binds
-      # it to the branch name; a second file would arrive there checked by nothing, and the
-      # rev list the pull request body quotes was exactly that. `open-pr` derives it for
-      # itself now, from the config it has just verified.
+      # anything it takes off this runner is a file they have had the chance to write -- as
+      # the same user, with /tmp writable. `open-pr` gates the config three ways and binds it
+      # to the branch name; a second file would arrive there checked by nothing, and the rev
+      # list the pull request body quotes was exactly that. `open-pr` derives it for itself
+      # now, from the config it has just verified.
+      #
+      # `mkdir -p` is not what keeps the artefact to one file: a hook that has already
+      # created /tmp/frozen and filled it loses nothing to it. The upload below names the
+      # file rather than the directory, so the artefact has one entry whatever else is
+      # sitting there, and `open-pr` reads that one entry and no other.
       - name: Collect the frozen config for the job that can push
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -144,7 +149,9 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         with:
           name: frozen-pre-commit-config
-          path: /tmp/frozen/
+          # The file, not the directory: see the step above. `download-artifact` unpacks it
+          # to /tmp/frozen/pre-commit-config.yaml in the job that pushes, as before.
+          path: /tmp/frozen/pre-commit-config.yaml
           retention-days: 1
 
   open-pr:
@@ -216,17 +223,24 @@ jobs:
           git diff -U0 --no-index -- \
             .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml > /tmp/revs.diff \
             || status=$?
-          # 0 is "identical" and 1 is "they differ", which is the answer this step is here
-          # for; anything above that is git failing to make the comparison at all, which must
-          # not read as a list of no revs.
-          if [ "${status}" -gt 1 ]; then
-            echo "::error::could not diff the frozen config against ${GITHUB_REF_NAME}"
+          # 0 is "identical" and 1 is "they differ", which is the answer this step is
+          # here for -- so the status alone does not say the comparison happened at all. git
+          # reports a path it could not read as 1 with an empty diff, exactly as it reports
+          # two identical files as 0 with one, and only a usage error is above 1. So the
+          # empty diff is the check, and both readings of it are refused: `freeze` only got
+          # this far having found a rev to move, so nothing to quote means these are not the
+          # two files this step thinks it is comparing, and a comparison git did not make
+          # must not fall through to the filter below and read as a list of no revs.
+          if [ "${status}" -gt 1 ] || [ ! -s /tmp/revs.diff ]; then
+            echo "::error::could not diff the frozen config against ${GITHUB_REF_NAME}" \
+              "(git exited ${status})"
             exit 1
           fi
           # The filter and the gate in one: a line that is not a `rev:` diff line is dropped
-          # rather than quoted, and a list with nothing left in it fails the run rather than
-          # reaching the body as an empty fence -- `freeze` only gets here having found a
-          # move, so no rev having moved means the two files are not what this step thinks.
+          # rather than quoted, and a diff with none left in it fails the run rather than
+          # reaching the body as an empty fence. `autoupdate --freeze` moves `rev:` lines and
+          # nothing else, and the branch-name gate above has already refused any config the
+          # hooks rewrote, so a diff that changes something else is not this job's to quote.
           if ! grep -E '^[-+] *rev: ' /tmp/revs.diff > /tmp/revs.txt; then
             echo "::error::the frozen config moves no rev against ${GITHUB_REF_NAME}"
             exit 1
