@@ -174,13 +174,17 @@ what the session may do within them.
   line, and adding `--restricted` lists neither. So the flag would make that argument a no-op,
   and silently void the README's promise that `claude.setting_sources: [project]` loads a
   target repository's own permission rules and hooks -- a documented opt-in that would keep
-  reading as honoured while doing nothing. And the mode's most valuable clause is the one that might
-  break the workflow outright: with `--permission-prompts none` there is no approval surface,
+  reading as honoured while doing nothing. And the mode's most valuable clause is the one that
+  might break the workflow outright: with `--permission-prompts none` there is no approval
+  surface,
   so anything routed to "only a person or the configured permission handler" is denied
   automatically, and every issuebot session commits, merges and pushes. Whether that clause
-  reaches `git commit` was **not measured**: deciding this needs a permission decision on a
-  real tool call, which needs a model turn, and the session that decided it held no Claude
-  credential. That measurement is the first thing a reconsideration owes.
+  reaches `git commit` was **not measured**, and neither was whether the working-directory
+  confinement binds `Bash` or only the file tools -- which matters because adoption has to hand
+  `Bash` back, and a session holding it writes wherever its uid reaches whatever the file tools
+  may touch. Both need a permission decision on a real tool call, so both need a model turn,
+  and the session that decided this held no Claude credential. They are the first thing a
+  reconsideration owes.
 
   What the mode would add, set against that, is mostly already held: the session runs at its
   own uid in its own workspace (#75, #121), the worker reads back out of it only through
@@ -190,9 +194,11 @@ what the session may do within them.
   #151), the environment spelling of that last one is refused (#171), and egress goes through
   an allow-listing proxy (#126). `bypassPermissions` is refused by a mode an operator sets in
   the front matter, outside the prompt, so refusing it guards a misconfiguration rather than
-  the threat this document is about. The genuinely new confinement is over the account's own
-  `$HOME`, which the sweeps already clear per turn. So the trade is a mandatory silently-lossy
-  allow list and a voided promise, for confinement largely bought elsewhere.
+  the threat this document is about. What is left is the confinement over the account's own
+  `$HOME` -- worth having, but bounded above by the `Bash` question just named, and standing
+  beside sweeps that already clear that home before every turn and every login shell. So the
+  trade is a mandatory silently-lossy allow list and a voided promise, for confinement that is
+  largely bought elsewhere and whose remainder is not yet known to hold.
 
   Reopen it if `--tools` grows a way to fail loudly on a name it does not know -- an error, a
   warning, or an init line issuebot could assert the resolved set against at build, the way
