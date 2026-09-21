@@ -760,7 +760,15 @@ version, and moves by hand.
   `_resume_plan`, because what keeps it off a *running* issue is `admit` answering `busy` long
   before it reaches the budget, not the state. Its block names the way out, which differs by
   ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
-  is not for `spend`, whose figure never resets.
+  is not for `spend`, whose figure never resets. Its note follows the blocked escape's rule
+  (#157), through the `_escape_note` the two share: `_has_budget_block` reads the same body
+  the block is appended to, so a non-retryable failure of either half would leave the refused
+  issue where the gate found it, to be refused again on every tick with the escalation a human
+  would read never written. The label moves first, the block is written blind after an
+  unreadable lookup (`budget_escape_workpad_unreadable`) and left after a refused append
+  (`budget_escape_note_failed`), and a retryable failure keeps the next tick's retry. That is
+  independent of `announce=` below, which is about a second *report* of one escalation rather
+  than about whether the block landed, so the note is reported on both of this function's exits.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
   refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
   the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
@@ -809,16 +817,20 @@ version, and moves by hand.
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
   otherwise, plus `PrOpened`). `actions.py`: `claim` (`in_progress`, markers cleared),
   `blocked_escape` (workpad block then
-  `review`, idempotent per run id -- and label-first when the workpad lookup fails
-  non-retryably, #128: that read *is* the idempotence, so a `response` error on a page past
+  `review`, idempotent per run id -- and label-first whenever the note fails
+  non-retryably, #128 and #157: the lookup *is* the idempotence, so a `response` error on a page past
   `MAX_COMMENT_PAGES` or a malformed one used to keep the issue in `in_progress` for the life
   of the process while the orchestrator retried every five minutes, and the escape's purpose is
   the label move rather than the note explaining it. So the label moves and the block is then
   appended blind, as a fresh marker comment, on a best-effort basis
   (`blocked_escape_workpad_unreadable` names the read that failed,
   `blocked_escape_note_failed` the write), trading a possible duplicate note for an issue that
-  never leaves `in_progress`. A retryable failure -- `transport`, `rate_limited` -- is still the
-  next tick's to retry, since that read is likely to answer),
+  never leaves `in_progress`. #157 extends the same rule to the *append*: a `response` error on
+  the POST, or a `not_found` on a comment deleted between the read and the write, moves the
+  label and logs `blocked_escape_note_failed` -- and is not written blind afterwards, since the
+  write has just been refused at the one moment it could have been idempotent. Both halves go
+  through one `_escape_note`, which `budget_escape` shares. A retryable failure -- `transport`,
+  `rate_limited` -- is still the next tick's to retry, since that call is likely to answer),
   `finish_terminal` (`complete`, `no_change` or `cancelled`,
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
