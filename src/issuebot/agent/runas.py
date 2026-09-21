@@ -137,8 +137,10 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   ``credential.helper``, ``[alias] x = !sh -c ...``, ``diff.<driver>.textconv``). Both
 #   spellings, because git reads both: ``$XDG_CONFIG_HOME/git/config`` first -- which is
 #   ``~/.config/git/config`` here, since ``XDG_CONFIG_HOME`` is not in ``PASSTHROUGH_NAMES``
-#   and so is not inherited from the worker's environment -- and then ``~/.gitconfig``. Sweeping
-#   one and not the other would leave the channel open at the name git looks at first.
+#   and so is not inherited from the worker's environment, and since #171 a workspace's
+#   ``.issuebot/env`` cannot set it either (``TOOL_CONFIG_ENV_NAMES``, ``runner.py``): the two
+#   halves are what make this a guarantee rather than a default -- and then ``~/.gitconfig``.
+#   Sweeping one and not the other would leave the channel open at the name git looks at first.
 #   ``.ssh/config``: ``ProxyCommand``, ``LocalCommand`` and ``Match exec`` run a shell command
 #   for a matching host. issuebot's own clone is HTTPS through ``gh`` and the default image
 #   installs no ssh client, so nothing issuebot does reads it today; a target repository's hook

@@ -683,15 +683,20 @@ version, and moves by hand.
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
   reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
-  `HOME`, `PROXY_ENV_NAMES`, `XDG_CONFIG_HOME`) keeps `gh` and `claude` running through a typo,
-  and `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`) is the trust boundary: the
-  file sits in the agent's own workspace, so the session can write it, and it must not
-  re-point the `claude` issuebot launches next -- nor, since #171 (spec
+  `HOME`, `PROXY_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and
+  `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
+  `TOOL_CONFIG_ENV_NAMES` (`XDG_CONFIG_HOME`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`) is the
+  trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
-  issue* runs. `GIT_` whole and not a list of names, because `GIT_EDITOR` names a command on a
-  plain `git commit` as surely as `GIT_SSH_COMMAND` does, and a list is one somebody has to
-  keep complete; the deployment's `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the
-  session from `.env` through `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
+  issue* runs, which is the environment spelling of what #151 sweeps from the home. Whole
+  prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain
+  `git commit` as surely as `GIT_SSH_COMMAND` does and `GH_CONFIG_DIR` outranks
+  `XDG_CONFIG_HOME` for `gh`'s shell aliases -- a list is one somebody has to keep complete,
+  and two drafts of this one were not. `SSH_ASKPASS` is a name rather than an `SSH_` prefix
+  because `SSH_AUTH_SOCK` is the deploy-key route a hook author keeps; the deployment's
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
+  `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
   `create_subprocess_exec` raises `ValueError` for one and that is no kind of `OSError`
   (`parse_workspace_env`/`merge_workspace_env` are the pure seam; a complaint names a line

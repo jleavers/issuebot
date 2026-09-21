@@ -88,29 +88,44 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # network rather than let anything off the allow-list (#126).
 # The tool-config entries below are the same rule one step in (#171): `PATH` decides *which*
 # binary `git` and `gh` are, and these decide what that binary does and which further commands
-# it runs. Neither is inherited from the worker, so `.issuebot/env` is the only route in, and
-# the file outlives the session -- a workspace belongs to one issue, so what it would re-point
-# is the next session on that issue.
-TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset({"XDG_CONFIG_HOME"})
-# `GIT_` whole, rather than the handful of names the issue started from. An enumeration here is
-# one somebody has to keep complete against git's own manual, and the first draft of this list
-# was not: `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do `GIT_EDITOR` (on
-# a plain `git commit`, which a session runs constantly), `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`,
-# `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_SSH`, `GIT_EXEC_PATH` (the directory
-# `git <subcommand>` is looked up in) and `GIT_TEMPLATE_DIR` (the hooks copied into the next
-# repository `git init` creates); `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>` and
-# `GIT_CONFIG_VALUE_<n>` sets `alias.x = !...` with no file at all; and `GIT_DIR` and
-# `GIT_WORK_TREE` re-point which repository is being operated on. The prefix covers all of them
-# and whatever git adds next, which is the only version of this that stays true.
-# It costs a deployment nothing, because `.issuebot/env` was never its channel for these: the
-# identity variables are set in `.env`, reach the worker's own environment, and are inherited
-# through `PASSTHROUGH_PREFIXES` (`GIT_AUTHOR_`, `GIT_COMMITTER_`) exactly as before. What is
-# refused is the *session-writable file* re-pointing them, the commit identity a pull request
-# carries included. A hook that needs a setting of its own has `git config --local` in the
-# clone, `git -c` or its own shell for the git it runs itself, and a root-owned `/etc/gitconfig`
-# or `/etc/ssh/ssh_config` in an image built `FROM` this one for a deployment-wide one; what it
-# may not do is hand the variable to the session.
-TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_",)
+# it runs. The file outlives the session -- a workspace belongs to one issue -- so what such a
+# line re-points is the next session on that issue. It is also the environment spelling of what
+# `TOOL_CONFIG_SWEEP` (`runas.py`, #151) removes from the account's home: a sweep of
+# `~/.gitconfig` would leave a guarantee conditional on a variable nothing checked.
+#   `XDG_CONFIG_HOME` is not a git variable at all: it moves the config directory of everything
+#   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
+#   whose aliases may be shell commands. `SSH_ASKPASS` (with `SSH_ASKPASS_REQUIRE`) is git's
+#   documented fallback after `GIT_ASKPASS` and `core.askPass`, and with no controlling
+#   terminal -- the session's condition -- git executes it itself, no ssh client involved.
+#   Names and not an `SSH_` prefix, because `SSH_AUTH_SOCK` is a legitimate route for exactly
+#   the deploy-key case this bound has to leave a hook author.
+TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
+    {"XDG_CONFIG_HOME", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"}
+)
+# `GIT_` and `GH_` whole, rather than the handful of names the issue started from. An
+# enumeration here is one somebody has to keep complete against those tools' own manuals, and
+# two drafts of this list were not. `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command,
+# but so do `GIT_EDITOR` (on a plain `git commit`, which a session runs constantly),
+# `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_SSH`,
+# `GIT_EXEC_PATH` (the directory `git <subcommand>` is looked up in) and `GIT_TEMPLATE_DIR`
+# (the hooks copied into the next repository `git init` creates); `GIT_CONFIG_COUNT` with
+# `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` sets `alias.x = !...` with no file at all;
+# and `GIT_DIR` and `GIT_WORK_TREE` re-point which repository is being operated on. On the `gh`
+# side, `GH_CONFIG_DIR` takes precedence over `$XDG_CONFIG_HOME/gh` for the same aliases, and
+# `GH_EDITOR`/`GH_BROWSER` name commands, while `GH_PAGER` was already fixed and protected --
+# an asymmetry with no reason behind it. The prefixes cover all of them and whatever either
+# tool adds next, which is the only version of this that stays true.
+# The cost, stated where the code is: `GIT_AUTHOR_`/`GIT_COMMITTER_` are caught too, but
+# `.issuebot/env` was never the deployment's channel for them -- they are set in `.env`, reach
+# the worker's own environment and are inherited through `PASSTHROUGH_PREFIXES` exactly as
+# before, and refusing the *session-writable file* from re-pointing the identity a pull
+# request's commits carry is worth having on its own account. Behaviour-only switches with no
+# config equivalent (`GIT_TERMINAL_PROMPT`, `GIT_TRACE*`, `GIT_LFS_SKIP_SMUDGE`) are caught as
+# well, and for those the hook has its own shell around the git it runs, or a derived image.
+# Otherwise a hook that needs a setting has `git config --local` in the clone, `git -c`, and a
+# root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` for a deployment-wide one; what it may
+# not do is hand the variable to the session.
+TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_", "GH_")
 PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
     {
         "GH_TOKEN",

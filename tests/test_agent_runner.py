@@ -401,9 +401,21 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         # deployment sets it: `.env` -> the worker -> `PASSTHROUGH_PREFIXES`.
         "GIT_AUTHOR_NAME",
         "GIT_COMMITTER_EMAIL",
-        # Not a git variable at all: `$XDG_CONFIG_HOME/gh/config.yml` carries shell aliases,
-        # so this re-points the one tool in the session holding `GH_TOKEN`.
+        # `gh`, the one tool in the session holding `GH_TOKEN`. `GH_CONFIG_DIR` takes
+        # precedence over `$XDG_CONFIG_HOME/gh` for the same shell aliases, and `GH_PAGER`
+        # was already protected as a fixed entry -- an asymmetry with no reason behind it.
+        "GH_CONFIG_DIR",
+        "GH_EDITOR",
+        "GH_BROWSER",
+        "GH_HOST",
+        # Not a git or gh variable at all: it moves the config directory of everything
+        # following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml`
+        # among them.
         "XDG_CONFIG_HOME",
+        # git's documented fallback after `GIT_ASKPASS` and `core.askPass`. With no
+        # controlling terminal -- the session's condition -- git executes it itself.
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
     ],
 )
 def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> None:
@@ -416,14 +428,44 @@ def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> No
 
 
 def test_the_tool_config_protections_are_pinned() -> None:
-    """`GIT_` whole rather than an enumeration, which is what makes the bound stay true:
-    `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do `GIT_EDITOR`,
-    `GIT_PAGER`, `GIT_TEMPLATE_DIR` and the rest, and the first draft of this list missed
-    them. Dropping either entry has to be a deliberate edit here as well as in `runner.py`."""
-    assert sorted(TOOL_CONFIG_ENV_NAMES) == ["XDG_CONFIG_HOME"]
-    assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_"]
+    """`GIT_` and `GH_` whole rather than an enumeration, which is what makes the bound stay
+    true: `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do `GIT_EDITOR`,
+    `GIT_PAGER`, `GIT_TEMPLATE_DIR` and `GH_CONFIG_DIR`, and two drafts of this list missed
+    some of them. `SSH_ASKPASS` is a name and not an `SSH_` prefix, because `SSH_AUTH_SOCK` is
+    a legitimate route for the deploy-key case this bound has to leave a hook author. Dropping
+    an entry has to be a deliberate edit here as well as in `runner.py`."""
+    assert sorted(TOOL_CONFIG_ENV_NAMES) == [
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "XDG_CONFIG_HOME",
+    ]
+    assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_", "GH_"]
     assert TOOL_CONFIG_ENV_NAMES <= PROTECTED_ENV_NAMES
     assert set(TOOL_CONFIG_ENV_PREFIXES) <= set(PROTECTED_ENV_PREFIXES)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # No underscore, so not the `GIT_`/`GH_` prefixes however much it looks like one.
+        "GITHUB_WORKSPACE",
+        "GHOSTSCRIPT_HOME",
+        # The base-directory specification's other roots: neither `git` nor `gh` reads them,
+        # and a hook pointing a cache somewhere is exactly what this file is for.
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_DIRS",
+        # The legitimate route for a forwarded deploy key, which is why `SSH_ASKPASS` is a
+        # name here and `SSH_` is not a prefix.
+        "SSH_AUTH_SOCK",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_tool_config_entries(key: str) -> None:
+    """The bound is on configuring the tooling issuebot launches, and a prefix is only safe to
+    state as a prefix if it stops where it says it does."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
 
 
 def test_the_deployments_own_git_identity_still_reaches_the_session() -> None:
