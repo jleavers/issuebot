@@ -147,7 +147,10 @@ what the session may do within them.
   repository's test runner -- unless `--tools` names it back. Adoption therefore forces the
   allow list that the tool policy above refused on purpose, on the ground that "tool names move
   between `claude` releases (`Task` became `Agent`), so a hard-coded one would break sessions
-  silently on the weekly version bump". The same probe confirms the prediction and sharpens it:
+  silently on the weekly version bump". `--tools default` is not a way round it -- under the
+  flag that still comes back without `Bash` -- and `--tools Bash` comes back with `Bash` and
+  nothing else, so the list has to enumerate every tool the workflow needs, by name, which is
+  the shape that was refused. The same probe confirms the prediction and sharpens it:
   `--tools Bash,Edit,NoSuchTool` comes back `Bash,Edit` with nothing on stderr and an init line
   a clean list's is identical to but for the missing tool, and `TodoWrite` -- a real-looking
   name, not a nonsense one -- disappears from a longer list just as quietly. `claude` does have
