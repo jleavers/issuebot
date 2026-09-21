@@ -21,6 +21,7 @@ from issuebot.agent.boundary import ENV_FILE, TURN_STDERR, Boundary, BoundaryErr
 from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
+from issuebot.agent.uvcache import UV_CACHE_ENV, ensure_uv_cache_dir
 from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
@@ -138,8 +139,17 @@ TurnEventKind = Literal[
 ]
 
 
-def agent_environment(environ: Mapping[str, str], *, token: SecretStr | None) -> dict[str, str]:
-    """The minimal environment the agent child and every hook see."""
+def agent_environment(
+    environ: Mapping[str, str], *, token: SecretStr | None, uv_cache: Path | None = None
+) -> dict[str, str]:
+    """The minimal environment the agent child and every hook see.
+
+    ``uv_cache`` is the one thing here the worker *computes* rather than passes through or
+    fixes (#164): the cache directory belongs to the session account and sits under
+    ``workspace.root``, so neither the allow-list above nor a constant could carry it. It joins
+    the environment the way ``GH_TOKEN`` does, and ``None`` -- the host route, an image with no
+    uv, a directory that could not be made -- leaves uv's own default alone.
+    """
     env = {
         name: value
         for name, value in environ.items()
@@ -148,6 +158,8 @@ def agent_environment(environ: Mapping[str, str], *, token: SecretStr | None) ->
     env.update(FIXED_ENVIRONMENT)
     if token is not None:
         env["GH_TOKEN"] = token.get_secret_value()
+    if uv_cache is not None:
+        env[UV_CACHE_ENV] = str(uv_cache)
     return env
 
 
@@ -760,6 +772,7 @@ class ClaudeRunner:
         # The account every turn runs as (#75), or None for the worker's own uid. One
         # account: a pool has been narrowed to this workspace's bound member above (#121).
         account = session_account(settings)
+        self._account = account
         self._runas = RunAs(account) if account else None
         # The worker's side of the line the session writes across (#104): every read of the
         # workspace's env file and of the turn files goes through it. Its session uid is that
@@ -823,7 +836,21 @@ class ClaudeRunner:
         return argv
 
     def child_environment(self) -> dict[str, str]:
-        return agent_environment(self._environ, token=self._token)
+        """What one turn's ``claude -p`` is run with.
+
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+        """
+        return agent_environment(self._environ, token=self._token, uv_cache=self._ensure_uv_cache())
+
+    def _ensure_uv_cache(self) -> Path | None:
+        """This session account's uv cache on the workspaces volume, or ``None`` (#164).
+
+        Asked per turn rather than once in ``__init__``: the directory is the worker's to
+        create, the call is idempotent, and a constructor that touched the filesystem would
+        make every runner a test builds do it too.
+        """
+        return ensure_uv_cache_dir(self._root, self._account, self._environ)
 
     async def run_turn(
         self,

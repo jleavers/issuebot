@@ -336,8 +336,8 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101, #137), clears what a prior session left in the
-  account's *home* for the next one to load. Two lists, both pinned by tests, so dropping a name
+  two blind spots; a fourth verb, `sweep` (#101, #137, #151), clears what a prior session left in the
+  account's *home* for the next one to load. Three lists, all pinned by tests, so dropping a name
   is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
   `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
@@ -352,6 +352,41 @@ version, and moves by hand.
   session at that uid runs, for the container's lifetime. Removing them costs an account nobody
   logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
   which are root's and where the image puts node and the PostgreSQL binaries.
+  And `TOOL_CONFIG_SWEEP`, the same home one tool further out (#151, spec
+  `2026-09-18-session-tool-config-design.md`): `.gitconfig`, `.config/git/config` and
+  `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
+  git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
+  `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
+  (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
+  not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
+  name git looks at first. That no deployment has a reason to leave one of these in a session
+  account's home is what made it a sweep rather than a documented residual: commit identity comes
+  from `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (`PASSTHROUGH_PREFIXES`), `safe.directory` is the image's
+  `--system` entry, the post-clone setup's credential helper is `git config --local` inside the
+  clone, and a deployment that does want global git or ssh config for its sessions has root's
+  `/etc/gitconfig` and `/etc/ssh/ssh_config`, outside the session's privilege domain. The entries
+  are path components rather than names, since each is nested: `_walk` resolves one component at a
+  time and yields the first symlink it meets instead of descending through it, so a `.ssh`
+  replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
+  -- and the directories themselves stay, with `gh`'s configuration beside git's and
+  `known_hosts` beside ssh's.
+  A mode is not a defence against the owner: the sweep runs as the account whose home it is
+  clearing, so a target still there after the first attempt is tried again with the modes put
+  back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
+  does the same for an intermediate directory it cannot stat, and `projects` is relaxed before it
+  is read. Each bit hides a different step and the plant needs none of them: without write the
+  unlink fails, without search nothing inside can be stat'ed (so `_exists` reads the plant as
+  absent and `_walk` yields no target through a closed `~/.config`), and without read
+  `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
+  `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
+  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
+  is an absence, and anything else is an answer this process cannot get until the modes go back.
+  A symlinked `.claude` is yielded as the target rather than descended into, the rule
+  `projects/<project>` already had -- following one would have the *next* session's sweep delete
+  the named entries inside whatever tree the link points at -- and a symlinked target's tree is
+  not walked by the retry either, since `os.walk` follows its own top and the session chooses
+  where that points.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential
@@ -481,6 +516,41 @@ version, and moves by hand.
   where the home is the operator's own, is exempt. The record's
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
+  `uvcache.py` (#164) is the same line drawn around a *cache*: `<workspace.root>/.uv-cache/
+  <account>`, one directory per session account, created by the worker the way it creates a
+  workspace (sealed, then `share_with` -- `1770`, the worker's, enterable by that account's
+  group alone) inside a `0755` root the accounts traverse and cannot write. A cache is a
+  directory one process writes and the next installs *from*, so a shared one would be a
+  surface one session writes for another to execute, which is what the pool exists to
+  prevent; per account it is the boundary the account's own home already draws, and the next
+  session bound to it is what the cache is kept for. What the hardlink does change is that a
+  `.venv` entry *is* the cache's inode, so two workspaces bound to one account share the files
+  their venvs were installed from, and a hardlink reaches past the seal an idle workspace
+  carries -- bounded by the two sessions being the same account at the same uid, which already
+  shares a home holding a per-account uv cache the home sweep names nowhere (so the channel is
+  one uv's default location had too, and what the hardlink adds is that it takes effect without
+  waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
+  session commits and pushes. The alternative gives up what the shape was measured for: the
+  second workspace's venv is free only because it is the first one's files (#176 asks
+  whether the residual is worth closing).
+  `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
+  turn (`ClaudeRunner.child_environment`) and every hook
+  (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an
+  image with no `uv` on the session's `PATH` (the `ISSUEBOT_UV_VERSION` opt-in as the session
+  sees it) and for a directory it could not make -- that last one a `uv_cache_unavailable`
+  warning and then uv's own default, since exporting a path uv cannot write would break every
+  `uv` command where an unset variable only costs a hardlink. It reaches the session as
+  `agent_environment`'s one *computed* entry beside `GH_TOKEN` (`uv_cache=`), because the
+  allow-list carries no `UV_` name and the value is per account and per deployment; it is
+  deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
+  -- which the image no longer sets at all, the `copy` default of #161 having existed only
+  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
+  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
+  them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
+  every account can reach its own directory, and sealing it at each worker start would take
+  every account's cache away. `AccountRegistry.prune` and the terminal sweep work from keys
+  rather than by listing the root and are undisturbed, which #161 believed and #164 proved.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with a timeout and a cap on what they hand back,
   `.issuebot/session.json`, whose `workpad_comment_id` is the
@@ -731,7 +801,15 @@ version, and moves by hand.
   `_resume_plan`, because what keeps it off a *running* issue is `admit` answering `busy` long
   before it reaches the budget, not the state. Its block names the way out, which differs by
   ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
-  is not for `spend`, whose figure never resets.
+  is not for `spend`, whose figure never resets. Its note follows the blocked escape's rule
+  (#157), through the `_escape_note` the two share: `_has_budget_block` reads the same body
+  the block is appended to, so a non-retryable failure of either half would leave the refused
+  issue where the gate found it, to be refused again on every tick with the escalation a human
+  would read never written. The label moves first, the block is written blind after an
+  unreadable lookup (`budget_escape_workpad_unreadable`) and left after a refused append
+  (`budget_escape_note_failed`), and a retryable failure keeps the next tick's retry. That is
+  independent of `announce=` below, which is about a second *report* of one escalation rather
+  than about whether the block landed, so the note is reported on both of this function's exits.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
   refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
   the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
@@ -780,16 +858,20 @@ version, and moves by hand.
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
   otherwise, plus `PrOpened`). `actions.py`: `claim` (`in_progress`, markers cleared),
   `blocked_escape` (workpad block then
-  `review`, idempotent per run id -- and label-first when the workpad lookup fails
-  non-retryably, #128: that read *is* the idempotence, so a `response` error on a page past
+  `review`, idempotent per run id -- and label-first whenever the note fails
+  non-retryably, #128 and #157: the lookup *is* the idempotence, so a `response` error on a page past
   `MAX_COMMENT_PAGES` or a malformed one used to keep the issue in `in_progress` for the life
   of the process while the orchestrator retried every five minutes, and the escape's purpose is
   the label move rather than the note explaining it. So the label moves and the block is then
   appended blind, as a fresh marker comment, on a best-effort basis
   (`blocked_escape_workpad_unreadable` names the read that failed,
   `blocked_escape_note_failed` the write), trading a possible duplicate note for an issue that
-  never leaves `in_progress`. A retryable failure -- `transport`, `rate_limited` -- is still the
-  next tick's to retry, since that read is likely to answer),
+  never leaves `in_progress`. #157 extends the same rule to the *append*: a `response` error on
+  the POST, or a `not_found` on a comment deleted between the read and the write, moves the
+  label and logs `blocked_escape_note_failed` -- and is not written blind afterwards, since the
+  write has just been refused at the one moment it could have been idempotent. Both halves go
+  through one `_escape_note`, which `budget_escape` shares. A retryable failure -- `transport`,
+  `rate_limited` -- is still the next tick's to retry, since that call is likely to answer),
   `finish_terminal` (`complete`, `no_change` or `cancelled`,
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
