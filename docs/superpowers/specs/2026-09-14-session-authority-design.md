@@ -132,13 +132,12 @@ what the session may do within them.
   the model's own egress and the container's remains.
 - **`--restricted`.** `claude` has a mode that removes the code-running tools and `WebFetch`
   unless `--tools` names them, confines the file tools to the working directories, refuses
-  `bypassPermissions`,
-  ignores user, project and local settings files, and lets only a person or the configured
-  permission handler approve writes to settings, git and tool-configuration files. **Declined
-  in #127** -- not adopted as a default, and not added as an opt-in `claude.restricted` either,
-  since a setting this project cannot recommend turning on is a supported surface bought for
-  nothing. The reason is the allow list, and it is the one this document already gives two
-  sections above.
+  `bypassPermissions`, ignores user, project and local settings files, and lets only a person
+  or the configured permission handler approve writes to settings, git and tool-configuration
+  files. **Declined in #127** -- not adopted as a default, and not added as an opt-in
+  `claude.restricted` either, since a setting this project cannot recommend turning on is a
+  supported surface bought for nothing. The reason is the allow list, and it is the one this
+  document already gives two sections above.
 
   The mode does not leave the choice open. Measured against the image's own `claude` 2.1.263,
   through the credential-free init-line probe the CI `docker` job already uses for
@@ -149,21 +148,21 @@ what the session may do within them.
   between `claude` releases (`Task` became `Agent`), so a hard-coded one would break sessions
   silently on the weekly version bump". `--tools default` is not a way round it -- under the
   flag that still comes back without `Bash` -- and `--tools Bash` comes back with `Bash` and
-  nothing else, so the list has to enumerate every tool the workflow needs, by name, which is
-  the shape that was refused. The same probe confirms the prediction and sharpens it:
-  `--tools Bash,Edit,NoSuchTool` comes back `Bash,Edit` with nothing on stderr and an init line
-  a clean list's is identical to but for the missing tool, and `TodoWrite` -- a real-looking
-  name, not a nonsense one -- disappears from a longer list just as quietly. `claude` does have
-  a way to refuse an argument it does not recognise, and a tool name is not on it: an unknown
-  *flag* stops at parse, `error: unknown option` on stderr and no init line at all. (The probe
-  holds no credential, so every run of it ends at the login check and the exit status says
-  nothing either way -- which is itself the point, since the signal would have to be one a
-  build could read.) So the failure is not merely closed, it is *silent*: a rename would start a
-  session that looks healthy, has no way to do its work, and fails `max_attempts` times per
-  issue with claude's own words rather than a build that stops. `claude-code-version.yml`
-  bumps this deployment weekly, which is the cadence the hazard runs at. The Dockerfile's
-  `claude --help` assertions cannot cover it, because the flag would still be there; what
-  the argument list resolves *to* is what moves.
+  nothing else, so the list has to enumerate every tool the workflow needs, by name. The same
+  probe confirms the prediction and sharpens it: `--tools Bash,Edit,NoSuchTool` comes back
+  `Bash,Edit` with nothing on stderr and an init line identical to a clean list's but for the
+  missing tool, and `TodoWrite` -- a real-looking name, not a nonsense one -- disappears from a
+  longer list just as quietly. `claude` does have a way to refuse an argument it does not
+  recognise, and a tool name is not on it: an unknown *flag* stops at parse, `error: unknown
+  option` on stderr and no init line at all. (The probe holds no credential, so every run of it
+  that gets past parse ends at the login check, and the exit status is 1 for a clean list, an
+  unknown name and an unknown flag alike -- so it says nothing either way, which is itself the
+  point, since the signal would have to be one a build could read.) So the failure is not
+  merely closed, it is *silent*: a rename would start a session that looks healthy, has no way
+  to do its work, and fails `max_attempts` times per issue with claude's own words rather than
+  a build that stops. `claude-code-version.yml` bumps this deployment weekly, which is the
+  cadence the hazard runs at. The Dockerfile's `claude --help` assertions cannot cover it,
+  because the flag would still be there; what the argument list resolves *to* is what moves.
 
   Two of the three doubts the issue was filed with are settled, so that nobody spends the
   investigation again. The version floor is **not** an obstacle: the changelog carried in the
@@ -185,18 +184,18 @@ what the session may do within them.
   target repository's own permission rules and hooks -- a documented opt-in that would keep
   reading as honoured while doing nothing. Nor is it only the opt-in: the flag ignores the user
   scope too, which is the default, so `claude.setting_sources` would stop describing what the
-  session loads under *any* value. That the default's loss costs this deployment little -- the
-  sweeps clear those surfaces before every turn anyway (#101, #137, #151) -- is not the same as
-  a setting that still means what it says. And the mode's most valuable clause is the one that
-  might break the workflow outright: with `--permission-prompts none` there is no approval
-  surface, so anything routed to "only a person or the configured permission handler" is denied
-  automatically, and every issuebot session commits, merges and pushes. Whether that clause
-  reaches `git commit` was **not measured**, and neither was whether the working-directory
-  confinement binds `Bash` or only the file tools -- which matters because adoption has to hand
-  `Bash` back, and a session holding it writes wherever its uid reaches whatever the file tools
-  may touch. Both need a permission decision on a real tool call, so both need a model turn,
-  and the session that decided this held no Claude credential. They are the first thing a
-  reconsideration owes.
+  session loads under *any* value. That the default's loss costs this deployment little -- what
+  the user scope carries is `CLAUDE_HOME_SWEEP`'s list, cleared before every turn anyway (#101)
+  -- is not the same as a setting that still means what it says. And the mode's most valuable
+  clause is the one that might break the workflow outright: with `--permission-prompts none`
+  there is no approval surface, so anything routed to "only a person or the configured
+  permission handler" is denied automatically, and every issuebot session commits, merges and
+  pushes. Whether that clause reaches `git commit` was **not measured**, and neither was
+  whether the working-directory confinement binds `Bash` or only the file tools -- which
+  matters because adoption has to hand `Bash` back, and a session holding it writes wherever
+  its uid reaches whatever the file tools may touch. Both need a permission decision on a real
+  tool call, so both need a model turn, and the session that decided this held no Claude
+  credential. They are the first thing a reconsideration owes.
 
   What the mode would add, set against that, is mostly already held: the session runs at its
   own uid in its own workspace (#75, #121), the worker reads back out of it only through
