@@ -819,7 +819,12 @@ _GLOB_METACHARACTERS = frozenset("*?[]{}(),!\\\n")
 
 
 def claude_md_allowlist(*, trees: Sequence[Path] = (), files: Sequence[Path] = ()) -> str | None:
-    """The ``--settings`` document confining CLAUDE.md and its ``@`` includes to these paths.
+    """The ``--settings`` document keeping CLAUDE.md and its ``@`` includes to these paths.
+
+    "Keeping", not "confining": claude matches the exclusion against the path as written and
+    only then resolves it, so a symlink among these paths is still followed out of them. That
+    is measured and recorded in the spec, and it is why the argument is a narrowing rather
+    than a boundary.
 
     ``trees`` are allowed with everything under them, ``files`` exactly. The split is the
     point: the workspace is a tree, because a clone's instruction files may include anything

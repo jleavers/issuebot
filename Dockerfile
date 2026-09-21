@@ -441,8 +441,9 @@ ENV LANG=C.UTF-8 \
 # would break those deployments one session at a time; --setting-sources is what keeps the
 # clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
 # passed on every turn whatever the front matter says; and --settings carries the CLAUDE.md
-# allow-list of #135, which confines what claude loads as instructions to the workspace and
-# the account's own user memory, is passed on every turn and is not a setting either. Then the delegation itself, as the
+# allow-list of #135, which keeps what claude loads as instructions to the workspace and the
+# account's own user memory, is passed on every turn and is not a setting either (a symlink
+# is still followed out of those; the spec records it). Then the delegation itself, as the
 # worker will use it: sudo, the account, and claude under it.
 # The last two lines read the account list back (#142). It is what `agent.run_as` resolves to
 # in every container, so a build that wrote a list naming nothing would ship an image whose

@@ -210,10 +210,16 @@ while an `@` include pointing outside the clone and an `@` include of
 preference: with `.claude/settings.json` in the clone setting `claudeMdExcludes` back to `[]`,
 the argv value still won and the external includes were still not read -- which is the property
 AC2 asked for, "cannot be switched off by a setting". The mechanism is union rather than
-precedence -- the sources' arrays are concatenated -- so it holds in the direction that matters
-and not in the other: no source can remove the argv's arm, and any source can *add* an
-exclusion. A clone that sets `claudeMdExcludes` can therefore make its own instruction files
-not load, which costs it nothing it could not achieve by deleting them.
+precedence -- the sources' arrays are concatenated, measured separately, since a clone setting
+`[]` cannot tell the two apart -- so it holds in the direction that matters and not in the
+other: no source can remove the argv's arm, and any source can *add* one. Under the
+`project`/`local` opt-in, that means a clone's `.claude/settings.json` can suppress any
+`User`, `Project` or `Local` memory file, the account's *own* `~/.claude/CLAUDE.md` included
+(measured: named in a clone exclusion, it went from read to not read). `Managed` is the only
+immune type, `Sgr` returning false for it. That is a clone silently stripping instructions it
+did not write rather than its own, so it is worth stating; it is reachable only under the
+opt-in `validate` warns about, and stripping instructions is the weaker half of what that
+opt-in already grants, which is running a hook.
 
 Five things about the shape, each of which a simpler one gets wrong.
 
@@ -260,24 +266,42 @@ clone:
 So the key still grants a reach outside the workspace; what the allow-list changed is the
 spelling it takes. In the loader, `Q0` matches `Sgr` against the *unresolved* path, and only
 then resolves with `To()` and skips its own containment test `if (d > 0 && !v && !OZ(x))`
-whenever `v` -- the approval -- is true. An exclusion list keyed on the path as written cannot
-see through that, so no argument closes it: it is claude's rule that a symlink is followed
-once external includes are on, and `CLAUDE_CODE_DISABLE_CLAUDE_MDS` is still the only thing
-that stops it, at the price the table already showed.
+whenever `v` -- external includes -- is on. An exclusion list keyed on the path as written
+cannot see through that, so no argument closes it: it is claude's rule that a symlink is
+followed once external includes are on. On the command line, and while the key is true,
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS` is the only thing that stops it, at the price the table
+already showed -- the key being false stops it too, and so does the sweep.
 
-This is narrower than what #135 found and it is recorded rather than fixed, which is the
-distinction the original "Residual" got wrong -- that one was an absence of measurement, this
-is a measurement. It needs a session to plant both the symlink and the key, so it is bounded to
-the `project`/`local` opt-in and to a workspace that survives to a later session, which means a
-rework of the same issue. Closing it would mean the worker refusing symlinks among the clone's
-instruction paths before each turn, which is a check against the repository's own contents
-rather than against claude, and is a separate piece of work.
+**And it is not bounded to the opt-in**, which the first draft of this section got wrong. The
+same escape runs through the *user* memory arm at the shipped `--setting-sources user` with the
+key **false**, because `v` for `User` is `o && (t !== "User" || wgr())` with `o` passed `!0`:
+external includes are on for user memory whatever the key says, as this document says two
+sections up. Measured, with the argv verbatim: `<config>/CLAUDE.md` holding `@rules/ulink.md`,
+where `<config>/rules/ulink.md` is a symlink to a file outside, and the outside file is read.
+
+| arm | key | `--setting-sources` | outside file |
+|---|---|---|---|
+| clone `CLAUDE.md` -> in-clone symlink | `true` | `user,project` | **read** |
+| clone `CLAUDE.md` -> in-clone symlink | `false` | `user,project` | not read |
+| user `CLAUDE.md` -> in-`rules` symlink | `false` | `user` | **read** |
+
+So the real bound on this is not `claude.setting_sources` but `CLAUDE_HOME_SWEEP`, since
+`CLAUDE.md` and `rules` are both swept names: the sweep window, the host route where nothing
+sweeps, and the `$CLAUDE_CONFIG_DIR` gap below. The clone arm adds the opt-in and a workspace
+that survives to a later session, which means a rework of the same issue.
+
+It is recorded rather than fixed, which is the distinction the original "Residual" got wrong --
+that one was an absence of measurement, this is a measurement. Closing it would mean the worker
+refusing symlinks among the instruction paths before each turn, a check against the
+repository's and the home's own contents rather than against claude, and a separate piece of
+work.
 
 Two smaller ones, both measured and both recorded here:
 
-- Where `<config>/rules` is itself a symlink, claude matches the exclusion against the
-  *resolved* path, so the argument stops those rules loading. The arms are the paths as
-  written on purpose: resolving them would feed a path the session may own into the fence,
+- Rules entries are loaded by their *resolved* path, so the argument stops one loading
+  wherever that resolution leaves the arms: a symlinked `<config>/rules`, a symlinked entry
+  inside it, a symlinked config directory or home, or a symlinked component of the workspace
+  path for the clone's own `.claude/rules`. The arms are the paths as written on purpose: resolving them would feed a path the session may own into the fence,
   where a planted `rules -> /` would widen it to everything. An operator who keeps user memory
   elsewhere has `$CLAUDE_CONFIG_DIR`, which the allow-list does follow.
 - `CLAUDE_HOME_SWEEP` walks `~/.claude` literally, so a deployment that sets
@@ -345,7 +369,8 @@ For the CLAUDE.md allow-list (#135), in the same file:
   is the part a reasonable edit would get wrong in the direction that loads nothing.
 - `test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell` and
   `test_no_claude_md_allow_list_without_a_home` pin the two ways the argument is omitted
-  rather than guessed, and `test_the_claude_md_allow_list_keeps_the_account_home_out_of_the_tree`
+  rather than guessed, `test_an_unspellable_workspace_leaves_no_confinement_and_says_so` pins
+  that the first of them says so rather than dropping the confinement in silence, and `test_the_claude_md_allow_list_keeps_the_account_home_out_of_the_tree`
   and `test_the_claude_md_allow_list_follows_claude_config_dir` pin which config paths it names.
 - `tests/test_agent_runas.py::test_the_claude_md_allow_list_names_the_session_accounts_home`
   pins the one thing that differs between the two routes, on the production one, with a `HOME`

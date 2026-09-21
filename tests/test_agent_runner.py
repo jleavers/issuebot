@@ -301,9 +301,7 @@ def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> N
     assert claude_md_allowlist(trees=[Path("/a")], files=[Path(root)]) is None
 
 
-def test_an_unspellable_workspace_leaves_no_confinement_and_says_so(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_an_unspellable_workspace_leaves_no_confinement_and_says_so(tmp_path: Path) -> None:
     """The fail-open branch through the public surface, and the warning that marks it (#135).
 
     `claude_md_allowlist` declines a path it cannot spell rather than emitting a pattern that
@@ -312,12 +310,16 @@ def test_an_unspellable_workspace_leaves_no_confinement_and_says_so(
     every instruction file -- but it is not one to make silently, since nothing downstream
     would show it.
     """
-    configure_logging()
-    root = tmp_path / "work[1]"
-    runner = ClaudeRunner(settings(root), environ={"HOME": "/home/agent"})
-    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=root / "ws")
+    stream = io.StringIO()
+    configure_logging(level="WARNING", fmt="json", stream=stream)
+    try:
+        root = tmp_path / "work[1]"
+        runner = ClaudeRunner(settings(root), environ={"HOME": "/home/agent"})
+        argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=root / "ws")
+    finally:
+        configure_logging(stream=io.StringIO())
     assert "--settings" not in argv
-    lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()]
+    lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
     [warning] = [line for line in lines if line["event"] == "claude_md_allowlist_unavailable"]
     assert warning["level"] == "warning"
     assert warning["reason"] == "path not expressible"
