@@ -598,8 +598,10 @@ def _setting_sources_check(settings: Settings) -> Check:
         f"{sources}; the clone's CLAUDE.md and .claude/ (settings, hooks, skills) are "
         "claude's own configuration for every session, and anyone who can merge to "
         f"{settings.github.repo} can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way, and their @ includes cannot leave the workspace "
-        "under --settings claudeMdExcludes); omit the setting to load only the user's"
+        "--strict-mcp-config either way, and --settings claudeMdExcludes confines what "
+        "claude loads as instructions to the workspace and the account's own user memory, so "
+        "neither an @ include nor a CLAUDE.md above the workspace reaches the session); omit "
+        "the setting to load only the user's"
     )
     return Check(subject, "warn", detail)
 

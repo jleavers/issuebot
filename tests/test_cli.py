@@ -743,8 +743,10 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
         "[WARN] claude.setting_sources: user, project; the clone's CLAUDE.md and .claude/ "
         "(settings, hooks, skills) are claude's own configuration for every "
         "session, and anyone who can merge to o/r can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way, and their @ includes cannot leave the workspace "
-        "under --settings claudeMdExcludes); omit the setting to load only the user's" in out
+        "--strict-mcp-config either way, and --settings claudeMdExcludes confines what "
+        "claude loads as instructions to the workspace and the account's own user memory, so "
+        "neither an @ include nor a CLAUDE.md above the workspace reaches the session); omit "
+        "the setting to load only the user's" in out
     )
 
 

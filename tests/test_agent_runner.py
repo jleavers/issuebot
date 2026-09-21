@@ -86,7 +86,8 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         # #135: CLAUDE.md and its `@` includes are confined to this workspace and the account's
         # own `~/.claude`, so an approval in `~/.claude.json` reaches nothing outside them.
         "--settings",
-        '{"claudeMdExcludes": ["!{%s,/home/agent/.claude}/**"]}' % (tmp_path / "ws"),
+        '{"claudeMdExcludes": ["!{%s/**,/home/agent/.claude/rules/**,'
+        '/home/agent/.claude/CLAUDE.md}"]}' % (tmp_path / "ws"),
         "--session-id",
         SESSION_ID,
         "--disallowedTools",
@@ -215,22 +216,66 @@ def test_build_argv_always_confines_claude_md_to_the_workspace_and_the_account(
     runner = ClaudeRunner(settings(tmp_path, **extra), environ={"HOME": "/home/agent"})  # type: ignore[arg-type]
     argv = runner.build_argv(session_id=SESSION_ID, resume=resume, workspace=tmp_path / "ws")
     assert json.loads(argv[argv.index("--settings") + 1]) == {
-        "claudeMdExcludes": [f"!{{{tmp_path / 'ws'},/home/agent/.claude}}/**"]
+        "claudeMdExcludes": [
+            f"!{{{tmp_path / 'ws'}/**,/home/agent/.claude/rules/**,/home/agent/.claude/CLAUDE.md}}"
+        ]
     }
 
 
-def test_the_claude_md_allow_list_is_one_negated_pattern_over_every_root() -> None:
-    """One brace, not one pattern per root (#135).
+def test_the_claude_md_allow_list_is_one_negated_pattern_over_every_arm() -> None:
+    """One brace, not one pattern per arm (#135).
 
-    picomatch matches a list when *any* pattern matches, so a negation per root would have
-    each one match everything outside its own root, and the two would OR together to "exclude
+    picomatch matches a list when *any* pattern matches, so a negation per arm would have each
+    one match everything outside its own arm, and they would OR together to "exclude
     everything" -- which is not a weaker allow-list but a session with no instructions at all.
     """
-    assert json.loads(claude_md_allowlist([Path("/ws/a"), Path("/home/agent/.claude")])) == {
-        "claudeMdExcludes": ["!{/ws/a,/home/agent/.claude}/**"]
+    allowlist = claude_md_allowlist(
+        trees=[Path("/ws/a"), Path("/home/agent/.claude/rules")],
+        files=[Path("/home/agent/.claude/CLAUDE.md")],
+    )
+    assert json.loads(allowlist) == {
+        "claudeMdExcludes": [
+            "!{/ws/a/**,/home/agent/.claude/rules/**,/home/agent/.claude/CLAUDE.md}"
+        ]
     }
-    # One root needs no brace: `{a}` is not reliably one arm to picomatch.
-    assert json.loads(claude_md_allowlist([Path("/ws/a")])) == {"claudeMdExcludes": ["!/ws/a/**"]}
+    # One arm needs no brace: `{a}` is not reliably one arm to picomatch.
+    assert json.loads(claude_md_allowlist(trees=[Path("/ws/a")])) == {
+        "claudeMdExcludes": ["!/ws/a/**"]
+    }
+    assert claude_md_allowlist() is None
+
+
+def test_the_claude_md_allow_list_keeps_the_account_home_out_of_the_tree(tmp_path: Path) -> None:
+    """The config directory is allowed by its two memory paths and never wholesale (#135).
+
+    `claude` reads exactly `CLAUDE.md` and `rules/` from it as user memory. The rest is
+    `.credentials.json`, the transcripts of other sessions at the same uid that
+    `CLAUDE_HOME_SWEEP` deliberately keeps, and the caches -- none of it instructions, and all
+    of it inside the one directory a clone's CLAUDE.md would most want to `@` include.
+    """
+    runner = ClaudeRunner(settings(tmp_path), environ={"HOME": "/home/agent"})
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    (pattern,) = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
+    assert "/home/agent/.claude/CLAUDE.md" in pattern
+    assert "/home/agent/.claude/rules/**" in pattern
+    assert "/home/agent/.claude/**" not in pattern
+
+
+def test_the_claude_md_allow_list_follows_claude_config_dir(tmp_path: Path) -> None:
+    """User memory moves with `$CLAUDE_CONFIG_DIR`, so the allow-list has to (#135).
+
+    `claude` resolves `CLAUDE.md` and `rules/` against `$CLAUDE_CONFIG_DIR` when one is set,
+    and `CLAUDE_` is a `PASSTHROUGH_PREFIXES` entry, so a deployment that sets one in `.env`
+    gets it in the child. Naming `~/.claude` regardless would leave the operator's own user
+    memory excluded by the very flag meant to preserve it -- and silently.
+    """
+    runner = ClaudeRunner(
+        settings(tmp_path), environ={"HOME": "/home/agent", "CLAUDE_CONFIG_DIR": "/etc/cfg"}
+    )
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "claudeMdExcludes": [f"!{{{tmp_path / 'ws'}/**,/etc/cfg/rules/**,/etc/cfg/CLAUDE.md}}"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -242,6 +287,9 @@ def test_the_claude_md_allow_list_is_one_negated_pattern_over_every_root() -> No
         pytest.param("/ws/a?", id="question-mark"),
         pytest.param("/ws/[a]", id="character-class"),
         pytest.param("/ws/!a", id="negation"),
+        # Relative is the dangerous one: `claudeMdExcludes` is matched against absolute paths,
+        # so a relative arm matches nothing and the negation then matches everything.
+        pytest.param("ws/a", id="relative"),
     ],
 )
 def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> None:
@@ -249,13 +297,14 @@ def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> N
     else (#135). The failure that matters is not "too little is excluded" but "everything is":
     a mis-parsed arm excludes every CLAUDE.md, the clone's and the user's alike, and a session
     that silently lost its instructions looks like a session that ignored them."""
-    assert claude_md_allowlist([Path(root), Path("/home/agent/.claude")]) is None
+    assert claude_md_allowlist(trees=[Path(root)], files=[Path("/a/CLAUDE.md")]) is None
+    assert claude_md_allowlist(trees=[Path("/a")], files=[Path(root)]) is None
 
 
 def test_no_claude_md_allow_list_without_a_home(tmp_path: Path) -> None:
-    """A one-root allow-list would stop `~/.claude/CLAUDE.md` loading, so an unresolved home
-    omits the flag instead (#135): the residual is bounded and recorded, where dropping
-    instructions a deployment means to load is a fault that shows up nowhere."""
+    """A workspace-only allow-list would stop the user memory loading, so an unresolved config
+    directory omits the argument instead (#135): the residual it would buy against is bounded
+    and recorded, where dropping instructions a deployment means to load shows up nowhere."""
     runner = ClaudeRunner(settings(tmp_path), environ={})
     assert "--settings" not in runner.build_argv(
         session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"

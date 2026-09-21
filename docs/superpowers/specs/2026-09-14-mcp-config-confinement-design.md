@@ -133,6 +133,12 @@ include *inside* the project is the control that separates "CLAUDE.md was not lo
 | `user` | user's | `true` | not read | not read | read |
 | `project`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` | project's | `true` | not read | not read | not read |
 
+The three file columns are always the *project's* `CLAUDE.md`, its in-clone `@INSIDE.md` and
+the out-of-clone `@../outside/EXTERNAL.md`, whichever row it is. So the `user` rows read
+"project CLAUDE.md not read" -- it is not a setting source there -- beside "EXTERNAL read",
+which is the *user's* CLAUDE.md reaching the same include; that file's own atime is not a
+column. The point of those rows is that the key moves nothing in them.
+
 Two things the table alone does not say.
 
 **claude keys `projects[]` by the git root of the cwd, not by the cwd.** The first run of the
@@ -189,37 +195,62 @@ recurses into*. It is reachable from the command line through `--settings`, and
 `--strict-mcp-config` and for the same reason: it is what makes the run safe rather than what
 makes it convenient, so no setting turns it off.
 
-The value is an allow-list of two roots -- the turn's own workspace and the session account's
-`~/.claude` -- as a single *negated* brace pattern:
+The value is an allow-list of the turn's own workspace and the two paths `claude` reads as
+user memory, as a single *negated* brace pattern:
 
 ```json
-{"claudeMdExcludes": ["!{/workspaces/issuebot-135,/home/agent-5/.claude}/**"]}
+{"claudeMdExcludes": ["!{/workspaces/issuebot-135/**,/home/agent-5/.claude/rules/**,/home/agent-5/.claude/CLAUDE.md}"]}
 ```
 
 Measured with exactly the string `claude_md_allowlist` emits, under `--setting-sources
 user,project` with the key `true`: the clone's `CLAUDE.md`, its `@INSIDE.md`, its
-`.claude/rules/r.md` and the user's `~/.claude/CLAUDE.md` are all still read, and both
-`@` includes pointing outside the clone are not. And it is an argument rather than a
+`.claude/rules/r.md`, the user's `CLAUDE.md` and the user's `rules/ur.md` are all still read,
+while an `@` include pointing outside the clone and an `@` include of
+`<config>/projects/other/notes.md` are both not. And it is an argument rather than a
 preference: with `.claude/settings.json` in the clone setting `claudeMdExcludes` back to `[]`,
 the argv value still won and the external includes were still not read -- which is the property
 AC2 asked for, "cannot be switched off by a setting".
 
-Four things about the shape, each of which a simpler one gets wrong.
+Five things about the shape, each of which a simpler one gets wrong.
 
-- **One negated pattern, not one per root.** picomatch matches a list when *any* pattern
-  matches, so `!a/**` and `!b/**` would each match everything outside their own root and OR
+- **One negated pattern, not one per arm.** picomatch matches a list when *any* pattern
+  matches, so `!a/**` and `!b/**` would each match everything outside their own arm and OR
   together to "exclude everything" -- not a weaker allow-list but a session with no instruction
   files at all. Braced, the negation is evaluated once against the union.
 - **This workspace, not `settings.workspace.root`.** That is every workspace's parent; one
   issue's CLAUDE.md has no more business reading another issue's clone than reading the home.
   So `build_argv` takes the turn's `workspace`, which `run_turn` has already contained.
-- **`~/.claude` has to be the second root.** Without it the flag would stop
-  `~/.claude/CLAUDE.md` loading, which is user memory issuebot does leave in place.
-- **A root it cannot spell means no flag at all.** A brace, a comma or a glob metacharacter in
-  a path would change what the pattern matches, and so would an unresolved home; the failure
-  that matters is not "too little is excluded" but "everything is", which costs the session
-  every instruction file it should have loaded and looks, from outside, like a session that
-  ignored them. `claude_md_allowlist` returns `None` for those and the argument is omitted.
+- **The config directory by its two memory paths, never as a tree.** `claude` loads exactly
+  `CLAUDE.md` and `rules/` from it as user memory -- `dQ("User")` and `age()` in the loader --
+  and those two have to be allowed or the argument would stop the user memory issuebot
+  deliberately leaves in place. Allowing the directory itself would have drawn the fence around
+  the most valuable target in the home: `.credentials.json`, and the other sessions' transcripts
+  under `projects/` that `CLAUDE_HOME_SWEEP` keeps on purpose, would all have become things a
+  clone's `CLAUDE.md` could `@` include. Measured both ways.
+- **`$CLAUDE_CONFIG_DIR` when the deployment sets one.** `claude` resolves that pair against
+  `process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`, and `CLAUDE_` is a
+  `PASSTHROUGH_PREFIXES` entry, so a deployment that sets one gets it in the child. Naming
+  `~/.claude` regardless would leave the operator's own user memory excluded by the very
+  argument meant to preserve it, and silently. The session cannot re-point it either way:
+  `CLAUDE_` is also a `PROTECTED_ENV_PREFIXES` entry, so `.issuebot/env` is refused it.
+- **An arm it cannot spell means no argument at all.** A brace, a comma or a glob
+  metacharacter would change what the pattern matches; so would a *relative* path, and worse,
+  since `claudeMdExcludes` is matched against absolute paths, so a relative arm matches nothing
+  and the negation then matches everything. An unresolved config directory is the same case.
+  The failure that matters is not "too little is excluded" but "everything is", which costs the
+  session every instruction file it should have loaded and looks, from outside, like a session
+  that ignored them. `claude_md_allowlist` returns `None` for all of those.
+
+One behaviour change worth naming, because it is not an `@` include. `claudeMdExcludes`
+excludes the memory *files* themselves, and the loader walks every ancestor directory of the
+cwd up to `/`, taking `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules` and `CLAUDE.local.md`
+from each. Those ancestors are outside the workspace, so the allow-list drops them. That is the
+intended reading of "outside the clone" rather than a side effect -- a `CLAUDE.md` above the
+workspace is as much somebody else's instructions as one in the home -- and under compose the
+ancestors are `/workspaces` and `/`, both the worker's and neither carrying one. On the host
+route, with `workspace.root` under an operator's home and `setting_sources` naming `project`,
+it does mean a `~/CLAUDE.md` of theirs stops reaching the session; `validate`'s
+`claude.setting_sources` line is where that is said.
 
 `Managed` memory is outside all of this by claude's own rule: `Sgr` returns false for any type
 but `User`, `Project` and `Local`, so an operator's root-owned policy CLAUDE.md is untouched --
