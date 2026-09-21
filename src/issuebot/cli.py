@@ -577,14 +577,14 @@ def _claude_auth_check(command: str, *, run_as: str | None = None) -> Check:
 def _setting_sources_check(settings: Settings) -> Check:
     """Whether the clone's files are claude's configuration (#107): a warning when they are.
 
-    The warning names the `@` includes too (#135). That is not a second fact about the same
-    setting but the reach of the first one: `hasClaudeMdExternalIncludesApproved`, in the
-    session account's `~/.claude.json` under the *git root* of the workspace, is what decides
-    whether a Project or Local CLAUDE.md may `@` a path outside the clone -- measured in
-    `docs/superpowers/specs/2026-09-14-mcp-config-confinement-design.md`. Naming `user` alone
-    loads no such CLAUDE.md, so the key reaches nothing and the OK line says so; naming
-    `project` or `local` is the one thing that opens it, and no flag closes it again, so this
-    line is where an operator is told.
+    The warning names what the opt-in does *not* hand over as well, because both exclusions
+    are argv-shaped and neither is this setting's to revoke: `.mcp.json` under
+    `--strict-mcp-config` (#119), and, since #135, anything a `CLAUDE.md` or a `.claude/rules`
+    file `@`-includes from outside the clone -- which `hasClaudeMdExternalIncludesApproved` in
+    the session account's `~/.claude.json` would otherwise allow, and which
+    `--settings claudeMdExcludes` now confines to the workspace and the account's own
+    `~/.claude`. Both are measured in
+    `docs/superpowers/specs/2026-09-14-mcp-config-confinement-design.md`.
     """
     subject = "claude.setting_sources"
     sources = ", ".join(settings.claude.setting_sources)
@@ -598,10 +598,8 @@ def _setting_sources_check(settings: Settings) -> Check:
         f"{sources}; the clone's CLAUDE.md and .claude/ (settings, hooks, skills) are "
         "claude's own configuration for every session, and anyone who can merge to "
         f"{settings.github.repo} can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way); that CLAUDE.md's @ includes may also reach outside "
-        "the clone, on an approval a previous session at this workspace path wrote into the "
-        "session account's ~/.claude.json, which no flag turns off; omit the setting to load "
-        "only the user's"
+        "--strict-mcp-config either way, and their @ includes cannot leave the workspace "
+        "under --settings claudeMdExcludes); omit the setting to load only the user's"
     )
     return Check(subject, "warn", detail)
 

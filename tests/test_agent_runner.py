@@ -32,6 +32,7 @@ from issuebot.agent.runner import (
     agent_environment,
     classify_result,
     claude_auth_status,
+    claude_md_allowlist,
     describe_claude_auth,
     is_auth_failure,
     merge_workspace_env,
@@ -65,8 +66,8 @@ def settings(root: Path, **claude: object) -> Settings:
 
 
 def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
-    runner = ClaudeRunner(settings(tmp_path), environ={})
-    assert runner.build_argv(session_id=SESSION_ID, resume=False) == [
+    runner = ClaudeRunner(settings(tmp_path), environ={"HOME": "/home/agent"})
+    assert runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws") == [
         str(FAKE_CLAUDE),
         "-p",
         "--output-format",
@@ -82,6 +83,10 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         # Never claude's default (#107): the clone's files are not its configuration.
         "--setting-sources",
         "user",
+        # #135: CLAUDE.md and its `@` includes are confined to this workspace and the account's
+        # own `~/.claude`, so an approval in `~/.claude.json` reaches nothing outside them.
+        "--settings",
+        '{"claudeMdExcludes": ["!{%s,/home/agent/.claude}/**"]}' % (tmp_path / "ws"),
         "--session-id",
         SESSION_ID,
         "--disallowedTools",
@@ -95,7 +100,7 @@ def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path)
     denies the model's own network tools and loads no MCP server; an operator widens the deny
     list by emptying it, and even then the MCP flag stays."""
     argv = ClaudeRunner(settings(tmp_path, disallowed_tools=[]), environ={}).build_argv(
-        session_id=SESSION_ID, resume=False
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
     )
     assert "--disallowedTools" not in argv
     assert "--strict-mcp-config" in argv
@@ -103,7 +108,7 @@ def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path)
     # The MCP half is widened the same way, by naming the servers in the front matter, and
     # the strict flag stays so nothing else joins them.
     argv = ClaudeRunner(settings(tmp_path, mcp_config=["a.json", "b.json"]), environ={}).build_argv(
-        session_id=SESSION_ID, resume=False
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
     )
     assert argv[-3:] == ["--mcp-config", "a.json", "b.json"]
     assert "--strict-mcp-config" in argv
@@ -124,7 +129,7 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         ),
         environ={},
     )
-    argv = runner.build_argv(session_id=SESSION_ID, resume=True)
+    argv = runner.build_argv(session_id=SESSION_ID, resume=True, workspace=tmp_path / "ws")
     assert argv[6] == "bypassPermissions"
     assert argv[9] == "--strict-mcp-config"
     assert argv[11] == "2.5"
@@ -173,13 +178,88 @@ def test_build_argv_always_confines_mcp_to_the_command_line(
     and each is named, so a failure says which shape broke rather than which loop iteration.
     """
     runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
-    argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume, workspace=tmp_path / "ws")
     assert "--strict-mcp-config" in argv
     # No `--mcp-config` beside it: the flag keeps only the servers named there, and none of
     # these settings names one, so the loadable set is nothing. The one that does is
     # `claude.mcp_config` (#109), the front matter's, empty by default and pinned in
     # `test_the_tool_policy_is_a_setting_and_nothing_else_widens_it`.
     assert "--mcp-config" not in argv
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resumed"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({}, id="default"),
+        pytest.param({"setting_sources": ["user"]}, id="setting-sources-user"),
+        pytest.param({"setting_sources": ["user", "project"]}, id="setting-sources-user-project"),
+        pytest.param({"setting_sources": ["project", "local"]}, id="setting-sources-project-local"),
+        pytest.param({"permission_mode": "bypassPermissions"}, id="bypass-permissions"),
+    ],
+)
+def test_build_argv_always_confines_claude_md_to_the_workspace_and_the_account(
+    tmp_path: Path, resume: bool, extra: dict[str, object]
+) -> None:
+    """No setting reaches the CLAUDE.md allow-list either (#135), fresh or resumed.
+
+    `hasClaudeMdExternalIncludesApproved`, in the session account's `~/.claude.json` under the
+    git root of the workspace, is what lets a Project or Local `CLAUDE.md` `@`-include a path
+    outside the clone -- measured, and the key is one a `-p` session can write for the next
+    session at that path. `claude.setting_sources` is what decides whether such a CLAUDE.md is
+    loaded at all, so it might look as though `[user]` already covers this; it does not, since
+    the *user* CLAUDE.md's own external includes are on whatever the key says. So the flag is
+    unconditional, like `--strict-mcp-config`, and these are the settings that might look as
+    though they cover it, each named so a failure says which shape broke.
+    """
+    runner = ClaudeRunner(settings(tmp_path, **extra), environ={"HOME": "/home/agent"})  # type: ignore[arg-type]
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume, workspace=tmp_path / "ws")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "claudeMdExcludes": [f"!{{{tmp_path / 'ws'},/home/agent/.claude}}/**"]
+    }
+
+
+def test_the_claude_md_allow_list_is_one_negated_pattern_over_every_root() -> None:
+    """One brace, not one pattern per root (#135).
+
+    picomatch matches a list when *any* pattern matches, so a negation per root would have
+    each one match everything outside its own root, and the two would OR together to "exclude
+    everything" -- which is not a weaker allow-list but a session with no instructions at all.
+    """
+    assert json.loads(claude_md_allowlist([Path("/ws/a"), Path("/home/agent/.claude")])) == {
+        "claudeMdExcludes": ["!{/ws/a,/home/agent/.claude}/**"]
+    }
+    # One root needs no brace: `{a}` is not reliably one arm to picomatch.
+    assert json.loads(claude_md_allowlist([Path("/ws/a")])) == {"claudeMdExcludes": ["!/ws/a/**"]}
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        pytest.param("/ws/a,b", id="comma-splits-the-arms"),
+        pytest.param("/ws/{a}", id="brace-nests-the-arms"),
+        pytest.param("/ws/a*", id="star"),
+        pytest.param("/ws/a?", id="question-mark"),
+        pytest.param("/ws/[a]", id="character-class"),
+        pytest.param("/ws/!a", id="negation"),
+    ],
+)
+def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> None:
+    """A path a glob would re-read is no flag at all, rather than a pattern meaning something
+    else (#135). The failure that matters is not "too little is excluded" but "everything is":
+    a mis-parsed arm excludes every CLAUDE.md, the clone's and the user's alike, and a session
+    that silently lost its instructions looks like a session that ignored them."""
+    assert claude_md_allowlist([Path(root), Path("/home/agent/.claude")]) is None
+
+
+def test_no_claude_md_allow_list_without_a_home(tmp_path: Path) -> None:
+    """A one-root allow-list would stop `~/.claude/CLAUDE.md` loading, so an unresolved home
+    omits the flag instead (#135): the residual is bounded and recorded, where dropping
+    instructions a deployment means to load is a fault that shows up nowhere."""
+    runner = ClaudeRunner(settings(tmp_path), environ={})
+    assert "--settings" not in runner.build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
 
 
 # --- per-issue model override ----------------------------------------------------------
@@ -216,7 +296,9 @@ def test_settings_for_labels_keeps_the_default_when_labels_disagree(tmp_path: Pa
 def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
     base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
     resolved = settings_for_labels(base, ("issuebot/model/fable",))
-    argv = ClaudeRunner(resolved, environ={}).build_argv(session_id=SESSION_ID, resume=False)
+    argv = ClaudeRunner(resolved, environ={}).build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
     assert argv[argv.index("--model") + 1] == "fable"
 
 
