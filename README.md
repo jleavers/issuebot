@@ -1008,21 +1008,29 @@ hook that would truncate it again or append a duplicate per session.
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
   repository's tests need.
-- **So are the names that re-point `git` and `gh`** (#171), for the reason `PATH` is and one
-  step in: `PATH` decides *which* binary `git` and `gh` are, and these decide what that binary
-  does and which further commands it runs. Anything starting `GIT_CONFIG_` — `GIT_CONFIG_GLOBAL`
-  and `GIT_CONFIG_SYSTEM`, which replace the config files git reads with a path of the line's
-  choosing, and the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` triple, which
-  sets any key at all with no file involved — and `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
-  `GIT_EXEC_PATH` and `XDG_CONFIG_HOME`. A git config file names commands (`core.pager`,
-  `credential.helper`, `[alias] x = !...`), and `XDG_CONFIG_HOME` is not a git variable at all:
-  it moves the config directory of everything that follows the base-directory specification,
-  `$XDG_CONFIG_HOME/gh/config.yml` among them, whose aliases may be shell commands — so it
-  re-points the one tool in the session holding `GH_TOKEN`. The workspace outlives the session,
-  so what such a line would re-point is the *next* session on that issue.
+- **So is anything starting `GIT_`, and `XDG_CONFIG_HOME`** (#171), for the reason `PATH` is and
+  one step in: `PATH` decides *which* binary `git` and `gh` are, and these decide what that
+  binary does and which further commands it runs. A git config file names commands
+  (`core.pager`, `credential.helper`, `[alias] x = !...`), and `GIT_CONFIG_GLOBAL`,
+  `GIT_CONFIG_SYSTEM` and the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`
+  triple each supply one at a path — or a key with no file at all — of the line's choosing;
+  `GIT_EDITOR` (on a plain `git commit`), `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`,
+  `GIT_SSH`, `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` name one outright; `GIT_EXEC_PATH` and
+  `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
+  repository is being operated on. The whole prefix rather than a list of those, because a list
+  is one somebody has to keep complete against git's own manual. `XDG_CONFIG_HOME` is not a git
+  variable at all: it moves the config directory of everything that follows the base-directory
+  specification, `$XDG_CONFIG_HOME/gh/config.yml` among them, whose aliases may be shell
+  commands — so it re-points the one tool in the session holding `GH_TOKEN`. The workspace
+  outlives the session, so what such a line would re-point is the *next* session on that issue.
 
-  A hook with a real reason for one — a deploy key for the target repository is the usual one —
-  has three routes that are not this file, and keeps all of them:
+  **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
+  are unaffected: set in `.env`, they reach the worker's environment and the session inherits
+  them through `PASSTHROUGH_PREFIXES` exactly as before. What is refused is a file the session
+  itself can write re-pointing the identity your pull requests are committed under.
+
+  A hook with a real reason for a git setting of its own — a deploy key for the target
+  repository is the usual one — has three routes that are not this file, and keeps all of them:
 
   - `git config --local core.sshCommand 'ssh -i /path/to/key -o IdentitiesOnly=yes'` from
     `after_create`. The workspace directory *is* the clone, so this is the post-clone setup's
@@ -1036,8 +1044,14 @@ hook that would truncate it again or append a duplicate per session.
     the session's reach altogether. `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` being
     protected is what keeps that route honest.
 
-  The git variables a deployment *can* hand over through this file are the identity ones,
-  `GIT_AUTHOR_*` and `GIT_COMMITTER_*`, which are not protected.
+  `XDG_CONFIG_HOME` is the one with a cost that those routes do not cover, since it is not a git
+  variable: a hook can no longer hand the session a relocated config root for `uv`, `ruff`, `npm`
+  or anything else following the specification, and `HOME` is protected too. What it keeps is
+  per-command (`XDG_CONFIG_HOME=... some-tool ...` in the hook's own shell, where the hook runs
+  the tool) and per-repository (config written into the clone, which every later turn sees). The
+  trade is deliberate: a route to `gh`'s aliases is not one to leave open for the convenience of
+  pointing another tool's config somewhere.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records

@@ -613,25 +613,16 @@ version, and moves by hand.
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
   reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
-  `HOME`, `PROXY_ENV_NAMES`, `TOOL_CONFIG_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and `PROTECTED_ENV_PREFIXES`
-  (`ANTHROPIC_`, `CLAUDE_`, `TOOL_CONFIG_ENV_PREFIXES`) is the trust boundary: the file sits in the agent's own
-  workspace, so the session can write it, and it must not re-point the `claude` issuebot
-  launches next. The tool-config pair is that boundary one step out (#171, spec
-  `2026-09-21-session-tool-config-env-design.md`): `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
-  `GIT_EXEC_PATH` and `XDG_CONFIG_HOME` as names, and `GIT_CONFIG_` as a prefix rather than
-  `GIT_CONFIG_GLOBAL` as a name, since `GIT_CONFIG_SYSTEM` and the
-  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` triple each deliver the same
-  configuration by another spelling -- the last sets `alias.x = !...` with no file involved --
-  and the prefix covers whatever git adds next. Where `PATH` decides *which* binary `git` and
-  `gh` are, these decide what that binary does and which further commands it runs, and
-  `XDG_CONFIG_HOME` is not a git variable at all: it moves `$XDG_CONFIG_HOME/gh/config.yml`,
-  whose aliases may be shell commands, so it re-points the one tool in the session holding
-  `GH_TOKEN`. None is inherited from the worker, so the file is the only route in, and what it
-  would re-point is the *next* session on that issue. A hook with a real reason for one -- a
-  deploy key -- keeps `git config --local core.sshCommand` in the clone from `after_create`,
-  `git -c` or its own shell for the git it runs itself, and a root-owned `/etc/gitconfig` or
-  `/etc/ssh/ssh_config` in a derived image for a deployment-wide setting; the identity
-  variables `GIT_AUTHOR_*` and `GIT_COMMITTER_*` are not protected. Everything else warns rather than fails, a null byte included, since
+  `HOME`, `PROXY_ENV_NAMES`, `XDG_CONFIG_HOME`) keeps `gh` and `claude` running through a typo,
+  and `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`) is the trust boundary: the
+  file sits in the agent's own workspace, so the session can write it, and it must not
+  re-point the `claude` issuebot launches next -- nor, since #171 (spec
+  `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
+  issue* runs. `GIT_` whole and not a list of names, because `GIT_EDITOR` names a command on a
+  plain `git commit` as surely as `GIT_SSH_COMMAND` does, and a list is one somebody has to
+  keep complete; the deployment's `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the
+  session from `.env` through `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
+  than fails, a null byte included, since
   `create_subprocess_exec` raises `ValueError` for one and that is no kind of `OSError`
   (`parse_workspace_env`/`merge_workspace_env` are the pure seam; a complaint names a line
   number, never the line, which can be most of a DSN); `settings_for_labels` (a
