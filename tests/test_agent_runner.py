@@ -83,8 +83,9 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         # Never claude's default (#107): the clone's files are not its configuration.
         "--setting-sources",
         "user",
-        # #135: CLAUDE.md and its `@` includes are confined to this workspace and the account's
-        # own `~/.claude`, so an approval in `~/.claude.json` reaches nothing outside them.
+        # #135: CLAUDE.md and its `@` includes are kept to this workspace and the two paths
+        # the account's own config directory holds as user memory, so an approval in
+        # `~/.claude.json` names nothing outside them.
         "--settings",
         '{"claudeMdExcludes": ["!{%s/**,/home/agent/.claude/rules/**,'
         '/home/agent/.claude/CLAUDE.md}"]}' % (tmp_path / "ws"),

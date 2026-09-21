@@ -929,10 +929,12 @@ class ClaudeRunner:
         ]
         # Unconditional, for the reason `--strict-mcp-config` above is (#135). Not narrowed to
         # `claude.setting_sources` naming the clone, although that is the only source the
-        # approval key gates: under the shipped `[user]` the flag still confines the *user*
+        # approval key gates: under the shipped `[user]` the argument still bounds the *user*
         # CLAUDE.md's own `@` includes, which claude loads from outside the home whatever the
-        # key says, and which nothing else confines on the host route -- `sweep_agent_home`
-        # returns early there, because the home is the operator's own.
+        # key says, and which nothing else bounds on the host route -- `sweep_agent_home`
+        # returns early there, because the home is the operator's own. A bound and not a
+        # boundary: a symlink among the allowed paths is still followed out of them, which the
+        # spec measures and records.
         trees, files = self._claude_md_allowed(workspace)
         allowlist = claude_md_allowlist(trees=trees, files=files)
         if allowlist is not None:
@@ -959,7 +961,7 @@ class ClaudeRunner:
 
         The workspace is a tree, so an operator who has named `project` or `local` still gets
         the clone's `CLAUDE.md`, its `.claude/CLAUDE.md` and its `.claude/rules`, and an `@`
-        include of theirs still resolves anywhere inside the clone; what it no longer reaches is
+        include of theirs still resolves anywhere inside the clone; what it no longer names is
         the session account's home, which outlives the run. This workspace and not `self._root`,
         which is every workspace's parent: one issue's CLAUDE.md has no more business reading
         another issue's clone than reading the home.
