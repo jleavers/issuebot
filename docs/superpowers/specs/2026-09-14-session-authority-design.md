@@ -2,7 +2,7 @@
 
 Date: 2026-09-14
 Status: implemented (tools, credentials, the envelope); egress landed in #126
-(`2026-09-15-session-egress-design.md`), `--restricted` filed as #127
+(`2026-09-15-session-egress-design.md`), `--restricted` declined in #127
 Issue: #109 (security sweep findings `hostile-issue-1`, `hostile-issue-3`)
 
 ## Problem
@@ -130,12 +130,73 @@ what the session may do within them.
   registries the hooks need on the list -- which is a deployment change too large to make
   unattended here. Filed as #126 with that sketch; until it lands, the tool policy removes
   the model's own egress and the container's remains.
-- **`--restricted`.** `claude` 2.1.263 has a mode that removes the code-running tools unless
-  named, confines the file tools to the working directories, refuses `bypassPermissions` and
-  lets only a person or the permission handler approve writes to settings, git and
-  tool-configuration files. Whether `MIN_CLAUDE_VERSION` has it is not known from here, and it
-  ignores the project settings `setting_sources` would load when an operator names
-  `project`, so it is a decision rather than a default; filed as #127.
+- **`--restricted`.** `claude` has a mode that removes the code-running tools unless `--tools`
+  names them, confines the file tools to the working directories, refuses `bypassPermissions`,
+  ignores user, project and local settings files, and lets only a person or the configured
+  permission handler approve writes to settings, git and tool-configuration files. **Declined
+  in #127** -- not adopted as a default, and not added as an opt-in `claude.restricted` either,
+  since a setting this project cannot recommend turning on is a supported surface bought for
+  nothing. The reason is the allow list, and it is the one this document already gives two
+  sections above.
+
+  The mode does not leave the choice open. Measured against the image's own `claude` 2.1.263,
+  through the credential-free init-line probe the CI `docker` job already uses for
+  `--strict-mcp-config`: the same argv lists `Bash` without the flag and does not list it with
+  it, so `--restricted` removes the tool an issuebot session *is* -- `git`, `gh`, the target
+  repository's test runner -- unless `--tools` names it back. Adoption therefore forces the
+  allow list that the tool policy above refused on purpose, on the ground that "tool names move
+  between `claude` releases (`Task` became `Agent`), so a hard-coded one would break sessions
+  silently on the weekly version bump". The same probe confirms the prediction and sharpens it:
+  `--tools Bash,Edit,NoSuchTool` comes back `Bash,Edit`, exit 0, nothing on stderr, and
+  `TodoWrite` -- a real-looking name, not a nonsense one -- disappears from a longer list just
+  as quietly. So the failure is not merely closed, it is *silent*: a rename would start a
+  session that looks healthy, has no way to do its work, and fails `max_attempts` times per
+  issue with claude's own words rather than a build that stops. `claude-code-version.yml`
+  bumps this deployment weekly, which is the cadence the hazard runs at. The Dockerfile's
+  `claude --help` assertions cannot cover it, because the flag would still be there; what
+  the argument list resolves *to* is what moves.
+
+  Two of the three doubts the issue was filed with are settled, so that nobody spends the
+  investigation again. The version floor is **not** an obstacle: the changelog carried in the
+  `claude` binary records `--restricted` (and `CLAUDE_CODE_RESTRICTED=1`) added at **2.1.248**,
+  below `MIN_CLAUDE_VERSION`'s 2.1.259, so every release issuebot permits already has it and
+  neither a raised floor nor a version probe would be needed. And the existing confinement
+  would survive adoption: `--disallowedTools` still layers on top of `--tools` under the flag
+  (`--restricted --tools Bash,Edit,WebFetch` lists `WebFetch`; adding
+  `--disallowedTools WebFetch WebSearch` removes it again), as does `--strict-mcp-config`, so a
+  future attempt would keep the deny list rather than trade it away. The env spelling is
+  already inert from the workspace: `CLAUDE_` is in `PROTECTED_ENV_PREFIXES`, so a session
+  cannot set or clear `CLAUDE_CODE_RESTRICTED` through its own `.issuebot/env`.
+
+  The third doubt stands and is joined by a larger one. `--restricted` ignores the settings
+  files `--setting-sources` selects, so the flag would make that argument a no-op and silently
+  void the README's promise that `claude.setting_sources: [project]` loads a target
+  repository's own permission rules and hooks -- a documented opt-in that would keep reading as
+  honoured while doing nothing. And the mode's most valuable clause is the one that might
+  break the workflow outright: with `--permission-prompts none` there is no approval surface,
+  so anything routed to "only a person or the configured permission handler" is denied
+  automatically, and every issuebot session commits, merges and pushes. Whether that clause
+  reaches `git commit` was **not measured**: deciding this needs a permission decision on a
+  real tool call, which needs a model turn, and the session that decided it held no Claude
+  credential. That measurement is the first thing a reconsideration owes.
+
+  What the mode would add, set against that, is mostly already held: the session runs at its
+  own uid in its own workspace (#75, #121), the worker reads back out of it only through
+  `boundary.py` (#104), the clone's `CLAUDE.md`, `.claude/` and `.mcp.json` are already data
+  rather than configuration (#107, #119), the account home's instruction, shell start-up and
+  tool-configuration surfaces are swept before every turn and every login shell (#101, #137,
+  #151), the environment spelling of that last one is refused (#171), and egress goes through
+  an allow-listing proxy (#126). `bypassPermissions` is refused by a mode an operator sets in
+  the front matter, outside the prompt, so refusing it guards a misconfiguration rather than
+  the threat this document is about. The genuinely new confinement is over the account's own
+  `$HOME`, which the sweeps already clear per turn. So the trade is a mandatory silently-lossy
+  allow list and a voided promise, for confinement largely bought elsewhere.
+
+  Reopen it if `--tools` grows a way to fail loudly on a name it does not know -- an error, a
+  warning, or an init line issuebot could assert the resolved set against at build, the way
+  the CI `docker` job already asserts `mcp_servers` -- or if the person-only approval turns out
+  not to reach an ordinary `git commit`, and the `setting_sources` promise is re-stated to say
+  what the flag leaves standing.
 - **The Claude credential.** It is the session's own and stays so (#75, "What this does not
   do").
 - **Labels and the clone's instruction files.** #105 (a label reaching the prompt bare,
