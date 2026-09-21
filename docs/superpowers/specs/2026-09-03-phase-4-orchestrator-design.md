@@ -373,6 +373,19 @@ possible, and that is preferred to an issue that never leaves
 `in_progress`. `find_workpad_comment` returns the lowest-id marker comment,
 so a real workpad stays the workpad and the blind note sits beside it.
 
+*Amended by #157:* the same reversal now covers the *write* of step 2, which
+still cost the label move after #128 -- a `response` error on the POST, or a
+`not_found` on a comment deleted between the read and the write, left the
+issue in `in_progress` for the life of the process, which is the state #128
+set out to make unreachable. A retryable append is unchanged and still
+returns `"failed"` for the caller to retry; a non-retryable one moves the
+label, logs `blocked_escape_note_failed` and returns `"applied"`. It is
+*not* then written blind: unlike a failed read, the append has already been
+attempted at the one moment the run-marker check could have made it
+idempotent, so repeating it in the same tick would only cost a second
+request. Read and write are one `_escape_note`, which `budget_escape`
+shares.
+
 The block:
 
 ```markdown

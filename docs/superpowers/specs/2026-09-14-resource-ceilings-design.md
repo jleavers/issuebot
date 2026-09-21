@@ -36,9 +36,13 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   session open a second workpad on every turn. The blocked escape and the conflict bounce go
   through the same call, so a thread past the cap fails those loudly too
   (`blocked_escape_failed`) rather than reading forever.
-  *Amended by #128:* the conflict bounce and the budget escape still fail loudly past the cap
-  (the latter is #157's to revisit); the blocked escape no longer does -- it moves the label
-  first and logs `blocked_escape_workpad_unreadable`. See below.
+  *Amended by #128, then #157:* the conflict bounce still fails loudly past the cap. The
+  blocked escape no longer does -- it moves the label first and logs
+  `blocked_escape_workpad_unreadable` (see below) -- and #157 gave the budget escape the same
+  treatment, through the `_escape_note` helper the two now share: a thread past the cap costs
+  the block (`budget_escape_workpad_unreadable`) rather than the hand-over to `review`, since
+  a refused issue that stays where the gate found it is refused again on every tick with the
+  escalation a human would read never written.
 - **`GhCliAdapter.count_own_label_additions`** (`github/ghcli.py`, landed by #104 while this
   was in review): the conflict bounce's read of the issue's `LABELED_EVENT` timeline, one
   GraphQL page at a time, under the same rule: at most `MAX_TIMELINE_PAGES` (10) pages, past
@@ -260,7 +264,11 @@ symbolic link (#104). Those two together would be a trap on their own -- a sessi
 pre-placed the name would make `create_marker` fail while `finished_keys` refused what it
 found, and the retry would be silently gone -- so a name that is not the worker's own file is
 taken back (`workspace_mark_replaced`, then `remove_marker` and create). The directory is the
-worker's; only the names inside it are shared. Writing the mark is still best effort: what it
+worker's; only the names inside it are shared. `finished_keys` also steps over
+`RESERVED_ROOT_NAMES` -- the account registry (#121) and the per-account uv caches (#164) --
+by name, as `seal_idle` does: those are the worker's *own* directories beside the workspace
+keys, so the boundary checks that refuse a session's plant would pass them, and a retry that
+took one for a clone would unlink every session account's cache. Writing the mark is still best effort: what it
 buys is the retry, so a workspace too damaged to carry one is still a workspace to remove, and
 the failure is `workspace_mark_failed` at WARNING.
 

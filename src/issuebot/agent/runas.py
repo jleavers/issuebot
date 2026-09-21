@@ -127,6 +127,40 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
     ".bash_logout",
 )
 
+# The same class again, one tool further out (#151): the config files a *tool* the session runs
+# reads out of the account's home, each of which can name a command to execute. Not shell
+# start-up files, which is why they are a list of their own rather than entries in the one
+# above, but the same residual -- a file the account may write, in a home the container keeps
+# for its lifetime, read by the next session at that uid -- and so the same sweep.
+#   ``.gitconfig`` and ``.config/git/config``: every session runs ``git`` as the account, and
+#   user-level git config names commands (``core.pager``, ``core.editor``, ``core.fsmonitor``,
+#   ``credential.helper``, ``[alias] x = !sh -c ...``, ``diff.<driver>.textconv``). Both
+#   spellings, because git reads both: ``$XDG_CONFIG_HOME/git/config`` first -- which is
+#   ``~/.config/git/config`` here, since ``XDG_CONFIG_HOME`` is not in ``PASSTHROUGH_NAMES``
+#   and so is not inherited from the worker's environment -- and then ``~/.gitconfig``. Sweeping
+#   one and not the other would leave the channel open at the name git looks at first.
+#   ``.ssh/config``: ``ProxyCommand``, ``LocalCommand`` and ``Match exec`` run a shell command
+#   for a matching host. issuebot's own clone is HTTPS through ``gh`` and the default image
+#   installs no ssh client, so nothing issuebot does reads it today; a target repository's hook
+#   or a submodule URL in an image built ``FROM`` this one can, and a name on this list costs
+#   nothing where the file does not exist.
+# No deployment has a reason to leave any of them in a session account's home, which is what
+# makes this a sweep rather than a residual: the session's commit identity comes from the
+# ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` variables (``PASSTHROUGH_PREFIXES``), the workspace's
+# ``safe.directory`` entry is the image's ``--system`` one, and the post-clone setup's
+# credential helper is ``git config --local`` inside the clone. A deployment that does want
+# global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
+# session's privilege domain, in the image or in one built ``FROM`` it.
+# A denylist like the two above: named paths, and everything else in the home is left alone.
+# Each is the sequence of its path components, because every one of them is nested and the
+# sweep walks rather than follows -- ``.ssh`` or ``.config`` replaced with a symlink is
+# unlinked as the plant it is, not stepped through to whatever it points at.
+TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
+    (".gitconfig",),
+    (".config", "git", "config"),
+    (".ssh", "config"),
+)
+
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
 # it carries -- GH_TOKEN, the Anthropic credential, any DSN a ``before_run`` hook wrote --
@@ -327,8 +361,8 @@ class RunAs:
 
     def sweep_home(self, home: Path | None = None) -> bool:
         """Clear what a prior session could steer the next one with from the account's home:
-        the loadable config under ``~/.claude`` (#101) and the shell start-up files a login
-        shell reads (#137).
+        the loadable config under ``~/.claude`` (#101), the shell start-up files a login
+        shell reads (#137) and the tool config files that can name a command (#151).
 
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
         like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
@@ -415,66 +449,217 @@ def _kill(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
 
 
+def _relax(path: Path) -> None:
+    """Restore this uid's own access to the directory ``path``, if it is one and it owns it.
+
+    A mode is the owner's to set and the owner's to put back, so a directory this account owns
+    can never be a directory it cannot open. Anything else -- another account's, a symlink, a
+    file -- is left exactly as it is, and a failure is skipped like every other step of a
+    best-effort removal.
+    """
+    with contextlib.suppress(OSError):
+        # `lstat`, so `S_ISDIR` is false for a symlink to a directory and the chmod below can
+        # never travel down one.
+        st = os.lstat(path)
+        if st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode):
+            os.chmod(path, st.st_mode | stat.S_IRWXU)
+
+
+def _relax_tree(path: Path) -> None:
+    """``_relax`` for ``path`` and every directory under it, top down.
+
+    Top down because ``os.walk`` has to read a directory to reach what is inside it: each level
+    is opened before the level below is listed. ``os.walk`` does not follow a link below its
+    top, and ``_relax`` reads an ``lstat``, so no chmod travels down one; the *top* is the
+    caller's to check, since ``os.walk`` does follow that one (``_sweep`` does).
+
+    ``path`` itself is relaxed, where ``_remove``'s inline loop used to start one level down.
+    That reaches one directory more than before on the workspace path, and only ever a
+    directory the calling account owns -- a workspace root is the worker's (``SEALED_DIR_MODE``,
+    ``WorkspaceManager``), so the uid check declines it there and the removal is unchanged.
+    """
+    _relax(path)
+    for dirpath, dirnames, _filenames in os.walk(path):
+        for name in dirnames:
+            _relax(Path(dirpath) / name)
+
+
 def _remove(path: Path) -> None:
     """Remove every entry the caller owns under ``path``, opening its own directories first.
 
     Anything else -- the worker's ``.issuebot`` state, a directory it cannot empty -- is left
     for the worker, and no failure is reported: the worker's own removal is what decides.
     """
-    me = os.getuid()
-    for dirpath, dirnames, _filenames in os.walk(path):
-        for name in dirnames:
-            child = os.path.join(dirpath, name)
-            with contextlib.suppress(OSError):
-                st = os.lstat(child)
-                if st.st_uid == me and not stat.S_ISLNK(st.st_mode):
-                    os.chmod(child, st.st_mode | stat.S_IRWXU)
+    _relax_tree(path)
     shutil.rmtree(path, onexc=lambda *_: None)
 
 
+def _walk(root: Path, parts: Sequence[str]) -> Path | None:
+    """The path ``parts`` names under ``root``, or the first symlink on the way to it.
+
+    The sweep removes what it is pointed at, so a nested target has to be resolved one
+    component at a time: with ``.ssh`` replaced by a symlink, ``root / ".ssh" / "config"``
+    names a file inside whatever it points at, and unlinking that would reach outside the home
+    -- while the symlink itself is what a session planted and what ``ssh`` would read through.
+    So an intermediate symlink is returned instead, to be unlinked like a symlinked surface,
+    and ``None`` comes back when a component below one is missing, which is the ordinary case
+    of a home that never held the file. Never resolves the final component: whether *that* is a
+    symlink is ``_sweep``'s to decide, and it unlinks either way.
+    """
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return current
+        if not current.is_dir():
+            # `is_dir` answers False for a directory this process cannot stat as well as for
+            # one that is not there, and the difference matters: a session that plants
+            # `~/.config/git/config` and closes `~/.config` to search would otherwise have the
+            # sweep yield no target at all, where `_sweep`'s retry cannot reach it. The modes
+            # are this account's own (`_relax`), so put them back and ask again; a component
+            # that is really absent, or really not a directory, still ends the walk.
+            if not _exists(current):
+                return None
+            _relax(current.parent)
+            _relax(current)
+            if current.is_symlink():
+                return current
+            if not current.is_dir():
+                return None
+    return current / parts[-1]
+
+
 def _sweep_targets(home: Path) -> Iterator[Path]:
-    """Every path the sweep removes under ``home``: the shell start-up files, the named
-    ``.claude`` surfaces and each project's auto memory directory.
+    """Every path the sweep removes under ``home``: the shell start-up files, the tool config
+    files, the named ``.claude`` surfaces and each project's auto memory directory.
 
     ``projects`` and each entry in it are walked, never followed: claude
     creates real directories there, so a symlink at either level is a session's, planted to
     point claude's memory read at a tree the sweep would not visit, and it is yielded as the
-    target -- unlinked like a symlinked surface -- rather than stepped through."""
+    target -- unlinked like a symlinked surface -- rather than stepped through. ``_walk``
+    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP``."""
     yield from (home / name for name in SHELL_STARTUP_SWEEP)
-    claude_dir = home / CLAUDE_HOME_DIR
-    yield from (claude_dir / name for name in CLAUDE_HOME_SWEEP)
+    for parts in TOOL_CONFIG_SWEEP:
+        target = _walk(home, parts)
+        if target is not None:
+            yield target
+    # Through ``_walk`` as well, rather than by joining: the image creates ``.claude`` as a real
+    # directory owned by the account, so a link there is a session's, and following it would have
+    # this sweep delete the named entries inside whatever tree it points at -- the rule
+    # ``projects/<project>`` has always had, applied one level up. Going through ``_walk`` is
+    # also what keeps that check from resting on the home being readable by luck: it relaxes a
+    # component it cannot stat rather than answering ``False`` for it.
+    for name in CLAUDE_HOME_SWEEP:
+        target = _walk(home, (CLAUDE_HOME_DIR, name))
+        if target is not None:
+            yield target
     projects_name, memory_name = CLAUDE_HOME_MEMORY_DIR
-    projects = claude_dir / projects_name
+    projects = _walk(home, (CLAUDE_HOME_DIR, projects_name))
+    if projects is None:
+        return
+    # A link at either level -- ``.claude`` itself, which ``_walk`` returns in place of what is
+    # under it, or ``projects`` -- is the target, and nothing below it is visited.
     if projects.is_symlink():
         yield projects
         return
     if not projects.is_dir():
         return
+    # Relaxed before it is read rather than after the read failed, which is the one place the
+    # sweep does that: reaching auto memory needs both *read* on ``projects``, to list the
+    # project directories, and *search*, to tell a directory from a link -- and a session can
+    # drop either one on its own, leaving a listing whose names cannot be classified and so a
+    # target that is never yielded for ``_sweep``'s retry to repair. One chmod on a directory
+    # this account owns, against a mode game with no other cost to the plant: ``claude`` opens
+    # a path it already knows and lists nothing.
+    _relax(projects)
+    for project in _entries(projects):
+        if project.is_symlink():
+            yield project
+        elif project.is_dir():
+            yield project / memory_name
+
+
+def _entries(path: Path) -> list[Path]:
+    """What ``path`` holds, with the modes put back if it will not list.
+
+    Listing a directory needs *read* on it, where opening a file inside one by name needs only
+    search -- so a session that plants ``projects/<project>/memory/`` and drops read on
+    ``projects`` would keep it: the listing this walk depends on fails, no target is yielded and
+    ``_sweep``'s retry never sees one, while ``claude`` opens the planted path by name as
+    before. The mode is the account's own, like every other in this home, so the repair is the
+    same one (``_relax``) and the listing is asked again. Empty when it still will not answer,
+    which is the best-effort rule the rest of the sweep keeps.
+    """
     with contextlib.suppress(OSError):
-        for project in projects.iterdir():
-            if project.is_symlink():
-                yield project
-            elif project.is_dir():
-                yield project / memory_name
+        return list(path.iterdir())
+    _relax(path)
+    with contextlib.suppress(OSError):
+        return list(path.iterdir())
+    return []
 
 
 def _sweep(home: Path) -> None:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
-    its shell start-up files (``SHELL_STARTUP_SWEEP``) and the loadable config surfaces under
-    ``.claude`` (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
+    its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
+    command (``TOOL_CONFIG_SWEEP``) and the loadable config surfaces under ``.claude``
+    (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
     Keeps the credential and claude's own runtime state -- and everything else in the home,
     ``.claude.json``, a tool's cache or state directory included -- by naming only what it
     removes.
     Best-effort: an entry that is absent or cannot be removed is skipped, and a symlink is
     unlinked rather than followed, so the tree it points at is never touched.
+
+    A target that is still there after the first attempt is tried once more with the modes put
+    back first (``_relax``), because this runs as the account whose home it is clearing and
+    every directory in it is that account's own. Unlinking a file needs write on the directory
+    holding it and reaching one needs search, while ``git``, ``ssh`` and ``claude`` need only to
+    read, so a session that plants ``~/.ssh/config`` and then drops either bit on ``~/.ssh`` --
+    or on the home itself, which reaches every list at once -- would otherwise keep its plant at
+    no cost to itself, and the sweep would report success. The modes are the plant's, not a
+    deployment's: the repair is the one ``_remove`` already makes for a workspace tree, and the
+    retry is what makes the removal the account's decision rather than the previous session's.
     """
     for target in _sweep_targets(home):
-        with contextlib.suppress(OSError):
-            if target.is_symlink() or not target.is_dir():
-                target.unlink()
-            else:
-                shutil.rmtree(target, onexc=lambda *_: None)
+        _remove_swept(target)
+        if _exists(target):
+            _relax(target.parent)
+            if not target.is_symlink():
+                # ``os.walk`` refuses to follow a link *below* its top but follows the top
+                # itself, and a swept target that is a link is one a session chose: walking it
+                # would widen modes across whatever tree it points at -- any size, any place --
+                # for no gain, since unlinking a link needs the parent's bits and nothing of
+                # its target's. Relaxing the parent above is the whole repair for that case.
+                _relax_tree(target)
+            _remove_swept(target)
+
+
+def _remove_swept(target: Path) -> None:
+    """One attempt at one swept path: the link or file unlinked, the directory removed whole."""
+    with contextlib.suppress(OSError):
+        if target.is_symlink() or not target.is_dir():
+            target.unlink()
+        else:
+            shutil.rmtree(target, onexc=lambda *_: None)
+
+
+def _exists(path: Path) -> bool:
+    """Whether anything may be at ``path``: ``False`` only for a definite absence.
+
+    The question this answers is "is there still something here to retry", so the two failures
+    have to be told apart. A directory the session closed to *search* (``chmod 0600``, ``0000``)
+    answers ``EACCES`` rather than ``ENOENT`` for everything inside it, and reading that as an
+    empty home would skip the very retry the mode is what makes necessary. Only
+    ``FileNotFoundError`` is an absence; anything else is an answer this process cannot get yet,
+    and the retry is what gets it. A broken symlink is present, since ``lstat`` does not follow.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def main(argv: Sequence[str] | None = None) -> int:

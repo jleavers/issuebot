@@ -19,6 +19,7 @@ import pytest
 
 from issuebot.agent import workspace as workspace_module
 from issuebot.agent.errors import AgentError
+from issuebot.agent.uvcache import UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import (
     FINISHED_MARKER,
     MAX_HOOK_OUTPUT_BYTES,
@@ -929,6 +930,13 @@ async def test_finished_keys_ignores_what_the_worker_did_not_write(
     # The account registry, which is not a workspace at all (#121).
     (root / ".issuebot").mkdir(exist_ok=True)
     (root / ".issuebot" / FINISHED_MARKER).touch()
+    # Nor is the per-account uv cache root (#164). Both are the worker's own directories
+    # beside the workspace keys, so neither is refused by the boundary the way a session's
+    # plant is: they are stepped over by name, as `seal_idle` steps over them, because a
+    # retry that took one for a clone would unlink every session account's cache.
+    cache_root = root / UV_CACHE_ROOT_NAME
+    (cache_root / ".issuebot").mkdir(parents=True)
+    (cache_root / ".issuebot" / FINISHED_MARKER).touch()
     # A plain file where a workspace would be.
     (root / "not-a-workspace").write_text("", encoding="utf-8")
     # A mark that is a symbolic link rather than a file.
