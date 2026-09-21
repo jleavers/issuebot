@@ -283,14 +283,25 @@ removed gives its account back on the same sweep.
 
 ### What this does not cover
 
-Two cases the `complete` re-read reached and the mark does not, both stated rather than
-closed. A removal whose *mark* could not be written and which then fails is not retried; the
+Three cases the `complete` re-read reached and this does not, all stated rather than closed.
+A removal whose *mark* could not be written and which then fails is not retried; the
 two failures are independent and both are logged, and the second attempt in `remove`'s
 `finally` is a third chance at the first. And a workspace already orphaned when a deployment
 takes this change carries no mark, since nothing wrote one: the old sweep was retrying those
 for as long as their issues sat in `complete`, and after the upgrade an operator removes what
-is left under `workspace.root` by hand. Neither is a growing resource -- both are bounded by
-failures that have already happened -- which is what makes them acceptable here.
+is left under `workspace.root` by hand.
+
+And the third is the store's, not the disk's: the trade above says what stops being
+*refreshed*, and assumes the row is there to refresh. An issue whose sweep-time
+`_report_issues` never reached the store at all -- `PostgresSink` drops an item on
+`db_queue_full`, `db_drain_timeout` or `db_sink_closed_drop` -- used to be backfilled by the
+next sweep's re-read of the `complete` role, and now nothing writes that row. Its `state` is
+not at stake, since `state_changed` and `issue_completed` are separate events on the same
+queue and the dashboard's board and counts are built from `state`; what can be missing is the
+row's title, labels and URL.
+
+None of the three is a growing resource -- each is bounded by a failure that has already
+happened -- which is what makes them acceptable here.
 
 ## Not done here
 

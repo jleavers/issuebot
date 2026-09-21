@@ -3827,15 +3827,22 @@ async def test_the_uv_cache_beside_the_workspaces_survives_startup_and_the_sweep
     tmp_path: Path,
 ) -> None:
     """#164 puts one uv cache directory per session account under ``workspace.root``, beside
-    the workspace keys. Two things there work over the root and had to be shown not to mind it:
-    ``seal_idle``, which at every worker start chmods each worker-owned directory under the
-    root to ``0700`` so that a workspace a killed worker left open cannot be entered, and
-    ``AccountRegistry.prune``, which expires a binding whose workspace is gone.
+    the workspace keys. Three things there work over the root and had to be shown not to mind
+    it: ``seal_idle``, which at every worker start chmods each worker-owned directory under
+    the root to ``0700`` so that a workspace a killed worker left open cannot be entered;
+    ``AccountRegistry.prune``, which expires a binding whose workspace is gone; and, since
+    #149, ``finished_keys``, the removal retry the terminal sweep runs.
 
-    The first is the load-bearing one: the cache root is ``0755`` precisely so that every
-    session account can reach its own directory inside it, and a seal would take every
-    account's cache away on each restart. The second never listed the root at all -- #161
+    ``seal_idle`` is the load-bearing one for #164: the cache root is ``0755`` precisely so
+    that every session account can reach its own directory inside it, and a seal would take
+    every account's cache away on each restart. ``prune`` never listed the root at all -- #161
     believed that and did not prove it.
+
+    ``finished_keys`` is the one that arrived with #149 and the only one that could *unlink*
+    the cache rather than chmod it, so the ``terminal_sweep()`` below exercises it too: it
+    steps over ``RESERVED_ROOT_NAMES`` by name, since the boundary checks would pass a
+    directory that genuinely is the worker's. Its own direct coverage is
+    ``test_finished_keys_ignores_what_the_worker_did_not_write``.
     """
     h = Harness(tmp_path, max_concurrent=2)
     orchestrator = _with_pool(h)

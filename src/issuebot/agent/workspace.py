@@ -487,7 +487,13 @@ class WorkspaceManager:
         Every step goes through the boundary (#104): the workspace and its state directory
         must be the worker's own directories reached without following a link, and the mark
         must be the worker's own regular file. A session that plants the name in a directory
-        of its own therefore asks for nothing. Never raises: this runs inside a sweep.
+        of its own therefore asks for nothing. Under ``agent.run_as`` the session can also
+        write in the shared, sticky ``.issuebot``, and what refuses it there is the owner
+        check rather than the directory -- so where ``fs.protected_hardlinks`` is 0 a session
+        could link the worker's ``created`` sentinel to ``finished`` and inherit its
+        ownership. That asks for its own workspace to be removed once its run has ended, a
+        key with a session running or a retry pending being skipped and its work pushed, so
+        what it costs is a re-clone. Never raises: this runs inside a sweep.
         """
         try:
             children = sorted(child.name for child in self.root.iterdir())
