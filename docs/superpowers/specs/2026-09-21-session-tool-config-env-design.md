@@ -51,8 +51,9 @@ it (#75 closed that).
 
 **Invariant.** A line in `.issuebot/env` cannot configure the tooling issuebot launches for
 the next session: not `claude` (the `ANTHROPIC_`/`CLAUDE_` prefixes, which already did this),
-and now not `git` or `gh` either -- it cannot name a command they run, a file or directory they
-read configuration, aliases or hooks from, or the repository `git` operates on.
+and now not `git` or `gh` either. At no rung of those two tools' documented precedence chains
+can it name a command they run, and it cannot name a file or directory they read configuration,
+aliases, hooks or credentials from, or the repository `git` operates on.
 
 ## Decision
 
@@ -64,8 +65,10 @@ first of them.
 
 - **`TOOL_CONFIG_ENV_PREFIXES`** (`agent/runner.py`, beside the existing entries): `GIT_` and
   `GH_`, joined to `PROTECTED_ENV_PREFIXES`.
-- **`TOOL_CONFIG_ENV_NAMES`**: `XDG_CONFIG_HOME`, `SSH_ASKPASS` and `SSH_ASKPASS_REQUIRE`,
-  joined to `PROTECTED_ENV_NAMES`.
+- **`TOOL_CONFIG_ENV_NAMES`**, joined to `PROTECTED_ENV_NAMES`: the rungs of git's and gh's
+  documented precedence chains that fall outside those two prefixes -- `EDITOR`, `VISUAL`,
+  `PAGER`, `BROWSER`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN` -- plus `XDG_CONFIG_HOME`, which is on no chain.
 
 Both are pinned by a test, as the sweep lists are, so dropping a name is a deliberate edit in two
 places. Nothing else changes: `PROTECTED_ENV_NAMES` has exactly one reader,
@@ -151,14 +154,50 @@ wrong twice here before it landed, and "closed under the other spellings of the 
 claim only a prefix can support. The prefixes also settle the bare `GIT_CONFIG`, which
 `GIT_CONFIG_` would have missed, and whatever either tool adds next.
 
-**`SSH_ASKPASS` is a name and not an `SSH_` prefix**, deliberately. git's documented chain is
-`GIT_ASKPASS` -> `core.askPass` -> `SSH_ASKPASS` -> the terminal, and with no controlling
-terminal -- the session's condition -- git executes `SSH_ASKPASS` itself, no ssh client
-involved (`SSH_ASKPASS-RAN ... username=hunter2` out of `git credential fill`). So protecting
-`GIT_ASKPASS` through the prefix and leaving this one would be the same mistake again. But
-`SSH_AUTH_SOCK` is a legitimate route for exactly the deploy-key case this bound has to leave a
-hook author, so the `SSH_` namespace is not one to take wholesale. Names here, prefixes there,
-and the reason is in the tests as a negative case.
+### The names: chain tails, and why that is a rule rather than a list
+
+A third review pass found the same class of error a third time, and this is the fix for the
+*class* rather than for its instances. Both tools resolve several settings through a documented
+precedence chain, and the prefixes above protect only each chain's head:
+
+| chain | head (prefixed) | config rung | tail (a name here) |
+|---|---|---|---|
+| editor | `GIT_EDITOR`, `GH_EDITOR` | `core.editor` | `VISUAL`, `EDITOR` |
+| pager | `GIT_PAGER`, `GH_PAGER` | `core.pager` | `PAGER` |
+| browser | `GH_BROWSER` | -- | `BROWSER` |
+| askpass | `GIT_ASKPASS` | `core.askPass` | `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` |
+| identity | `GIT_AUTHOR_EMAIL` | `user.email` | `EMAIL` |
+| token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | -- | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
+
+Protecting a head and leaving its tail closes nothing, and the config rung in the middle is
+gone already: `TOOL_CONFIG_SWEEP` (#151) removes `~/.gitconfig` and `~/.config/git/config`
+before every turn, so in a session the environment rungs are the *whole* of each chain.
+Measured, with `env -i` and no controlling terminal:
+
+```text
+$ env -i PATH=... HOME=... EDITOR=./ed.sh git commit --allow-empty
+PLANTED-RUNG-RAN
+$ env -i PATH=... TERM=xterm HOME=... VISUAL=./ed.sh git commit --allow-empty
+PLANTED-RUNG-RAN
+$ env -i PATH=... HOME=... EMAIL=attacker@evil.test git -c user.name=n commit --allow-empty -m x
+$ git log -1 --format='%ae'
+attacker@evil.test
+```
+
+`EDITOR` fires with no `TERM` set at all, on a plain `git commit`. `PAGER` needs a terminal,
+which a hook may well have. `EMAIL` is why the claim about the commit identity below is
+unconditional rather than resting on the shipped `.env` setting `GIT_AUTHOR_EMAIL`.
+
+This is a *rule* and not another list: the chains are enumerable from `git-var(1)`,
+`git-commit(1)` and `gh environment`, and a chain has an end. Which is also why these are names
+rather than prefixes -- `SSH_AUTH_SOCK` is a legitimate route for exactly the deploy-key case
+this bound has to leave a hook author, and the `GITHUB_` and generic namespaces hold plenty a
+hook may hand over. The negative test cases pin that.
+
+`PAGER` in particular was named in an earlier draft of the Residuals below as deliberately *out*
+of scope, alongside `NODE_OPTIONS` and `LD_PRELOAD`. That was wrong, and inconsistently so:
+`GIT_PAGER` was already protected, which makes `PAGER` a chain tail and not a generic tooling
+variable. It is in.
 
 `XDG_CONFIG_DIRS` was measured and is *not* included: neither `git` nor `gh` reads it. Nor are
 the specification's other roots, `XDG_DATA_HOME` and `XDG_CACHE_HOME` -- a hook pointing a cache
@@ -255,9 +294,12 @@ beside `PATH` and the proxy names.
   `gh`, `claude` -- and never a general claim that the next session's environment is
   uninfluenced. `PAGER`, `NODE_OPTIONS`, `LD_PRELOAD` and their kind are outside it by the same
   reasoning that keeps the list short -- and `BASH_ENV` above is the measured proof that such a
-  gap is real rather than theoretical. Fails safe: a gap is a name that still gets through,
-  never a broken session. The `GIT_` prefix is the one part of this that is *not* a denylist,
-  which is exactly why it is a prefix.
+  gap is real rather than theoretical. `NODE_OPTIONS` and `LD_PRELOAD` are the shape of what is
+  left out: variables of *other* tooling, not rungs of git's or gh's own chains. (`PAGER` was
+  on this list in an earlier draft and should not have been: `GIT_PAGER` is protected, so
+  `PAGER` is a chain tail. It is now a protected name.) Fails safe: a gap is a name that still
+  gets through, never a broken session. The two prefixes are the part of this that is *not* a
+  denylist, which is exactly why they are prefixes.
 
 - **Concurrency does not arise here**, unlike #101. The file is in one workspace, a workspace is
   open to one account at a time and sealed `0700` between runs (#121), so there is no second
@@ -265,26 +307,28 @@ beside `PATH` and the proxy names.
 
 ## Tests
 
-`tests/test_agent_runner.py`: `merge_workspace_env` refuses each of twenty-eight spellings,
+`tests/test_agent_runner.py`: `merge_workspace_env` refuses each of thirty-three spellings,
 grouped by what each one does -- a config file at a chosen path, a key with no file at all, a
 command named outright, a directory of commands, the repository itself, the commit identity,
-`gh`'s own config directory and aliases, the askpass fallback -- and still applies an ordinary
-key beside each; six *negative* cases pin that the prefixes stop where they say they do
-(`GITHUB_WORKSPACE` and `GHOSTSCRIPT_HOME` have no underscore where the prefix does,
-`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_CONFIG_DIRS` are not read by either tool, and
-`SSH_AUTH_SOCK` is the deploy-key route the `SSH_` namespace had to keep); both entries are
-pinned, with the docstring recording that two drafts missed `GIT_EDITOR` and `GH_CONFIG_DIR`,
-so a future edit back to a list has to argue with that; the deployment's own `GIT_AUTHOR_NAME`
-still reaches the session through
+`gh`'s own config directory and aliases, and one group per chain tail annotated with the chain
+it ends -- and still applies an ordinary key beside each. Six *negative* cases pin that the
+prefixes and names stop where they say they do: `GITHUB_WORKSPACE` and `GHOSTSCRIPT_HOME` have
+no underscore where the prefix does, `XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_CONFIG_DIRS` are not
+read by either tool, and `SSH_AUTH_SOCK` is the deploy-key route the `SSH_` namespace had to
+keep. Both entries are pinned, with the docstring carrying the rule -- prefixes for the two
+tools, chain tails for the names -- and recording that successive drafts missed `GIT_EDITOR`,
+`GH_CONFIG_DIR` and then the tails, so a future edit back to an ad-hoc list has to argue with
+that. The deployment's own `GIT_AUTHOR_NAME` still reaches the session through
 `agent_environment` while a `.issuebot/env` line cannot take it out from under the next turn,
-which is the two halves of the prefix's cost; and, end to end through `workspace_environment`
+which is the two halves of the prefix's cost. And, end to end through `workspace_environment`
 with a real `.issuebot/env`, a file carrying all three of the issue's names plus the
-`GIT_CONFIG_COUNT` triple and `GIT_EDITOR` hands the next turn its `DATABASE_URL` and nothing
-else, while the complaint is one `workspace_env_ignored` line per key, each naming the key it
-dropped and never its value. The suite was run with the pre-#171 lists substituted back: every
-one of those tests fails, so the proof is two-sided.
+`GIT_CONFIG_COUNT` triple, `GIT_EDITOR`, `EDITOR` and `EMAIL` hands the next turn its
+`DATABASE_URL` and nothing else, while the complaint is one `workspace_env_ignored` line per
+key, each naming the key it dropped and never its value. The suite was run with the pre-#171
+lists substituted back: every one of those tests fails, so the proof is two-sided.
 
 Beyond the suite, the channel was walked end to end against the real `git`, before and after:
 the same `.issuebot/env` that made the next turn's `git st` print `PLANTED-COUNT-RAN` now leaves
-it `git: 'st' is not a git command`, with `DATABASE_URL` still handed over and six
-`workspace_env_ignored` lines naming the keys that were dropped.
+it `git: 'st' is not a git command`, with one `workspace_env_ignored` line per dropped key and
+`DATABASE_URL`, `XDG_CACHE_HOME` and `SSH_AUTH_SOCK` still handed over -- the half that matters
+as much as the refusals.

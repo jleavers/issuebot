@@ -412,10 +412,19 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         # following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml`
         # among them.
         "XDG_CONFIG_HOME",
-        # git's documented fallback after `GIT_ASKPASS` and `core.askPass`. With no
-        # controlling terminal -- the session's condition -- git executes it itself.
-        "SSH_ASKPASS",
+        # The tails of git's and gh's own precedence chains, whose heads are covered by the
+        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` (#151) removes from the
+        # home -- so these are the whole of what is left of each chain. Protecting a head and
+        # leaving its tail closes nothing.
+        "SSH_ASKPASS",  # GIT_ASKPASS -> core.askPass -> this
         "SSH_ASKPASS_REQUIRE",
+        "EDITOR",  # GIT_EDITOR/GH_EDITOR -> core.editor -> VISUAL -> this
+        "VISUAL",
+        "PAGER",  # GIT_PAGER/GH_PAGER -> core.pager -> this
+        "BROWSER",  # GH_BROWSER -> this
+        "EMAIL",  # GIT_AUTHOR_EMAIL -> user.email -> this
+        "GITHUB_TOKEN",  # GH_TOKEN -> this
+        "GITHUB_ENTERPRISE_TOKEN",  # GH_ENTERPRISE_TOKEN -> this
     ],
 )
 def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> None:
@@ -428,15 +437,26 @@ def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> No
 
 
 def test_the_tool_config_protections_are_pinned() -> None:
-    """`GIT_` and `GH_` whole rather than an enumeration, which is what makes the bound stay
-    true: `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do `GIT_EDITOR`,
-    `GIT_PAGER`, `GIT_TEMPLATE_DIR` and `GH_CONFIG_DIR`, and two drafts of this list missed
-    some of them. `SSH_ASKPASS` is a name and not an `SSH_` prefix, because `SSH_AUTH_SOCK` is
-    a legitimate route for the deploy-key case this bound has to leave a hook author. Dropping
-    an entry has to be a deliberate edit here as well as in `runner.py`."""
+    """Two halves with two different rules, and both have to be a deliberate edit here as well
+    as in `runner.py`. `GIT_` and `GH_` whole rather than an enumeration, which is what makes
+    the bound stay true: `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do
+    `GIT_EDITOR`, `GIT_PAGER`, `GIT_TEMPLATE_DIR` and `GH_CONFIG_DIR`, and successive drafts of
+    this list missed some of them. The names are then the rungs of git's and gh's documented
+    precedence chains that fall outside those prefixes -- checkable against `git-var(1)`,
+    `git-commit(1)` and `gh environment`, and finite because a chain has an end -- plus
+    `XDG_CONFIG_HOME`, which is on no chain and moves the directory `gh` reads its aliases
+    from. Names and not prefixes, because `SSH_AUTH_SOCK` is a legitimate route for the
+    deploy-key case this bound has to leave a hook author."""
     assert sorted(TOOL_CONFIG_ENV_NAMES) == [
+        "BROWSER",
+        "EDITOR",
+        "EMAIL",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITHUB_TOKEN",
+        "PAGER",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
+        "VISUAL",
         "XDG_CONFIG_HOME",
     ]
     assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_", "GH_"]
@@ -503,6 +523,8 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
         "GIT_CONFIG_KEY_0=alias.st\n"
         "GIT_CONFIG_VALUE_0=!/tmp/theirs/payload.sh\n"
         "GIT_EDITOR=/tmp/theirs/payload.sh\n"
+        "EDITOR=/tmp/theirs/payload.sh\n"
+        "EMAIL=someone@example.invalid\n"
         "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
     )
     base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
@@ -517,6 +539,7 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
     assert applied == ["DATABASE_URL"]
     assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
     assert not [name for name in merged if name.startswith(("GIT_", "XDG_"))]
+    assert "EDITOR" not in merged and "EMAIL" not in merged
     records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
     ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
     assert ignored == [
@@ -527,6 +550,8 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
         "GIT_CONFIG_KEY_0 is protected",
         "GIT_CONFIG_VALUE_0 is protected",
         "GIT_EDITOR is protected",
+        "EDITOR is protected",
+        "EMAIL is protected",
     ]
 
 

@@ -1052,8 +1052,8 @@ hook that would truncate it again or append a duplicate per session.
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
   repository's tests need.
-- **So is anything starting `GIT_` or `GH_`, and `XDG_CONFIG_HOME`, `SSH_ASKPASS` and
-  `SSH_ASKPASS_REQUIRE`** (#171), for the reason `PATH` is and one step in: `PATH` decides
+- **So is anything starting `GIT_` or `GH_`, and the tails of those two tools' own fallback
+  chains** (#171), for the reason `PATH` is and one step in: `PATH` decides
   *which* binary `git` and `gh` are, and these decide what that binary does and which further
   commands it runs. A git config file names commands (`core.pager`, `credential.helper`,
   `[alias] x = !...`), and `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and the
@@ -1065,15 +1065,29 @@ hook that would truncate it again or append a duplicate per session.
   repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
   name the directory holding `config.yml`, whose aliases may be shell commands, and `GH_EDITOR`
   and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
-  holding `GH_TOKEN`. `SSH_ASKPASS` is git's documented fallback after `GIT_ASKPASS`, and with
-  no controlling terminal — the session's condition — git runs it itself.
+  holding `GH_TOKEN`.
 
   Whole prefixes rather than a list of those names, because a list is one somebody has to keep
-  complete against git's and `gh`'s own manuals. `SSH_ASKPASS` is a name and not an `SSH_`
-  prefix on purpose: `SSH_AUTH_SOCK` is a legitimate route for a forwarded deploy key, and
-  `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched for the same reason. The workspace outlives
-  the session, so what such a line would re-point is the *next* session on that issue — and it
-  is the environment spelling of what the home sweep (#151) removes from the account's
+  complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
+  chain those tools resolve a setting through, and the config rung in the middle is swept out
+  of the home by #151 — so the environment tails are protected too, by name:
+
+  | chain | head (prefixed) | tail (protected by name) |
+  |---|---|---|
+  | editor | `GIT_EDITOR`, `GH_EDITOR` | `VISUAL`, `EDITOR` |
+  | pager | `GIT_PAGER`, `GH_PAGER` | `PAGER` |
+  | browser | `GH_BROWSER` | `BROWSER` |
+  | askpass | `GIT_ASKPASS` | `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` |
+  | commit identity | `GIT_AUTHOR_EMAIL` | `EMAIL` |
+  | token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
+
+  `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
+  leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
+  for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
+  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
+  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
+  session, so what such a line would re-point is the *next* session on that issue — and it is
+  the environment spelling of what the home sweep (#151) removes from the account's
   `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
 
   **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they

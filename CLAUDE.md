@@ -685,16 +685,22 @@ version, and moves by hand.
   reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
   `HOME`, `PROXY_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
-  `TOOL_CONFIG_ENV_NAMES` (`XDG_CONFIG_HOME`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`) is the
-  trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
+  `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+  `XDG_CONFIG_HOME`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home. Whole
   prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain
   `git commit` as surely as `GIT_SSH_COMMAND` does and `GH_CONFIG_DIR` outranks
   `XDG_CONFIG_HOME` for `gh`'s shell aliases -- a list is one somebody has to keep complete,
-  and two drafts of this one were not. `SSH_ASKPASS` is a name rather than an `SSH_` prefix
-  because `SSH_AUTH_SOCK` is the deploy-key route a hook author keeps; the deployment's
+  and successive drafts of this one were not. The names are then the *tails* of those tools'
+  documented precedence chains, which a prefix covering each chain's head does not reach and
+  whose config rung #151 sweeps from the home -- `GIT_EDITOR` -> `core.editor` -> `VISUAL` ->
+  `EDITOR` is the shape, and `EDITOR` fires on a plain `git commit` with no terminal. A rule
+  checkable against `git-var(1)` and `gh environment`, and finite because a chain has an end;
+  names rather than prefixes because `SSH_AUTH_SOCK` is the deploy-key route a hook author
+  keeps. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
