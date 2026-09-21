@@ -233,14 +233,60 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
     # ... and the copy may move that one line and nothing else. A reused branch is held to
     # the same shape against the base, since `build` built the base plus the pin and the
-    # pull request body says so.
+    # pull request body says so -- measured from the merge base, which is the test below.
     assert "git diff --numstat -- Dockerfile" in opens["run"]
-    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in opens["run"]
 
     # The branch name is derived from the validated version rather than carried over from
     # the job that ran the unreviewed release: it names what gets written to the repository.
     assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
+
+
+def test_the_claude_bump_job_measures_a_reused_branch_from_the_merge_base() -> None:
+    """A reused branch is what it *changes*, not how far the default branch has moved (#166).
+
+    The reuse arm is the recovery path for a run that pushed a branch and then failed before
+    opening the pull request, and a rerun is not usually immediate: the schedule is weekly, so
+    by then the default branch has almost certainly advanced. A local ``git diff <base tip>
+    <branch>`` compares two tips, so every commit merged since the branch was pushed reads as
+    another path the branch touches -- with the sign reversed, as a file the branch reverts --
+    and the arm that exists to spare a human the hand-deletion of the branch demands one
+    instead. ``compare`` measures from the merge base, as the pull request itself will, and
+    needs no history this checkout has to have: the three-dot ``git diff`` that would ask git
+    the same question fails outright there, with "no merge base".
+
+    That is #148's fix in ``pre-commit-version.yml``, and this arm reached it late for the
+    same reason that one did: until #138 the lookup that answers ``reuse=true`` could not see
+    the branch, so nothing had ever run here.
+    """
+    _, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # Of the commit, resolved once from what was checked out, so the shape measured is the
+    # shape of the very tree the pin above was read out of.
+    assert 'tip="$(git rev-parse HEAD)"' in commands, "the reused branch's tip is not resolved"
+    assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
+        "a reused branch is not held to the shape of the change it proposes"
+    )
+    # And the two-tip form is gone with it. The two-tip form, not the idiom: a local
+    # `git diff --numstat -- <path>` over what this step has just copied in is a different
+    # question with a right answer, and the other arm still asks it of the artefact.
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}"' not in commands, (
+        "compares two tips rather than the change the branch proposes"
+    )
+    # The line counts survive the move, since `build` rewrote one line of one file and the
+    # pull request body says so: `compare` reports them per file as `.additions`/`.deletions`.
+    assert r'"\(.additions)\t\(.deletions)\t\(.filename)"' in commands, (
+        "a reused branch is no longer held to the pin's line counts"
+    )
+    # The question and what is done with the answer, since each can be deleted alone: a
+    # comparison nothing reads, and one whose failure reads as "no files", both leave a
+    # workflow that asks and then pushes anyway.
+    assert r"""[ "${moved}" != "$(printf '1\t1\tDockerfile')" ]""" in commands, (
+        "the answer is not used"
+    )
+    assert "::error::could not compare" in commands, "a failed comparison is not a failure"
 
 
 def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:

@@ -212,7 +212,10 @@ jobs:
           # above true of every value this step acts on, and it cannot start with a `-`.
           BRANCH="claude-code-${LATEST}"
           if [ "${REUSE}" = "true" ]; then
-            git fetch origin "${GITHUB_REF_NAME}" "${BRANCH}"
+            # The branch alone: the shape below is measured by the API rather than locally,
+            # so nothing in this arm reads `origin/${GITHUB_REF_NAME}` any more, and the
+            # default branch is what this job is checked out on in any case.
+            git fetch origin "${BRANCH}"
             git checkout "${BRANCH}"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
             # earlier run, and writable by anyone who can push here -- so it is held to the
@@ -224,11 +227,34 @@ jobs:
                 "Delete the branch and rerun this workflow to rebuild it."
               exit 1
             fi
-            if [ "$(git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}")" \
-                 != "$(printf '1\t1\tDockerfile')" ]; then
+            # The commit both gates are about, resolved once from what was checked out: the
+            # shape asked for below is the shape of the very tree the pin was read out of,
+            # rather than of whatever the name resolves to by the time the API answers.
+            tip="$(git rev-parse HEAD)"
+            # ... and it moves that one line and no other. Asked of the API, because the
+            # question is what the branch *changes*, which is measured from where it left the
+            # default branch and not from wherever that branch has since got to: a local
+            # `git diff origin/${GITHUB_REF_NAME} ${BRANCH}` compares two tips, so every
+            # commit merged since the branch was pushed reads as another path the branch
+            # touches -- with the sign reversed, as a file the branch reverts -- and a
+            # week-old branch, which is the ordinary case for a rerun on a weekly schedule,
+            # is refused for somebody else's change and demands by hand exactly the deletion
+            # this arm exists to spare (#166). `compare` measures from the merge base, as the
+            # pull request itself will, and needs no history this checkout has to have: the
+            # three-dot `git diff` that would ask git the same question fails outright here,
+            # with "no merge base". The line counts are kept -- `build` rewrote one line of
+            # one file -- as `.additions` and `.deletions`, which is where `compare` puts
+            # them. A comparison that fails fails the run rather than reading as "no files".
+            if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${tip}" \
+                 --jq '[.files[] | "\(.additions)\t\(.deletions)\t\(.filename)"] | join(" ")' \
+                 | tr -d '\r\n')"; then
+              echo "::error::could not compare ${BRANCH} with ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            if [ "${moved}" != "$(printf '1\t1\tDockerfile')" ]; then
               echo "::error::${BRANCH} differs from ${GITHUB_REF_NAME} by more than the pin," \
-                "so it is not what was built. Delete the branch and rerun this workflow."
-              git diff --stat "origin/${GITHUB_REF_NAME}" "${BRANCH}"
+                "so it is not what was built: ${moved}." \
+                "Delete the branch and rerun this workflow."
               exit 1
             fi
           else
