@@ -932,6 +932,10 @@ class ClaudeRunner:
         allowlist = claude_md_allowlist(trees=trees, files=files)
         if allowlist is not None:
             argv += ["--settings", allowlist]
+        elif trees or files:
+            # The other way `claude_md_allowlist` declines: a path it cannot spell as an arm.
+            # `_claude_md_allowed` has already said its piece when it returned nothing at all.
+            self._log.warning("claude_md_allowlist_unavailable", reason="path not expressible")
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         if cfg.model:
             argv += ["--model", cfg.model]
@@ -957,16 +961,29 @@ class ClaudeRunner:
 
         The config directory is not a tree. `claude` loads exactly two things from it as user
         memory, `CLAUDE.md` and `rules/`, and they have to be allowed or the argument would stop
-        the user memory issuebot does leave in place -- swept between sessions on the
-        `agent.run_as` route (#101, #137) and the operator's own on the host route, where
-        nothing sweeps it. The rest of that directory is `.credentials.json`, the other
-        sessions' transcripts under `projects/` that the sweep deliberately keeps, and the
-        caches, and none of it is instructions.
+        the user memory issuebot does leave in place. The rest of that directory is
+        `.credentials.json`, the other sessions' transcripts under `projects/` that the sweep
+        deliberately keeps, and the caches, and none of it is instructions.
+
+        Those two are allowed, not trusted, and what clears them is the home sweep rather than
+        this argument -- `CLAUDE.md` and `rules` are both `CLAUDE_HOME_SWEEP` names, removed
+        before every turn and every hook on the `agent.run_as` route (#101, #137). Two gaps,
+        both recorded in the spec rather than closed here: on the host route nothing sweeps
+        them, because the home is the operator's own; and the sweep walks `~/.claude`
+        literally, so a deployment that sets `$CLAUDE_CONFIG_DIR` has its user memory allowed
+        here and swept nowhere.
 
         `$CLAUDE_CONFIG_DIR` and not `~/.claude` whenever the deployment sets one, because that
         is what `claude` itself resolves the pair against, and it reaches the child through
         `PASSTHROUGH_PREFIXES`. The session cannot re-point it: `CLAUDE_` is a
         `PROTECTED_ENV_PREFIXES` entry, so `.issuebot/env` is refused it.
+
+        The arms are the paths as written, never what they resolve to, which is a choice and
+        costs something measured: where `<config>/rules` is a symlink, claude matches the
+        exclusion against the *resolved* path and the argument then stops those rules loading.
+        Resolving here would fix that and would also feed a path the session may own into the
+        fence -- a planted `rules -> /` would widen it to everything -- so an operator who
+        keeps user memory elsewhere has `$CLAUDE_CONFIG_DIR`, which this does follow.
 
         Two empties -- so no argument -- when the directory does not resolve, rather than an
         allow-list of the workspace alone: that would stop the user memory loading, and the

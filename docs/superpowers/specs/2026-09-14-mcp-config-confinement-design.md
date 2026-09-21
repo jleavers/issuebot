@@ -209,7 +209,11 @@ while an `@` include pointing outside the clone and an `@` include of
 `<config>/projects/other/notes.md` are both not. And it is an argument rather than a
 preference: with `.claude/settings.json` in the clone setting `claudeMdExcludes` back to `[]`,
 the argv value still won and the external includes were still not read -- which is the property
-AC2 asked for, "cannot be switched off by a setting".
+AC2 asked for, "cannot be switched off by a setting". The mechanism is union rather than
+precedence -- the sources' arrays are concatenated -- so it holds in the direction that matters
+and not in the other: no source can remove the argv's arm, and any source can *add* an
+exclusion. A clone that sets `claudeMdExcludes` can therefore make its own instruction files
+not load, which costs it nothing it could not achieve by deleting them.
 
 Five things about the shape, each of which a simpler one gets wrong.
 
@@ -241,6 +245,46 @@ Five things about the shape, each of which a simpler one gets wrong.
   session every instruction file it should have loaded and looks, from outside, like a session
   that ignored them. `claude_md_allowlist` returns `None` for all of those.
 
+## What this does not close
+
+An `@` include whose target is a **symlink inside the workspace** is still followed out of it.
+Measured, with the argv above verbatim, `--setting-sources user,project`, and a clone
+`CLAUDE.md` whose only line is `@link.md` where `link.md` is a symlink to a file outside the
+clone:
+
+| key | the outside file, through an in-clone symlink |
+|---|---|
+| `hasClaudeMdExternalIncludesApproved: true` | **read** |
+| `false` | not read |
+
+So the key still grants a reach outside the workspace; what the allow-list changed is the
+spelling it takes. In the loader, `Q0` matches `Sgr` against the *unresolved* path, and only
+then resolves with `To()` and skips its own containment test `if (d > 0 && !v && !OZ(x))`
+whenever `v` -- the approval -- is true. An exclusion list keyed on the path as written cannot
+see through that, so no argument closes it: it is claude's rule that a symlink is followed
+once external includes are on, and `CLAUDE_CODE_DISABLE_CLAUDE_MDS` is still the only thing
+that stops it, at the price the table already showed.
+
+This is narrower than what #135 found and it is recorded rather than fixed, which is the
+distinction the original "Residual" got wrong -- that one was an absence of measurement, this
+is a measurement. It needs a session to plant both the symlink and the key, so it is bounded to
+the `project`/`local` opt-in and to a workspace that survives to a later session, which means a
+rework of the same issue. Closing it would mean the worker refusing symlinks among the clone's
+instruction paths before each turn, which is a check against the repository's own contents
+rather than against claude, and is a separate piece of work.
+
+Two smaller ones, both measured and both recorded here:
+
+- Where `<config>/rules` is itself a symlink, claude matches the exclusion against the
+  *resolved* path, so the argument stops those rules loading. The arms are the paths as
+  written on purpose: resolving them would feed a path the session may own into the fence,
+  where a planted `rules -> /` would widen it to everything. An operator who keeps user memory
+  elsewhere has `$CLAUDE_CONFIG_DIR`, which the allow-list does follow.
+- `CLAUDE_HOME_SWEEP` walks `~/.claude` literally, so a deployment that sets
+  `$CLAUDE_CONFIG_DIR` has its `CLAUDE.md` and `rules/` allowed by this argument and swept by
+  nothing. Pre-existing in the sweep rather than introduced here, but this is the first thing
+  to lean on the pairing, so it belongs in the record.
+
 One behaviour change worth naming, because it is not an `@` include. `claudeMdExcludes`
 excludes the memory *files* themselves, and the loader walks every ancestor directory of the
 cwd up to `/`, taking `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules` and `CLAUDE.local.md`
@@ -267,12 +311,15 @@ single-account route shares with a session that may be running right now (#121 b
 account per workspace; it does not serialise two workspaces bound to one account), so the
 failure mode of the fix is a corrupted `.claude.json` breaking every session in the container.
 
-So the file's non-MCP keys are now settled rather than open. `allowedTools` is not honoured
-(above, #119). `hasClaudeMdExternalIncludesApproved` is honoured, and what it can still reach
-is bounded by the argument above rather than by a setting. `hasClaudeMdExternalIncludesWarningShown`
-only suppresses the dialog a `-p` session never sees, and the dialog's `Sit` is the only writer
-of either key, so a session that wants the approval has to write the file itself -- which is
-the same act, on the same file, that `--strict-mcp-config` already answers for `mcpServers`.
+So the file's non-MCP keys are settled rather than open, which is the thing #135 asked for and
+is not the same as "closed". `allowedTools` is not honoured (above, #119).
+`hasClaudeMdExternalIncludesApproved` is honoured; what it reaches is bounded by the argument
+above rather than by a setting, and what remains inside that bound is measured and written down
+in "What this does not close" rather than assumed away, which is exactly how the first version
+of this section went wrong. `hasClaudeMdExternalIncludesWarningShown` only suppresses the dialog
+a `-p` session never sees, and the dialog's `Sit` is the only writer of either key, so a session
+that wants the approval has to write the file itself -- which is the same act, on the same file,
+that `--strict-mcp-config` already answers for `mcpServers`.
 
 ## Proof
 
@@ -294,11 +341,18 @@ For the CLAUDE.md allow-list (#135), in the same file:
   argument for a fresh session and a resumed one, over each shape of `claude.setting_sources`
   and over `permission_mode`, since those are the settings that might look as though they
   already cover it.
-- `test_the_claude_md_allow_list_is_one_negated_pattern_over_every_root` pins the brace, which
+- `test_the_claude_md_allow_list_is_one_negated_pattern_over_every_arm` pins the brace, which
   is the part a reasonable edit would get wrong in the direction that loads nothing.
 - `test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell` and
   `test_no_claude_md_allow_list_without_a_home` pin the two ways the argument is omitted
-  rather than guessed.
+  rather than guessed, and `test_the_claude_md_allow_list_keeps_the_account_home_out_of_the_tree`
+  and `test_the_claude_md_allow_list_follows_claude_config_dir` pin which config paths it names.
+- `tests/test_agent_runas.py::test_the_claude_md_allow_list_names_the_session_accounts_home`
+  pins the one thing that differs between the two routes, on the production one, with a `HOME`
+  in the environment deliberately unlike the account's.
+- The Dockerfile asserts `--settings <` against `claude --help` beside the other four flags,
+  with its argument, since a bare `--settings` is a substring of `--setting-sources`;
+  `tests/test_image_layout.py` pins that assertion.
 
 The measurement itself is not a test and deliberately is not one: it needs a real `claude`, a
 writable `~/.claude.json` and a filesystem whose atimes move, and the thing it establishes --

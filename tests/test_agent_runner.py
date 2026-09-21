@@ -301,6 +301,28 @@ def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> N
     assert claude_md_allowlist(trees=[Path("/a")], files=[Path(root)]) is None
 
 
+def test_an_unspellable_workspace_leaves_no_confinement_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fail-open branch through the public surface, and the warning that marks it (#135).
+
+    `claude_md_allowlist` declines a path it cannot spell rather than emitting a pattern that
+    means something else, so a deployment whose `workspace.root` carries a glob metacharacter
+    runs with no confinement at all. That is the safer of the two failures -- the other loses
+    every instruction file -- but it is not one to make silently, since nothing downstream
+    would show it.
+    """
+    configure_logging()
+    root = tmp_path / "work[1]"
+    runner = ClaudeRunner(settings(root), environ={"HOME": "/home/agent"})
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=root / "ws")
+    assert "--settings" not in argv
+    lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()]
+    [warning] = [line for line in lines if line["event"] == "claude_md_allowlist_unavailable"]
+    assert warning["level"] == "warning"
+    assert warning["reason"] == "path not expressible"
+
+
 def test_no_claude_md_allow_list_without_a_home(tmp_path: Path) -> None:
     """A workspace-only allow-list would stop the user memory loading, so an unresolved config
     directory omits the argument instead (#135): the residual it would buy against is bounded
