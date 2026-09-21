@@ -165,8 +165,8 @@ beside `PATH` and the proxy names.
   environment allow-list closes. What this change closes is the wider blast radius: git run
   anywhere else, `gh`'s entire config namespace, and any other tool following the
   base-directory specification that a target repository's hooks reach for. Named because
-  "protected" must not be read as "the next session on this issue inherits nothing"; filed as a
-  follow-up rather than folded in, since the answer is about workspace reuse and not about this
+  "protected" must not be read as "the next session on this issue inherits nothing"; filed as
+  #180 rather than folded in, since the answer is about workspace reuse and not about this
   file.
 
 - **`BASH_ENV`.** Measured firing under `bash -lc`, which is `WorkspaceManager.hook_shell`:
@@ -174,7 +174,7 @@ beside `PATH` and the proxy names.
   is #137's `~/.profile` channel in environment-variable form, reaching every hook and the
   post-clone setup. It is a different tool and a different sibling issue from the git and `ssh`
   configuration this one decides, and the repository's practice is to file rather than fold in
-  (#151 out of #137, #171 out of #151), so it is filed as a follow-up and named here. A reader
+  (#151 out of #137, #171 out of #151), so it is filed as #179 and named here. A reader
   should not take this change for a claim that the next session's login shell is unreachable.
 
 - **A denylist, as in #101 and #137.** `.issuebot/env` admits everything it does not refuse, and
