@@ -229,10 +229,13 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
     # -F, so the version's dots are dots and not any-character.
     pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
-    assert opens["run"].count(pin) == 2, "the artefact and the reused branch are not both pinned"
-    assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
-    # The other one is the reused branch's, read out of its commit rather than off the disk;
-    # the test below pins that arm.
+    # Counted over the invocations, since one of these scripts explains in a comment what it
+    # deliberately does not do, and a quotation of the grep is not a grep.
+    commands = _commands(opens["run"])
+    assert commands.count(pin) == 2, "the artefact and the reused branch are not both pinned"
+    assert f"{pin} /tmp/bump/Dockerfile" in commands, "the artefact's pin is not re-checked"
+    # The other one is the reused branch's, read out of its commit rather than off a
+    # worktree; the test below pins that arm.
     # ... and the copy may move that one line and nothing else. A reused branch is held to
     # the same shape against the base, since `build` built the base plus the pin and the
     # pull request body says so -- measured from the merge base, which is the test below.
@@ -280,8 +283,15 @@ def test_the_claude_bump_job_re_checks_the_reused_branch_from_the_merge_base() -
     # The pin is read out of that commit and not off the disk, since `grep` follows a symlink:
     # a `Dockerfile` that is one, pointed at the artefact this step holds, would otherwise
     # pass the pin check carrying none of its own bytes.
-    assert 'git cat-file blob "${tip}:Dockerfile"' in commands, (
-        "a reused branch's pin is read off the disk, or through an ambiguous name"
+    # The read and the grep that consumes it, as one: either alone would still pass with the
+    # blob going to `/dev/null` and the pin checked against something else. Through a file
+    # and not a pipe, because `grep -q` exits at the first match and `pipefail` would then
+    # make a SIGPIPE'd `git cat-file` refuse an honest branch.
+    assert 'git cat-file blob "${tip}:Dockerfile" > /tmp/reused-Dockerfile' in commands, (
+        "a reused branch's pin is read off a worktree, through a pipe, or through an ambiguous name"
+    )
+    assert 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/reused-Dockerfile' in commands, (
+        "the pin is not checked against what was read out of the commit"
     )
     assert "${BRANCH}:Dockerfile" not in commands, "reads an ambiguous name"
     assert "git checkout ${BRANCH}" not in commands.replace('"', ""), (
