@@ -229,8 +229,10 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
     # -F, so the version's dots are dots and not any-character.
     pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
+    assert opens["run"].count(pin) == 2, "the artefact and the reused branch are not both pinned"
     assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
-    assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
+    # The other one is the reused branch's, read out of its commit rather than off the disk;
+    # the test below pins that arm.
     # ... and the copy may move that one line and nothing else. A reused branch is held to
     # the same shape against the base, since `build` built the base plus the pin and the
     # pull request body says so -- measured from the merge base, which is the test below.
@@ -242,7 +244,7 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
 
 
-def test_the_claude_bump_job_measures_a_reused_branch_from_the_merge_base() -> None:
+def test_the_claude_bump_job_re_checks_the_reused_branch_from_the_merge_base() -> None:
     """A reused branch is what it *changes*, not how far the default branch has moved (#166).
 
     The reuse arm is the recovery path for a run that pushed a branch and then failed before
@@ -257,15 +259,34 @@ def test_the_claude_bump_job_measures_a_reused_branch_from_the_merge_base() -> N
 
     That is #148's fix in ``pre-commit-version.yml``, and this arm reached it late for the
     same reason that one did: until #138 the lookup that answers ``reuse=true`` could not see
-    the branch, so nothing had ever run here.
+    the branch, so nothing had ever run here. Which is also why the rest of that arm's rule
+    is pinned here: what it reuses is a branch on the remote, writable by anyone who can push
+    to this repository, so the commit both gates read is resolved once from a fully qualified
+    ref, and the pin is read out of that commit rather than off a worktree, where a symlink
+    would be followed.
     """
     _, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
     commands = _commands(opens["run"])
 
-    # Of the commit, resolved once from what was checked out, so the shape measured is the
-    # shape of the very tree the pin above was read out of.
-    assert 'tip="$(git rev-parse HEAD)"' in commands, "the reused branch's tip is not resolved"
+    # Of one commit, resolved once from the fully qualified ref, and both gates are about
+    # that commit: `gitrevisions` resolves `refs/tags/${BRANCH}` ahead of `refs/heads/`, and
+    # an ordinary fetch follows a tag pointing into the history it downloads, so a bare
+    # `${BRANCH}` would let a tag of the same name -- writable by anyone who can push here --
+    # hand these gates one commit while the pull request, which is opened by branch name,
+    # proposed another. The rule `pre-commit-version.yml` has held its own arm to since #148.
+    assert 'git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"' in commands
+    assert 'tip="$(git rev-parse "refs/heads/${BRANCH}")"' in commands, "the ref is not resolved"
+    # The pin is read out of that commit and not off the disk, since `grep` follows a symlink:
+    # a `Dockerfile` that is one, pointed at the artefact this step holds, would otherwise
+    # pass the pin check carrying none of its own bytes.
+    assert 'git cat-file blob "${tip}:Dockerfile"' in commands, (
+        "a reused branch's pin is read off the disk, or through an ambiguous name"
+    )
+    assert "${BRANCH}:Dockerfile" not in commands, "reads an ambiguous name"
+    assert "git checkout ${BRANCH}" not in commands.replace('"', ""), (
+        "the reuse arm works from the worktree"
+    )
     assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
         "a reused branch is not held to the shape of the change it proposes"
     )
