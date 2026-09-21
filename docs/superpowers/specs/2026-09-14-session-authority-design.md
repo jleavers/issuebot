@@ -169,10 +169,12 @@ what the session may do within them.
   cannot set or clear `CLAUDE_CODE_RESTRICTED` through its own `.issuebot/env`.
 
   The third doubt stands and is joined by a larger one. `--restricted` ignores the settings
-  files `--setting-sources` selects, so the flag would make that argument a no-op and silently
-  void the README's promise that `claude.setting_sources: [project]` loads a target
-  repository's own permission rules and hooks -- a documented opt-in that would keep reading as
-  honoured while doing nothing. And the mode's most valuable clause is the one that might
+  files `--setting-sources` selects -- measured the same way, with a skill planted at user
+  scope and another at project scope: `--setting-sources user,project` lists both in the init
+  line, and adding `--restricted` lists neither. So the flag would make that argument a no-op,
+  and silently void the README's promise that `claude.setting_sources: [project]` loads a
+  target repository's own permission rules and hooks -- a documented opt-in that would keep
+  reading as honoured while doing nothing. And the mode's most valuable clause is the one that might
   break the workflow outright: with `--permission-prompts none` there is no approval surface,
   so anything routed to "only a person or the configured permission handler" is denied
   automatically, and every issuebot session commits, merges and pushes. Whether that clause
