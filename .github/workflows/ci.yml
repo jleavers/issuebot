@@ -437,10 +437,16 @@ jobs:
       # because it is the real uid split, the real sudo rule and the real home, and through the
       # worker's own code path (`RunAs.sweep_home`, the default target) rather than the helper
       # verb by hand, so a wrong default path or an argv the sudoers rule rejects fails here.
-      # The profile half is two-sided for the reason the MCP proof above is: the same login
-      # shell is run before the sweep, where the plant must *run*, so a `bash -lc` that stopped
-      # sourcing anything could not pass this as a no-op.
-      - name: a session's config and shell profile do not survive to the next session
+      # The same goes for the config a *tool* the session runs reads out of that home (#151):
+      # `~/.gitconfig` and `~/.config/git/config` name commands to `git`, which every session
+      # runs, and `~/.ssh/config` names one to `ssh`. The profile and gitconfig halves are
+      # two-sided for the reason the MCP proof above is: the same login shell and the same
+      # `git` are run before the sweep, where the plant must *run*, so a `bash -lc` that
+      # stopped sourcing anything, or a `git` that stopped reading the home, could not pass
+      # this as a no-op.
+      # Nothing inside the outer script may carry an apostrophe or a single quote: it is one
+      # `bash -c '...'` argument, and either would end that quoting and split the command.
+      - name: a session's config, shell profile and tool config do not survive
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -461,6 +467,15 @@ jobs:
               echo \"echo BASHRC-RAN\" > /home/agent/.bashrc
               echo \"{}\" > /home/agent/.claude.json
               mkdir -p /home/agent/.npm
+              # The tool config, and the neighbours in those directories that the sweep is not
+              # aimed at: gh keeps its configuration beside the one git reads, and known_hosts
+              # sits beside the one ssh reads.
+              mkdir -p /home/agent/.config/git /home/agent/.config/gh /home/agent/.ssh
+              printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
+              printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
+              echo ProxyCommand false > /home/agent/.ssh/config
+              echo github.com: > /home/agent/.config/gh/hosts.yml
+              echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
             "
             # Before the sweep the plant runs, which is what the sweep is for: a hook is
             # `bash -lc`, a login shell, and the home it reads belongs to the account.
@@ -469,11 +484,19 @@ jobs:
               *PROFILE-RAN*) ;;
               *) echo "the login shell did not source ~/.profile: $planted" >&2; exit 1 ;;
             esac
+            # And the same for git, which reads both spellings of the user config, the XDG
+            # one first, and runs a command either can name. `-C /` so the reading is about
+            # the home rather than about whatever repository the working directory sits in.
+            test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN
+            test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
             # The next session hook finds nothing planted: it runs its own command and no more.
             test "$(sudo -n -H -u agent bash -lc "echo hook-ran")" = hook-ran
+            # And the next session git has no alias left to run, by either spelling.
+            ! sudo -n -H -u agent git -C / pwn 2>/dev/null
+            ! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null
             # And the account can still do what it is for with its start-up files gone: `claude`
             # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
             # from /etc/profile and /etc/profile.d, which belong to root and are not swept.
@@ -484,8 +507,14 @@ jobs:
               set -eu
               test ! -e /home/agent/.profile
               test ! -e /home/agent/.bashrc
+              test ! -e /home/agent/.gitconfig
+              test ! -e /home/agent/.config/git/config
+              test ! -e /home/agent/.ssh/config
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
+              # The directories those files sat in are other tools too, and stay.
+              test -f /home/agent/.config/gh/hosts.yml
+              test -f /home/agent/.ssh/known_hosts
               cd /home/agent/.claude
               test ! -e commands
               test ! -e skills
@@ -530,19 +559,22 @@ jobs:
           docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'command -v initdb && command -v node && command -v npm && command -v uv && command -v pwsh'
           test "$(docker run --rm --entrypoint id issuebot:ci-toolchain -un)" = issuebot
           test "$(docker run --rm --user agent --entrypoint id issuebot:ci-toolchain -un)" = agent
-      # #161: on this deployment uv can never hardlink out of its cache -- the cache is under
-      # $HOME/.cache/uv, in the container's writable layer, and the venv is on the workspaces
-      # volume -- so every `uv sync` copies and warns three lines about it on the stderr of
-      # `after_create`, which is logged in full and quoted into the run's error when that hook
-      # fails. The profile script says the copy is intended. Three readings: the default; an
-      # inherited value, which is what an `.issuebot/env` written from `before_run` hands over
-      # and what an unconditional export in that file would have overwritten; and the default
-      # build, which installs no uv and so must carry no variable about it either. The third is
-      # an assignment on its own line, since `test -z "$(docker run ...)"` would also pass for a
-      # `docker run` that failed and printed nothing.
-      - name: the opt-in build's login shell defaults uv's link mode and defers to one set
+      # #164: the image states nothing about uv's link mode any more. It used to default it to
+      # `copy` (#161), because the cache was under $HOME/.cache/uv in the container's writable
+      # layer while the venv was on the workspaces volume, and a hardlink cannot cross the two;
+      # the worker now puts the cache on that volume itself, one directory per session account,
+      # so uv's own default is both what it wants and what works and a `copy` here would be in
+      # its way. Three readings, and each is a different mistake: the opt-in build's login
+      # shell, which must state nothing; an inherited value, which must still arrive, since
+      # `UV_LINK_MODE` is on no allow-list and an `.issuebot/env` written from `before_run` is
+      # how a deployment overrides it; and the default build, which installs no uv and so must
+      # carry no variable about it either. The first and third are assignments on their own
+      # line, since `test -z "$(docker run ...)"` would also pass for a `docker run` that
+      # failed and printed nothing.
+      - name: the opt-in build's login shell states no uv link mode and defers to one set
         run: |
-          test "$(docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')" = copy
+          toolchain="$(docker run --rm --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')"
+          test -z "$toolchain"
           test "$(docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain -lc 'echo ${UV_LINK_MODE-}')" = hardlink
           default="$(docker run --rm --entrypoint bash issuebot:ci -lc 'echo ${UV_LINK_MODE-}')"
           test -z "$default"

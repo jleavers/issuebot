@@ -29,6 +29,7 @@ from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
 from issuebot.agent.scrub import Scrubber
+from issuebot.agent.uvcache import UV_CACHE_ROOT_NAME, ensure_uv_cache_dir
 from issuebot.config import Settings
 from issuebot.events.types import RunOutcome
 from issuebot.github import GhRunner, GhRunnerLike, GitHubError, Issue
@@ -52,6 +53,17 @@ STATE_DIR = ".issuebot"
 # the worker reads back out of them is declared, and guarded, in ``issuebot.agent.boundary``.
 # The mode and the group come from ``share_with`` (#121): the bound account's group and nobody
 # else's, so a sibling session at another uid cannot enter the directory at all.
+
+# Names directly under ``workspace.root`` that are not workspaces, and must not be treated as
+# one. The worker's account registry (#121) and the per-account uv caches (#164): both are the
+# worker's own directories beside the workspace keys, and both would be damaged by being taken
+# for a clone. ``path_for`` refuses either as a key -- no identifier spells one today, since a
+# key is ``<repo>-<number>`` and always ends in a digit, but neither directory is something to
+# leave resting on that -- and ``seal_idle`` steps over them, which for the cache root is
+# load-bearing rather than tidy: it is ``0755`` so that every session account can reach its own
+# directory inside it, and sealing it to ``0700`` at each worker start would take every
+# account's cache away until something re-created it.
+RESERVED_ROOT_NAMES: frozenset[str] = frozenset({REGISTRY_DIR, UV_CACHE_ROOT_NAME})
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
@@ -193,11 +205,11 @@ class WorkspaceManager:
         path = (self.root / workspace_key(identifier)).resolve()
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
-        if path.name == REGISTRY_DIR:
-            # The worker keeps its account bindings there (#121), and a workspace is
-            # removed wholesale. No identifier reaches it today -- one is `<repo>-<number>`,
-            # so a key always ends in a digit -- but the record is not something to leave
-            # resting on how identifiers happen to be spelled.
+        if path.name in RESERVED_ROOT_NAMES:
+            # The worker keeps its account bindings and its per-account uv caches there (#121,
+            # #164), and a workspace is removed wholesale. No identifier reaches either today
+            # -- one is `<repo>-<number>`, so a key always ends in a digit -- but neither is
+            # something to leave resting on how identifiers happen to be spelled.
             raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
@@ -319,7 +331,9 @@ class WorkspaceManager:
         for child in children:
             # Through the boundary (#104): a workspace is a directory of the worker's, reached
             # without following a link, so a name a session planted here is not sealed as one.
-            if child.name != REGISTRY_DIR and self._boundary.is_own_dir(self.root, (child.name,)):
+            if child.name not in RESERVED_ROOT_NAMES and self._boundary.is_own_dir(
+                self.root, (child.name,)
+            ):
                 seal(child)
 
     def _make_state_dir(self, path: Path) -> None:
@@ -363,8 +377,9 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear what a prior or concurrent session may have left in the account's home for
-        this one to load: the config under ``~/.claude`` (#101) and the shell start-up files a
-        login shell sources (#137). Called immediately before each of this session's turns and
+        this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
+        login shell sources (#137) and the git and ssh config a tool would take a command from
+        (#151). Called immediately before each of this session's turns and
         before every script it runs in a login shell (``_run_script``: the hooks and the
         post-clone setup).
 
@@ -513,13 +528,31 @@ class WorkspaceManager:
         await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 
+    def _hook_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
+        """What every hook, and the clone, is run with, and the complaints about the env file.
+
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+
+        The later hooks see what ``before_run`` wrote: ``after_run`` and ``before_remove`` tend
+        to want the same DSN. ``after_create`` runs before any file can exist, which is fine.
+
+        ``uv_cache`` is ensured here rather than at workspace creation, so that
+        ``before_remove`` -- which runs for a workspace this manager never created -- is handed
+        the same environment as the rest (#164). ``after_create``, where the target
+        repository's ``uv sync`` runs, is the one it is for.
+        """
+        base = agent_environment(
+            self._environ,
+            token=self._settings.github.token,
+            uv_cache=ensure_uv_cache_dir(self.root, self._account, self._environ),
+        )
+        return workspace_environment(base, workspace, boundary=self._boundary)
+
     async def _run_argv(self, name: str, argv: Sequence[str], workspace: Path) -> HookResult:
         timeout_s = self._settings.hooks.timeout_ms / 1000
         started = time.monotonic()
-        # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
-        # want the same DSN. `after_create` runs before any file can exist, which is fine.
-        base = agent_environment(self._environ, token=self._settings.github.token)
-        env, _ = workspace_environment(base, workspace, boundary=self._boundary)
+        env, _ = self._hook_environment(workspace)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
             with self._prepared(argv, env) as spawn:

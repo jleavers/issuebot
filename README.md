@@ -867,25 +867,69 @@ also an ordering: **rebuild the image before the new `configs/WORKFLOW.md` reach
 worker**, since `configs/` is bind-mounted and reloads live. `docker compose stop worker`
 before pulling, and `up -d worker` after the build, closes that window entirely.
 
-**`UV_LINK_MODE=copy`, and why.** The build writes that into
-`/etc/profile.d/issuebot-uv.sh` beside the `PATH` line, so a login shell carries it. uv would
-rather hardlink a package out of its cache into the venv, and here it can never do that: the
-cache is `$HOME/.cache/uv`, in the container's own writable layer, and the venv is
-`<workspace>/.venv`, on the `workspaces` volume. A hardlink cannot cross two filesystems, so uv
-copies and then warns three lines about it on the stderr of `after_create` — the first hook of
-every session, logged in full and quoted into the run's error if that hook fails, which is a
-poor place to leave an unexplained warning about something that is working. The variable states
-that the copy is intended.
+**uv's cache lives on the `workspaces` volume, one directory per session account.** The
+worker creates `<workspace.root>/.uv-cache/<account>` — `/workspaces/.uv-cache/agent-1` on a
+default deployment — and hands it to every hook and every turn as `UV_CACHE_DIR`. There is
+nothing to configure: it is derived from `workspace.root`, so a deployment whose workspaces are
+somewhere else gets its caches there too.
 
-It is a *default*, so a deployment whose cache and workspaces do share a filesystem can ask for
-something else: `uv sync --link-mode=hardlink` in the hook line itself, which is the only route
-`after_create` has — it runs before anything has written `.issuebot/env`, and that file only
-reaches the hooks *after* the one that wrote it — or `UV_LINK_MODE=hardlink` in an
-`.issuebot/env` written from `before_run`, which covers the later hooks and every turn. The
-speed is not the argument either way: the copy took 122 ms for this repository. What it does
-still cost is a duplicated venv per workspace and a cache that is discarded with the container,
-which is [#164](https://github.com/jleavers/issuebot/issues/164) — putting the cache on the
-volume, one directory per session account, so the hardlink works at all.
+Two things follow from it, and they are the reason it exists (#164). uv would rather hardlink a
+package out of its cache into the venv than copy it, and a hardlink cannot cross a filesystem:
+with the cache in `$HOME/.cache/uv`, in the container's own writable layer, and the venv at
+`<workspace>/.venv` on the volume, it never could. On the same filesystem it can, so a second
+workspace's venv costs almost nothing — measured on the live worker, this repository's own
+dependency set: 152 MB for two venvs copied, 77 MB for the two hardlinked out of one 78 MB
+cache. And the cache is on the volume rather than in the container's writable layer, so it
+survives `docker compose up -d worker` instead of being re-downloaded from PyPI by the first
+session after every worker recreation.
+
+**One directory per account, and that is the point of the shape.** A cache is a directory one
+process writes and the next installs *from*, so a cache shared between session accounts would
+be a surface one session could write for another to execute — exactly what the [account
+pool](#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
+the worker and group that account's own, inside a `0755` root: an account reaches its own and
+is refused at every sibling's door. Per account it is the boundary that account's own home
+already draws, and the next session bound to it is the one the cache is kept for.
+
+What the hardlink *does* change is worth stating plainly, since it is not nothing. A hardlinked
+`.venv` entry is the cache's own inode, so two workspaces bound to one account now share the
+files their venvs were installed from — and an idle workspace is sealed `0700` precisely
+because a hostile session may later be handed an account that also holds an honest, idle one. A
+hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it. The
+two sessions are the same account at the same uid, which already shares a home, and that home
+already held a per-account uv cache the home sweep does not touch (it is a denylist of
+instruction surfaces and shell start-up files, and names no cache) — so this is a channel uv's
+default location had too, and what the hardlink adds is that a poisoning takes effect without
+waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
+that session commits and pushes; only what its tests import. And the alternative gives up the
+venv sharing this was measured for: a per-workspace cache would close it, and the second
+workspace's venv is free only because it is the first one's files. Whether the residual is
+worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
+
+Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
+hardlinks into it, removing a workspace frees very little that the cache still holds, and a
+full volume stops workspace creation rather than just caching. `uv cache prune` from a hook is
+the lever if a deployment wants one; `uv cache clean` is not, since it removes the cache
+directory itself and that directory's parent is the worker's.
+
+The host route (`agent.run_as` unset) carries none of this: there is no session account, the
+home is the operator's own, and uv's default cache stays where it is. Nor does an image built
+without `ISSUEBOT_UV_VERSION`, which has no `uv` on `PATH` for the question to be about.
+
+**`UV_LINK_MODE` is no longer set anywhere,** which is the other half of the same change. The
+build used to default it to `copy` in `/etc/profile.d/issuebot-uv.sh`, because the copy was
+unavoidable and uv warns three lines about falling back to one — on the stderr of
+`after_create`, the first hook of every session, logged in full and quoted into the run's error
+if that hook fails, which is a poor place to leave an unexplained warning about something that
+is working. With the cache on the volume the fallback is gone and uv's own default is what
+should happen, so the image states nothing and lets it. A deployment that wants something else
+still has both routes: `uv sync --link-mode=copy` in the hook line itself, which is the only
+one `after_create` has — it runs before anything has written `.issuebot/env`, and that file
+only reaches the hooks *after* the one that wrote it — or `UV_LINK_MODE=copy` in an
+`.issuebot/env` written from `before_run`, which covers the later hooks and every turn.
+`UV_CACHE_DIR` is overridable from the same file, for the same reason: neither name is on the
+protected list. Speed was never the argument either way — the copy took 122 ms for this
+repository.
 
 If a session reports `uv: command not found`, check it in a login shell, which is what the hooks
 get: `docker compose exec worker bash -lc 'command -v uv'`. If it reports a `403` from the
@@ -1027,6 +1071,14 @@ hook that would truncate it again or append a duplicate per session.
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
+- **Nor through `git config --global`.** The session account's `~/.gitconfig`,
+  `~/.config/git/config` and `~/.ssh/config` are swept on the same schedule (#151), so a hook
+  that writes user-level git or ssh config finds it gone before the next login shell — again
+  between two sessions and within one. Commit identity is already handled: set the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
+  the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
+  `git config --local` inside the clone, which is what the post-clone setup does.
 
 ### More than one repository
 
@@ -1246,12 +1298,22 @@ that matters on your host.
   session's Bash tool, so a `~/.profile` one session leaves is a script every later session
   runs at that uid. That is why the sweep runs before each of those scripts as well as before
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-  before turn 1. It leaves the rest of the
+  before turn 1. The same home holds the config a *tool* the session runs reads, and that is
+  swept with it (#151): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
+  second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
+  `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
+  to run. Nothing a deployment needs goes there: the bot's identity is the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
+  entry is the image's system-wide one, the clone's credential helper is written into the clone,
+  and global git or ssh config for every session belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-  tool the session ran keeps there (`gh`'s state, npm's cache). It is a
-  denylist of what is loaded, not an allowlist of what is kept, so a new claude location has to
-  be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+  tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
+  sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
+  `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
+  denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
+  new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next
