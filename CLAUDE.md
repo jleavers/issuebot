@@ -516,6 +516,41 @@ version, and moves by hand.
   where the home is the operator's own, is exempt. The record's
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
+  `uvcache.py` (#164) is the same line drawn around a *cache*: `<workspace.root>/.uv-cache/
+  <account>`, one directory per session account, created by the worker the way it creates a
+  workspace (sealed, then `share_with` -- `1770`, the worker's, enterable by that account's
+  group alone) inside a `0755` root the accounts traverse and cannot write. A cache is a
+  directory one process writes and the next installs *from*, so a shared one would be a
+  surface one session writes for another to execute, which is what the pool exists to
+  prevent; per account it is the boundary the account's own home already draws, and the next
+  session bound to it is what the cache is kept for. What the hardlink does change is that a
+  `.venv` entry *is* the cache's inode, so two workspaces bound to one account share the files
+  their venvs were installed from, and a hardlink reaches past the seal an idle workspace
+  carries -- bounded by the two sessions being the same account at the same uid, which already
+  shares a home holding a per-account uv cache the home sweep names nowhere (so the channel is
+  one uv's default location had too, and what the hardlink adds is that it takes effect without
+  waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
+  session commits and pushes. The alternative gives up what the shape was measured for: the
+  second workspace's venv is free only because it is the first one's files (#176 asks
+  whether the residual is worth closing).
+  `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
+  turn (`ClaudeRunner.child_environment`) and every hook
+  (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an
+  image with no `uv` on the session's `PATH` (the `ISSUEBOT_UV_VERSION` opt-in as the session
+  sees it) and for a directory it could not make -- that last one a `uv_cache_unavailable`
+  warning and then uv's own default, since exporting a path uv cannot write would break every
+  `uv` command where an unset variable only costs a hardlink. It reaches the session as
+  `agent_environment`'s one *computed* entry beside `GH_TOKEN` (`uv_cache=`), because the
+  allow-list carries no `UV_` name and the value is per account and per deployment; it is
+  deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
+  -- which the image no longer sets at all, the `copy` default of #161 having existed only
+  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
+  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
+  them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
+  every account can reach its own directory, and sealing it at each worker start would take
+  every account's cache away. `AccountRegistry.prune` and the terminal sweep work from keys
+  rather than by listing the root and are undisturbed, which #161 believed and #164 proved.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with a timeout and a cap on what they hand back,
   `.issuebot/session.json`, whose `workpad_comment_id` is the
