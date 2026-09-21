@@ -104,12 +104,97 @@ the flag rather than reading about it.
 this flag. That is left alone on purpose: the phase specs are a record of what was decided
 then, and this document is the amendment.
 
-## Residual
+## The non-MCP keys: `hasClaudeMdExternalIncludesApproved` (#135)
 
-`hasClaudeMdExternalIncludesApproved` still persists per project path, so a rework session on
-the same workspace path inherits an approval its predecessor gave for CLAUDE.md includes
-outside the project. It is bounded to one issue's own workspace rather than shared across
-issues, and no measurement here shows it granting anything; it is recorded rather than fixed.
+This section replaces the "Residual" that stood here. That residual recorded
+`hasClaudeMdExternalIncludesApproved` as persisting per project path with "no measurement here
+[showing] it granting anything" -- which was an absence of measurement, not a finding. #135
+measured it. The answer is **yes, `claude -p` honours it**, and the rest of this section is
+what that does and does not reach.
+
+Measured against the same `claude` the image pins (2.1.263), run as a session account
+(`agent-5`, uid 1015), with the worker's own flags and a throwaway `CLAUDE_CONFIG_DIR`. The
+signal is not what the model said: `ANTHROPIC_API_KEY` is present but *empty* in a container
+session's environment, so no credential was reachable, exactly as #119 found when
+`CLAUDE_CONFIG_DIR` cost it the OAuth login. It did not need one. CLAUDE.md is loaded before
+the login check -- the same property that let #119 read the init line -- so the question
+"was the include honoured" is answerable as "did `claude` read the include target at all",
+which is an atime under `relatime` with the mtime bumped before each run. An `@INSIDE.md`
+include *inside* the project is the control that separates "CLAUDE.md was not loaded" from
+"the external include was refused".
+
+| `--setting-sources` | CLAUDE.md | key | `CLAUDE.md` | `@INSIDE.md` | `@../outside/EXTERNAL.md` |
+|---|---|---|---|---|---|
+| `project` | project's | absent | read | read | **not read** |
+| `project` | project's | `false` | read | read | **not read** |
+| `project` | project's | `true` | read | read | **read** |
+| `user` | user's | absent | not read | not read | read |
+| `user` | user's | `false` | not read | not read | read |
+| `user` | user's | `true` | not read | not read | read |
+| `project`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` | project's | `true` | not read | not read | not read |
+
+Two things the table alone does not say.
+
+**claude keys `projects[]` by the git root of the cwd, not by the cwd.** The first run of the
+probe wrote the key onto the working directory and measured "not honoured"; the probe was
+sitting inside a clone, so `claude` was reading a different entry entirely. `git init` in the
+probe inverted the result. Anyone re-running this hits that trap first.
+
+**The key gates the project's and local's CLAUDE.md, never the user's.** From the 2.1.263
+bundle, in the memory loader:
+
+```js
+let x = es(),                                   // projects[<git root>] of ~/.claude.json
+    D = o || x.hasClaudeMdExternalIncludesApproved || !1;
+if (Or("userSettings"))    { ... Q0(Pe, "User",    v, !0) }   // external includes always on
+if (hF("projectSettings")) { ... Q0(Ie, "Project", v, D)  }   // gated by the key
+if (hF("localSettings"))   { ... Q0(Ie, "Local",   v, D)  }   // gated by the key
+```
+
+`Or`/`hF` are the `--setting-sources` gates, and `OZ(e){return vf(e, he())}` -- the test an
+include has to fail to count as external -- is "inside the cwd". The only *writer* of the key
+is the interactive dialog's `Sit`, so a `claude -p` session cannot approve external includes
+through claude at all; it can write `~/.claude.json` itself, which is the vector and the same
+one `mcpServers` had.
+
+## What that leaves, and why no flag is set for it
+
+At the shipped `claude.setting_sources: [user]` (#107) the key reaches nothing. No Project or
+Local CLAUDE.md is a source, so the clone has no CLAUDE.md loaded for an `@` include to hang
+off, and the last three rows are the *user* CLAUDE.md, which loads external includes whatever
+the key says -- and `~/.claude/CLAUDE.md` is the first name in `CLAUDE_HOME_SWEEP` (#101,
+#137), removed before every turn and before every hook. The route opens only under the
+`project` or `local` opt-in that `ClaudeSettings.loads_clone_settings` reports and `validate`
+already warns about, and under it the incremental grant is that a CLAUDE.md include may point
+*outside* the clone -- at the session account's home, which the sweep's denylist does not
+cover -- and be read by the next session at that workspace path.
+
+Unlike `mcpServers`, this one gets no flag, and the reason is that there is no flag to set.
+`D` above reads no environment variable and no argument; nothing in the argv can turn external
+includes off while leaving CLAUDE.md on. The one env-shaped switch is
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS`, and the last row of the table is what it does: it voids
+*every* CLAUDE.md, the project file and its own internal include included. Putting that in
+`FIXED_ENVIRONMENT` beside `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` would make #107's opt-in
+silently do nothing -- a regression dressed as a fix, and a worse one than the hole, since an
+operator who names `project` is asking for that file on purpose.
+
+Clearing the key out of `~/.claude.json` is the option this document already refused for
+`mcpServers`, and #135 makes it worse rather than better. It is still a denylist over a format
+that is claude's own, but it is now also a read-modify-write of that file, performed as the
+session account, in a home the single-account route shares with a session that may be running
+*right now* (#121 is what narrows that to one account per workspace; it does not serialise two
+workspaces bound to one account). The failure mode of the fix is a corrupted `.claude.json`
+that breaks every session in the container, and it would be paid to close a route the shipped
+setting already shuts.
+
+So the decision is: measured, bounded, and carried by the setting that governs it rather than
+by a flag. What #135 changes in code is that `validate`'s `claude.setting_sources` warning now
+names this consequence, so an operator turning the opt-in on is told that the clone's CLAUDE.md
+becomes configuration *and* that its `@` includes may then reach outside the clone on an
+approval a previous session at that workspace path wrote. The keys that are settled and grant
+nothing are recorded here rather than re-measured: `allowedTools` (above, #119),
+`hasClaudeMdExternalIncludesApproved` (this section), and `hasClaudeMdExternalIncludesWarningShown`,
+which only suppresses the dialog a `-p` session never sees.
 
 ## Proof
 

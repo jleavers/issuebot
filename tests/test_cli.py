@@ -723,7 +723,13 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
     executables: object,
 ) -> None:
     """#107: naming `project` or `local` hands the clone's files to every session as
-    configuration, which anyone who can merge to the repository can change."""
+    configuration, which anyone who can merge to the repository can change.
+
+    #135 adds the `@` includes to the same line: with `project` or `local` named, a Project or
+    Local CLAUDE.md may include a path outside the clone whenever
+    `projects.<git root>.hasClaudeMdExternalIncludesApproved` is true in the session account's
+    `~/.claude.json`, and nothing in the argv turns that off -- so this warning is the only
+    place an operator choosing the opt-in is told."""
     monkeypatch.setenv("GH_TOKEN", "t")
     path = _write(
         tmp_path,
@@ -736,9 +742,41 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
         "[WARN] claude.setting_sources: user, project; the clone's CLAUDE.md and .claude/ "
         "(settings, hooks, skills) are claude's own configuration for every "
         "session, and anyone who can merge to o/r can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way); omit the setting to load "
+        "--strict-mcp-config either way); that CLAUDE.md's @ includes may also reach outside "
+        "the clone, on an approval a previous session at this workspace path wrote into the "
+        "session account's ~/.claude.json, which no flag turns off; omit the setting to load "
         "only the user's" in out
     )
+
+
+def test_validate_setting_sources_ok_line_is_silent_about_external_includes(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#135: at the shipped `[user]` the approval key reaches nothing, so the line must not
+    warn about it.
+
+    No Project or Local CLAUDE.md is a setting source, so there is no CLAUDE.md of the clone's
+    for an `@` include to hang off and `hasClaudeMdExternalIncludesApproved` gates nothing. The
+    user's own CLAUDE.md does load external includes whatever the key says, and what covers
+    that is `CLAUDE_HOME_SWEEP` removing `~/.claude/CLAUDE.md` before every turn (#101, #137),
+    not this setting -- so mentioning the key here would point at the wrong control.
+    """
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nnotifications:\n  slack:\n    events: []\n---\nBody",
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json "
+        "are data, not configuration" in out
+    )
+    assert "@ includes" not in out
+    assert "~/.claude.json" not in out
 
 
 def _validate_with_database(
