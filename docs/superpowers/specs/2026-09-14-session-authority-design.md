@@ -130,8 +130,9 @@ what the session may do within them.
   registries the hooks need on the list -- which is a deployment change too large to make
   unattended here. Filed as #126 with that sketch; until it lands, the tool policy removes
   the model's own egress and the container's remains.
-- **`--restricted`.** `claude` has a mode that removes the code-running tools unless `--tools`
-  names them, confines the file tools to the working directories, refuses `bypassPermissions`,
+- **`--restricted`.** `claude` has a mode that removes the code-running tools and `WebFetch`
+  unless `--tools` names them, confines the file tools to the working directories, refuses
+  `bypassPermissions`,
   ignores user, project and local settings files, and lets only a person or the configured
   permission handler approve writes to settings, git and tool-configuration files. **Declined
   in #127** -- not adopted as a default, and not added as an opt-in `claude.restricted` either,
@@ -147,9 +148,14 @@ what the session may do within them.
   allow list that the tool policy above refused on purpose, on the ground that "tool names move
   between `claude` releases (`Task` became `Agent`), so a hard-coded one would break sessions
   silently on the weekly version bump". The same probe confirms the prediction and sharpens it:
-  `--tools Bash,Edit,NoSuchTool` comes back `Bash,Edit`, exit 0, nothing on stderr, and
-  `TodoWrite` -- a real-looking name, not a nonsense one -- disappears from a longer list just
-  as quietly. So the failure is not merely closed, it is *silent*: a rename would start a
+  `--tools Bash,Edit,NoSuchTool` comes back `Bash,Edit` with nothing on stderr and an init line
+  a clean list's is identical to but for the missing tool, and `TodoWrite` -- a real-looking
+  name, not a nonsense one -- disappears from a longer list just as quietly. `claude` does have
+  a way to refuse an argument it does not recognise, and a tool name is not on it: an unknown
+  *flag* stops at parse, `error: unknown option` on stderr and no init line at all. (The probe
+  holds no credential, so every run of it ends at the login check and the exit status says
+  nothing either way -- which is itself the point, since the signal would have to be one a
+  build could read.) So the failure is not merely closed, it is *silent*: a rename would start a
   session that looks healthy, has no way to do its work, and fails `max_attempts` times per
   issue with claude's own words rather than a build that stops. `claude-code-version.yml`
   bumps this deployment weekly, which is the cadence the hazard runs at. The Dockerfile's
@@ -174,10 +180,13 @@ what the session may do within them.
   line, and adding `--restricted` lists neither. So the flag would make that argument a no-op,
   and silently void the README's promise that `claude.setting_sources: [project]` loads a
   target repository's own permission rules and hooks -- a documented opt-in that would keep
-  reading as honoured while doing nothing. And the mode's most valuable clause is the one that
+  reading as honoured while doing nothing. Nor is it only the opt-in: the flag ignores the user
+  scope too, which is the default, so `claude.setting_sources` would stop describing what the
+  session loads under *any* value. That the default's loss costs this deployment little -- the
+  sweeps clear those surfaces before every turn anyway (#101, #137, #151) -- is not the same as
+  a setting that still means what it says. And the mode's most valuable clause is the one that
   might break the workflow outright: with `--permission-prompts none` there is no approval
-  surface,
-  so anything routed to "only a person or the configured permission handler" is denied
+  surface, so anything routed to "only a person or the configured permission handler" is denied
   automatically, and every issuebot session commits, merges and pushes. Whether that clause
   reaches `git commit` was **not measured**, and neither was whether the working-directory
   confinement binds `Bash` or only the file tools -- which matters because adoption has to hand
