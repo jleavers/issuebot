@@ -229,6 +229,8 @@ class GitHubAdapter(Protocol):
         # (deleted, transferred, or actually a pull request) are omitted; empty input -> []
     async def fetch_terminal_issues(self) -> list[Issue]
         # closed issues that still carry any state label (startup sweep and completion)
+        # *Amended by #149:* any state label but `complete`, which is where a closed issue
+        # comes to rest -- `TERMINAL_SWEEP_ROLES` in `github/state.py`.
     async def set_state(self, number: int, state: StateLabel) -> None
         # adds the target label and removes every other state label in one gh invocation
     async def clear_state(self, number: int) -> None
@@ -333,6 +335,11 @@ invoked as `gh api graphql -f query=<text> -f owner=<o> -f name=<n> -f label=<na
 repository name), following `pageInfo` until `hasNextPage` is false. Results across roles are
 merged by number (first occurrence wins) and sorted. `fetch_terminal_issues`
 is the same query with `states: [CLOSED]` over all five roles.
+*Amended by #149:* over `TERMINAL_SWEEP_ROLES`, the four roles a closed issue has to be moved
+off, and never `complete` -- which held everything issuebot had ever finished, so asking for
+it made the sweep's cost grow with the deployment's own successful work. The reasoning, and
+what the re-read was load-bearing for, is in `2026-09-14-resource-ceilings-design.md`,
+"The sweep's repetition".
 
 **By id.** Aliased lookups in batches of 50:
 

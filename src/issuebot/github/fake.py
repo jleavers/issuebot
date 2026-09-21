@@ -22,7 +22,12 @@ from issuebot.github.models import (
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
-from issuebot.github.state import LABEL_STYLES, LabelStyle, marker_label_styles
+from issuebot.github.state import (
+    LABEL_STYLES,
+    TERMINAL_SWEEP_ROLES,
+    LabelStyle,
+    marker_label_styles,
+)
 
 _PR_STATE_UPPER: dict[PrState, str] = {"open": "OPEN", "closed": "CLOSED", "merged": "MERGED"}
 
@@ -119,8 +124,14 @@ class FakeGitHub:
         return [self._snapshot(self._issues[n]) for n in numbers if n in self._issues]
 
     async def fetch_terminal_issues(self) -> list[Issue]:
+        """The sweep's read: closed issues under every state role but ``complete`` (#149).
+
+        ``complete`` is where a closed issue rests, so the real adapter stopped asking for it;
+        the fake has to stop too, or every orchestrator test would be exercising a read the
+        worker no longer makes.
+        """
         self._enter("fetch_terminal_issues")
-        state_names = {name.lower() for name in self.labels.as_tuple()}
+        state_names = {label_name(self.labels, role).lower() for role in TERMINAL_SWEEP_ROLES}
         return self._snapshots(
             record
             for record in self._issues.values()

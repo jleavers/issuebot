@@ -655,6 +655,18 @@ every-tenth-tick cadence (five minutes at the default interval) bounds the
 cost of a query that returns every completed issue the repository has; a
 `since` filter on the adapter is noted under Later.
 
+*Amended by #149:* the query no longer returns every completed issue the repository has, so
+the cadence is not what bounds it -- the read asks for `TERMINAL_SWEEP_ROLES`, the four roles
+a closed issue has to be moved off, and never `complete`, where it comes to rest. The
+`state is not COMPLETE` branch above is therefore the only one the sweep reaches, and the
+`since` filter under Later is answered a different way (a windowed query was considered and
+rejected there). The sweep also does two things this section predates: it reads back by number
+the issues it relabelled, so what `_report_issues` refreshes in the store survives the role no
+longer being re-read, dropping an answer that still shows the old role; and it retries every
+workspace a removal marked `.issuebot/finished` and did not take, which is where the retry
+that re-reading `complete` used to provide now lives. See
+`2026-09-14-resource-ceilings-design.md`, "The sweep's repetition".
+
 ### 6.7 Retries
 
 `_schedule(issue, *, attempt, kind, delay_ms, error, escape=None)` replaces
