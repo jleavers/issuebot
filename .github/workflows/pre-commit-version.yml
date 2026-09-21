@@ -76,7 +76,6 @@ jobs:
           # The branch is named for the config it proposes, so a rerun that lands on the same
           # digests finds its own branch and pull request rather than opening a second.
           branch="pre-commit-hooks-$(git hash-object .pre-commit-config.yaml | cut -c1-12)"
-          git diff -U0 -- .pre-commit-config.yaml | grep -E '^[-+] *rev:' > /tmp/revs.txt || true
           changed=true
           reuse=false
           # "This job's pull request" is decided by provenance, not by the branch name
@@ -128,13 +127,18 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
+      # The config, and nothing beside it (#168). This step runs *after* the hooks, so
+      # whatever it copies off this runner is a file they have had the chance to rewrite --
+      # as the same user, with /tmp writable. `open-pr` gates the config three ways and binds
+      # it to the branch name; a second file would arrive there checked by nothing, and the
+      # rev list the pull request body quotes was exactly that. `open-pr` derives it for
+      # itself now, from the config it has just verified.
       - name: Collect the frozen config for the job that can push
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
           mkdir -p /tmp/frozen
           cp .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml
-          cp /tmp/revs.txt /tmp/frozen/revs.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.check.outputs.changed == 'true'
@@ -192,6 +196,41 @@ jobs:
             echo "::error::the artefact is not the config ${BRANCH} is named for"
             exit 1
           fi
+          # The rev list the body quotes is derived here, from the config the three gates
+          # above have just passed and the base config this job checked out -- never carried
+          # across the boundary beside the config (#168). A list written in `freeze` before
+          # `pre-commit run --all-files` and copied out after it is a file those hooks can
+          # choose: they are the unreviewed third-party code this whole split exists to
+          # distrust, they run as the same user, and /tmp is writable. Three backticks close
+          # the fence below and everything after them is Markdown of the hook's choosing in a
+          # body authored by github-actions[bot] -- a review summary claiming the change was
+          # checked, a link, an instruction to whoever reads the thread. Nothing downstream
+          # re-checks a body, and the body is the one part of this proposal a reviewer reads
+          # rather than diffs. Derived from the artefact the gates passed, it can only quote
+          # what they passed.
+          #
+          # `--no-index` because one side is a path on this runner rather than a tracked
+          # one, and it is the base config the worktree still holds: the fresh arm copies the
+          # frozen one over it below, and the reuse arm never touches the worktree at all.
+          status=0
+          git diff -U0 --no-index -- \
+            .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml > /tmp/revs.diff \
+            || status=$?
+          # 0 is "identical" and 1 is "they differ", which is the answer this step is here
+          # for; anything above that is git failing to make the comparison at all, which must
+          # not read as a list of no revs.
+          if [ "${status}" -gt 1 ]; then
+            echo "::error::could not diff the frozen config against ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          # The filter and the gate in one: a line that is not a `rev:` diff line is dropped
+          # rather than quoted, and a list with nothing left in it fails the run rather than
+          # reaching the body as an empty fence -- `freeze` only gets here having found a
+          # move, so no rev having moved means the two files are not what this step thinks.
+          if ! grep -E '^[-+] *rev: ' /tmp/revs.diff > /tmp/revs.txt; then
+            echo "::error::the frozen config moves no rev against ${GITHUB_REF_NAME}"
+            exit 1
+          fi
           if [ "${REUSE}" = "true" ]; then
             # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
             # the checkout happens to have left and git's opportunistic update of the
@@ -214,7 +253,7 @@ jobs:
             # and the POST proposes something they have not seen -- unavoidable, and a much
             # narrower window than a tag that can sit on the remote indefinitely.
             #
-            # Nothing in this arm works from the worktree, so nothing checks it out.
+            # Nothing in this arm works from the branch's tree, so nothing checks it out.
             git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
             tip="$(git rev-parse "refs/heads/${BRANCH}")"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
@@ -265,7 +304,7 @@ jobs:
             echo 'digest of each repository'"'"'s newest tag (#111):'
             echo
             echo '```diff'
-            cat /tmp/frozen/revs.txt
+            cat /tmp/revs.txt
             echo '```'
             echo
             echo 'The hooks were run over the whole tree at these digests before the pull'

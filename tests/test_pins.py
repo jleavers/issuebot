@@ -318,3 +318,77 @@ def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
     assert '[ "${BRANCH}" != "pre-commit-hooks-${hash}" ]' in commands, (
         "the artefact is not tied to the branch name it is pushed under"
     )
+
+
+def test_the_pre_commit_bump_job_derives_the_rev_list_its_body_quotes() -> None:
+    """The digests the body quotes are derived in ``open-pr``, never carried across (#168).
+
+    ``freeze`` used to write the rev list *before* it ran the hooks and copy it into the
+    artefact *after* -- and the step between those two is ``pre-commit run --all-files``, the
+    unreviewed third-party code the whole split exists to distrust, running as the same user
+    with ``/tmp`` writable. The config beside it in that artefact is checked three ways here
+    (digest shape, at least one frozen digest, the branch-name binding); the list was checked
+    no ways, and it goes into a fenced block in a pull request body authored by
+    ``github-actions[bot]``. Three backticks close the fence and the rest is Markdown of the
+    hook's choosing -- a review summary claiming the change was checked, a link, an
+    instruction to whoever reads the thread -- and the body is the one part of the proposal a
+    reviewer reads rather than diffs.
+
+    So the list is not carried at all. ``open-pr`` derives it from the config the gates above
+    have just passed and the base config it checked out, filtering to ``rev:`` diff lines: a
+    line that is not one is dropped rather than quoted, and a list with nothing left in it
+    fails the run. The body can then only quote what the gates have passed.
+
+    The invocation and not the word, in both directions: these scripts explain in a comment
+    what they deliberately do not do.
+    """
+    freeze, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
+
+    # Nothing in the job that runs the hooks derives a rev list, so there is none to rewrite,
+    # and the artefact carries the config alone.
+    for step in freeze["steps"]:
+        commands = _commands(step.get("run", ""))
+        assert "revs" not in commands, f"freeze still derives a rev list: {commands}"
+        assert "/tmp/frozen/" not in commands or (
+            "cp .pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml" in commands
+        )
+    collect = next(s for s in freeze["steps"] if "/tmp/frozen" in _commands(s.get("run", "")))
+    assert _commands(collect["run"]).count("/tmp/frozen/") == 1, (
+        "a second file crosses the boundary beside the config"
+    )
+
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # One file is read out of the artefact, and it is the one the gates above check. This is
+    # what closes the channel: anything else `freeze` left on that runner is not read here.
+    read = set(re.findall(r"/tmp/frozen/[\w./-]*", commands))
+    assert read == {"/tmp/frozen/pre-commit-config.yaml"}, f"reads more than the config: {read}"
+
+    # The derivation: the verified artefact against the base config this job checked out.
+    # `--no-index` because one side is a path on the runner rather than a tracked one.
+    derive = ".pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml > /tmp/revs.diff"
+    assert "git diff -U0 --no-index" in commands, "the rev list is not derived here"
+    assert derive in commands, "the rev list is not derived from the verified config"
+    # A comparison git could not make must not read as a list of no revs: 0 is "identical"
+    # and 1 is "they differ", which is the answer the step exists for.
+    assert "status=$?" in commands, "git's status is not kept"
+    assert '[ "${status}" -gt 1 ]' in commands, "a failed comparison is not a failure"
+    assert "::error::could not diff the frozen config" in commands
+
+    # The filter and the gate in one, and each can be deleted alone: a grep whose output
+    # nothing quotes, and one whose failure nothing acts on, both leave a body that quotes
+    # whatever it was handed.
+    assert "grep -E '^[-+] *rev: ' /tmp/revs.diff > /tmp/revs.txt" in commands, (
+        "the quoted list is not filtered to rev: diff lines"
+    )
+    assert "::error::the frozen config moves no rev" in commands, (
+        "a list with no rev: diff line in it is quoted rather than failing the run"
+    )
+    assert "cat /tmp/revs.txt" in commands, "the body does not quote the derived list"
+
+    # ... and derived *after* the gates, which is the whole point: a list derived from an
+    # artefact nothing had checked yet would quote whatever the artefact carried.
+    assert commands.index("git hash-object /tmp/frozen/pre-commit-config.yaml") < commands.index(
+        derive
+    ), "the rev list is derived before the artefact is checked"
