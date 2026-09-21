@@ -18,7 +18,10 @@ from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
     PROTECTED_ENV_NAMES,
+    PROTECTED_ENV_PREFIXES,
     PROXY_ENV_NAMES,
+    TOOL_CONFIG_ENV_NAMES,
+    TOOL_CONFIG_ENV_PREFIXES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -364,6 +367,104 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
     merged, refused = merge_workspace_env({"ANTHROPIC_API_KEY": "sk-real"}, {key: "sk-theirs"})
     assert refused == [key]
     assert merged == {"ANTHROPIC_API_KEY": "sk-real"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_ASKPASS",
+        "GIT_EXEC_PATH",
+        "XDG_CONFIG_HOME",
+    ],
+)
+def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> None:
+    """#171: the same rule as `PATH` one step in. `PATH` decides which binary `git` and `gh`
+    are; each of these decides what that binary does and which further commands it runs -- an
+    alias or a pager out of a config file at a path of the line's choosing, the transport or
+    the credential prompt named outright, or the directory a subcommand is looked up in."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_tool_config_protections_are_pinned() -> None:
+    """Dropping a name is a deliberate edit here as well as in `runner.py`, as it is for the
+    sweep lists. The prefix is what makes the set closed: `GIT_CONFIG_COUNT` with its
+    `KEY_<n>`/`VALUE_<n>` pair sets `alias.x = !...` with no file involved, so protecting
+    `GIT_CONFIG_GLOBAL` alone would be a protection the next line round defeats."""
+    assert sorted(TOOL_CONFIG_ENV_NAMES) == [
+        "GIT_ASKPASS",
+        "GIT_EXEC_PATH",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "XDG_CONFIG_HOME",
+    ]
+    assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_CONFIG_"]
+    assert TOOL_CONFIG_ENV_NAMES <= PROTECTED_ENV_NAMES
+    assert set(TOOL_CONFIG_ENV_PREFIXES) <= set(PROTECTED_ENV_PREFIXES)
+
+
+def test_a_hook_can_still_hand_over_the_git_identity() -> None:
+    """The bound is on configuring `git`, not on the two git variables `agent_environment`
+    already inherits from the worker: `GIT_CONFIG_` is a prefix precisely because it catches
+    nothing a deployment legitimately sets."""
+    merged, refused = merge_workspace_env(
+        {"PATH": "/usr/bin"}, {"GIT_AUTHOR_NAME": "issuebot", "GIT_COMMITTER_EMAIL": "b@example"}
+    )
+    assert refused == []
+    assert merged["GIT_AUTHOR_NAME"] == "issuebot"
+    assert merged["GIT_COMMITTER_EMAIL"] == "b@example"
+
+
+def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#171): what a session leaves in `.issuebot/env` is what the
+    *next* session on that issue is handed, and the complaint names the key that was dropped.
+    Each of these was measured naming a command that ran -- `[alias] st = !...` out of the file
+    `GIT_CONFIG_GLOBAL` and `XDG_CONFIG_HOME` name, the `GIT_CONFIG_COUNT` triple's `alias.st`
+    with no file at all, and `GIT_SSH_COMMAND` as the transport git execs."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "GIT_CONFIG_GLOBAL=/tmp/theirs/gitconfig\n"
+        "XDG_CONFIG_HOME=/tmp/theirs/xdg\n"
+        "GIT_SSH_COMMAND=/tmp/theirs/payload.sh\n"
+        "GIT_CONFIG_COUNT=1\n"
+        "GIT_CONFIG_KEY_0=alias.st\n"
+        "GIT_CONFIG_VALUE_0=!/tmp/theirs/payload.sh\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    # The turn's environment carries what the hook had a reason to hand over, and nothing that
+    # would re-point `git` or `gh` for it.
+    assert applied == ["DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert not [name for name in merged if name.startswith(("GIT_CONFIG_", "GIT_SSH", "XDG_"))]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "GIT_CONFIG_GLOBAL is protected",
+        "XDG_CONFIG_HOME is protected",
+        "GIT_SSH_COMMAND is protected",
+        "GIT_CONFIG_COUNT is protected",
+        "GIT_CONFIG_KEY_0 is protected",
+        "GIT_CONFIG_VALUE_0 is protected",
+    ]
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:

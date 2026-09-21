@@ -1008,6 +1008,36 @@ hook that would truncate it again or append a duplicate per session.
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
   repository's tests need.
+- **So are the names that re-point `git` and `gh`** (#171), for the reason `PATH` is and one
+  step in: `PATH` decides *which* binary `git` and `gh` are, and these decide what that binary
+  does and which further commands it runs. Anything starting `GIT_CONFIG_` — `GIT_CONFIG_GLOBAL`
+  and `GIT_CONFIG_SYSTEM`, which replace the config files git reads with a path of the line's
+  choosing, and the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` triple, which
+  sets any key at all with no file involved — and `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
+  `GIT_EXEC_PATH` and `XDG_CONFIG_HOME`. A git config file names commands (`core.pager`,
+  `credential.helper`, `[alias] x = !...`), and `XDG_CONFIG_HOME` is not a git variable at all:
+  it moves the config directory of everything that follows the base-directory specification,
+  `$XDG_CONFIG_HOME/gh/config.yml` among them, whose aliases may be shell commands — so it
+  re-points the one tool in the session holding `GH_TOKEN`. The workspace outlives the session,
+  so what such a line would re-point is the *next* session on that issue.
+
+  A hook with a real reason for one — a deploy key for the target repository is the usual one —
+  has three routes that are not this file, and keeps all of them:
+
+  - `git config --local core.sshCommand 'ssh -i /path/to/key -o IdentitiesOnly=yes'` from
+    `after_create`. The workspace directory *is* the clone, so this is the post-clone setup's
+    own idiom (it writes `credential.https://github.com.helper` exactly this way) and it reaches
+    every later turn, because the clone does.
+  - `git -c core.sshCommand=...`, or `GIT_SSH_COMMAND=... git ...` exported in the hook's own
+    shell, for git the hook itself runs — a submodule fetch, a second clone. Unchanged: what is
+    bounded is handing the variable *to the session*, not the hook's own environment.
+  - A root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` in an image built `FROM` this one,
+    for a deployment-wide setting — better than a variable for that purpose, since it is outside
+    the session's reach altogether. `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` being
+    protected is what keeps that route honest.
+
+  The git variables a deployment *can* hand over through this file are the identity ones,
+  `GIT_AUTHOR_*` and `GIT_COMMITTER_*`, which are not protected.
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
