@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -18,9 +19,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
+from issuebot.agent.accounts import WORKSPACE_DIR_MODE
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.session import run_session
+from issuebot.agent.uvcache import CACHE_ROOT_MODE, UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
 from issuebot.events import (
@@ -3563,6 +3566,56 @@ async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path:
     for _ in range(10):
         await h.tick()
     assert orchestrator._pool.bound(identifier) is None
+
+
+async def test_the_uv_cache_beside_the_workspaces_survives_startup_and_the_sweep(
+    tmp_path: Path,
+) -> None:
+    """#164 puts one uv cache directory per session account under ``workspace.root``, beside
+    the workspace keys. Two things there work over the root and had to be shown not to mind it:
+    ``seal_idle``, which at every worker start chmods each worker-owned directory under the
+    root to ``0700`` so that a workspace a killed worker left open cannot be entered, and
+    ``AccountRegistry.prune``, which expires a binding whose workspace is gone.
+
+    The first is the load-bearing one: the cache root is ``0755`` precisely so that every
+    session account can reach its own directory inside it, and a seal would take every
+    account's cache away on each restart. The second never listed the root at all -- #161
+    believed that and did not prove it.
+    """
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.root.mkdir(parents=True, exist_ok=True)
+    cache = h.root / UV_CACHE_ROOT_NAME / "agent-1"
+    cache.mkdir(parents=True)
+    os.chmod(cache.parent, CACHE_ROOT_MODE)
+    os.chmod(cache, WORKSPACE_DIR_MODE)
+    (cache / "wheels").mkdir()
+
+    # What `startup()` does before this worker claims anything, and the half that would hurt:
+    # a cache root chmod'ed to `0700` is every session account's cache taken away.
+    orchestrator._workspaces.seal_idle()
+    assert stat.S_IMODE(cache.parent.stat().st_mode) == CACHE_ROOT_MODE
+    assert stat.S_IMODE(cache.stat().st_mode) == WORKSPACE_DIR_MODE
+
+    h.add_issue(1, "todo")
+    await h.tick()
+    identifier = h.github.issue(1).identifier
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(identifier) == "agent-1"
+    workspace = h.workspace_dir(identifier)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(2)
+    h.github.merge_pr(h.github.open_pr(1).number)
+    await orchestrator.terminal_sweep()
+    await h.drain()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert not workspace.exists(), "the workspace is removed"
+    assert orchestrator._pool.bound(identifier) is None, "and its binding forgotten"
+    assert (cache / "wheels").is_dir(), "the cache is not a workspace and is not removed"
+    assert stat.S_IMODE(cache.parent.stat().st_mode) == CACHE_ROOT_MODE, "nor sealed shut"
+    assert stat.S_IMODE(cache.stat().st_mode) == WORKSPACE_DIR_MODE
 
 
 async def test_a_retry_whose_account_is_busy_is_requeued_rather_than_dropped(
