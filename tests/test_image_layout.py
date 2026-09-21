@@ -200,6 +200,30 @@ def test_ci_proves_a_planted_shell_profile_does_not_run_for_the_next_sessions_ho
     assert 'sudo -n -H -u agent bash -lc "claude --version"' in CI
 
 
+def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_session() -> None:
+    """#151: the same home again, one tool further out. `git` runs in every session and reads
+    two user-level config files, either of which can name a command; `ssh` reads one. Proved in
+    the image and two-sided like the profile half above -- the same `git` runs before the
+    sweep, where the alias has to *run*, so a `git` that stopped reading the account home could
+    not pass this as a no-op -- and the neighbours in those directories have to survive it,
+    since the sweep names files and never empties a directory another tool also keeps state in.
+    """
+    assert 'printf \\"[alias]\\\\npwn = !echo GITCONFIG-RAN\\\\n\\" > /home/agent/.gitconfig' in CI
+    assert (
+        'printf \\"[alias]\\\\npwnxdg = !echo XDG-RAN\\\\n\\" > /home/agent/.config/git/config'
+    ) in CI
+    assert "echo ProxyCommand false > /home/agent/.ssh/config" in CI
+    assert 'test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN' in CI
+    assert 'test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN' in CI
+    assert "! sudo -n -H -u agent git -C / pwn 2>/dev/null" in CI
+    assert "! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null" in CI
+    for gone in (".gitconfig", ".config/git/config", ".ssh/config"):
+        assert f"test ! -e /home/agent/{gone}" in CI, gone
+    # The directories those files sat in are other tools' too.
+    assert "test -f /home/agent/.config/gh/hosts.yml" in CI
+    assert "test -f /home/agent/.ssh/known_hosts" in CI
+
+
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
     """The ``web`` service takes HTTP from a browser and needs no privilege transition, so it
     runs as an account that is not the worker's (#102): outside group ``issuebot``, which is
