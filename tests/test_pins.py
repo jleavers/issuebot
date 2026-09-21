@@ -229,18 +229,95 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
     # -F, so the version's dots are dots and not any-character.
     pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
-    assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
-    assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
+    # Counted over the invocations, since one of these scripts explains in a comment what it
+    # deliberately does not do, and a quotation of the grep is not a grep.
+    commands = _commands(opens["run"])
+    assert commands.count(pin) == 2, "the artefact and the reused branch are not both pinned"
+    assert f"{pin} /tmp/bump/Dockerfile" in commands, "the artefact's pin is not re-checked"
+    # The other one is the reused branch's, read out of its commit rather than off a
+    # worktree; the test below pins that arm.
     # ... and the copy may move that one line and nothing else. A reused branch is held to
     # the same shape against the base, since `build` built the base plus the pin and the
-    # pull request body says so.
+    # pull request body says so -- measured from the merge base, which is the test below.
     assert "git diff --numstat -- Dockerfile" in opens["run"]
-    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in opens["run"]
 
     # The branch name is derived from the validated version rather than carried over from
     # the job that ran the unreviewed release: it names what gets written to the repository.
     assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
+
+
+def test_the_claude_bump_job_re_checks_the_reused_branch_from_the_merge_base() -> None:
+    """A reused branch is what it *changes*, not how far the default branch has moved (#166).
+
+    The reuse arm is the recovery path for a run that pushed a branch and then failed before
+    opening the pull request, and a rerun is not usually immediate: the schedule is weekly, so
+    by then the default branch has almost certainly advanced. A local ``git diff <base tip>
+    <branch>`` compares two tips, so every commit merged since the branch was pushed reads as
+    another path the branch touches -- with the sign reversed, as a file the branch reverts --
+    and the arm that exists to spare a human the hand-deletion of the branch demands one
+    instead. ``compare`` measures from the merge base, as the pull request itself will, and
+    needs no history this checkout has to have: the three-dot ``git diff`` that would ask git
+    the same question fails outright there, with "no merge base".
+
+    That is #148's fix in ``pre-commit-version.yml``, and this arm reached it late for the
+    same reason that one did: until #138 the lookup that answers ``reuse=true`` could not see
+    the branch, so nothing had ever run here. Which is also why the rest of that arm's rule
+    is pinned here: what it reuses is a branch on the remote, writable by anyone who can push
+    to this repository, so the commit both gates read is resolved once from a fully qualified
+    ref, and the pin is read out of that commit rather than off a worktree, where a symlink
+    would be followed.
+    """
+    _, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # Of one commit, resolved once from the fully qualified ref, and both gates are about
+    # that commit: `gitrevisions` resolves `refs/tags/${BRANCH}` ahead of `refs/heads/`, and
+    # an ordinary fetch follows a tag pointing into the history it downloads, so a bare
+    # `${BRANCH}` would let a tag of the same name -- writable by anyone who can push here --
+    # hand these gates one commit while the pull request, which is opened by branch name,
+    # proposed another. The rule `pre-commit-version.yml` has held its own arm to since #148.
+    assert 'git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"' in commands
+    assert 'tip="$(git rev-parse "refs/heads/${BRANCH}")"' in commands, "the ref is not resolved"
+    # The pin is read out of that commit and not off the disk, since `grep` follows a symlink:
+    # a `Dockerfile` that is one, pointed at the artefact this step holds, would otherwise
+    # pass the pin check carrying none of its own bytes.
+    # The read and the grep that consumes it, as one: either alone would still pass with the
+    # blob going to `/dev/null` and the pin checked against something else. Through a file
+    # and not a pipe, because `grep -q` exits at the first match and `pipefail` would then
+    # make a SIGPIPE'd `git cat-file` refuse an honest branch.
+    assert 'git cat-file blob "${tip}:Dockerfile" > /tmp/reused-Dockerfile' in commands, (
+        "a reused branch's pin is read off a worktree, through a pipe, or through an ambiguous name"
+    )
+    assert 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/reused-Dockerfile' in commands, (
+        "the pin is not checked against what was read out of the commit"
+    )
+    assert "${BRANCH}:Dockerfile" not in commands, "reads an ambiguous name"
+    assert "git checkout ${BRANCH}" not in commands.replace('"', ""), (
+        "the reuse arm works from the worktree"
+    )
+    assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
+        "a reused branch is not held to the shape of the change it proposes"
+    )
+    # And the two-tip form is gone with it. The two-tip form, not the idiom: a local
+    # `git diff --numstat -- <path>` over what this step has just copied in is a different
+    # question with a right answer, and the other arm still asks it of the artefact.
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}"' not in commands, (
+        "compares two tips rather than the change the branch proposes"
+    )
+    # The line counts survive the move, since `build` rewrote one line of one file and the
+    # pull request body says so: `compare` reports them per file as `.additions`/`.deletions`.
+    assert r'"\(.additions)\t\(.deletions)\t\(.filename)"' in commands, (
+        "a reused branch is no longer held to the pin's line counts"
+    )
+    # The question and what is done with the answer, since each can be deleted alone: a
+    # comparison nothing reads, and one whose failure reads as "no files", both leave a
+    # workflow that asks and then pushes anyway.
+    assert r"""[ "${moved}" != "$(printf '1\t1\tDockerfile')" ]""" in commands, (
+        "the answer is not used"
+    )
+    assert "::error::could not compare" in commands, "a failed comparison is not a failure"
 
 
 def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:

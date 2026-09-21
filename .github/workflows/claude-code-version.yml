@@ -212,23 +212,68 @@ jobs:
           # above true of every value this step acts on, and it cannot start with a `-`.
           BRANCH="claude-code-${LATEST}"
           if [ "${REUSE}" = "true" ]; then
-            git fetch origin "${GITHUB_REF_NAME}" "${BRANCH}"
-            git checkout "${BRANCH}"
+            # Fetched under a name this step chooses, rather than on the `remote.origin.fetch`
+            # the checkout happens to have left, and then resolved to the one commit both
+            # gates below read: the file one of them greps and the change the other measures.
+            # Only the branch, since nothing here reads `origin/${GITHUB_REF_NAME}` any more.
+            #
+            # `refs/heads/` on both sides of the refspec, because a bare `${BRANCH}` is not
+            # the branch: `refs/tags/${BRANCH}` outranks it when the *remote* resolves the
+            # name and again when this repository does, per `gitrevisions`, and `--no-tags`
+            # is the second half, since an ordinary fetch also follows a tag pointing into
+            # the history it just downloaded. Either way, anyone who can push here could put
+            # the pin in a tagged commit and leave whatever they liked at the tip -- and the
+            # tip is what the pull request carries, since it is opened by branch name. The
+            # same rule, for the same reason, as pre-commit-version.yml's arm (#148).
+            #
+            # Nothing in this arm works from the worktree, so nothing checks it out.
+            git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"
+            tip="$(git rev-parse "refs/heads/${BRANCH}")"
             # A branch left on the remote is whatever is on the remote -- the wreckage of an
             # earlier run, and writable by anyone who can push here -- so it is held to the
-            # same rule as one this job writes, and to the same *shape*. `build` built this
-            # branch's base plus the pin and nothing else, and the body below says so, so
-            # that is exactly what the branch has to be for the claim to be true of it.
-            if ! grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" Dockerfile; then
+            # same rule as one this job writes, and to the same *shape*: the base it was cut
+            # from plus the pin and nothing else, which is what `build` built and what the
+            # body below claims of the tree this pull request proposes.
+            #
+            # Read out of that commit rather than off a worktree, because `grep` follows a
+            # symlink: a `Dockerfile` that is one, pointed at the artefact this step is
+            # holding, would otherwise pass the pin check carrying none of its own bytes.
+            # Into a file this step writes rather than down a pipe, because `grep -q` exits
+            # at the first match and the pin is near the top: past a certain size `git
+            # cat-file` is then writing into a closed pipe, dies on SIGPIPE, and `pipefail`
+            # makes that the pipeline's status -- so an honest branch would be refused, and
+            # told to delete itself. Measured at 141 for a 2 MB blob; the Dockerfile is 32 KB
+            # today, and a check with a size limit nobody stated is not one to rest on.
+            git cat-file blob "${tip}:Dockerfile" > /tmp/reused-Dockerfile
+            if ! grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/reused-Dockerfile; then
               echo "::error::${BRANCH} is not pinned to ${LATEST}." \
                 "Delete the branch and rerun this workflow to rebuild it."
               exit 1
             fi
-            if [ "$(git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}")" \
-                 != "$(printf '1\t1\tDockerfile')" ]; then
-              echo "::error::${BRANCH} differs from ${GITHUB_REF_NAME} by more than the pin," \
-                "so it is not what was built. Delete the branch and rerun this workflow."
-              git diff --stat "origin/${GITHUB_REF_NAME}" "${BRANCH}"
+            # ... and it moves that one line and no other. Asked of the API, because the
+            # question is what the branch *changes*, which is measured from where it left the
+            # default branch and not from wherever that branch has since got to: a local
+            # `git diff origin/${GITHUB_REF_NAME} ${BRANCH}` compares two tips, so every
+            # commit merged since the branch was pushed reads as another path the branch
+            # touches -- with the sign reversed, as a file the branch reverts -- and a
+            # week-old branch, which is the ordinary case for a rerun on a weekly schedule,
+            # is refused for somebody else's change and demands by hand exactly the deletion
+            # this arm exists to spare (#166). `compare` measures from the merge base, as the
+            # pull request itself will, and needs no history this shallow checkout does not
+            # have: the three-dot `git diff` that would ask git the same question fails
+            # outright there, with "no merge base". The line counts are kept -- `build`
+            # rewrote one line of one file -- as `.additions` and `.deletions`, which is
+            # where `compare` puts them. A comparison that fails fails the run rather than
+            # reading as "no files".
+            if ! moved="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${tip}" \
+                 --jq '[.files[] | "\(.additions)\t\(.deletions)\t\(.filename)"] | join(" ")' \
+                 | tr -d '\r\n')"; then
+              echo "::error::could not compare ${BRANCH} with ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            if [ "${moved}" != "$(printf '1\t1\tDockerfile')" ]; then
+              echo "::error::${BRANCH} changes more than the pin, so it is not what was" \
+                "built: ${moved}. Delete the branch and rerun this workflow."
               exit 1
             fi
           else
