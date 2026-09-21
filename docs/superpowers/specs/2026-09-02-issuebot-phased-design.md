@@ -657,10 +657,12 @@ implementation, a disk and clone-time optimisation over per-issue clones that
 would share one `.git` between concurrent agents. A `since` filter on
 `fetch_terminal_issues`, so the terminal sweep stops re-reading every completed issue the
 repository has (Phase 4 bounds it to every tenth tick instead).
-*Answered by #149*, and not this way: the sweep stopped asking for the `complete` role at
-all, a windowed query having been considered and rejected because the two things the re-read
-was load-bearing for both turn on an issue whose `updatedAt` has not moved for months, which
-is exactly what a window excludes. See `2026-09-14-resource-ceilings-design.md`.
+
+*Answered by #149 -- the `since` filter only, not the rest of this list*, and not that way:
+the sweep stopped asking for the `complete` role at all, a windowed query having been
+considered and rejected because the two things the re-read was load-bearing for both turn on
+an issue whose `updatedAt` has not moved for months, which is exactly what a window excludes.
+See `2026-09-14-resource-ceilings-design.md`.
 
 ## 4. Decisions to confirm
 

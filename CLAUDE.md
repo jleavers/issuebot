@@ -560,11 +560,12 @@ version, and moves by hand.
   them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
   every account can reach its own directory, and sealing it at each worker start would take
   every account's cache away. `AccountRegistry.prune` works from keys and never lists the
-  root, which #161 believed and #164 proved. The terminal sweep's removal retry does list it
-  (`finished_keys`, #149) and steps over the same `RESERVED_ROOT_NAMES` by name, for the
-  reason `seal_idle` does and not because the boundary would catch it: those directories are
-  the worker's *own*, so `is_own_dir` and `is_own_file` pass, and a retry that took the cache
-  root for a clone would unlink every account's cache rather than chmod it.
+  root, which #161 believed and #164 proved. The terminal sweep's removal retry does list the
+  root (`finished_keys`, #149) and steps over the same `RESERVED_ROOT_NAMES` by name, for the
+  reason `seal_idle` does rather than because the boundary would catch it: those directories
+  are the worker's *own*, so the ownership checks would pass a mark planted in either, and
+  what refuses them today is only that neither carries one. A retry that took the cache root
+  for a clone would unlink every account's cache rather than chmod it.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with a timeout and a cap on what they hand back,
   `.issuebot/session.json`, whose `workpad_comment_id` is the

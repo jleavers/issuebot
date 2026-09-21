@@ -292,13 +292,26 @@ for as long as their issues sat in `complete`, and after the upgrade an operator
 is left under `workspace.root` by hand.
 
 And the third is the store's, not the disk's: the trade above says what stops being
-*refreshed*, and assumes the row is there to refresh. An issue whose sweep-time
-`_report_issues` never reached the store at all -- `PostgresSink` drops an item on
-`db_queue_full`, `db_drain_timeout` or `db_sink_closed_drop` -- used to be backfilled by the
-next sweep's re-read of the `complete` role, and now nothing writes that row. Its `state` is
-not at stake, since `state_changed` and `issue_completed` are separate events on the same
-queue and the dashboard's board and counts are built from `state`; what can be missing is the
-row's title, labels and URL.
+*refreshed*, and assumes the row is there to refresh. `_report_issues` reaches the sink
+through `record_issues`, and a batch is lost when the write itself fails -- `db_write_failed`,
+a `StoreError` the sink drops rather than retries, which is the likeliest of these -- or on
+`db_drain_timeout` at shutdown, or silently when the sink is already closed. (Not
+`db_queue_full` or `db_sink_closed_drop`: those are `handle`'s, the event path, and
+`record_issues` has no queue limit of its own.) The next sweep's re-read of the `complete`
+role used to backfill whatever was lost; nothing does now.
+
+Which columns that costs depends on whether the row exists at all, and the two are worth
+separating. For an issue issuebot has polled while it was open -- the ordinary case, since
+the board poll reports every issue it fetches -- the row is already there, and what a dropped
+sweep-time report leaves stale is its title, labels, URL and linked pull request, while
+`state_changed` and `issue_completed` still put `state` right: those are separate events on
+the same queue, and they are `UPDATE`s that find their row. The genuinely uncovered case is an
+issue this sweep is the *first* to see, a closed `review` issue met by a freshly started
+worker among them: `UPSERT_ISSUE`, fed only by `record_issues`, is the one `INSERT INTO
+issues` in the codebase, so with its batch lost the two `UPDATE`s match no row and the issue
+is absent from `issues` entirely -- from the board, the counts, the list and its own page --
+rather than merely stale. That is the honest shape of it: rarer than the first case and
+larger.
 
 None of the three is a growing resource -- each is bounded by a failure that has already
 happened -- which is what makes them acceptable here.

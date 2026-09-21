@@ -493,7 +493,8 @@ class WorkspaceManager:
         could link the worker's ``created`` sentinel to ``finished`` and inherit its
         ownership. That asks for its own workspace to be removed once its run has ended, a
         key with a session running or a retry pending being skipped and its work pushed, so
-        what it costs is a re-clone. Never raises: this runs inside a sweep.
+        what it costs is a re-clone -- and ``session.json`` with it, so the next run starts
+        cold rather than resuming. Never raises: this runs inside a sweep.
         """
         try:
             children = sorted(child.name for child in self.root.iterdir())
