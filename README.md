@@ -94,10 +94,25 @@ issues that triage is most of the value.
    `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` — which is what Actions read buys, and
    why the workflow's "wait for checks" step is performable at all. If the agent may edit files
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
-   without it any push touching those files is rejected. A classic token with the `repo` scope
-   works too; it needs `workflow` adding for the same reason, and it reads check runs where a
-   fine-grained token cannot -- and `validate` warns on it, because the session holds the
-   token and a classic token's reach is the whole account's, not one repository's (#109).
+   without it any push touching those files is rejected. Grant it deliberately, because what it
+   removes is human review over what CI *is*: the session pushes its branch to the target
+   repository itself, and GitHub trusts a same-repository ref where it withholds secrets from a
+   fork's, so a job definition the session wrote -- its triggers, its `permissions:`, the
+   secrets it names -- runs as written when the push or the pull request fires it, before
+   anyone has read the diff. Nothing in issuebot replaces that gate: the session's uid, the
+   token it holds and the egress allow-list all bound the *session*, and this is GitHub's
+   runner afterwards. Leaving it off narrows that blast radius rather than closing it, though,
+   and the difference is worth being exact about: wherever your existing workflows run
+   repository code -- a test file, a build script -- that code is already the session's, and it
+   already runs with whatever secrets that job is given. So grant Workflows only where the
+   agent's issues really do change those files, and either way treat every secret that
+   repository's Actions can read as one the agent can reach.
+   A classic token with the `repo` scope works too; it needs `workflow` adding for the same
+   reason and with the same consequence, and it reads check runs where a fine-grained token
+   cannot -- and `validate` warns on it, because the session holds the token and a classic
+   token's reach is the whole account's, not one repository's (#109). That is the boundary
+   *that* choice removes: the scoping to a single repository which the Safety note below names
+   as the control, so one repository's compromise becomes the account's.
    The account needs permission to push branches and open PRs in the target repository.
    Where the token can be *sent* is bounded separately, by the network allow-list under step 2
    ("What a session may reach"): under Compose a session can open a connection to Anthropic,
@@ -105,7 +120,17 @@ issues that triage is most of the value.
 2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
-   credential comes from the environment (see step 2 below).
+   credential comes from the environment (see step 2 below) -- which means the session holds
+   this one *directly*. Choose between the two knowing what can bound each. A `setup-token`
+   credential carries your subscription's whole reach, with no equivalent of the token's
+   "restricted to this repository" to narrow it, and the spend ceilings are no substitute: a
+   subscription reports no per-token cost, so `agent.max_issue_cost_usd` never fires and
+   `claude.max_budget_usd` acts as an effort limit rather than money. What bounds a runaway
+   issue there is `agent.max_turns` and `agent.max_attempts` (see "Cost"). An API key is the
+   one you can bound from outside issuebot -- capped and revoked on its own, and better still
+   on an account dedicated to the bot rather than the login you use yourself -- and there
+   `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run) and
+   `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
 3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
@@ -1255,13 +1280,21 @@ that matters on your host.
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and,
-for the container stack, Docker with Compose. Running the CLI outside a container — the host
-route, which is what `agent.run_as` unset means and how the test suite runs — also wants
-`git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
-2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
-use WSL. It is a development convenience rather than a deployment: the session then runs as
-your own user with none of the container's boundaries, and `validate` warns about it.
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and, for the
+container stack, Docker with Compose. Running the CLI outside a container — the host route,
+which is what `agent.run_as` unset means and how the test suite runs — also wants `git`, the
+[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
+newer on `PATH`, where `claude` uses whatever login you already have. On Windows, use WSL. It
+is a development convenience rather than a deployment, and what it removes is the container
+that the Safety note above calls the sandbox: the session runs at your own uid, with your
+`$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), and with no
+allow-list between it and the network -- while still running, as it does everywhere, with no
+permission prompts. That uid is the worker's too, so the split #75 rests on is gone with the
+container, and the workspace defences resting on that split go with it. Nothing replaces any of
+this. `validate` warns at `agent.run_as`, and at `egress` unless you have pointed a proxy of
+your own there, and a warning is all issuebot can do about a route it is not on. Anyone can
+open an issue, so run the host route against work you would run yourself, and keep a real
+deployment in the container with a repository-scoped token.
 
 ```bash
 uv sync
