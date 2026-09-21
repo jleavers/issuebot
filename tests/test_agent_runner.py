@@ -18,7 +18,10 @@ from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
     MIN_CLAUDE_VERSION,
     PROTECTED_ENV_NAMES,
+    PROTECTED_ENV_PREFIXES,
     PROXY_ENV_NAMES,
+    TOOL_CONFIG_ENV_NAMES,
+    TOOL_CONFIG_ENV_PREFIXES,
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
@@ -364,6 +367,192 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
     merged, refused = merge_workspace_env({"ANTHROPIC_API_KEY": "sk-real"}, {key: "sk-theirs"})
     assert refused == [key]
     assert merged == {"ANTHROPIC_API_KEY": "sk-real"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # A config file at a path of the line's choosing, in either of git's two spellings for
+        # the user level, and in the system one that a derived image's /etc/gitconfig uses.
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        # Any key at all, `alias.x = !...` included, with no file involved.
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        # A command named outright. `GIT_EDITOR` is the one that matters most: it runs on a
+        # plain `git commit`, which a session does constantly, and needs no terminal.
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_ASKPASS",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_PAGER",
+        "GIT_PROXY_COMMAND",
+        # A directory of commands: git's own subcommands, and the hooks copied into the next
+        # repository `git init` creates.
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
+        # Which repository is being operated on at all.
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        # The commit identity a pull request carries. Refused here, and unaffected as the
+        # deployment sets it: `.env` -> the worker -> `PASSTHROUGH_PREFIXES`.
+        "GIT_AUTHOR_NAME",
+        "GIT_COMMITTER_EMAIL",
+        # `gh`, the one tool in the session holding `GH_TOKEN`. `GH_CONFIG_DIR` takes
+        # precedence over `$XDG_CONFIG_HOME/gh` for the same shell aliases, and `GH_PAGER`
+        # was already protected as a fixed entry -- an asymmetry with no reason behind it.
+        "GH_CONFIG_DIR",
+        "GH_EDITOR",
+        "GH_BROWSER",
+        "GH_HOST",
+        # Not a git or gh variable at all: it moves the config directory of everything
+        # following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml`
+        # among them.
+        "XDG_CONFIG_HOME",
+        # The tails of git's and gh's own precedence chains, whose heads are covered by the
+        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` (#151) removes from the
+        # home -- so these are the whole of what is left of each chain. Protecting a head and
+        # leaving its tail closes nothing.
+        "SSH_ASKPASS",  # GIT_ASKPASS -> core.askPass -> this
+        "SSH_ASKPASS_REQUIRE",
+        "EDITOR",  # GIT_EDITOR/GH_EDITOR -> core.editor -> VISUAL -> this
+        "VISUAL",
+        "PAGER",  # GIT_PAGER/GH_PAGER -> core.pager -> this
+        "BROWSER",  # GH_BROWSER -> this
+        "EMAIL",  # GIT_AUTHOR_EMAIL -> user.email -> this
+        "GITHUB_TOKEN",  # GH_TOKEN -> this
+        "GITHUB_ENTERPRISE_TOKEN",  # GH_ENTERPRISE_TOKEN -> this
+    ],
+)
+def test_merge_workspace_env_refuses_the_tools_own_configuration(key: str) -> None:
+    """#171: the same rule as `PATH` one step in. `PATH` decides which binary `git` and `gh`
+    are; each of these decides what that binary does and which further commands it runs."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_tool_config_protections_are_pinned() -> None:
+    """Two halves with two different rules, and both have to be a deliberate edit here as well
+    as in `runner.py`. `GIT_` and `GH_` whole rather than an enumeration, which is what makes
+    the bound stay true: `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command, but so do
+    `GIT_EDITOR`, `GIT_PAGER`, `GIT_TEMPLATE_DIR` and `GH_CONFIG_DIR`, and successive drafts of
+    this list missed some of them. The names are then the rungs of git's and gh's documented
+    precedence chains that fall outside those prefixes -- checkable against `git-var(1)`,
+    `git-commit(1)` and `gh environment`, and finite because a chain has an end -- plus
+    `XDG_CONFIG_HOME`, which is on no chain and moves the directory `gh` reads its aliases
+    from. Names and not prefixes, because `SSH_AUTH_SOCK` is a legitimate route for the
+    deploy-key case this bound has to leave a hook author."""
+    assert sorted(TOOL_CONFIG_ENV_NAMES) == [
+        "BROWSER",
+        "EDITOR",
+        "EMAIL",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITHUB_TOKEN",
+        "PAGER",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "VISUAL",
+        "XDG_CONFIG_HOME",
+    ]
+    assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_", "GH_"]
+    assert TOOL_CONFIG_ENV_NAMES <= PROTECTED_ENV_NAMES
+    assert set(TOOL_CONFIG_ENV_PREFIXES) <= set(PROTECTED_ENV_PREFIXES)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # No underscore, so not the `GIT_`/`GH_` prefixes however much it looks like one.
+        "GITHUB_WORKSPACE",
+        "GHOSTSCRIPT_HOME",
+        # The base-directory specification's other roots: neither `git` nor `gh` reads them,
+        # and a hook pointing a cache somewhere is exactly what this file is for.
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_DIRS",
+        # The legitimate route for a forwarded deploy key, which is why `SSH_ASKPASS` is a
+        # name here and `SSH_` is not a prefix.
+        "SSH_AUTH_SOCK",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_tool_config_entries(key: str) -> None:
+    """The bound is on configuring the tooling issuebot launches, and a prefix is only safe to
+    state as a prefix if it stops where it says it does."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
+
+
+def test_the_deployments_own_git_identity_still_reaches_the_session() -> None:
+    """`.issuebot/env` was never the deployment's channel for these and is not the loser here:
+    `GIT_AUTHOR_`/`GIT_COMMITTER_` are set in `.env`, reach the worker's own environment and
+    are inherited through `PASSTHROUGH_PREFIXES`. What the `GIT_` prefix refuses is the
+    session-writable file re-pointing them."""
+    assert agent_environment({"GIT_AUTHOR_NAME": "issuebot"}, token=None) == {
+        "GIT_AUTHOR_NAME": "issuebot",
+        **FIXED_ENVIRONMENT,
+    }
+    # And a line in the file cannot take that value out from under the next turn.
+    merged, refused = merge_workspace_env(
+        {"GIT_AUTHOR_NAME": "issuebot"}, {"GIT_AUTHOR_NAME": "someone else"}
+    )
+    assert refused == ["GIT_AUTHOR_NAME"]
+    assert merged["GIT_AUTHOR_NAME"] == "issuebot"
+
+
+def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#171): what a session leaves in `.issuebot/env` is what the
+    *next* session on that issue is handed, and the complaint names the key that was dropped.
+    Each of these was measured naming a command that ran -- `[alias] st = !...` out of the file
+    `GIT_CONFIG_GLOBAL` and `XDG_CONFIG_HOME` name, the `GIT_CONFIG_COUNT` triple's `alias.st`
+    with no file at all, `GIT_SSH_COMMAND` as the transport git execs, and `GIT_EDITOR` on a
+    plain `git commit`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "GIT_CONFIG_GLOBAL=/tmp/theirs/gitconfig\n"
+        "XDG_CONFIG_HOME=/tmp/theirs/xdg\n"
+        "GIT_SSH_COMMAND=/tmp/theirs/payload.sh\n"
+        "GIT_CONFIG_COUNT=1\n"
+        "GIT_CONFIG_KEY_0=alias.st\n"
+        "GIT_CONFIG_VALUE_0=!/tmp/theirs/payload.sh\n"
+        "GIT_EDITOR=/tmp/theirs/payload.sh\n"
+        "EDITOR=/tmp/theirs/payload.sh\n"
+        "EMAIL=someone@example.invalid\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    # The turn's environment carries what the hook had a reason to hand over, and nothing that
+    # would re-point `git` or `gh` for it.
+    assert applied == ["DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert not [name for name in merged if name.startswith(("GIT_", "XDG_"))]
+    assert "EDITOR" not in merged and "EMAIL" not in merged
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "GIT_CONFIG_GLOBAL is protected",
+        "XDG_CONFIG_HOME is protected",
+        "GIT_SSH_COMMAND is protected",
+        "GIT_CONFIG_COUNT is protected",
+        "GIT_CONFIG_KEY_0 is protected",
+        "GIT_CONFIG_VALUE_0 is protected",
+        "GIT_EDITOR is protected",
+        "EDITOR is protected",
+        "EMAIL is protected",
+    ]
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:

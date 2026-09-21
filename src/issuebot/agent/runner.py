@@ -86,10 +86,84 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # bounds egress is the container's lack of a route, not a variable the session could rewrite,
 # so a hook that emptied them would take `gh`, `git` and the next turn's `claude` off the
 # network rather than let anything off the allow-list (#126).
-PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
-    {"GH_TOKEN", "PATH", "HOME", *FIXED_ENVIRONMENT, *PROXY_ENV_NAMES}
+# The tool-config entries below are the same rule one step in (#171): `PATH` decides *which*
+# binary `git` and `gh` are, and these decide what that binary does and which further commands
+# it runs. The file outlives the session -- a workspace belongs to one issue -- so what such a
+# line re-points is the next session on that issue. It is also the environment spelling of what
+# `TOOL_CONFIG_SWEEP` (`runas.py`, #151) removes from the account's home: a sweep of
+# `~/.gitconfig` would leave a guarantee conditional on a variable nothing checked.
+#   The names are the rungs of git's and gh's own documented precedence chains that fall
+#   outside the two prefixes below. That is the rule, and it is checkable against
+#   `git-var(1)`, `git-commit(1)` and `gh environment` rather than being a list of everything
+#   that might name a command -- which matters, because protecting the head of a chain and
+#   leaving its tail closes nothing. Each chain, with the protected head first:
+#     editor    GIT_EDITOR / GH_EDITOR -> core.editor -> VISUAL -> EDITOR
+#     pager     GIT_PAGER / GH_PAGER   -> core.pager  -> PAGER
+#     browser   GH_BROWSER                            -> BROWSER
+#     askpass   GIT_ASKPASS            -> core.askPass -> SSH_ASKPASS (SSH_ASKPASS_REQUIRE)
+#     identity  GIT_AUTHOR_EMAIL       -> user.email  -> EMAIL
+#     token     GH_TOKEN               -> GITHUB_TOKEN; GH_ENTERPRISE_TOKEN ->
+#               GITHUB_ENTERPRISE_TOKEN
+#   The config rung of each is swept out of the home by `TOOL_CONFIG_SWEEP` (#151), so the
+#   environment rungs are the whole of what is left. `EDITOR` was measured firing on a plain
+#   `git commit` with no `TERM` set at all, and `EMAIL` setting the author of a commit; `PAGER`
+#   needs a terminal, which a hook may well have.
+#   `XDG_CONFIG_HOME` is not on any chain: it moves the config directory of everything
+#   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
+#   whose aliases may be shell commands.
+#   Names and not prefixes (`SSH_`, `GITHUB_`, `EDITOR`...), because `SSH_AUTH_SOCK` is a
+#   legitimate route for exactly the deploy-key case this bound has to leave a hook author, and
+#   `GITHUB_`/generic namespaces hold plenty a hook may hand over. A chain has an end, so this
+#   list has one too.
+TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "XDG_CONFIG_HOME",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "BROWSER",
+        "EMAIL",
+        "GITHUB_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    }
 )
-PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_")
+# `GIT_` and `GH_` whole, rather than the handful of names the issue started from. An
+# enumeration here is one somebody has to keep complete against those tools' own manuals, and
+# two drafts of this list were not. `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command,
+# but so do `GIT_EDITOR` (on a plain `git commit`, which a session runs constantly),
+# `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_SSH`,
+# `GIT_EXEC_PATH` (the directory `git <subcommand>` is looked up in) and `GIT_TEMPLATE_DIR`
+# (the hooks copied into the next repository `git init` creates); `GIT_CONFIG_COUNT` with
+# `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` sets `alias.x = !...` with no file at all;
+# and `GIT_DIR` and `GIT_WORK_TREE` re-point which repository is being operated on. On the `gh`
+# side, `GH_CONFIG_DIR` takes precedence over `$XDG_CONFIG_HOME/gh` for the same aliases, and
+# `GH_EDITOR`/`GH_BROWSER` name commands, while `GH_PAGER` was already fixed and protected --
+# an asymmetry with no reason behind it. The prefixes cover all of them and whatever either
+# tool adds next, which is the only version of this that stays true.
+# The cost, stated where the code is: `GIT_AUTHOR_`/`GIT_COMMITTER_` are caught too, but
+# `.issuebot/env` was never the deployment's channel for them -- they are set in `.env`, reach
+# the worker's own environment and are inherited through `PASSTHROUGH_PREFIXES` exactly as
+# before, and refusing the *session-writable file* from re-pointing the identity a pull
+# request's commits carry is worth having on its own account. Behaviour-only switches with no
+# config equivalent (`GIT_TERMINAL_PROMPT`, `GIT_TRACE*`, `GIT_LFS_SKIP_SMUDGE`) are caught as
+# well, and for those the hook has its own shell around the git it runs, or a derived image.
+# Otherwise a hook that needs a setting has `git config --local` in the clone, `git -c`, and a
+# root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` for a deployment-wide one; what it may
+# not do is hand the variable to the session.
+TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_", "GH_")
+PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "GH_TOKEN",
+        "PATH",
+        "HOME",
+        *FIXED_ENVIRONMENT,
+        *PROXY_ENV_NAMES,
+        *TOOL_CONFIG_ENV_NAMES,
+    }
+)
+PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", *TOOL_CONFIG_ENV_PREFIXES)
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MESSAGE_LIMIT = 500
 STDERR_TAIL_LIMIT = 64 * 1024

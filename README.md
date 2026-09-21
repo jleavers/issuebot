@@ -1052,6 +1052,79 @@ hook that would truncate it again or append a duplicate per session.
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
   repository's tests need.
+- **So is anything starting `GIT_` or `GH_`, and the tails of those two tools' own fallback
+  chains** (#171), for the reason `PATH` is and one step in: `PATH` decides
+  *which* binary `git` and `gh` are, and these decide what that binary does and which further
+  commands it runs. A git config file names commands (`core.pager`, `credential.helper`,
+  `[alias] x = !...`), and `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and the
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` triple each supply one at a
+  path — or a key with no file at all — of the line's choosing; `GIT_EDITOR` (on a plain
+  `git commit`), `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_SSH`,
+  `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` name one outright; `GIT_EXEC_PATH` and
+  `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
+  repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
+  name the directory holding `config.yml`, whose aliases may be shell commands, and `GH_EDITOR`
+  and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
+  holding `GH_TOKEN`.
+
+  Whole prefixes rather than a list of those names, because a list is one somebody has to keep
+  complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
+  chain those tools resolve a setting through, and the config rung in the middle is swept out
+  of the home by #151 — so the environment tails are protected too, by name:
+
+  | chain | head (prefixed) | tail (protected by name) |
+  |---|---|---|
+  | editor | `GIT_EDITOR`, `GH_EDITOR` | `VISUAL`, `EDITOR` |
+  | pager | `GIT_PAGER`, `GH_PAGER` | `PAGER` |
+  | browser | `GH_BROWSER` | `BROWSER` |
+  | askpass | `GIT_ASKPASS` | `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` |
+  | commit identity | `GIT_AUTHOR_EMAIL` | `EMAIL` |
+  | token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
+
+  `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
+  leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
+  for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
+  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
+  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
+  session, so what such a line would re-point is the *next* session on that issue — and it is
+  the environment spelling of what the home sweep (#151) removes from the account's
+  `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
+
+  **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
+  are unaffected: set in `.env`, they reach the worker's environment and the session inherits
+  them through `PASSTHROUGH_PREFIXES` exactly as before. What is refused is a file the session
+  itself can write re-pointing the identity your pull requests are committed under.
+
+  A hook with a real reason for a git setting of its own — a deploy key for the target
+  repository is the usual one — has three routes that are not this file:
+
+  - `git config --local core.sshCommand 'ssh -i /path/to/key -o IdentitiesOnly=yes'` from
+    `after_create`. The workspace directory *is* the clone, so this is the post-clone setup's
+    own idiom (it writes `credential.https://github.com.helper` exactly this way) and it reaches
+    every later turn, because the clone does.
+  - `git -c core.sshCommand=...`, or `GIT_SSH_COMMAND=... git ...` exported in the hook's own
+    shell, for git the hook itself runs — a submodule fetch, a second clone. Unchanged: what is
+    bounded is handing the variable *to the session*, not the hook's own environment.
+  - A root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` in an image built `FROM` this one,
+    for a deployment-wide setting — better than a variable for that purpose, since it is outside
+    the session's reach altogether. `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` being
+    protected is what keeps that route honest.
+
+  Two things those routes do *not* cover, so that you find out here rather than from a variable
+  that silently did not arrive (a refused key is a `workspace_env_ignored` line in the **worker's**
+  log, not something the hook sees):
+
+  - **Behaviour-only `GIT_*` switches with no config equivalent** — `GIT_TERMINAL_PROMPT=0`,
+    `GIT_TRACE*`, `GIT_CURL_VERBOSE`, `GIT_LFS_SKIP_SMUDGE`. Set them in the hook's own shell
+    around the git it runs, or system-wide in a derived image.
+  - **`XDG_CONFIG_HOME` for tools that are not `git` or `gh`** — `uv`, `ruff`, `npm` or anything
+    else following the specification. With `HOME` protected too, a hook can no longer hand the
+    session a relocated config root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
+    in the hook's own shell) and per-repository (config written into the clone, which every later
+    turn sees). `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not protected, which covers the cache
+    and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
+    for the convenience of pointing another tool's config somewhere.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
