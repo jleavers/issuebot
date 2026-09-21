@@ -78,6 +78,12 @@ ENV_FILE = Artefact("env", ".issuebot/env", "session", 64 * KIB)
 SESSION_FILE = Artefact("session", ".issuebot/session.json", "worker", 64 * KIB)
 # `.issuebot/created`: the completion sentinel, created exclusively and read for its existence.
 CREATED_MARKER = Artefact("created", ".issuebot/created", "worker", 0)
+# `.issuebot/finished`: the removal sentinel (#149). Written before the unlink that removes a
+# workspace, so a removal that failed leaves a workspace that says so and the next terminal
+# sweep retries it. That retry used to be a side effect of re-reading every issue issuebot had
+# ever completed; here it is a property of the workspace, and so bounded by what is on disk.
+# Created exclusively and read for its existence, exactly as `created` is.
+FINISHED_MARKER = Artefact("finished", ".issuebot/finished", "worker", 0)
 # `.issuebot/runs/<run_id>/turn-N.*`: the runner's tee of claude's stdout, the prompt it fed
 # and the stderr it captured, all opened by the worker inside a directory `own_dir` verified.
 # The stream is read from the head (the capture keeps a head of lines and the last `result`
@@ -102,6 +108,7 @@ ARTEFACTS: tuple[Artefact, ...] = (
     ENV_FILE,
     SESSION_FILE,
     CREATED_MARKER,
+    FINISHED_MARKER,
     TURN_STREAM,
     TURN_PROMPT,
     TURN_STDERR,
@@ -275,6 +282,21 @@ class Boundary:
         try:
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
             os.close(os.open(parts[-1], flags, mode, dir_fd=fd))
+        finally:
+            os.close(fd)
+
+    def remove_marker(self, base: Path, parts: Sequence[str]) -> None:
+        """Unlink a marker this class created; a name that is not there is already gone.
+
+        The walk to the parent is `create_marker`'s, so the directory holding the name is the
+        worker's own and reached through no symbolic link -- which is what makes the unlink
+        safe in a `.issuebot` shared with the session under `agent.run_as` (#75). Nothing
+        follows the final component either: `unlinkat` never does.
+        """
+        fd = self._open_parent(base, parts)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(parts[-1], dir_fd=fd)
         finally:
             os.close(fd)
 

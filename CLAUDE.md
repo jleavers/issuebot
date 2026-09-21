@@ -275,16 +275,23 @@ version, and moves by hand.
   rather than returning a short board (#139): the query is oldest first, so a truncated answer
   would have the worker claim from it believing it had seen everything and silently starve the
   newest issues, where a refused read is the `github` dispatch hold of #88 and says so on
-  `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` passes its own,
-  looser `MAX_TERMINAL_PAGES` (50), because `complete` rests on a closed issue for ever, so
-  that role grows with everything issuebot has finished rather than with a working set a human
-  drains (that it is re-read at all is #149). The sweep's roles are read independently
-  (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped` warning and the
-  other four are still swept, since `terminal_sweep` is the only path to `finish_terminal` and
-  the role that can reach the ceiling is `complete` -- so voiding the read would stop every
-  issue closing out, every workspace being removed and every account being released, where
-  skipping the one role costs only `finish_terminal`'s retry of a removal that failed at the
-  time, for the issues in it. The poll keeps the all-or-nothing rule. The isolation is by type
+  `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` reads
+  `TERMINAL_SWEEP_ROLES` (`state.py`) and not `list(StateLabel)` (#149): every state a closed
+  issue has to be moved *off*, and never `complete`, the one it comes to rest in.
+  `finish_terminal` leaves that label alone deliberately -- it is how the dashboard's closed
+  column is built -- so the role held everything issuebot had ever finished and every issue in
+  it was read only to be classified `unchanged`, which made the sweep's cost grow with the
+  deployment's own successful work and, past the ceiling, spend fifty pages a sweep to learn
+  nothing. The four that are read are a working set the sweep itself drains. It still passes
+  its own, looser `MAX_TERMINAL_PAGES` (50), now as headroom rather than against growth: the
+  first sweep of a repository holding a backlog of closed-but-labelled issues is legitimately
+  large and the sweep is the only thing that drains it, and the two reads fail differently, so
+  a number tuned for one is not a number for the other. The sweep's roles are read
+  independently (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped`
+  warning and the others are still swept, since `terminal_sweep` is the only path to
+  `finish_terminal`, so voiding the read would stop every issue closing out, every workspace
+  being removed and every account being released, where skipping one role costs the issues in
+  that role alone. The poll keeps the all-or-nothing rule. The isolation is by type
   and not by category: `PageCeilingError` is caught, while every other `response` error -- a
   GraphQL errors payload, which is how a server-side query timeout arrives, or a malformed
   answer -- still fails the whole read);
@@ -448,14 +455,15 @@ version, and moves by hand.
   a git repository"), which fails every git command a session runs, the post-clone setup
   first. The CI `docker` job builds that exact shape and runs git in it. Unset (the host route, the tests) runs everything as
   the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
-  `created` marker file (the completion sentinel), and `session.json` trusted only when the
+  `created` marker file (the completion sentinel) and a `finished` one (#149, the removal
+  sentinel below), and `session.json` trusted only when the
   worker owns it. `boundary.py` (#104, spec `2026-09-14-session-boundary-design.md`) is the
   other half of that line: `ARTEFACTS` declares every file the worker reads back out of a
   workspace after the session has had its uid in it (`.issuebot/env`, which the session's
   side writes; the clone's `CLAUDE.md` and `AGENTS.md`, the `instructions` artefact of #107,
   which the session may own since the clone is cloned as it; `session.json`, the `created`
-  marker and the `runs/<run_id>/turn-N.*` files, the worker's own), each with its writer and
-  the most the worker will ever read of it, and
+  and `finished` markers and the `runs/<run_id>/turn-N.*` files, the worker's own), each with
+  its writer and the most the worker will ever read of it, and
   `Boundary.read` is the one seam: the path is walked from the workspace one component at a
   time under `O_NOFOLLOW` (a link at the name or above it is refused, not followed), the
   object is checked on the descriptor before a byte is read (`O_NONBLOCK`, so a FIFO cannot
@@ -466,7 +474,9 @@ version, and moves by hand.
   `capture_turns`, `read_repository_instructions` and the runner's stderr tail all go through
   it; `own_dir` creates and
   verifies a run's log directory as the worker's own, closed to others' writes, before a
-  turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
+  turn file is written in it, `create_marker` is the exclusive create of a sentinel, and
+  `remove_marker` (#149) is the unlink of one by the same walk, following nothing, for a
+  `.issuebot` the session shares.
   `Boundary.current(account)` resolves the session's uid once per runner and manager, from the
   one account that session runs as -- under a pool, the account bound to *that* workspace
   (#121), so a boundary names the single member that may have written in it and no other
@@ -549,13 +559,34 @@ version, and moves by hand.
   `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
   them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
   every account can reach its own directory, and sealing it at each worker start would take
-  every account's cache away. `AccountRegistry.prune` and the terminal sweep work from keys
-  rather than by listing the root and are undisturbed, which #161 believed and #164 proved.
+  every account's cache away. `AccountRegistry.prune` works from keys and never lists the
+  root, which #161 believed and #164 proved. The terminal sweep's removal retry does list the
+  root (`finished_keys`, #149) and steps over the same `RESERVED_ROOT_NAMES` by name, for the
+  reason `seal_idle` does rather than because the boundary would catch it: those directories
+  are the worker's *own*, so the ownership checks would pass a mark planted in either, and
+  what refuses them today is only that neither carries one. A retry that took the cache root
+  for a clone would unlink every account's cache rather than chmod it.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with a timeout and a cap on what they hand back,
   `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`).
+  `mark_finished`/`remove`/`remove_key` write `.issuebot/finished` (#149): the intent recorded
+  ahead of the act, so a removal that failed leaves a workspace that says what should have
+  happened to it, and `finished_keys()` reads the terminal sweep's retry candidates off the
+  disk instead of off a re-read of every issue issuebot has ever completed. Bounded by the
+  failures that put those directories there, and durable across a restart. Written at two
+  moments, both needed: `finish_terminal` marks before it moves the label, since a worker
+  killed between the move and the removal would leave an issue at rest in `complete` -- which
+  nothing reads again -- beside a workspace nothing would remove; and `remove` re-asserts it
+  in its `finally`, since `rmtree` stops at the first entry it cannot unlink having already
+  taken everything it reached, which on half the readdir orderings is `.issuebot` with the
+  mark in it. Exclusive, like the `created` sentinel, because `.issuebot` is shared with the
+  session -- and a name there that is not the worker's own file is taken back
+  (`workspace_mark_replaced`), since `finished_keys` would refuse it and the retry would be
+  silently gone. Best effort otherwise (`workspace_mark_failed`): what the mark buys is the
+  retry and not the removal. Cleared by `create_or_reuse` on the reuse path, because a
+  reopened issue is not one issuebot is done with.
   The hook cap is #139: `_run_argv` reads both pipes through `read_capped` and kills the
   process *group* past `MAX_HOOK_OUTPUT_BYTES` (4 MiB each, much smaller than `GhRunner`'s
   since only `_OUTPUT_TAIL` of either survives into `HookResult`), because `hooks.timeout_ms`
@@ -886,7 +917,9 @@ version, and moves by hand.
   `finish_terminal` (`complete`, `no_change` or `cancelled`,
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
-  counts include triage, and only a genuine abandonment still clears the label).
+  counts include triage, and only a genuine abandonment still clears the label. An issue
+  already in `complete` is `unchanged`, and the sweep no longer reads that role at all, so the
+  removal it used to retry on the way past is retried off the disk instead: #149, below).
   `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`, amended by #104): a `review`
   issue whose open PR reads `conflicting` is moved to `rework` by issuebot, label first and
   then a `### Issuebot merge conflict` workpad block, a note for a person. The bounce number
@@ -914,7 +947,12 @@ version, and moves by hand.
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
-  tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
+  tick -- which reads the four non-`complete` roles, reads back by number only the issues it
+  relabelled so the store keeps what `_report_issues` refreshed (dropping an answer that still
+  shows the old role, `terminal_refresh_stale`: a replica that has not caught up would carry
+  the newest `seen_at` and overwrite the state `state_changed` had just written, permanently,
+  since nothing reads a `complete` issue again), and then retries every workspace a removal
+  marked and did not take (#149); reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
   slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is

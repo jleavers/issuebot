@@ -21,6 +21,17 @@ ACTIVE_STATES: frozenset[StateLabel] = frozenset(
 )
 TERMINAL_STATES: frozenset[StateLabel] = frozenset({StateLabel.COMPLETE})
 
+# The roles the terminal sweep reads, and the one it does not (#149): every state a closed
+# issue has to be moved *off*, which is every state but the one it comes to rest in.
+# ``finish_terminal`` leaves ``complete`` on a closed issue deliberately -- it is how the
+# dashboard's closed column is built -- so that role holds everything issuebot has ever
+# finished, and every issue in it reaches ``finish_terminal`` only to be classified
+# ``unchanged``. Asking for it cost the deployment its own history, twice an hour, for
+# nothing. The four here are a working set the sweep itself drains.
+TERMINAL_SWEEP_ROLES: tuple[StateLabel, ...] = tuple(
+    role for role in StateLabel if role not in TERMINAL_STATES
+)
+
 TRANSITIONS: frozenset[tuple[StateLabel | None, StateLabel, Actor]] = frozenset(
     {
         (None, StateLabel.TODO, Actor.HUMAN),

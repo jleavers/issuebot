@@ -20,7 +20,12 @@ from issuebot.github.models import (
 )
 from issuebot.github.normalise import issue_from_node, label_name
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
-from issuebot.github.state import LABEL_STYLES, LabelStyle, marker_label_styles
+from issuebot.github.state import (
+    LABEL_STYLES,
+    TERMINAL_SWEEP_ROLES,
+    LabelStyle,
+    marker_label_styles,
+)
 from issuebot.log import get_logger
 
 PAGE_SIZE = 100
@@ -48,12 +53,16 @@ MAX_TIMELINE_PAGES = 10
 MAX_ISSUE_PAGES = 10
 
 # The same ceiling for the terminal sweep's read of *closed* issues, and a looser one, because
-# it bounds a different resource (#139). A closed issue rests in ``complete`` for ever --
-# ``finish_terminal`` leaves the label where it is -- so that role grows with everything
-# issuebot has ever finished rather than with a working set, and one number for both would
-# either strangle the sweep on a long-lived deployment or leave the poll with a ceiling far
-# above what it needs. Five thousand is years of completed issues; that the figure grows at all
-# is the sweep's own defect and not this cap's, and it is filed separately (#149).
+# it bounds a different resource (#139). Not a growing one any more: the sweep stopped asking
+# for ``complete`` in #149 (``TERMINAL_SWEEP_ROLES``), so what is left is the four roles a
+# closed issue only passes *through* -- the sweep finishes every issue it reads, and the read
+# is therefore a working set the sweep itself drains rather than the deployment's whole
+# history. The looser number stays for two reasons that are not growth. The first sweep of a
+# repository that already holds a backlog of closed-but-labelled issues is legitimately large,
+# and it is the sweep that drains it: a ceiling reached here refuses the one thing that would
+# bring the role back under it. And the two reads fail differently -- the poll's is
+# all-or-nothing because four roles are not a board, while this one skips the role and sweeps
+# the rest -- so a number tuned for one is not a number for the other.
 MAX_TERMINAL_PAGES = 50
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
@@ -166,9 +175,18 @@ class GhCliAdapter:
         return await self._collect(roles, OPEN_ISSUES_QUERY, max_pages=MAX_ISSUE_PAGES)
 
     async def fetch_terminal_issues(self) -> list[Issue]:
+        """Closed issues still carrying a state label the sweep has to move them off (#149).
+
+        ``complete`` is not among them: it is where a closed issue comes to rest, so the role
+        holds everything issuebot has ever finished and every issue in it reaches
+        ``finish_terminal`` only to be classified ``unchanged``.
+        """
         self._log.debug("fetch_terminal_issues")
         return await self._collect(
-            list(StateLabel), CLOSED_ISSUES_QUERY, max_pages=MAX_TERMINAL_PAGES, per_role=True
+            TERMINAL_SWEEP_ROLES,
+            CLOSED_ISSUES_QUERY,
+            max_pages=MAX_TERMINAL_PAGES,
+            per_role=True,
         )
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
@@ -468,16 +486,19 @@ class GhCliAdapter:
         ``per_role`` decides what one role over its page ceiling costs the others (#139).
         Off, for the board poll: any role's refusal refuses the whole read, because the answer
         is a board to claim from and four roles of it are not a board. On, for the terminal
-        sweep, where the answer is a list of closed issues to finish one at a time, and the
-        role that can actually reach the ceiling is ``complete``, which grows with everything
-        issuebot has ever finished. Letting that one void the other four would stop the sweep
-        closing *any* issue out, removing any workspace and releasing any session account --
-        `terminal_sweep` is the only path to `finish_terminal` -- on a deployment that had
-        merely succeeded often enough, and from a warning line, since the sweep's failures
-        reach no dispatch hold and no health surface. Skipping the one role costs less: the
-        issues in it are already closed and already labelled, and what is lost is
-        `finish_terminal`'s retry of a workspace removal that failed at the time, for issues
-        in that role alone. A skipped role is a warning naming it, and the sweep repeats.
+        sweep, where the answer is a list of closed issues to finish one at a time and
+        `terminal_sweep` is the only path to `finish_terminal`: letting one overgrown role
+        void the others would stop the sweep closing *any* issue out, removing any workspace
+        and releasing any session account, from a warning line, since the sweep's failures
+        reach no dispatch hold and no health surface. A skipped role costs the issues in that
+        role alone, and they are already closed and already labelled: the sweep repeats, and
+        the next one gets them if the role has come back under the ceiling.
+
+        Since #149 no role the sweep reads grows with the deployment's history -- ``complete``,
+        the one that did, is no longer asked for (``TERMINAL_SWEEP_ROLES``) -- so the isolation
+        is now headroom for a backlog rather than the only thing standing between a long-lived
+        deployment and a sweep that never runs. It is kept because that backlog is real on a
+        first sweep, and because the sweep is what drains it.
         """
         login = await self.own_login()
         found: dict[int, Issue] = {}

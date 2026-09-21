@@ -1782,6 +1782,223 @@ async def test_terminal_sweep_runs_on_the_first_and_every_tenth_tick(tmp_path: P
     assert len(h.recorder.of(IssueCompleted)) == 1
 
 
+async def test_terminal_sweep_never_asks_for_the_issues_it_has_already_completed(
+    tmp_path: Path,
+) -> None:
+    """#149: the sweep's cost stops growing with the deployment's own successful work.
+
+    ``complete`` is where a closed issue rests -- ``finish_terminal`` leaves the label alone,
+    since it is how the dashboard's closed column is built -- so the role held everything
+    issuebot had ever finished and every issue in it was read only to be classified
+    ``unchanged``. The sweep no longer asks, so such an issue reaches neither the store nor
+    ``finish_terminal``, while a closed issue in any other role is still finished.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "complete")
+    h.github.close_issue(1)
+    h.add_issue(2, "review")
+    h.github.close_issue(2)
+
+    await h.orchestrator.terminal_sweep()
+
+    reported = {issue.number for batch in h.polled for issue in batch}
+    assert reported == {2}
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.github.issue(2).state is None
+    assert [args[0] for args in h.calls("set_state")] == []
+    assert [args[0] for args in h.calls("clear_state")] == [2]
+
+
+async def test_terminal_sweep_reads_back_only_the_issues_it_moved(tmp_path: Path) -> None:
+    """What `_report_issues` refreshes in the store is kept, at a cost bounded by the sweep's
+    own work rather than by the deployment's history (#149).
+
+    The sweep reports each issue as it *found* it, carrying the label `finish_terminal` is
+    about to take off it; the re-read of every completed issue is what used to put that right.
+    Now the issues this sweep relabelled are read back by number -- and a sweep that moved
+    nothing spends no request at all, which is the steady state.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    await h.orchestrator.terminal_sweep()
+
+    assert h.calls("fetch_issues_by_ids") == [(("1",),)]
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1], [1]]
+    assert h.polled[0][0].state is StateLabel.REVIEW
+    assert h.polled[1][0].state is StateLabel.COMPLETE
+
+    h.github.calls.clear()
+    await h.orchestrator.terminal_sweep()
+    assert h.calls("fetch_issues_by_ids") == []
+
+
+async def test_a_read_back_that_fails_costs_the_refresh_and_not_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The label move reaches the store through `state_changed` either way (#149)."""
+    h = Harness(tmp_path, observe_issues=True)
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+    h.workspace_dir("repo-1")
+
+    with monkeypatch.context() as patch:
+        h.fail_on("fetch_issues_by_ids", patch)
+        await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert len(h.recorder.of(IssueCompleted)) == 1
+    assert not (h.root / "repo-1").exists()
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
+
+
+async def test_no_read_back_without_a_store_to_read_it_back_for(tmp_path: Path) -> None:
+    """The re-read exists for the store alone, so a deployment without one does not make it
+    (#149): in a change about avoidable GitHub reads, one nobody reads is the same defect."""
+    h = Harness(tmp_path)
+    assert h.orchestrator._on_issues is None
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert h.calls("fetch_issues_by_ids") == []
+
+
+async def test_a_read_back_that_has_not_caught_up_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The move is written through `gh issue edit` and read back over GraphQL milliseconds
+    later, so a replica that has not seen the edit is a real answer to get (#149).
+
+    It would carry the newest `seen_at`, which is what `UPSERT_ISSUE` orders by, so reporting
+    it would overwrite the state `state_changed` had just recorded -- permanently, since
+    nothing reads a `complete` issue again. The refresh gives way to the state.
+    """
+    h = Harness(tmp_path, observe_issues=True)
+    found = h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    async def stale(ids: Any) -> list[Issue]:
+        return [found]
+
+    monkeypatch.setattr(h.github, "fetch_issues_by_ids", stale)
+    await h.orchestrator.terminal_sweep()
+
+    assert h.github.issue(1).state is StateLabel.COMPLETE
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[1]]
+
+
+async def test_the_removal_mark_is_written_before_the_label_moves(tmp_path: Path) -> None:
+    """A worker killed between the move and the removal would otherwise leave an issue at
+    rest in `complete`, which nothing reads again, beside a workspace nothing removes (#149).
+    """
+    h = Harness(tmp_path)
+    workspace = h.workspace_dir("repo-1")
+    h.add_issue(1, "review")
+    h.github.open_pr(1, pr_number=5)
+    h.github.merge_pr(5)
+
+    marks: list[bool] = []
+    original = h.github.set_state
+
+    async def record(*args: Any, **kwargs: Any) -> None:
+        marks.append((workspace / ".issuebot" / "finished").is_file())
+        await original(*args, **kwargs)
+
+    h.github.set_state = record  # type: ignore[method-assign]
+    await h.orchestrator.terminal_sweep()
+
+    assert marks == [True]
+    assert not workspace.exists()
+
+
+async def test_terminal_sweep_retries_a_workspace_removal_that_failed(tmp_path: Path) -> None:
+    """The one thing the re-read of ``complete`` was load-bearing for (#149).
+
+    `WorkspaceManager.remove` writes `.issuebot/finished` before it unlinks anything, so a
+    workspace whose removal failed asks for its own retry, off the disk and across restarts,
+    rather than by having the sweep read every issue issuebot has ever finished.
+    """
+    h = Harness(tmp_path)
+    left_behind = h.workspace_dir("repo-9")
+    (left_behind / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert not left_behind.exists()
+
+
+async def test_the_retry_leaves_a_marked_workspace_its_own_session_is_using(
+    tmp_path: Path,
+) -> None:
+    """A reused workspace has its mark cleared before its session starts, but the sweep does
+    not rely on that: a key with a session running or a retry pending is skipped (#149)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert list(h.orchestrator.running) == ["1"]
+    running = h.workspace_dir("repo-1")
+    (running / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert running.is_dir()
+
+
+async def test_the_retry_leaves_a_marked_workspace_whose_issue_is_waiting_to_retry(
+    tmp_path: Path,
+) -> None:
+    """The other half of the busy set: a pending retry's workspace is the run's, not the
+    sweep's, exactly as a running session's is (#149)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await fail_once(h, 1)
+    assert list(h.orchestrator._retries) == ["1"]
+    waiting = h.workspace_dir("repo-1")
+    (waiting / ".issuebot" / "finished").touch()
+
+    await h.orchestrator.terminal_sweep()
+
+    assert waiting.is_dir()
+
+
+async def test_a_retry_that_cannot_remove_says_so_and_sweeps_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal that fails again is a warning naming the key, and the next one is still
+    tried: the sweep is the only thing that removes anything (#149)."""
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    h = Harness(tmp_path)
+    for key in ("repo-8", "repo-9"):
+        (h.workspace_dir(key) / ".issuebot" / "finished").touch()
+
+    from issuebot.agent import AgentError
+
+    async def refuse(self: Any, key: str) -> bool:
+        raise AgentError("workspace_error", f"{key}: refused")
+
+    monkeypatch.setattr(WorkspaceManager, "remove_key", refuse)
+
+    await h.orchestrator.terminal_sweep()
+
+    failed = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if json.loads(line)["event"] == "workspace_retry_failed"
+    ]
+    assert [record["workspace_key"] for record in failed] == ["repo-8", "repo-9"]
+    assert (h.root / "repo-8").is_dir()
+
+
 async def test_terminal_sweep_failure_only_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2316,9 +2533,12 @@ async def test_on_issues_receives_every_fetch(tmp_path: Path) -> None:
     h.github.merge_pr(7)
     h.github.close_issue(3)
     await h.tick()
-    # the first tick: the sweep's closed issue, then the candidate fetch (review included)
-    assert [[issue.number for issue in batch] for batch in h.polled] == [[3], [1, 2]]
+    # The first tick: the sweep's closed issue as it was found, the same issue read back after
+    # the sweep relabelled it (#149), then the candidate fetch (review included).
+    assert [[issue.number for issue in batch] for batch in h.polled] == [[3], [3], [1, 2]]
     assert h.polled[0][0].github_state == "closed"
+    assert h.polled[0][0].state is StateLabel.REVIEW
+    assert h.polled[1][0].state is StateLabel.COMPLETE
     assert closed.number == 3
     assert list(h.orchestrator.running) == ["1"]
     assert h.calls("fetch_issues_by_states")[-1] == (
@@ -2326,8 +2546,8 @@ async def test_on_issues_receives_every_fetch(tmp_path: Path) -> None:
     )
     await h.tick()
     # the second tick: reconcile's refresh of the running issue, then the candidate fetch
-    assert [[issue.number for issue in batch] for batch in h.polled[2:]] == [[1], [1, 2]]
-    assert h.polled[2][0].state is StateLabel.IN_PROGRESS
+    assert [[issue.number for issue in batch] for batch in h.polled[3:]] == [[1], [1, 2]]
+    assert h.polled[3][0].state is StateLabel.IN_PROGRESS
 
 
 async def test_on_issues_receives_a_fired_retry_refresh(tmp_path: Path) -> None:
@@ -3568,19 +3788,61 @@ async def test_a_removed_workspace_gives_its_account_back_on_the_sweep(tmp_path:
     assert orchestrator._pool.bound(identifier) is None
 
 
+async def test_the_sweep_retries_a_pooled_workspace_and_gives_its_account_back(
+    tmp_path: Path,
+) -> None:
+    """The retry removes as the account bound to *that* workspace, since the unlink is the
+    session's files' (#121), and `_prune_accounts` runs after it, so the account comes back on
+    the same sweep rather than the next one (#149)."""
+    h = Harness(tmp_path, max_concurrent=2)
+    orchestrator = _with_pool(h)
+    h.add_issue(1, "todo")
+    await h.tick()
+    identifier = h.github.issue(1).identifier
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(identifier) == "agent-1"
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    await h.exit(h.run_for(1), final_issue=h.github.issue(1))
+    await h.fire(2)
+    # A clone the run left behind, marked by a removal that did not take.
+    left_behind = h.workspace_dir(identifier)
+    (left_behind / ".issuebot" / "finished").touch()
+    accounts: list[str | None] = []
+    factory = orchestrator._workspaces_factory
+
+    def record(settings: Any) -> Any:
+        accounts.append(settings.agent.run_as[0] if settings.agent.run_as else None)
+        return factory(settings)
+
+    orchestrator._workspaces_factory = record  # type: ignore[method-assign]
+
+    await orchestrator.terminal_sweep()
+
+    assert not left_behind.exists()
+    assert accounts == ["agent-1"]
+    assert orchestrator._pool.bound(identifier) is None
+
+
 async def test_the_uv_cache_beside_the_workspaces_survives_startup_and_the_sweep(
     tmp_path: Path,
 ) -> None:
     """#164 puts one uv cache directory per session account under ``workspace.root``, beside
-    the workspace keys. Two things there work over the root and had to be shown not to mind it:
-    ``seal_idle``, which at every worker start chmods each worker-owned directory under the
-    root to ``0700`` so that a workspace a killed worker left open cannot be entered, and
-    ``AccountRegistry.prune``, which expires a binding whose workspace is gone.
+    the workspace keys. Three things there work over the root and had to be shown not to mind
+    it: ``seal_idle``, which at every worker start chmods each worker-owned directory under
+    the root to ``0700`` so that a workspace a killed worker left open cannot be entered;
+    ``AccountRegistry.prune``, which expires a binding whose workspace is gone; and, since
+    #149, ``finished_keys``, the removal retry the terminal sweep runs.
 
-    The first is the load-bearing one: the cache root is ``0755`` precisely so that every
-    session account can reach its own directory inside it, and a seal would take every
-    account's cache away on each restart. The second never listed the root at all -- #161
+    ``seal_idle`` is the load-bearing one for #164: the cache root is ``0755`` precisely so
+    that every session account can reach its own directory inside it, and a seal would take
+    every account's cache away on each restart. ``prune`` never listed the root at all -- #161
     believed that and did not prove it.
+
+    ``finished_keys`` is the one that arrived with #149 and the only one that could *unlink*
+    the cache rather than chmod it, so the ``terminal_sweep()`` below exercises it too: it
+    steps over ``RESERVED_ROOT_NAMES`` by name, since the boundary checks would pass a
+    directory that genuinely is the worker's. Its own direct coverage is
+    ``test_finished_keys_ignores_what_the_worker_did_not_write``.
     """
     h = Harness(tmp_path, max_concurrent=2)
     orchestrator = _with_pool(h)

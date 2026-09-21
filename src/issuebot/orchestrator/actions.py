@@ -551,6 +551,12 @@ async def finish_terminal(
     """A closed issue: ``complete``, no-change or cancelled, the events, workspace removed."""
     log = get_logger(__name__)
     outcome: FinishOutcome
+    # Before the label move, not after the removal (#149). The sweep no longer reads the
+    # ``complete`` role, so what asks for a removal to be retried is the mark on the workspace
+    # -- and a worker killed between the move and the removal below would otherwise leave an
+    # issue at rest in ``complete``, which nothing reads again, beside a workspace nothing
+    # would remove. Marking first closes that window; it is a no-op without a workspace.
+    workspaces.mark_finished(issue.identifier)
     if issue.state is StateLabel.COMPLETE:
         outcome = "unchanged"
     else:
