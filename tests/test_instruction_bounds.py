@@ -56,10 +56,13 @@ HEADROOM = 16 * 1024
 # (121,097 -> 129,471 -> 136,911), replaying into it the layout edits #173, #190 and #225 made
 # on main while the section was moving out. That pair is a burst rather than the rate -- it is
 # what a split costs while it is in flight, and it stops once this lands -- but it is the
-# honest figure to size against, and it leaves ~26 KB here: a dozen merges at the ~2.2 KB mean
-# measured for `HEADROOM` below, three at the burst. The remedy when it fails is not to raise
-# it either -- it is to give the file the structure it has so far done without, one document
-# per module under `docs/package-layout/` behind an index.
+# honest figure to size against. It leaves ~29 KB here -- a dozen merges at the ~2.2 KB mean
+# measured for `HEADROOM` below, three at the burst -- of which ~3 KB is #221 handing back the
+# `- ` and the two-space indent of a bullet list it replaced with a heading per module. The
+# remedy when it fails is not to raise it either. It is the split this file's structure is now
+# one step from: #221 gave every module a `##` section of its own (pinned in
+# `tests/test_package_layout.py`), and what remains is to lift each section into a document of
+# its own under `docs/package-layout/` behind an index.
 LAYOUT_BUDGET = 160 * 1024
 LAYOUT_DOC = "docs/package-layout.md"
 
