@@ -125,9 +125,10 @@ whose session reads it.
 ### Why: the file is one issuebot already depends on
 
 `POST_CLONE_SCRIPT` writes `credential.https://github.com.helper` with `git config --local`, and
-the README tells a hook author with a deploy key to write `core.sshCommand` the same way from
-`after_create` (#171's "what a hook that needs one should do instead"). Both run on *creation*,
-so a per-run reset would have to preserve what they wrote while removing what a session wrote,
+`docs/toolchains.md` tells a hook author with a deploy key to write `core.sshCommand` the same
+way from `after_create` (#171's "what a hook that needs one should do instead"). Both run on
+*creation*, so a per-run reset would have to preserve what they wrote while removing what a
+session wrote,
 in a file that records no difference between the two. It would also have to preserve
 `remote.origin.*` and the `branch.<name>.merge` tracking that `git push -u` wrote, which is the
 state a continuation needs. A reset that keeps all of that is one more enumeration, and this
@@ -180,7 +181,8 @@ own when the issue closes -- on `complete`, `no_change` and `cancelled` alike.
 ## What is still bounded, and must not be read as widened
 
 This decision is about one directory and changes nothing else. All of the following still hold,
-and the README says so where each is described:
+and the README (or `docs/toolchains.md`, where the hook recipes live) says so where each is
+described:
 
 - The worker's own state in the workspace -- `.issuebot/session.json`, `.issuebot/runs/`, the
   `created` and `finished` markers -- is the worker's, in a sticky directory, and read back only
