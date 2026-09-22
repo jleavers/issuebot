@@ -319,6 +319,60 @@ def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() 
     assert 'test "$(sudo -n -H -u agent gh config get -h github.com git_protocol)" = https' in CI
 
 
+# The `docker` job step that plants a previous session's home and proves the sweep clears it.
+SWEEP_STEP = "a session's config, shell profile, tool config and gh extensions do not survive"
+
+
+def _docker_step(name: str) -> str:
+    """The ``run:`` script of one ``docker`` job step, by name."""
+    for step in yaml.safe_load(CI)["jobs"]["docker"]["steps"]:
+        if step.get("name") == name:
+            return str(step.get("run") or "")
+    raise AssertionError(f"no docker job step named {name!r}")
+
+
+def test_ci_plants_the_hosts_yml_exactly_once() -> None:
+    """The plant the sweep step asserts against has to be the one the shell is left holding.
+
+    #186 and #190 each added a ``hosts.yml`` plant to this step, on separate branches and in
+    different positions. Neither diff touched the other's line, so git merged both with no
+    conflict and the second ``>`` truncated the first: what reached the sweep carried no
+    ``api_host``, no ``git_protocol`` and none of the sentinel credential, while three
+    assertions further down the same step read exactly those keys back. The step could only
+    have failed, and for a while on ``main`` it would have.
+
+    Nothing reported it, for two reasons at once. Actions had been declining to run these jobs
+    since 2026-09-09, so no ``docker`` job executed the step; and every assertion here pinned a
+    *substring of the whole file*, where ``"api_host: 127.0.0.1" in CI`` is as true of a
+    clobbered plant as of a live one.
+
+    So this is the one thing the others cannot express: how many writes there are, and which is
+    last. #189's merge resolution removed the stale plant, which is why this reads as a guard
+    rather than a fix -- and a guard is what was missing, since the way the two plants met was
+    an ordinary clean merge of two branches that were each correct alone.
+    """
+    run = _docker_step(SWEEP_STEP)
+    writes = [
+        line.strip()
+        for line in run.splitlines()
+        if "printf" in line and ">" in line and "/home/agent/.config/gh/hosts.yml" in line
+    ]
+    assert len(writes) == 1, f"{len(writes)} hosts.yml plants; the last one wins: {writes}"
+    plant = writes[0]
+    # What the step's own assertions require of the file the sweep is handed: the credential
+    # that has to survive the key-level edit, and the two steering keys that edit has to take.
+    for key in (
+        "gho_KEEPTHISCREDENTIAL0123456789012345",
+        "api_host: 127.0.0.1",
+        "git_protocol: ssh",
+    ):
+        assert key in plant, f"the surviving plant does not carry {key!r}: {plant}"
+    # And well-formed enough for gh to run at all: it refuses a host entry it cannot migrate,
+    # so a gh that never reached its alias expansion or its extension dispatch would pass the
+    # other halves of this step for the wrong reason.
+    assert "oauth_token" in plant and "user: nobody" in plant, plant
+
+
 def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     """The other half of #190, and what lets the edit be a denylist at all.
     `GH_HOSTS_STEERING_KEYS` is `gh`'s own configuration surface -- every key `gh config`
