@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from issuebot.agent.accounts import session_account
 from issuebot.agent.boundary import ENV_FILE, TURN_STDERR, Boundary, BoundaryError, split_parts
 from issuebot.agent.errors import AgentErrorCategory
-from issuebot.agent.runas import RunAs, Spawn
+from issuebot.agent.runas import CLAUDE_HOME_DIR, RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.uvcache import UV_CACHE_ENV, ensure_uv_cache_dir
 from issuebot.config import Settings
@@ -796,6 +796,69 @@ def settings_for_labels(settings: Settings, labels: Sequence[str]) -> Settings:
     return settings_with_model(settings, models.pop())
 
 
+# The CLAUDE.md allow-list (#135, the same spec as `--strict-mcp-config` below).
+#
+# `claude` reads `projects.<git root of the cwd>.hasClaudeMdExternalIncludesApproved` out of
+# the session account's `~/.claude.json` and, where it is true, lets a Project or Local
+# `CLAUDE.md` -- and a `.claude/CLAUDE.md`, and a `.claude/rules` file, and anything any of
+# them `@`-includes -- read a path from *outside* the clone. That file is the surface #119
+# closed for `mcpServers`: it sits in `$HOME` beside `.claude/`, outside the directory the home
+# sweep walks, and a `-p` session can write the key itself, so an approval is one the next
+# session at that workspace path inherits.
+#
+# `claudeMdExcludes` is claude's own answer and it is reachable from the command line, which is
+# what makes this the flag-shaped closure #119 preferred to clearing a key out of claude's own
+# file: measured, a `.claude/settings.json` in the clone setting it back to `[]` does not win
+# against the argv. It is matched against absolute paths, and only for the `User`, `Project`
+# and `Local` memory types -- never `Managed` -- so an operator's root-owned policy CLAUDE.md
+# is outside it, as it is outside the session's privilege domain.
+CLAUDE_MD_EXCLUDES_KEY = "claudeMdExcludes"
+# What a path cannot carry and still be a literal arm of the pattern below. `,` and `{}` would
+# change the arms, the rest would make the arm a glob of its own.
+_GLOB_METACHARACTERS = frozenset("*?[]{}(),!\\\n")
+
+
+def claude_md_allowlist(*, trees: Sequence[Path] = (), files: Sequence[Path] = ()) -> str | None:
+    """The ``--settings`` document keeping CLAUDE.md and its ``@`` includes to these paths.
+
+    "Keeping", not "confining": claude matches the exclusion against the path as written and
+    only then resolves it, so a symlink among these paths is still followed out of them. That
+    is measured and recorded in the spec, and it is why the argument is a narrowing rather
+    than a boundary.
+
+    ``trees`` are allowed with everything under them, ``files`` exactly. The split is the
+    point: the workspace is a tree, because a clone's instruction files may include anything
+    in the clone, while the session account's config directory is *not* -- only
+    ``CLAUDE.md`` and ``rules/`` in it are user memory (measured against the loader:
+    ``dQ("User")`` and ``age()``), and the rest of that directory is the account's
+    credential, its other sessions' transcripts and its caches. Allowing the tree would
+    leave the fence around the most valuable target in the home.
+
+    One *negated* pattern carrying every arm in one brace, and deliberately not one negation
+    per arm: picomatch matches a list when **any** pattern matches, so ``!a/**`` and ``!b/**``
+    would each match everything outside their own arm and OR together to "exclude everything"
+    -- every instruction file, the clone's and the user's alike. Braced, the negation is
+    evaluated once against the union, which makes this the shape ``--strict-mcp-config`` is: it
+    names what survives rather than what is removed, so a path nobody thought of is excluded by
+    default instead of being a hole until someone notices.
+
+    ``None`` when there is nothing to allow, or when an arm cannot be spelled: a relative path
+    (``claudeMdExcludes`` is matched against absolute paths, so a relative arm would match
+    nothing and the negation would then match *everything*), or a brace, comma or glob
+    metacharacter, which would silently change what the pattern means. The failure that matters
+    is not "too little is excluded" but "everything is", which costs the session every
+    instruction file it should have loaded.
+    """
+    arms = [f"{tree}/**" for tree in trees] + [str(file) for file in files]
+    paths = [*trees, *files]
+    if not arms or any(not path.is_absolute() for path in paths):
+        return None
+    if any(_GLOB_METACHARACTERS & set(str(path)) for path in paths):
+        return None
+    allowed = arms[0] if len(arms) == 1 else "{" + ",".join(arms) + "}"
+    return json.dumps({CLAUDE_MD_EXCLUDES_KEY: [f"!{allowed}"]})
+
+
 class ClaudeRunner:
     """Builds and runs one ``claude -p`` process per turn."""
 
@@ -831,7 +894,7 @@ class ClaudeRunner:
             return self._runas.prepared(argv, env)
         return contextlib.nullcontext(Spawn(argv=list(argv), env=dict(env), pass_fds=()))
 
-    def build_argv(self, *, session_id: str, resume: bool) -> list[str]:
+    def build_argv(self, *, session_id: str, resume: bool, workspace: Path) -> list[str]:
         cfg = self._claude
         argv = [
             cfg.command,
@@ -864,6 +927,22 @@ class ClaudeRunner:
             "--setting-sources",
             ",".join(cfg.setting_sources),
         ]
+        # Unconditional, for the reason `--strict-mcp-config` above is (#135). Not narrowed to
+        # `claude.setting_sources` naming the clone, although that is the only source the
+        # approval key gates: under the shipped `[user]` the argument still bounds the *user*
+        # CLAUDE.md's own `@` includes, which claude loads from outside the home whatever the
+        # key says, and which nothing else bounds on the host route -- `sweep_agent_home`
+        # returns early there, because the home is the operator's own. A bound and not a
+        # boundary: a symlink among the allowed paths is still followed out of them, which the
+        # spec measures and records.
+        trees, files = self._claude_md_allowed(workspace)
+        allowlist = claude_md_allowlist(trees=trees, files=files)
+        if allowlist is not None:
+            argv += ["--settings", allowlist]
+        elif trees or files:
+            # The other way `claude_md_allowlist` declines: a path it cannot spell as an arm.
+            # `_claude_md_allowed` has already said its piece when it returned nothing at all.
+            self._log.warning("claude_md_allowlist_unavailable", reason="path not expressible")
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         if cfg.model:
             argv += ["--model", cfg.model]
@@ -876,6 +955,73 @@ class ClaudeRunner:
         if cfg.mcp_config:
             argv += ["--mcp-config", *cfg.mcp_config]
         return argv
+
+    def _claude_md_allowed(self, workspace: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        """The trees and the files a turn's instruction loading may read, or two empties (#135).
+
+        The workspace is a tree, so an operator who has named `project` or `local` still gets
+        the clone's `CLAUDE.md`, its `.claude/CLAUDE.md` and its `.claude/rules`, and an `@`
+        include of theirs still resolves anywhere inside the clone; what it no longer names is
+        the session account's home, which outlives the run. This workspace and not `self._root`,
+        which is every workspace's parent: one issue's CLAUDE.md has no more business reading
+        another issue's clone than reading the home.
+
+        The config directory is not a tree. `claude` loads exactly two things from it as user
+        memory, `CLAUDE.md` and `rules/`, and they have to be allowed or the argument would stop
+        the user memory issuebot does leave in place. The rest of that directory is
+        `.credentials.json`, the other sessions' transcripts under `projects/` that the sweep
+        deliberately keeps, and the caches, and none of it is instructions.
+
+        Those two are allowed, not trusted, and what clears them is the home sweep rather than
+        this argument -- `CLAUDE.md` and `rules` are both `CLAUDE_HOME_SWEEP` names, removed
+        before every turn and every hook on the `agent.run_as` route (#101, #137). Two gaps,
+        both recorded in the spec rather than closed here: on the host route nothing sweeps
+        them, because the home is the operator's own; and the sweep walks `~/.claude`
+        literally, so a deployment that sets `$CLAUDE_CONFIG_DIR` has its user memory allowed
+        here and swept nowhere.
+
+        `$CLAUDE_CONFIG_DIR` and not `~/.claude` whenever the deployment sets one, because that
+        is what `claude` itself resolves the pair against, and it reaches the child through
+        `PASSTHROUGH_PREFIXES`. The session cannot re-point it: `CLAUDE_` is a
+        `PROTECTED_ENV_PREFIXES` entry, so `.issuebot/env` is refused it.
+
+        The arms are the paths as written, never what they resolve to, which is a choice and
+        costs something measured: where `<config>/rules` is a symlink, claude matches the
+        exclusion against the *resolved* path and the argument then stops those rules loading.
+        Resolving here would fix that and would also feed a path the session may own into the
+        fence -- a planted `rules -> /` would widen it to everything -- so an operator who
+        keeps user memory elsewhere has `$CLAUDE_CONFIG_DIR`, which this does follow.
+
+        Two empties -- so no argument -- when the directory does not resolve, rather than an
+        allow-list of the workspace alone: that would stop the user memory loading, and the
+        residual it would be buying against is bounded and recorded, where silently dropping
+        instructions a deployment means to load is a fault that shows up nowhere.
+        """
+        config = self._session_config_dir()
+        if config is None:
+            self._log.warning("claude_md_allowlist_unavailable", reason="config dir unresolved")
+            return ((), ())
+        return ((workspace, config / "rules"), (config / "CLAUDE.md",))
+
+    def _session_config_dir(self) -> Path | None:
+        """Where the session's own ``claude`` keeps user memory: ``$CLAUDE_CONFIG_DIR``, else
+        ``~/.claude`` under the home of the account the turn runs as."""
+        configured = self._environ.get("CLAUDE_CONFIG_DIR")
+        if configured:
+            return Path(configured)
+        home = self._session_home()
+        return home / CLAUDE_HOME_DIR if home is not None else None
+
+    def _session_home(self) -> Path | None:
+        """The home of the account a turn runs as: the account's own, or this process's."""
+        if self._runas is not None:
+            # `RunAs.account()` reports a name that will not resolve as `RunAsError`, which is
+            # an `OSError`; there is no separate `KeyError` to catch here.
+            with contextlib.suppress(OSError):
+                return Path(self._runas.account().pw_dir)
+            return None
+        home = self._environ.get("HOME")
+        return Path(home) if home else None
 
     def child_environment(self) -> dict[str, str]:
         """What one turn's ``claude -p`` is run with.
@@ -981,7 +1127,7 @@ class ClaudeRunner:
                 "invalid_workspace_cwd", f"cannot use log directory {log_dir}: {exc}", None
             )
         (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
-        argv = self.build_argv(session_id=session_id, resume=resume)
+        argv = self.build_argv(session_id=session_id, resume=resume, workspace=resolved)
         # Read every turn: a `before_run` that ran once still feeds a session resumed after a
         # retry, and a hook is free to rewrite the file between turns.
         env, workspace_env = workspace_environment(
