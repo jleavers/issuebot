@@ -21,7 +21,8 @@ a restart; and only the `worker` service takes the argument. All four end at the
 [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and issuebot
 merges into the environment of every turn -- which is the last section here.
 
-Everything else an operator needs is in the [README](../README.md).
+Everything else an operator needs is in the [README](../README.md) and the documents it
+lists beside itself.
 
 ## A PostgreSQL server for the target repository's tests
 

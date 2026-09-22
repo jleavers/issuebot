@@ -16,7 +16,7 @@ and Claude credential. The checkouts meet on one Docker network.
    `docker network create --internal issuebot-internal`. The second is where the workers reach
    the hub's database; `--internal` is what leaves them no route off the host except the
    allow-listing proxy (see [What a session may
-   reach](security-model.md#what-a-session-may-reach) in the README).
+   reach](security-model.md#what-a-session-may-reach) in `docs/security-model.md`).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
