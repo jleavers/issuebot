@@ -245,7 +245,7 @@ than a restart. The pin moves by hand: a tarball fetched by URL is invisible to 
 — that one builds issuebot, this one runs the target repository's suite, and they are entitled
 to differ.)
 
-**2. Let the session reach PyPI.** The [shipped allow-list](../README.md#what-a-session-may-reach) carries
+**2. Let the session reach PyPI.** The [shipped allow-list](security-model.md#what-a-session-may-reach) carries
 the hosts the workflow itself needs and no registry, so `uv sync` is refused with a `403` until
 this checkout's `.env` says otherwise:
 
@@ -300,7 +300,7 @@ session after every worker recreation.
 **One directory per account, and that is the point of the shape.** A cache is a directory one
 process writes and the next installs *from*, so a cache shared between session accounts would
 be a surface one session could write for another to execute — exactly what the [account
-pool](../README.md#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
+pool](security-model.md#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
 the worker and group that account's own, inside a `0755` root: an account reaches its own and
 is refused at every sibling's door. Per account it is the boundary that account's own home
 already draws, and the next session bound to it is the one the cache is kept for.
@@ -382,7 +382,7 @@ runtime that starts and then quietly disagrees with the developer's machine is w
 that does not start, so CI asserts the formatting rather than the version.
 
 **2. There is no step 2.** Unlike node and uv, PowerShell needs nothing added to
-[the allow-list](../README.md#what-a-session-may-reach): the runtime ships in the image, and a repository
+[the allow-list](security-model.md#what-a-session-may-reach): the runtime ships in the image, and a repository
 of plain `.ps1` deliverables installs nothing to run its tests. The exception is a suite that
 pulls modules from the PowerShell Gallery — `Install-Module`, or a `#Requires -Modules` that
 is not already vendored — which needs
@@ -598,6 +598,7 @@ hook that would truncate it again or append a duplicate per session.
 - **What the clone itself does carry over.** `git config --local` is the route that stays open,
   and it stays open in both directions: a workspace outlives its run, so what a hook — or the
   session — writes into the clone's `.git/config` is there for the next session on that issue.
-  That is a decision and not an oversight; "How long a workspace lives, and what a reused one
-  hands the next session" under [When things go wrong](../README.md#when-things-go-wrong) says
-  what it reaches and why issuebot does not reset it.
+  That is a decision and not an oversight; [How long a workspace lives, and what a reused one
+  hands the next
+  session](operations.md#how-long-a-workspace-lives-and-what-a-reused-one-hands-the-next-session)
+  says what it reaches and why issuebot does not reset it.

@@ -58,9 +58,10 @@ session's own privilege domain and reaches the next session on this issue, as #1
 **Not bounded. The clone is the session's, and reuse hands it over whole.**
 
 Neither `.git/config` nor `.git/hooks/` is reset between two sessions on one issue, and
-issuebot ships no setting that resets them. This is recorded here, stated in the README where a
-deployment sees a workspace outlive its run, and pinned by a test, so that a later change to
-bound it is a deliberate edit rather than a silent one.
+issuebot ships no setting that resets them. This is recorded here, stated in
+`docs/operations.md` under "How long a workspace lives, and what a reused one hands the next
+session" -- where a deployment sees a workspace outlive its run -- and pinned by a test, so that
+a later change to bound it is a deliberate edit rather than a silent one.
 
 ### Why: the unit of this channel is the clone, and `.git/config` is a small part of it
 
@@ -209,7 +210,8 @@ own when the issue closes -- on `complete`, `no_change` and `cancelled` alike.
 ## What is still bounded, and must not be read as widened
 
 This decision is about one directory and changes nothing else. All of the following still hold,
-and the README (or `docs/toolchains.md`, where the hook recipes live) says so where each is
+and the documentation (`docs/operations.md` for the deployment's view, `docs/security-model.md`
+for the boundary, `docs/toolchains.md` where the hook recipes live) says so where each is
 described:
 
 - The worker's own state in the workspace -- `.issuebot/session.json`, `.issuebot/runs/`, the
