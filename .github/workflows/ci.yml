@@ -575,7 +575,9 @@ jobs:
             export HOME=/tmp/gh-key-probe
             mkdir -p $HOME
             keys=$(gh config --help | sed -n "s/^- .\([a-z_]*\).:.*/\1/p")
-            test -n "$keys"
+            # Not just non-empty: a help line this `sed` stops matching would shrink the list
+            # silently, and the key it dropped is exactly the channel back.
+            test "$(printf "%s\n" "$keys" | wc -l)" -ge 13
             /app/.venv/bin/python -c "
             import os, sys
             from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
@@ -604,15 +606,22 @@ jobs:
               gh config set -h github.com $key $value
             done
             /app/.venv/bin/python -c "
-            import os, pathlib, yaml
+            import os, pathlib, sys, yaml
             from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
             path = pathlib.Path(os.environ[\"HOME\"], \".config\", \"gh\", \"hosts.yml\")
             written = set(yaml.safe_load(path.read_text())[\"github.com\"])
-            unnamed = written - set(GH_HOSTS_STEERING_KEYS)
-            if unnamed:
-                raise SystemExit(f\"gh writes {sorted(unnamed)} into hosts.yml unnamed\")
+            named = set(GH_HOSTS_STEERING_KEYS)
+            advertised = set(sys.argv[1].split())
+            if written != named:
+                raise SystemExit(
+                    f\"gh config set -h writes {sorted(written)} into hosts.yml, the sweep names \"
+                    f\"{sorted(named)}; a key that moved to config.yml or arrived here is the \"
+                    f\"measurement this list is built on -- update runas.py and its test\"
+                )
+            if advertised - written:
+                raise SystemExit(f\"gh routes {sorted(advertised - written)} elsewhere now\")
             print(\"written host-level by gh config set -h:\", sorted(written))
-            "
+            " "$keys"
             # And git_protocol by what gh resolves rather than by what it writes: a host entry
             # has to out-rank the hostname-less lookup, which is what makes it steer the clone.
             rm -rf $HOME/.config/gh

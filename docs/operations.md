@@ -308,8 +308,11 @@ So the sweep removes gh's whole configuration surface from that file — the thi
 `gh config --help` advertises, every one of which `gh config set -h <host>` writes here rather
 than into `config.yml`, and none of which is credential state — and leaves everything else,
 the tokens included. The rule is not "these keys are dangerous" but "a session does not leave
-*configuration* in a credential file", so what survives is what `gh config` does not manage:
-`oauth_token`, `user` and the per-account `users:` subtree. A file with none of them in it is not rewritten at all; one that does
+*configuration* in a credential file", so what survives is the credential state: `oauth_token`
+and `user`, and the per-account tokens in the `users:` subtree. The keys go from that subtree
+too, since `gh config set -h` mirrors every one of them there as well as at host level. If the
+sweep ever cannot parse the file it leaves it alone and *says so* — the worker logs
+`claude_home_sweep_failed` each turn — rather than reporting a success it did not have. A file with none of them in it is not rewritten at all; one that does
 carry one is rewritten by a YAML parser, so it comes back normalised rather than
 character-for-character, which is what `gh` itself does to this file on an ordinary command. What is left of the
 channel is bounded and documented in

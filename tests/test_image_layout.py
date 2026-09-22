@@ -272,7 +272,12 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     # The `set` half, with a value per key and no `|| true` to swallow a refusal.
     assert "gh config set -h github.com $key $value" in CI
     assert "gh config set -h github.com $key $value || true" not in CI
-    assert "unnamed = written - set(GH_HOSTS_STEERING_KEYS)" in CI
+    # Equality, not a subset: a subset check cannot notice a key gh moved back to config.yml,
+    # which is half of what the list claims.
+    assert "if written != named:" in CI
+    assert "if advertised - written:" in CI
+    # And the extraction must not shrink silently when a help line is reformatted.
+    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 13' in CI
     # And git_protocol by what gh resolves rather than by what it writes.
     assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
     assert 'test "$(gh config get git_protocol)" = https' in CI

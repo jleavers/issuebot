@@ -417,9 +417,17 @@ version, and moves by hand.
   validates the enum-valued keys, so a probe passing a placeholder is refused for eight of the
   thirteen, and one that swallows the refusal reports only the five free-form ones and calls
   that the closed set. So the rule is not "these keys are dangerous" but "a session does not
-  leave *configuration* in a credential file", and what survives is what `gh config` does not
-  manage: `oauth_token`, `user` and the `users:` subtree, none of which `-h` can write. Host
-  level and no deeper -- a steering key inside `users:` is measured not honoured.
+  leave *configuration* in a credential file", and what survives is the credential state:
+  `oauth_token` and `user`, neither of which `-h` can write. The keys come out at *both* levels
+  `gh` writes them -- host level, where it reads them, and the `users.<name>` subtree, which
+  `gh config set -h` mirrors into (creating it if need be) once the file names a user, so a
+  host-level-only sweep would leave a complete second copy of every planted key. Those copies
+  are measured inert on this `gh`, but so are eleven of the thirteen at host level.
+  `GH_HOSTS_MAX_DEPTH` (8) is the other half of being able to write the file back at all: PyYAML
+  recurses per nesting level, `gh` writes this file three levels deep at most, and a key whose
+  value nests past the bound is dropped -- measured, ~900 bytes of brackets beside a plant used
+  to make the *dump* raise, so the keys came out of the document and the write was then
+  abandoned, leaving the plant for the container's lifetime. Nothing credential is that deep.
   Two of the thirteen are live from this position and they differ in reach. `api_host` is the
   issue's subject and the only one *only* reachable here, top level being inert for it, so this
   closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
@@ -441,11 +449,15 @@ version, and moves by hand.
   `Boundary.read`'s rule, since a FIFO at that name would hang the open once per turn and once
   per hook), bytes that are not UTF-8 or not YAML, and a document that is not the mapping of
   hosts `gh` writes are all left exactly as they are, since rewriting a credential file on a
-  guess is the one outcome worse than the plant. `RecursionError` is caught beside `YAMLError`
-  at both ends, because PyYAML's scanner and representer recurse per nesting level and a few
-  hundred bytes of brackets -- far inside the cap -- would otherwise leave `_sweep` altogether,
-  failing every sweep for the container's lifetime *and* never stripping the plant in that same
-  file. It is not written at all unless a key came out, so an unplanted home keeps its
+  guess is the one outcome worse than the plant -- and every one of those declines is
+  *reported*, which is the one answer this sweep gives. The removals elsewhere are best effort
+  because a target still there is one the next sweep retries, where a document PyYAML cannot
+  scan is one it will never scan: exiting 0 on it would be a silent, permanent bypass of the
+  control, so `_sweep_gh_hosts` returns False, the helper exits non-zero and
+  `claude_home_sweep_failed` is logged every turn. An absent file is not a decline.
+  `RecursionError` is caught beside `YAMLError` at both ends as a backstop -- the depth bound is
+  what actually keeps the write possible -- since a sweep must not raise either way.
+  It is not written at all unless a key came out, so an unplanted home keeps its
   `hosts.yml` byte for byte across the sweep that runs before every turn and every hook.
   `_relax_file` is the one new repair beside `_relax`: a removal needs the parent's bits and
   nothing of the file's own mode, where an edit has to read its target, so a session that plants

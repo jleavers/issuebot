@@ -265,6 +265,15 @@ GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
 # a credential file must not rewrite it, and an unparsed ``hosts.yml`` this large is not one
 # ``gh`` is authenticating from either.
 GH_HOSTS_LIMIT = 256 * 1024
+# How deep a value under a host may nest before the sweep drops the key holding it. ``gh`` writes
+# this file three levels deep at the most -- ``host -> users -> <name> -> key`` -- so nothing it
+# puts here comes close, and nothing credential does: ``oauth_token`` and ``user`` are scalars
+# and ``users:`` is two mappings. The bound exists because PyYAML recurses per nesting level in
+# both directions, and a few hundred bytes of brackets is enough to make the *dump* raise: a
+# document the sweep can read and cannot write back is one where the plant beside it would
+# survive. Dropping the over-deep key instead keeps the edit possible, and costs a session
+# nothing it could not have written as a scalar.
+GH_HOSTS_MAX_DEPTH = 8
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -740,7 +749,7 @@ class _HostsLoader(yaml.SafeLoader):
 _HostsLoader.yaml_implicit_resolvers = {}
 
 
-def _sweep_gh_hosts(home: Path) -> None:
+def _sweep_gh_hosts(home: Path) -> bool:
     """Remove the steering keys (``GH_HOSTS_STEERING_KEYS``) from ``~/.config/gh/hosts.yml``,
     keeping everything else in it (#190).
 
@@ -767,26 +776,84 @@ def _sweep_gh_hosts(home: Path) -> None:
     surface in this sweep has, and ``_walk``'s, which yields the first link it meets rather than
     descending through it. ``gh`` writes a regular file in a real directory, so a link at either
     is a session's redirection, and editing through one would rewrite a file outside the home.
+
+    Returns whether the file was resolved -- edited, or found to need no edit -- and ``False``
+    for every way of declining above. That answer is the *only* one this sweep gives, and it is
+    why it is given at all: the removals elsewhere are best-effort because a target still present
+    is a target the next sweep tries again, where declining here is *deterministic*. A document
+    this cannot parse is one it will never parse, so a plant beside it would survive for the
+    container's lifetime -- and without a signal nobody would know. The helper's exit status
+    carries it, which ``WorkspaceManager`` logs as ``claude_home_sweep_failed``: a warning every
+    turn, which is loud, and correct, because a credential file the sweep cannot edit is a
+    deployment fault a person has to look at.
     """
     target = _walk(home, GH_HOSTS_FILE)
     if target is None:
-        return
+        return True
     if target.is_symlink():
         _remove_swept(target)
-        return
+        return not _exists(target)
     document = _read_gh_hosts(target)
     if document is None:
-        return
+        # Absence is not a decline, it is the ordinary case: a home that never held the file, or
+        # one whose `.config/gh` holds only `config.yml`. `_exists` is the same distinction the
+        # removals make -- only `FileNotFoundError` is an absence, and a directory closed to
+        # search answers `EACCES` for everything inside it, which is a decline and must report.
+        return not _exists(target)
     parsed, seen = document
-    stripped = {
-        host: {key: value for key, value in entry.items() if key not in GH_HOSTS_STEERING_KEYS}
-        if isinstance(entry, dict)
-        else entry
-        for host, entry in parsed.items()
-    }
+    stripped = {host: _stripped_host(entry) for host, entry in parsed.items()}
     if stripped == parsed:
-        return
-    _replace_gh_hosts(target, stripped, seen)
+        return True
+    return _replace_gh_hosts(target, stripped, seen)
+
+
+def _stripped_host(entry: object) -> object:
+    """One host's entry with ``gh``'s configuration keys removed, at both levels it writes them.
+
+    Host level is where ``gh`` reads them. The ``users.<name>`` subtree is where it *mirrors*
+    them: ``gh config set -h <host> <key>`` writes the key twice once the file names a user, and
+    creates the subtree if it has to. Those copies are measured inert on this ``gh`` -- after a
+    host-level sweep the value no longer resolves -- but so are eleven of the thirteen at host
+    level, and they are removed for the same reason: a key that does nothing costs nothing to
+    remove, where leaving a complete second copy of every planted key in the file costs the
+    channel back the day a release starts reading it. ``oauth_token`` is what the subtree is for
+    and is not one of them, so the per-account credentials come through.
+
+    A value nested past ``GH_HOSTS_MAX_DEPTH`` takes its key with it, whichever level it is on.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    kept: dict = {}
+    for key, value in entry.items():
+        if key in GH_HOSTS_STEERING_KEYS or _too_deep(value):
+            continue
+        kept[key] = (
+            {name: _stripped_host(user) for name, user in value.items()}
+            if key == "users" and isinstance(value, dict)
+            else value
+        )
+    return kept
+
+
+def _too_deep(value: object) -> bool:
+    """Whether ``value`` nests past ``GH_HOSTS_MAX_DEPTH``, measured without recursing.
+
+    Iterative on purpose: the whole point is a document deep enough to exhaust the interpreter's
+    stack, so the check for it cannot be the thing that does. Breadth-first with an explicit
+    stack, and it stops at the first level past the bound rather than walking the whole tree.
+    """
+    level: list[object] = [value]
+    for _ in range(GH_HOSTS_MAX_DEPTH):
+        below: list[object] = []
+        for item in level:
+            if isinstance(item, dict):
+                below.extend(item.values())
+            elif isinstance(item, list | tuple):
+                below.extend(item)
+        if not below:
+            return False
+        level = below
+    return True
 
 
 def _read_gh_hosts(target: Path) -> tuple[dict, os.stat_result] | None:
@@ -810,13 +877,16 @@ def _read_gh_hosts(target: Path) -> tuple[dict, os.stat_result] | None:
         # `_HostsLoader` is a `SafeLoader`; only its scalar resolvers differ.
         parsed = yaml.load(text, Loader=_HostsLoader)
     except yaml.YAMLError, RecursionError:
-        # `RecursionError` beside `YAMLError` because PyYAML's scanner and representer both
-        # recurse per nesting level, and a document nested a few thousand deep -- well inside
-        # `GH_HOSTS_LIMIT`, a few hundred bytes of brackets -- raises it rather than complaining.
-        # It is not a `YAMLError`, so without this it would leave `_sweep` altogether: the sweep
-        # would report failure on every turn and every hook for the container's lifetime, and
-        # the plant in that same file would never be stripped. Declining is the fail-safe branch
-        # the rest of this function already has.
+        # `RecursionError` beside `YAMLError` because PyYAML's scanner recurses per nesting
+        # level, and a document a few thousand deep -- well inside `GH_HOSTS_LIMIT`, a few
+        # hundred bytes of brackets -- raises it rather than complaining. It is not a
+        # `YAMLError`, so it would otherwise leave `_sweep` altogether, as a traceback.
+        # Catching it does *not* strip the plant beside it, and must not be mistaken for a fix
+        # for that: the file is declined, and what makes the decline honest is that it is
+        # reported (`_sweep_gh_hosts` returns False, the helper exits non-zero). The dump side
+        # of the same problem *is* fixed rather than declined, by `GH_HOSTS_MAX_DEPTH`: a key
+        # whose value nests past what `gh` writes is dropped, so a document that parses can
+        # always be written back.
         return None
     if not isinstance(parsed, dict):
         return None
@@ -864,7 +934,7 @@ def _read_capped(target: Path) -> tuple[str, os.stat_result] | None:
         return None
 
 
-def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> None:
+def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> bool:
     """Write ``stripped`` over ``target`` atomically, or leave the file as it was.
 
     Through a temporary file in the same directory and ``os.replace``, so a session's ``gh``
@@ -885,10 +955,10 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
     ``hosts.yml`` an operator seeded as root is not a session's plant, and replacing it with an
     account-owned copy would hand the next session a file it can rewrite freely.
     """
-    # `RecursionError` beside the other two for the reason `_read_gh_hosts` catches it: the
-    # representer recurses per nesting level, so a document this deep raises on the way out as
-    # well as on the way in -- and a sweep that raises is one that never finishes, where a sweep
-    # that declines leaves a plant the next turn tries again.
+    # `RecursionError` beside the other two as a backstop rather than as the answer:
+    # `GH_HOSTS_MAX_DEPTH` drops the keys that would make the representer recurse, so reaching
+    # this should not be possible. A sweep must not raise whether or not that reasoning holds.
+    replaced = False
     with contextlib.suppress(OSError, yaml.YAMLError, RecursionError):
         # The temporary file is created in this directory and renamed over the target, so the
         # replace needs write and search on it -- the same bits `_sweep`'s retry puts back for
@@ -910,17 +980,11 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
             return
         mode = stat.S_IMODE(st.st_mode)
         handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".hosts-", suffix=".yml")
-        replaced = False
         try:
-            # `os.fdopen` takes ownership of the descriptor, but only once it returns: if it
-            # raises, the descriptor is still this process's to close, and the sweep runs before
-            # every turn and every hook.
-            try:
-                stream = os.fdopen(handle, "w")
-            except OSError:
-                os.close(handle)
-                raise
-            with stream:
+            # No handler around `os.fdopen`: measured, CPython's `io.open` closes the
+            # descriptor itself when it fails after taking it, so closing it here would be a
+            # double close rather than the leak it looks like a guard against.
+            with os.fdopen(handle, "w") as stream:
                 yaml.safe_dump(stripped, stream, default_flow_style=False, sort_keys=False)
                 # Flushed and synced before the rename: the rename is what makes the new file
                 # the credential, and a rename that reached the disk ahead of the bytes would
@@ -937,13 +1001,14 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
             if not replaced:
                 with contextlib.suppress(OSError):
                     os.unlink(temporary)
+    return replaced
     # Suppressed rather than reported: the replace is atomic, so a failure leaves the original
     # file intact and still carrying the plant, and the next turn sweeps again. This helper's
     # exit status is what ``sweep_home`` reports, and a sweep that cleared every other surface
     # should not read as a total failure because one edit did not land.
 
 
-def _sweep(home: Path) -> None:
+def _sweep(home: Path) -> bool:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
     its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
     command (``TOOL_CONFIG_SWEEP``) and the loadable config surfaces under ``.claude``
@@ -982,7 +1047,7 @@ def _sweep(home: Path) -> None:
     # targets above and is gone by now, so the walk below resolves inside the real home; and
     # this is an edit rather than a removal, so it belongs after every path-level decision has
     # been made.
-    _sweep_gh_hosts(home)
+    return _sweep_gh_hosts(home)
 
 
 def _remove_swept(target: Path) -> None:
@@ -1036,7 +1101,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.verb == "kill":
         _kill(args.pgid)
     elif args.verb == "sweep":
-        _sweep(args.path)
+        # The one verb with an answer of its own: every removal here is best effort, because a
+        # target still present is one the next sweep tries again, but the ``hosts.yml`` edit
+        # declines *deterministically* -- a document it cannot parse is one it will never parse.
+        # So a decline exits non-zero and ``WorkspaceManager`` logs ``claude_home_sweep_failed``,
+        # rather than a plant surviving the container's lifetime with nothing said about it.
+        if not _sweep(args.path):
+            return 1
     else:
         _remove(args.path)
     return 0

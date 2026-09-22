@@ -209,9 +209,28 @@ github.com:
 
 So the list is gh's own configuration surface, removed whole. That is the shape of the decision:
 the sweep does not judge which keys are dangerous, it declines to let a session leave
-*configuration* in a credential file — and what survives is what `gh config` does not manage,
-which is `oauth_token`, `user` and the `users:` subtree. None of the thirteen is credential
-state, so the acceptance bar is met by construction rather than by care.
+*configuration* in a credential file — and what survives is the credential state, `oauth_token`
+and `user`, neither of which `-h` can write. None of the thirteen is credential state, so the
+acceptance bar is met by construction rather than by care.
+
+They come out at **both** levels `gh` writes them. Host level is where it reads them; the
+`users.<name>` subtree is where `gh config set -h` *mirrors* them, creating it if the file does
+not have it, once the file names a user:
+
+```text
+github.com:
+    user: nobody
+    users:
+        nobody:
+            oauth_token: not-a-real-token
+            api_host: evil.example.com      <- mirrored
+    api_host: evil.example.com              <- host level
+```
+
+Measured inert in the subtree on this `gh` — after a host-level sweep the value no longer
+resolves — but so are eleven of the thirteen at host level, and they go for the same reason: a
+complete second copy of every planted key, left in the file, is the channel back the day a
+release starts reading it. `oauth_token` is what the subtree is for and is not one of them.
 
 Two of the thirteen are measured live from this position, and they are different shapes:
 
@@ -282,10 +301,24 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   yielded and unlinked rather than descended through. `gh` writes a regular file in a real
   directory, so a link at any of them is a session's redirection — and editing through one would
   rewrite a file outside the home altogether.
-- **Fail-safe in one direction only.** Anything the sweep cannot read, cannot parse, or cannot
-  understand as the mapping-of-hosts `gh` writes keeps its contents exactly as they are (its
-  mode may have been widened to the owner read and write `gh` needs anyway, which is
-  `_relax_file`'s repair and the only mark a declined file carries). Rewriting a
+- **Bounded in depth, so a document that parses can always be written back.**
+  `GH_HOSTS_MAX_DEPTH` (8, measured without recursing) drops a key whose value nests past it.
+  `gh` writes this file three levels deep at most and nothing credential is deeper, where PyYAML
+  recurses per nesting level: ~900 bytes of brackets beside a plant made the *dump* raise, so
+  the keys came out of the document and the write was then abandoned — the plant surviving every
+  sweep for the container's lifetime. Dropping the over-deep key fixes that rather than
+  declining it.
+- **Fail-safe in one direction only, and never silently.** Anything the sweep cannot read,
+  cannot parse, or cannot understand as the mapping-of-hosts `gh` writes keeps its contents
+  exactly as they are (its mode may have been widened to the owner read and write `gh` needs
+  anyway, which is `_relax_file`'s repair and the only mark a declined file carries) — **and the
+  decline is reported**. This is the one answer the sweep gives, and the reason it gives one:
+  every removal elsewhere is best effort because a target still there is one the next sweep
+  retries, where a document PyYAML cannot scan is one it will never scan. Exiting 0 on that
+  would be a silent, permanent bypass of the whole control. So `_sweep_gh_hosts` returns False,
+  the helper exits non-zero, and `WorkspaceManager` logs `claude_home_sweep_failed` every turn —
+  loud, and correct: a credential file the sweep cannot edit is a deployment fault a person has
+  to look at. An absent file is not a decline. Rewriting a
   credential file on a guess is the one outcome worse than the plant: a session whose `gh`
   cannot authenticate does no work at all, where a session carrying the plant is held by the
   bounds above. `GH_HOSTS_LIMIT` (256 KiB) is #110's rule at the one seam that parses a file the

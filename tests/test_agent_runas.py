@@ -541,14 +541,18 @@ def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Pa
     assert document["github.com"]["users"]["nobody"]["oauth_token"] == (
         "gho_KEEPTHISONETOO012345678901234567890"
     )
-    # Host level and no deeper. A steering key inside `users:` is measured not honoured --
-    # `users.<name>.api_host` left the request on the real api.github.com where the same key one
-    # level up re-pointed it -- so the subtree holding the per-account tokens is kept whole.
+    # Both levels gh writes them. `gh config set -h <host> <key>` mirrors into `users.<name>`
+    # once the file names a user, creating the subtree if it has to, so a host-level-only sweep
+    # would leave a complete second copy of every planted key. Those copies are measured inert
+    # on this gh -- but so are eleven of the thirteen at host level, and they go for the same
+    # reason. `oauth_token` is what the subtree is for and stays.
     document["github.com"]["users"]["nobody"]["api_host"] = "127.0.0.1"
+    document["github.com"]["users"]["nobody"]["git_protocol"] = "ssh"
     _hosts(home).write_text(yaml.safe_dump(document))
     _sweep(home)
-    again = yaml.safe_load(_hosts(home).read_text())
-    assert again["github.com"]["users"]["nobody"]["api_host"] == "127.0.0.1"
+    again = yaml.safe_load(_hosts(home).read_text())["github.com"]["users"]["nobody"]
+    assert set(again) & GH_HOSTS_STEERING_KEYS == set()
+    assert again["oauth_token"] == "gho_KEEPTHISONETOO012345678901234567890"
     # And nothing of the edit is left lying beside it.
     assert sorted(p.name for p in _hosts(home).parent.iterdir()) == ["hosts.yml"]
 
@@ -754,29 +758,67 @@ def test_sweep_declines_a_hosts_file_that_is_not_a_regular_file(tmp_path: Path) 
         assert not (home / name).exists(), name
 
 
-@pytest.mark.parametrize("depth", [400, 5000])
-def test_sweep_declines_a_deeply_nested_hosts_file_without_raising(
-    tmp_path: Path, depth: int
-) -> None:
-    """The sweep never raises, and PyYAML does. Its scanner and its representer both recurse per
-    nesting level, so a document a few hundred bytes of brackets deep -- far inside
-    `GH_HOSTS_LIMIT` -- raises `RecursionError`, which is not a `YAMLError`. Left uncaught it
-    leaves `_sweep` altogether: the sweep reports failure on every turn and every hook for the
-    container's lifetime, *and* the plant in that same file is never stripped, which is the
-    channel this whole function exists to close. Both depths, because the two ends of PyYAML
-    fail at different ones -- the dump first, then the load."""
+def test_sweep_strips_a_plant_hidden_behind_a_deeply_nested_value(tmp_path: Path) -> None:
+    """The cheapest way to defeat this edit, and the one that must not work. PyYAML's representer
+    recurses per nesting level, so ~900 bytes of brackets beside the plant -- far inside
+    `GH_HOSTS_LIMIT` -- used to make the *dump* raise, which meant the document parsed, the keys
+    came out of it, and the write was then abandoned: the plant survived every sweep for the
+    container's lifetime. Bounding the depth fixes it rather than declining it, since `gh` writes
+    this file three levels deep at most and nothing credential is deeper: the over-deep key is
+    dropped and the edit goes through."""
     home = tmp_path / "home"
     _plant_home(home)
-    nested = "[" * depth + "]" * depth
-    document = f"github.com:\n    oauth_token: keep-me\n    api_host: 127.0.0.1\n    d: {nested}\n"
-    _hosts(home).write_text(document)
-    _sweep(home)
-    # Declined, not mangled, and nothing of the abandoned edit beside it.
-    assert _hosts(home).read_text() == document
-    assert sorted(entry.name for entry in _hosts(home).parent.iterdir()) == ["hosts.yml"]
-    # And the rest of the sweep still ran.
+    nested = "[" * 450 + "]" * 450
+    _hosts(home).write_text(
+        "github.com:\n"
+        "    oauth_token: keep-me\n"
+        "    user: nobody\n"
+        "    api_host: 127.0.0.1:9\n"
+        f"    x: {nested}\n"
+    )
+    assert _hosts(home).stat().st_size < 2048
+    assert _sweep(home) is True
+    document = yaml.safe_load(_hosts(home).read_text())
+    assert "api_host" not in document["github.com"]
+    assert document["github.com"]["oauth_token"] == "keep-me"
+    # The value that would have broken the write goes with its key; nothing credential is that
+    # deep, so nothing the file is kept for can be taken this way.
+    assert "x" not in document["github.com"]
+
+
+def test_sweep_reports_a_hosts_file_it_cannot_parse_at_all(tmp_path: Path) -> None:
+    """The one place this sweep answers rather than shrugging, and the reason it answers.
+
+    Every removal elsewhere is best-effort because a target still there is one the next sweep
+    tries again. Declining `hosts.yml` is *deterministic*: a document PyYAML cannot scan is one
+    it will never scan, so a plant beside it survives the container's lifetime. Exiting 0 on that
+    would be a silent, permanent bypass of the control -- so the helper exits non-zero and
+    `WorkspaceManager` logs `claude_home_sweep_failed` every turn, which is loud and is meant to
+    be: a credential file the sweep cannot edit is a deployment fault a person has to see."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    nested = "[" * 5000 + "]" * 5000
+    _hosts(home).write_text(f"github.com:\n    api_host: 127.0.0.1\n    x: {nested}\n")
+    assert _sweep(home) is False
+    # Declined, not mangled, and the rest of the sweep still ran.
+    assert "api_host" in _hosts(home).read_text()
     for name in SHELL_STARTUP_SWEEP:
         assert not (home / name).exists(), name
+
+
+def test_sweep_reports_rather_than_shrugs_for_every_way_of_declining(tmp_path: Path) -> None:
+    """The same rule for the other declines, since each is deterministic in the same way."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).write_text("- not a mapping\n")
+    assert _sweep(home) is False
+    _hosts(home).write_bytes(b"\xff\xfe not utf-8")
+    assert _sweep(home) is False
+    # And a home the sweep has nothing to do in still answers yes.
+    _hosts(home).write_text("github.com:\n    oauth_token: keep-me\n")
+    assert _sweep(home) is True
+    _hosts(home).unlink()
+    assert _sweep(home) is True
 
 
 def test_sweep_leaves_a_hosts_file_over_the_cap(tmp_path: Path) -> None:
