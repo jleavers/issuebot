@@ -496,13 +496,11 @@ hook that would truncate it again or append a duplicate per session.
   | token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
 
   `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
-  leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
-  for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
-  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
-  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
-  session, so what such a line would re-point is the *next* session on that issue — and it is
-  the environment spelling of what the home sweep removes from the account's
-  `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
+  leaving it would close nothing. These are names and not prefixes on purpose: `SSH_AUTH_SOCK`
+  is a legitimate route for a forwarded deploy key, and the `GITHUB_` namespace holds plenty a
+  hook may hand over. The workspace outlives the session, so what such a line would re-point is
+  the *next* session on that issue — and it is the environment spelling of what the home sweep
+  removes from the account's `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
 
   **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
   are unaffected: set in `.env`, they reach the worker's environment and the session inherits
@@ -531,13 +529,41 @@ hook that would truncate it again or append a duplicate per session.
   - **Behaviour-only `GIT_*` switches with no config equivalent** — `GIT_TERMINAL_PROMPT=0`,
     `GIT_TRACE*`, `GIT_CURL_VERBOSE`, `GIT_LFS_SKIP_SMUDGE`. Set them in the hook's own shell
     around the git it runs, or system-wide in a derived image.
-  - **`XDG_CONFIG_HOME` for tools that are not `git` or `gh`** — `uv`, `ruff`, `npm` or anything
-    else following the specification. With `HOME` protected too, a hook can no longer hand the
-    session a relocated config root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
+  - **`XDG_CONFIG_HOME` and `XDG_DATA_HOME` for tools that are not `git` or `gh`** — `uv`,
+    `ruff`, `npm` or anything else following the specification (`uv`'s tool and python
+    directories are the measured case). With `HOME` protected too, a hook can no longer hand
+    the session a relocated config or data root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
     in the hook's own shell) and per-repository (config written into the clone, which every later
-    turn sees). `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not protected, which covers the cache
-    and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
-    for the convenience of pointing another tool's config somewhere.
+    turn sees), plus the per-tool variables, which are not protected and are the better
+    spelling anyway: `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR`
+    and their equivalents elsewhere. `XDG_CACHE_HOME` and `XDG_STATE_HOME` are not protected,
+    which covers the cache and state cases. The trade is deliberate: a route to `gh`'s aliases,
+    or to the directory it dispatches a subcommand from, is not one to leave open for the
+    convenience of pointing another tool's config or data somewhere.
+
+- **So are two of the base directories**, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, which are on
+  no chain and are not `git` or `gh` variables at all. The rule is what a tool issuebot
+  launches resolves *through* one of them:
+
+  | root | what `git` or `gh` reads there |
+  |---|---|
+  | `XDG_CONFIG_HOME` | `$XDG_CONFIG_HOME/git/config` and `$XDG_CONFIG_HOME/gh/config.yml`, both of which name commands |
+  | `XDG_DATA_HOME` | `$XDG_DATA_HOME/gh/extensions`, the directory `gh <name>` dispatches a program from — a *program* `gh` runs, one step past a setting naming one |
+
+  The other five — `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_DIRS`,
+  `XDG_DATA_DIRS` — are **not** protected: each was measured with an extension, a `gh` alias
+  and a git alias planted under it, and neither tool read any of them. A hook pointing a cache
+  or a state directory somewhere is exactly what this file is for.
+
+  `XDG_DATA_HOME` is the one there is no `GH_` spelling of: `gh` dispatches extensions from the
+  data directory alone, not from `PATH` and not from `GH_CONFIG_DIR`. That cuts both ways, and
+  the second way is a real cost: it was also the only way a deployment could give every session
+  a `gh` extension, since `gh` has no system-wide extension location. Install the same program
+  root-owned on the session's `PATH` instead — `/usr/local/bin/<name>` in an image built `FROM`
+  this one — and invoke it under its own name. An extension is an ordinary executable that `gh`
+  hands its argv and its own environment to; it is given no credential, and the only thing
+  `gh` adds is a `GH_EXTENSION=1` marker, so what you lose is the `gh ` prefix on the command. That route is also the one the
+  session cannot reach, where a variable in a file the session can rewrite never was.
 
 - **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the

@@ -718,8 +718,8 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
-  `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
+  `BASHOPTS`, `PS4`, `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -739,7 +739,24 @@ version, and moves by hand.
   `EDITOR` is the shape, and `EDITOR` fires on a plain `git commit` with no terminal. A rule
   checkable against `git-var(1)` and `gh environment`, and finite because a chain has an end;
   names rather than prefixes because `SSH_AUTH_SOCK` is the deploy-key route a hook author
-  keeps. The deployment's
+  keeps. The two XDG roots are on no chain and are there under a rule of their own -- a base
+  directory is protected when a tool issuebot launches resolves through it something it will
+  execute or read as configuration: `$XDG_CONFIG_HOME/{git/config,gh/config.yml}` for the
+  first, and, since #191 (spec `2026-09-22-session-gh-extension-env-design.md`),
+  `$XDG_DATA_HOME/gh/extensions` for the second, the directory `gh` dispatches `gh <name>`
+  from, which is a *program* rather than a setting naming one and which no `GH_` name reaches
+  (`GH_CONFIG_DIR` moves the config directory alone). That is the environment spelling of the
+  same directory in the account's home, which is #186's question, and the variable also
+  *hides* the home's own extensions, so leaving it would make any sweep there conditional on a
+  name nothing checked, the way #171 stood to #151; the cost, since
+  `gh` has no system-wide extension location, is that a deployment wanting an extension for
+  every session installs the program root-owned on `PATH` and invokes it under its own name.
+  The specification's other five roots were measured unread by those two tools and stay
+  settable, a cache or state directory being what the file is for (`claude` reads XDG names
+  too, and nothing was shown to work through them: the note's residual). `XDG_` is a specification's namespace
+  rather than a tool's, so it is names here and not a prefix: its roots are a short fixed list
+  (seven in the current version) and which of them belongs is a measurement, not a manual to
+  keep up with. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
