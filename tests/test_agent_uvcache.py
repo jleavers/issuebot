@@ -3,8 +3,10 @@
 import json
 import os
 import pwd
+import shutil
 import stat
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -36,7 +38,19 @@ from issuebot.log import configure_logging
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX accounts and modes")
 
 ME = pwd.getpwuid(os.getuid()).pw_name
-HAS_UV = {"PATH": "/opt/uv/bin:/usr/bin"}
+
+# The environment for every test below whose verdict does not rest on a ``uv`` being found:
+# the ones that pass a ``which`` stub, where the stub is what answers and this mapping exists
+# only because ``ensure_uv_cache_dir`` reads ``PATH`` out of it to hand over, and the two that
+# build a ``WorkspaceManager`` for something other than its environment and so never ask.
+#
+# Named for what it holds rather than for either of those uses, and empty on purpose.
+# ``shutil.which`` answers ``None`` for an empty ``PATH`` whatever the host holds, so a test
+# that reaches the *real* ``shutil.which`` through this constant fails on every machine rather
+# than on whichever machine happens to have no ``uv`` -- which is the accident #197 was about,
+# an environment named for a directory the image it was written in did have. A test at that
+# altitude takes ``uv_on_path`` instead.
+NO_UV_ON_PATH = {"PATH": ""}
 
 
 def found(_command: str, *, path: str | None = None) -> str | None:
@@ -46,6 +60,42 @@ def found(_command: str, *, path: str | None = None) -> str | None:
 
 def missing(_command: str, *, path: str | None = None) -> str | None:
     return None
+
+
+@pytest.fixture(scope="session")
+def uv_on_path(tmp_path_factory: pytest.TempPathFactory) -> Mapping[str, str]:
+    """An environment whose ``PATH`` really does hold a ``uv``, for the tests that reach the
+    real ``shutil.which`` (#197).
+
+    ``WorkspaceManager`` and ``ClaudeRunner`` take no ``which`` seam, deliberately: the
+    question ``ensure_uv_cache_dir`` asks is about the ``PATH`` the *session* will be handed
+    rather than the one this process has, which is the whole point of the seam, and widening
+    two constructors to answer it in a test would be the tail wagging the dog. So a test at
+    that altitude makes ``which`` answer the way the deployment does -- by putting a ``uv``
+    where it will look.
+
+    Nothing executes the file. ``shutil.which`` asks the filesystem two questions, whether the
+    name is there and whether it is executable, and this answers both; it is a shell script
+    that refuses so that anything which ever does run it says why rather than succeeding
+    quietly.
+
+    Outside any test's ``tmp_path``, because in this file a ``tmp_path`` *is* the workspace
+    root, and what is or is not a directory beside the workspace keys is precisely what
+    ``seal_idle``, ``path_for`` and the registry sweep are asked about further down.
+    """
+    bin_dir = tmp_path_factory.mktemp("uv-bin")
+    uv = bin_dir / uvcache.UV_COMMAND
+    uv.write_text("#!/bin/sh\necho 'not uv: a stand-in for shutil.which' >&2\nexit 127\n")
+    uv.chmod(0o755)
+    environ = {"PATH": str(bin_dir)}
+    # The one host dependency left, and it is asked here rather than left to surface four tests
+    # later as a missing ``UV_CACHE_DIR``: ``shutil.which`` tests for ``X_OK``, and a basetemp
+    # on a ``noexec`` mount answers no however this file is written. That is #197's own fault
+    # mode on a different axis, so it fails naming its cause.
+    assert shutil.which(uvcache.UV_COMMAND, path=environ["PATH"]) is not None, (
+        f"{uv} is not executable to shutil.which; is pytest's basetemp on a noexec mount?"
+    )
+    return environ
 
 
 def mode(path: Path) -> int:
@@ -68,7 +118,7 @@ def test_the_host_route_has_no_session_account_and_so_no_cache(tmp_path: Path) -
     developer's uv cache into the workspace root would re-download their world once and
     duplicate it on disk, to fix a warning they are not getting."""
     assert uv_cache_dir(tmp_path, None) is None
-    assert ensure_uv_cache_dir(tmp_path, None, HAS_UV, which=found) is None
+    assert ensure_uv_cache_dir(tmp_path, None, NO_UV_ON_PATH, which=found) is None
     assert not (tmp_path / UV_CACHE_ROOT_NAME).exists()
 
 
@@ -96,7 +146,7 @@ def test_the_worker_creates_it_as_it_creates_a_workspace(tmp_path: Path) -> None
     unaided, so the worker makes each cache directory the way it makes a workspace: created
     sealed and then handed to the account's own group. ``1770`` -- the worker keeps the
     directory, the account works inside it, nobody else may even enter."""
-    path = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    path = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert path == tmp_path / UV_CACHE_ROOT_NAME / ME
     assert path is not None and path.is_dir()
     assert mode(path) == WORKSPACE_DIR_MODE
@@ -114,7 +164,7 @@ def test_the_mode_survives_a_umask_that_would_have_narrowed_it(
     cache root no session account could traverse -- which is the same failure as sealing it."""
     old = os.umask(0o077)
     try:
-        path = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+        path = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     finally:
         os.umask(old)
     assert path is not None
@@ -124,11 +174,11 @@ def test_the_mode_survives_a_umask_that_would_have_narrowed_it(
 def test_it_is_idempotent_and_re_applies_the_sharing(tmp_path: Path) -> None:
     """Called on the way into every turn and every hook, so a cache removed out of band comes
     back and an account whose group moved is re-shared -- ``create_or_reuse``'s rule."""
-    first = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    first = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert first is not None
     (first / "marker").write_text("kept")
     os.chmod(first, SEALED_DIR_MODE)
-    second = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    second = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert second == first
     assert (first / "marker").read_text() == "kept"
     assert mode(first) == WORKSPACE_DIR_MODE
@@ -141,7 +191,7 @@ def test_a_cache_that_cannot_be_made_is_a_warning_and_uvs_own_default(
     an unset variable only costs the hardlink -- which is exactly today's behaviour."""
     configure_logging()
     (tmp_path / UV_CACHE_ROOT_NAME).write_text("not a directory")
-    assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) is None
+    assert ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found) is None
     lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()]
     [warning] = [line for line in lines if line["event"] == "uv_cache_unavailable"]
     assert warning["level"] == "warning"
@@ -187,7 +237,7 @@ def test_a_name_that_is_not_this_worker_s_directory_is_refused(
         stranger = os.getuid() + 1  # read before the patch, or the lambda would call itself
         monkeypatch.setattr(uvcache.os, "getuid", lambda: stranger)
 
-    assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) is None
+    assert ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found) is None
     # One of these two is the one that bites, depending on the plant: `chmod` and `chown` follow
     # a link, so an unguarded symlink case would show in the *target's* mode and leave the link
     # itself untouched, while an unguarded file or foreign directory shows in its own.
@@ -205,7 +255,7 @@ def test_an_unknown_account_is_refused_rather_than_left_world_readable(tmp_path:
     """``share_with`` is what closes the directory, so a name with no account behind it must
     leave nothing usable behind: the directory stays at the sealed mode it was created with,
     which is the worker's alone, and no variable is exported."""
-    assert ensure_uv_cache_dir(tmp_path, "no-such-account-x", HAS_UV, which=found) is None
+    assert ensure_uv_cache_dir(tmp_path, "no-such-account-x", NO_UV_ON_PATH, which=found) is None
     stranded = tmp_path / UV_CACHE_ROOT_NAME / "no-such-account-x"
     assert mode(stranded) == SEALED_DIR_MODE, "created sealed, and never opened to anyone"
 
@@ -228,8 +278,8 @@ def test_each_account_gets_its_own_directory_opened_to_its_own_group(
         return account_gid(ME)  # the real one, so the chgrp this test makes is permitted
 
     monkeypatch.setattr(accounts, "account_gid", gid)
-    first = ensure_uv_cache_dir(tmp_path, "agent-1", HAS_UV, which=found)
-    second = ensure_uv_cache_dir(tmp_path, "agent-2", HAS_UV, which=found)
+    first = ensure_uv_cache_dir(tmp_path, "agent-1", NO_UV_ON_PATH, which=found)
+    second = ensure_uv_cache_dir(tmp_path, "agent-2", NO_UV_ON_PATH, which=found)
     assert first is not None and second is not None
     assert first != second and first.parent == second.parent
     assert asked == ["agent-1", "agent-2"], "each is opened to its own account's group"
@@ -246,10 +296,10 @@ def test_a_cache_root_narrowed_out_from_under_the_accounts_is_put_back(tmp_path:
     ``UV_CACHE_DIR`` is exported -- naming a path no session account can traverse, which fails
     every ``uv`` command in the session rather than costing a hardlink. It does not heal
     itself, so the mode is re-applied on every call rather than trusted."""
-    first = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    first = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert first is not None
     os.chmod(first.parent, 0o0700)
-    assert ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found) == first
+    assert ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found) == first
     assert mode(first.parent) == CACHE_ROOT_MODE
 
 
@@ -267,13 +317,18 @@ def test_the_variable_reaches_the_session_and_every_hook(tmp_path: Path) -> None
     assert env[UV_CACHE_ENV] == str(tmp_path / "cache")
 
 
-def test_a_hook_can_point_uv_somewhere_else_from_the_workspace_env_file(tmp_path: Path) -> None:
+def test_a_hook_can_point_uv_somewhere_else_from_the_workspace_env_file(
+    tmp_path: Path, uv_on_path: Mapping[str, str]
+) -> None:
     """The override is new for ``UV_CACHE_DIR`` and works differently from ``UV_LINK_MODE``'s
     old one: the worker now *computes* a value into the base environment, so the file has to
     layer **over** it rather than fill a gap. That is ``merge_workspace_env``'s rule for
     anything not on the protected list, and it is what four paragraphs of documentation rest
-    on, so it is pinned here rather than inferred."""
-    workspaces = manager(tmp_path, ME)
+    on, so it is pinned here rather than inferred.
+
+    Through a real ``uv`` on the ``PATH`` (#197), since the "over rather than under" is only a
+    claim at all when the worker computed a value for the file to cover."""
+    workspaces = manager(tmp_path, ME, uv_on_path)
     workspace = tmp_path / "example_repo-1"
     (workspace / ".issuebot").mkdir(parents=True)
     (workspace / ".issuebot" / "env").write_text("UV_CACHE_DIR=/tmp/elsewhere\n")
@@ -290,29 +345,43 @@ def test_a_deployment_can_still_point_uv_somewhere_else(tmp_path: Path) -> None:
     assert "UV_LINK_MODE" not in PROTECTED_ENV_NAMES
 
 
-def manager(root: Path, account: str | None) -> WorkspaceManager:
+def manager(root: Path, account: str | None, environ: Mapping[str, str]) -> WorkspaceManager:
+    """A manager over ``root``. ``environ`` is explicit because it decides whether this one
+    finds a ``uv``: ``_hook_environment`` goes through the real ``shutil.which``, so a caller
+    that asserts on ``UV_CACHE_DIR`` passes ``uv_on_path`` and one that does not says so by
+    passing ``NO_UV_ON_PATH``."""
     agent: dict[str, object] = {"run_as": account} if account else {}
     settings = Settings.model_validate(
         {"github": {"repo": "example/repo"}, "workspace": {"root": str(root)}, "agent": agent}
     )
-    return WorkspaceManager(settings, gh=None, environ=dict(HAS_UV))
+    return WorkspaceManager(settings, gh=None, environ=dict(environ))
 
 
-def test_every_hook_is_handed_the_cache_directory(tmp_path: Path) -> None:
+def test_every_hook_is_handed_the_cache_directory(
+    tmp_path: Path, uv_on_path: Mapping[str, str]
+) -> None:
     """``after_create`` is where the target repository's ``uv sync`` runs, and it is the first
     hook of every session -- but ``before_remove`` runs for a workspace this manager never
     created, so the directory is ensured where the hook environment is built rather than at
-    workspace creation, and every hook gets the same one."""
-    workspaces = manager(tmp_path, ME)
+    workspace creation, and every hook gets the same one.
+
+    One of the pair #197 named: ``WorkspaceManager`` takes no ``which`` seam to stub, so the
+    ``uv`` this asks about is one ``uv_on_path`` really put there."""
+    workspaces = manager(tmp_path, ME, uv_on_path)
     env, applied = workspaces._hook_environment(tmp_path / "example_repo-1")
     assert applied == []
     assert env[UV_CACHE_ENV] == str(tmp_path / UV_CACHE_ROOT_NAME / ME)
     assert (tmp_path / UV_CACHE_ROOT_NAME / ME).is_dir()
 
 
-def test_every_turn_is_handed_the_same_cache_directory(tmp_path: Path) -> None:
+def test_every_turn_is_handed_the_same_cache_directory(
+    tmp_path: Path, uv_on_path: Mapping[str, str]
+) -> None:
     """The turn and the hooks have to agree, or ``uv`` in the session's own Bash tool would
-    build a second cache in the account's home and the hardlink would be lost again."""
+    build a second cache in the account's home and the hardlink would be lost again.
+
+    The other half of the pair above, and the reason both are worth their altitude: a unit test
+    over ``ensure_uv_cache_dir`` cannot catch the two call sites disagreeing."""
     settings = Settings.model_validate(
         {
             "github": {"repo": "example/repo"},
@@ -320,16 +389,22 @@ def test_every_turn_is_handed_the_same_cache_directory(tmp_path: Path) -> None:
             "agent": {"run_as": ME},
         }
     )
-    runner = ClaudeRunner(settings, environ=dict(HAS_UV))
+    runner = ClaudeRunner(settings, environ=dict(uv_on_path))
     assert runner.child_environment()[UV_CACHE_ENV] == str(tmp_path / UV_CACHE_ROOT_NAME / ME)
 
 
-def test_the_host_routes_turns_and_hooks_carry_no_cache_variable(tmp_path: Path) -> None:
+def test_the_host_routes_turns_and_hooks_carry_no_cache_variable(
+    tmp_path: Path, uv_on_path: Mapping[str, str]
+) -> None:
+    """With a real ``uv`` on the ``PATH``, so that what is proved is the gate this test is
+    named for (#197). The two gates are independent and either alone answers ``None``, so an
+    environment carrying no ``uv`` would pass this whatever ``agent.run_as`` did."""
     settings = Settings.model_validate(
         {"github": {"repo": "example/repo"}, "workspace": {"root": str(tmp_path)}}
     )
-    assert UV_CACHE_ENV not in ClaudeRunner(settings, environ=dict(HAS_UV)).child_environment()
-    env, _ = manager(tmp_path, None)._hook_environment(tmp_path / "example_repo-1")
+    runner = ClaudeRunner(settings, environ=dict(uv_on_path))
+    assert UV_CACHE_ENV not in runner.child_environment()
+    env, _ = manager(tmp_path, None, uv_on_path)._hook_environment(tmp_path / "example_repo-1")
     assert UV_CACHE_ENV not in env
     assert not (tmp_path / UV_CACHE_ROOT_NAME).exists()
 
@@ -344,7 +419,7 @@ def test_the_cache_root_is_not_a_workspace_key(tmp_path: Path) -> None:
     to leave resting on that."""
     assert UV_CACHE_ROOT_NAME in RESERVED_ROOT_NAMES
     with pytest.raises(Exception, match="issuebot's own"):
-        manager(tmp_path, "agent-1").path_for(UV_CACHE_ROOT_NAME)
+        manager(tmp_path, "agent-1", NO_UV_ON_PATH).path_for(UV_CACHE_ROOT_NAME)
 
 
 def test_seal_idle_steps_over_the_cache_root(tmp_path: Path) -> None:
@@ -356,8 +431,8 @@ def test_seal_idle_steps_over_the_cache_root(tmp_path: Path) -> None:
     and is ``0755`` on purpose: sealed, every session account would lose its cache until
     something re-created the directory.
     """
-    workspaces = manager(tmp_path, ME)
-    cache = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    workspaces = manager(tmp_path, ME, NO_UV_ON_PATH)
+    cache = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert cache is not None
     idle = tmp_path / "example_repo-7"
     idle.mkdir(mode=WORKSPACE_DIR_MODE)
@@ -375,7 +450,7 @@ def test_prune_does_not_see_the_cache_directory(tmp_path: Path) -> None:
     assert registry.allocate("example_repo-1") == "agent-1"
     assert registry.allocate("example_repo-2") == "agent-2"
     (tmp_path / "example_repo-1").mkdir()
-    ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     registry.prune(keep=())
     assert registry.bindings() == {"example_repo-1": "agent-1"}
     assert (tmp_path / UV_CACHE_ROOT_NAME).is_dir()
@@ -393,5 +468,5 @@ def test_busy_accounts_does_not_read_the_cache_directory_as_an_open_workspace(
     read as permanently busy and dispatch would stop."""
     registry = AccountRegistry(tmp_path, (ME,))
     assert registry.allocate("example_repo-1") == ME
-    ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert registry.busy_accounts() == set()
