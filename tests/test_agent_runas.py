@@ -70,6 +70,26 @@ def base_env(**extra: str) -> dict[str, str]:
     return {"PATH": fake_path(), "HOME": "/elsewhere", **extra}
 
 
+def real_gh_env(**extra: str) -> dict[str, str]:
+    """``base_env()`` for a test whose question is what the *real* ``gh`` does.
+
+    ``fake_path()`` puts ``tests/fakes`` ahead of ``$PATH``, so ``tests/fakes/gh`` -- which
+    echoes its argv as JSON and knows nothing about config files -- shadows the real one. A
+    test that plants config for ``gh`` to read and then asserts on what ``gh`` answered needs
+    the real binary, and its ``skipif(shutil.which("gh") is None)`` is about that binary, not
+    about the fake, which is always there.
+
+    Named here rather than written out per test because getting it wrong is silent in the
+    direction that matters: the hook still runs, the fake still exits 0, and the assertion
+    fails against JSON rather than skipping -- or, for a looser assertion, passes for the
+    wrong reason. #186's extension proof got this right inline; #173's two did not, and both
+    were merged red.
+
+    Only ``sudo`` stays a fake, and that one is passed by path rather than found on ``PATH``.
+    """
+    return {"PATH": os.environ["PATH"], "HOME": "/elsewhere", **extra}
+
+
 @pytest.fixture(params=["memfd", "unlinked-file"])
 def descriptor_branch(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
     """Both branches of ``anonymous_fd``, whichever one this interpreter would take (#115).
@@ -1613,7 +1633,7 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
             },
         }
     )
-    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    manager = WorkspaceManager(cfg, gh=object(), environ=real_gh_env())
     workspace = tmp_path / "workspaces" / "example-42"
     workspace.mkdir(parents=True)
 
@@ -1677,7 +1697,7 @@ async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
             },
         }
     )
-    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    manager = WorkspaceManager(cfg, gh=object(), environ=real_gh_env())
     workspace = tmp_path / "workspaces" / "example-42"
     workspace.mkdir(parents=True)
 
@@ -1734,10 +1754,7 @@ async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
             "hooks": {"before_run": "gh pwn 2>/dev/null; echo hook-ran"},
         }
     )
-    # The real `PATH`, not `fake_path()`: the fake `gh` the runner tests use would shadow the
-    # real one, and `gh`'s own dispatch is the whole question here.
-    environ = {"PATH": os.environ["PATH"], "HOME": "/elsewhere"}
-    manager = WorkspaceManager(cfg, gh=object(), environ=environ)
+    manager = WorkspaceManager(cfg, gh=object(), environ=real_gh_env())
     workspace = tmp_path / "workspaces" / "example-42"
     workspace.mkdir(parents=True)
 
