@@ -158,9 +158,11 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   thirteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
 #   unix socket the planting session names, and it *does* fire on an ordinary core command:
 #   measured, ``gh api user`` handed the socket ``Authorization: token <GH_TOKEN>`` and took a
-#   forged ``{"login": "forged"}`` back -- which is ``own_login()``, the probe #77's provenance
-#   rule resolves issuebot's own pull requests and workpad comments by -- and ``gh repo clone``,
-#   the worker's own clone at the session's uid, went the same way. A unix socket is not a
+#   forged ``{"login": "forged"}`` back, and so did ``gh repo clone`` -- which is the worker's
+#   own clone of the target repository, run at the session's uid under ``agent.run_as``, so the
+#   plant reaches issuebot's own work and not only a later session's. (Not the adapter's
+#   ``own_login()`` and so not #77's provenance rule: ``GhRunner`` spawns ``gh`` from the worker
+#   process with the worker's own ``HOME``, which no session can write.) A unix socket is not a
 #   network route, so #126's ``internal`` networks and the egress allow-list never see it.
 #   Its other command-bearing keys are answered by the environment, which ``.issuebot/env``
 #   cannot override: ``pager`` by ``GH_PAGER=cat`` and ``prompt`` by ``GH_PROMPT_DISABLED=1``
@@ -173,10 +175,11 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # credential helper is ``git config --local`` inside the clone. A deployment that does want
 # global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
 # session's privilege domain, in the image or in one built ``FROM`` it.
-# ``gh`` has no system-wide file to answer with, and needs none: it writes itself a fresh
-# default ``config.yml`` (``version: "1"``) on the next invocation, measured including a
-# read-only one, so a hook's ``gh config set`` reaches the rest of its own shell and the sweep
-# costs the account nothing it cannot recreate. What a hook may hand the *session* is the
+# ``gh`` has no system-wide file to answer with, and needs none: it runs perfectly well with
+# no ``config.yml`` at all -- measured, an empty home costs ``gh --version``, ``gh config get``
+# and ``gh api`` nothing -- and writes one when it next has config of its own to write. So a
+# hook's ``gh config set`` reaches the rest of its own shell and the sweep costs the account
+# nothing it cannot ask for again. What a hook may hand the *session* is the
 # question #171 settled for the same tools' environment variables, and the answer is the same
 # here: not through a surface the session can write.
 # A denylist like the two above: named paths, and everything else in the home is left alone.

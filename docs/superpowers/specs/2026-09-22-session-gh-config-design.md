@@ -67,17 +67,21 @@ Three harms on that one ordinary command, and each is a different boundary:
 
 - **The token is handed over.** `GH_TOKEN` is in every session's environment and every hook's,
   and it reaches the listener in the `Authorization` header verbatim.
-- **The answer is forged.** `gh api user` is `GhCliAdapter.own_login()`, and #77's provenance
-  rule resolves *which pull request and which workpad comment are issuebot's own* by that
-  login. A login the session chose is a session choosing what issuebot reads as its own
-  artefacts.
+- **The answer is forged.** Whatever the session's `gh` is asked, the listener decides what
+  comes back -- `{"login": "forged"}` above. Worth being exact about the reach: this is *not*
+  `GhCliAdapter.own_login()` and so not #77's provenance rule, because `GhRunner`
+  (`src/issuebot/github/runner.py`) spawns `gh` from the **worker** process with the worker's
+  own `HOME`, which no session can write. What it is, is every `gh` the session or a hook runs
+  -- and the clone, below.
 - **Nothing on the network path sees it.** #126 bounds egress by giving the worker `internal`
   networks alone and an allow-listing `CONNECT` proxy; a unix socket is not a route, so the
   proxy is not bypassed so much as never consulted.
 
-And it reaches issuebot's own work rather than only a session's. `gh repo clone` -- the
-worker's clone of the target repository, which runs through `RunAs` at the session's uid --
-went through the planted socket carrying the token:
+And it reaches issuebot's own work rather than only a later session's, which is what makes
+the entry worth having whatever a session does with its own `gh`. `gh repo clone` -- the
+worker's clone of the target repository, which under `agent.run_as` runs through `RunAs` at the
+session's uid (`WorkspaceManager._clone`) -- went through the planted socket carrying the
+token, and its answer is the listener's too:
 
 ```text
 $ HOME=... GH_TOKEN=ghp_SENTINELTOKEN... gh repo clone jleavers/issuebot /tmp/.../clone
@@ -129,22 +133,32 @@ about and the channel the issue is about do not meet.
 
 ## And the cost is nil, which is the other half
 
-`gh` writes itself a fresh default `config.yml` on the next invocation, including a read-only
-one, and reads `hosts.yml` perfectly well with the file absent:
+`gh` needs no `config.yml`. With an empty home it creates none and does not care:
+
+```text
+$ HOME=/tmp/empty gh --version >/dev/null; ls /tmp/empty/.config/gh
+ls: cannot access '/tmp/empty/.config/gh': No such file or directory
+$ HOME=/tmp/empty gh config get pager; echo "exit=$?"
+exit=0
+```
+
+and it writes one when it next has config of its own to write -- the multi-account migration
+of a `hosts.yml` beside it does exactly that, which is where the `version: "1"` below comes
+from:
 
 ```text
 $ ls ~/.config/gh                 # config.yml removed, hosts.yml left
 hosts.yml
-$ HOME=... gh api rate_limit --jq .rate.limit
-5000
+$ HOME=... gh pwn
+unknown command "pwn" for "gh"
 $ ls ~/.config/gh
 config.yml  hosts.yml
 $ cat ~/.config/gh/config.yml
 version: "1"
 ```
 
-So the file is self-healing, and a hook's `gh config set` still configures the `gh` in its own
-shell; what it no longer does is hand a setting to the *next* session, which is the same line
+So nothing has to be put back by hand, and a hook's `gh config set` still configures the `gh`
+in its own shell; what it no longer does is hand a setting to the *next* session, which is the same line
 #171 drew for the same two tools' environment variables. `gh` has no `/etc` file to point a
 deployment at the way git has `/etc/gitconfig`, and needs none: everything a deployment
 legitimately sets is in the table above, already answered by the protected environment.
@@ -157,6 +171,23 @@ legitimately sets is in the table above, already answered by the protected envir
   `.config/gh` replaced by a link is unlinked as the plant it is rather than stepped through.
   Nothing else changes: no new setting, no image change, no new call site, since `_sweep`
   already runs before every turn and before every script that opens a login shell (#137).
+
+- **The clone is swept too** (`WorkspaceManager._clone`), which is not a change to the list
+  but to when it runs, and without it the entry above would not have delivered. The sweep ran
+  before every turn and before every *script* (`_run_script`: the four hooks and the post-clone
+  setup), on #137's reasoning that what needed protecting was the login shell and that
+  `_run_argv`'s other caller, the clone, was "`gh` as an argv and reads no start-up file". True
+  of #137's list and false of #151's and this one: `gh repo clone` reads
+  `~/.config/gh/config.yml`, and it shells out to `git clone`, which reads `~/.gitconfig`. And
+  the clone is the *earliest* thing a run does at that uid -- ahead of the post-clone setup,
+  whose sweep CLAUDE.md calls the load-bearing one under a pool. So a plant the previous
+  session at this account left was live for exactly one command, and it was the one carrying
+  `GH_TOKEN` and writing the tree the session then works in: the command this spec's own
+  evidence uses. Two call sites rather than one seam in `_run_argv`, because the ordering test
+  in `tests/test_agent_session.py` records a spawn by wrapping `_run_argv`, so a sweep inside
+  it would no longer be observably *before* the thing it protects -- the very regression that
+  test exists to catch. The drift risk two call sites carry is answered by pinning the second
+  one (`test_the_clone_is_swept_before_it_runs`).
 
 - **`hosts.yml` stays, and so does `~/.config/gh`.** The invariant #151 pinned, kept for the
   reason it was pinned: a credential authenticates the next session rather than steering it,
@@ -187,8 +218,10 @@ legitimately sets is in the table above, already answered by the protected envir
 `tests/test_agent_runas.py`: the fourth entry is pinned beside the other three, with
 `(".config", "gh")` and `(".config", "gh", "hosts.yml")` pinned as *not* on the list, so
 taking the directory or the credential would be a deliberate edit; `_plant_home` plants a
-`config.yml` carrying both channels, so every sweep test in the file -- the mode-locked plant,
-the symlinked component, the neighbours -- covers it; and two end-to-end proofs through the
+`config.yml` carrying both channels, so the tests that build their home from it -- the
+mode-locked plant and the neighbours -- cover it (the symlink tests build homes of their own
+and do not, which costs nothing: `_walk` is generic, and `.config/git` already exercises a
+link at the same depth); and two end-to-end proofs through the
 real wrapper, the real hook path, the real `bash -lc` and the real `gh`, with only sudo a
 fake, each two-sided so it cannot pass against a `gh` that was never going to read the file:
 a planted alias does not run for the next session **while `~/.config/gh/hosts.yml` survives**,

@@ -371,14 +371,16 @@ version, and moves by hand.
   thirteen keys `gh config list` prints, re-points `gh`'s HTTP transport at a unix socket the
   session names and
   *does* fire on an ordinary core command -- measured, `gh api user` handed a listener
-  `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, which is
-  `own_login()` and so #77's whole provenance rule, and the worker's own `gh repo clone` went
-  the same way. A unix socket is not a network route, so #126's `internal` networks and the
+  `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, and so did
+  `gh repo clone`, the worker's own clone of the target repository at the session's uid, so the
+  plant reaches issuebot's own work and not only a later session's. Not the adapter's
+  `own_login()`, and so not #77's provenance rule: `GhRunner` spawns `gh` from the worker
+  process with the worker's own `HOME`. A unix socket is not a network route, so #126's `internal` networks and the
   egress allow-list never see it. Its other command-bearing keys are already answered by the
   protected environment (`GH_PAGER=cat`, `GH_PROMPT_DISABLED=1`, and `editor`/`browser` under
-  `TOOL_CONFIG_ENV_PREFIXES`' `GH_`), and `gh` writes itself a fresh default `config.yml` on
-  the next invocation, so the sweep costs a hook's `gh config set` nothing but the reach into
-  the *next* session -- the same line #171 drew for those tools' environment variables.
+  `TOOL_CONFIG_ENV_PREFIXES`' `GH_`), and `gh` runs with no `config.yml` at all and writes one
+  when it next has config of its own to write, so the sweep costs a hook's `gh config set`
+  nothing but the reach into the *next* session -- the same line #171 drew for those tools' environment variables.
   `hosts.yml` beside it survives, the invariant #151 pinned: a credential authenticates the
   next session rather than steering it, the line `.claude/.credentials.json` sits on, which is
   what makes this a file-level entry and not a directory-level one.
@@ -431,10 +433,18 @@ version, and moves by hand.
   host route authenticates with, and whether it honours `CLAUDE_CODE_OAUTH_TOKEN` has never been
   measured here -- so it was never a flag to rest the sweep on.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
-  `session._turn_loop`, and before *every* script the session runs in a login shell, from
-  `WorkspaceManager._run_script` — the four hooks and the post-clone setup, which is the one
-  seam because what matters is the login shell rather than which hook opened it (`_run_argv`'s
-  other caller is the clone, `gh` as an argv, which reads no start-up file). That second call
+  `session._turn_loop`; before *every* script the session runs in a login shell, from
+  `WorkspaceManager._run_script` — the four hooks and the post-clone setup, which is one seam
+  because what matters is the login shell rather than which hook opened it; and before the
+  *clone*, from `WorkspaceManager._clone` (#173). That third one is the ordering #173 had to
+  fix for its own entry to mean anything: the clone opens no shell, which is why #137 left it
+  out, but `gh repo clone` reads `~/.config/gh/config.yml` and shells out to `git clone`, which
+  reads `~/.gitconfig` — and it is the *earliest* thing a run does at that uid, ahead of the
+  post-clone setup. So a plant the previous session at this account left was live for exactly
+  one command, and it was the one carrying `GH_TOKEN` and writing the tree the session then
+  works in. Two call sites rather than one inside `_run_argv`, because the ordering test wraps
+  `_run_argv` to record a spawn and a sweep inside it would stop being observably *before* what
+  it protects; `test_the_clone_is_swept_before_it_runs` pins the second so they cannot drift. That second call
   site is what #137 needs: `after_create` and `before_run` both run before `_turn_loop` reaches
   its first sweep, so a per-turn sweep alone would let the previous session's `~/.profile` run
   in this session's first hook. A hook that is not configured opens no shell and takes no sweep.

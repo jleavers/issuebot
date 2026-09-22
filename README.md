@@ -1157,8 +1157,9 @@ hook that would truncate it again or append a duplicate per session.
   `git config --local` inside the clone, which is what the post-clone setup does. `gh` has no
   system-wide file and needs none: every key it respects that names a command or a transport is
   already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`) or held off it
-  (the `GH_` prefix above), and `gh` writes itself a fresh default `config.yml` whenever it
-  finds none, so a hook's `gh config set` still configures the `gh` in its own shell.
+  (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes one when it
+  next has config of its own to write, so a hook's `gh config set` still configures the `gh` in
+  its own shell.
 
 ### More than one repository
 
@@ -1380,9 +1381,9 @@ that matters on your host.
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
   before turn 1. The same home holds the config a *tool* the session runs reads, and that is
   swept with it (#151, #173): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
-  second of them first — `~/.ssh/config`, each of which can name a command (`core.pager`,
+  second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
   `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
-  to run, and `~/.config/gh/config.yml`, which can name one for `gh` (`[aliases]`) and can also
+  to run; and `~/.config/gh/config.yml`, which can name one for `gh` (`aliases:`) and can also
   re-point where `gh` sends its requests and its `GH_TOKEN` with them (`http_unix_socket`, a
   unix socket rather than a network route, so the egress proxy never sees it) on an ordinary
   `gh api` or `gh repo clone`. Nothing a deployment needs goes there: the bot's identity is the

@@ -369,6 +369,14 @@ class WorkspaceManager:
     async def _clone(self, path: Path) -> None:
         args = ["repo", "clone", self._settings.github.repo, str(path), "--", "--depth", "1"]
         if self._runas is not None:
+            # Swept first (#173). This is the *earliest* thing a run does at the session's uid,
+            # before the post-clone setup whose sweep is the load-bearing one under a pool, and
+            # ``gh`` as an argv is exempt only from #137's list: it sources no shell start-up
+            # file, but ``gh repo clone`` reads ``~/.config/gh/config.yml`` and shells out to
+            # ``git clone``, which reads ``~/.gitconfig``. So a plant the previous session at
+            # this account left was live for exactly one command, and it was the one carrying
+            # ``GH_TOKEN`` and writing the tree this session then works in.
+            await self.sweep_agent_home()
             # As the agent, so the clone is the agent's to write: gh clones into the empty
             # directory the worker made. `_run_argv` has already reported a failure to run.
             clone = await self._run_argv("clone", ["gh", *args], self.root)
@@ -392,9 +400,10 @@ class WorkspaceManager:
         """Clear what a prior or concurrent session may have left in the account's home for
         this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
         login shell sources (#137) and the git and ssh config a tool would take a command from
-        (#151). Called immediately before each of this session's turns and
-        before every script it runs in a login shell (``_run_script``: the hooks and the
-        post-clone setup).
+        (#151) and ``gh``'s own config (#173). Called immediately before each of this session's
+        turns, before every script it runs in a login shell (``_run_script``: the hooks and the
+        post-clone setup) and before the clone (``_clone``), which opens no shell but is ``gh``
+        and runs ``git``, and is earlier than any of them.
 
         Which session that is depends on the route (#121): one account is shared by everything
         running in the container, while a pool leaves only the next session bound to this
@@ -665,11 +674,13 @@ class WorkspaceManager:
         # Every script -- the four hooks and the post-clone setup -- runs under
         # ``hook_shell``, ``bash -lc``, a login shell that sources whatever shell start-up
         # files the account's home holds. So the sweep runs here as well as before each turn
-        # (#137): this is the session's *first* command at that uid, long before ``_turn_loop``
-        # reaches its own sweep, and a ``~/.profile`` the previous session at this account left
-        # would otherwise run in it. The one seam, rather than one call per hook, because what
-        # matters is the login shell and not which hook opened it; ``_run_argv``'s other caller
-        # is the clone, which is ``gh`` as an argv and reads no start-up file.
+        # (#137): this is the session's first *login shell* at that uid -- the clone, which
+        # sweeps for itself, comes before it -- long before ``_turn_loop`` reaches its own
+        # sweep, and a ``~/.profile`` the previous session at this account left would otherwise
+        # run in it. The one seam for the scripts, rather than one call per
+        # hook, because what matters is the login shell and not which hook opened it.
+        # ``_run_argv``'s other caller is the clone, which opens no shell -- and which sweeps
+        # for itself all the same (#173): see ``_clone``.
         await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 

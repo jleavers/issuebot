@@ -225,6 +225,14 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
         r"printf \"aliases:\\n    pwn: \\047!echo GH-ALIAS-RAN\\047\\n\" "
         "> /home/agent/.config/gh/config.yml"
     ) in CI
+    # The planted hosts.yml carries a token and a user, and that is load-bearing rather than
+    # decorative: without either, every gh in that home fails its multi-account migration
+    # before reading the alias -- for the user it even asks GitHub -- so the pre-sweep line
+    # below would fail and the post-sweep ones would pass for a reason that is not the sweep.
+    assert (
+        r"printf \"github.com:\\n    oauth_token: not-a-real-token\\n    user: nobody\\n\" "
+        "> /home/agent/.config/gh/hosts.yml"
+    ) in CI
     assert 'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn)" = GH-ALIAS-RAN' in CI
     assert "! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn 2>/dev/null" in CI
     assert "! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null" in CI

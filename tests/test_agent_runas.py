@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -44,7 +44,7 @@ from issuebot.agent.runas import (
     anonymous_fd,
 )
 from issuebot.agent.runner import PASSTHROUGH_NAMES, ClaudeRunner
-from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
+from issuebot.agent.workspace import HookResult, WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
 from issuebot.github import Issue
@@ -359,7 +359,12 @@ def _plant_home(home: Path) -> None:
     # `.config` and `.ssh` are other tools' directories as well, and `hosts.yml` is the
     # neighbour #151 pinned and #173 keeps: credential state, which authenticates the next
     # session rather than steering it, on the same line as `.claude/.credentials.json`.
-    (home / ".config" / "gh" / "hosts.yml").write_text("github.com:\n")
+    # With a token in it: a tokenless `hosts.yml` makes every `gh` run in this home fail the
+    # multi-account migration before it reads anything, which would have the end-to-end proofs
+    # below passing because `gh` never started rather than because the sweep worked.
+    (home / ".config" / "gh" / "hosts.yml").write_text(
+        "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n"
+    )
     (home / ".ssh" / "known_hosts").write_text("github.com ssh-ed25519 AAAA\n")
     # What the sweep names nothing of, and must therefore leave: claude's own `.claude.json`
     # (#119 holds its `mcpServers` off with `--strict-mcp-config`; the file itself is claude's
@@ -1044,9 +1049,11 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
             "github": {"repo": "example/repo"},
             "workspace": {"root": str(tmp_path / "workspaces")},
             "agent": {"run_as": ME},
-            # `gh pwn` is the alias if the plant is still there, and an unknown subcommand if it
-            # is not; either way the hook goes on to say it ran.
-            "hooks": {"before_run": "gh pwn 2>/dev/null; echo hook-ran"},
+            # `gh pwn` is the alias if the plant is still there, and an unknown subcommand if
+            # it is not. The `git_protocol` line is a liveness probe, and it is what keeps the
+            # swept half honest: without it a `gh` that failed to start -- for a reason having
+            # nothing to do with the sweep -- would print nothing and read as a pass.
+            "hooks": {"before_run": "gh pwn 2>/dev/null; echo live=$(gh config get git_protocol)"},
         }
     )
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
@@ -1055,19 +1062,22 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
 
     result = await manager.run_hook("before_run", workspace)
     assert result is not None and result.ok, result.summary
-    assert result.stdout_tail.splitlines() == ["hook-ran"]
+    # `gh` ran and answered from its own defaults; the alias it would have run is not there.
+    assert result.stdout_tail.splitlines() == ["live=https"]
     # The plant is gone, whether or not `gh` has since written its own default back.
     config = gh_dir / "config.yml"
     assert "PLANTED-GH-ALIAS-RAN" not in (config.read_text() if config.exists() else "")
-    # And the credential state beside it -- the neighbour #151 pinned -- is untouched.
-    assert (gh_dir / "hosts.yml").read_text() == "github.com:\n"
+    # And the credential state beside it -- the neighbour #151 pinned -- survives. Asked of
+    # the token rather than of the bytes: `gh` rewrote the file on its way past, adding the
+    # `users:` block of its own multi-account format, which is the sweep leaving it to `gh`.
+    assert "not-a-real-token" in (gh_dir / "hosts.yml").read_text()
 
     # Planted again, and this time not swept: the alias runs, which is what the sweep prevents.
     (gh_dir / "config.yml").write_text(plant)
     monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
     unswept = await manager.run_hook("before_run", workspace)
     assert unswept is not None and unswept.ok, unswept.summary
-    assert unswept.stdout_tail.splitlines() == ["PLANTED-GH-ALIAS-RAN", "hook-ran"]
+    assert unswept.stdout_tail.splitlines() == ["PLANTED-GH-ALIAS-RAN", "live=https"]
 
 
 @pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to read the planted config")
@@ -1097,8 +1107,15 @@ async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
             "github": {"repo": "example/repo"},
             "workspace": {"root": str(tmp_path / "workspaces")},
             "agent": {"run_as": ME},
-            # Prints the resolved value, or an empty line once there is no plant to resolve.
-            "hooks": {"before_run": "echo socket=$(gh config get http_unix_socket)"},
+            # Prints the resolved value, or an empty one once there is no plant to resolve --
+            # with the same liveness probe beside it, since an empty value and a `gh` that
+            # never started look identical from here.
+            "hooks": {
+                "before_run": (
+                    "echo socket=$(gh config get http_unix_socket)"
+                    "; echo live=$(gh config get git_protocol)"
+                )
+            },
         }
     )
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
@@ -1107,14 +1124,17 @@ async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
 
     result = await manager.run_hook("before_run", workspace)
     assert result is not None and result.ok, result.summary
-    assert result.stdout_tail.splitlines() == ["socket="]
+    assert result.stdout_tail.splitlines() == ["socket=", "live=https"]
 
     # Planted again and not swept: `gh` resolves it, which is the transport the sweep prevents.
     config.write_text(plant)
     monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
     unswept = await manager.run_hook("before_run", workspace)
     assert unswept is not None and unswept.ok, unswept.summary
-    assert unswept.stdout_tail.splitlines() == ["socket=/tmp/issuebot-173-poison.sock"]
+    assert unswept.stdout_tail.splitlines() == [
+        "socket=/tmp/issuebot-173-poison.sock",
+        "live=https",
+    ]
 
 
 async def _no_sweep() -> None:
@@ -1140,6 +1160,56 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
     assert [(entry["event"], entry["log_level"], entry["user"]) for entry in logs] == [
         ("claude_home_sweep_failed", "warning", ME)
     ]
+
+
+async def test_the_clone_is_swept_before_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clone is the *earliest* thing a run does at the session's uid -- before the
+    post-clone setup, whose sweep CLAUDE.md calls the load-bearing one under a pool -- and
+    until #173 it was the one command that took no sweep at all. The reasoning was #137's:
+    ``_run_argv``'s other caller is ``gh`` as an argv, which sources no shell start-up file.
+    True of that list and not of the other two, because ``gh repo clone`` reads
+    ``~/.config/gh/config.yml`` and shells out to ``git clone``, which reads ``~/.gitconfig``.
+    So a plant the previous session at this account left was live for exactly one command, and
+    it was the one carrying ``GH_TOKEN`` and writing the tree the session then works in.
+
+    Pinned separately from the hook ordering in ``tests/test_agent_session.py`` because the two
+    call sites are two, and the risk this closes is precisely that they drift apart.
+    """
+    order: list[str] = []
+
+    async def record_sweep() -> None:
+        order.append("sweep")
+
+    async def record_spawn(name: str, argv: Sequence[str], workspace: Path) -> HookResult:
+        order.append(f"{name}:{argv[0]}")
+        return HookResult(
+            name=name,
+            returncode=0,
+            timed_out=False,
+            duration_ms=1,
+            stdout_tail="",
+            stderr_tail="",
+        )
+
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    monkeypatch.setattr(manager, "sweep_agent_home", record_sweep)
+    monkeypatch.setattr(manager, "_run_argv", record_spawn)
+    path = tmp_path / "workspaces" / "example-42"
+    path.mkdir(parents=True)
+    (path / ".git").mkdir()
+
+    await manager._clone(path)
+
+    assert order == ["sweep", "clone:gh"]
 
 
 async def test_workspace_creation_and_removal_run_as_the_account(

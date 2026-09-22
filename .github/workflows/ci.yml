@@ -475,7 +475,12 @@ jobs:
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
               printf \"aliases:\\n    pwn: \\047!echo GH-ALIAS-RAN\\047\\n\" > /home/agent/.config/gh/config.yml
-              echo github.com: > /home/agent/.config/gh/hosts.yml
+              # With a token and a user: a hosts.yml missing either makes every gh in this
+              # home fail its multi-account migration -- on the user it even asks GitHub --
+              # and the alias below would never get the chance to run, so the step would pass
+              # or fail for a reason that is not the sweep. Obviously not a credential, and gh
+              # needs none to expand an alias.
+              printf \"github.com:\\n    oauth_token: not-a-real-token\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
             "
             # Before the sweep the plant runs, which is what the sweep is for: a hook is
