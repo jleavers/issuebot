@@ -70,6 +70,7 @@ from __future__ import annotations
 import functools
 import re
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -110,9 +111,6 @@ EXCLUDED = ("docs/superpowers", "tests/test_doc_pointers.py")
 POINTER = re.compile(
     r"(?P<document>README(?:\.md)?|[\w.-]*(?:/[\w.-]+)*\.md)`?,\s+\"(?P<title>[^\"\n]+)\""
 )
-# An ATX heading, with the optional closing run of hashes ``#`` allows.
-HEADING = re.compile(r"^\s{0,3}(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*#*$")
-FENCE = re.compile(r"^\s*(?:```|~~~)")
 # The leading indent and comment marker a line of prose may carry, in any of the files
 # swept: ``#`` for YAML, env, Python and a Dockerfile, and the same character for a
 # markdown heading, whose text is prose once the hashes are off. It matches the empty
@@ -251,7 +249,7 @@ def _text(path: Path) -> str | None:
     take the database and orchestrator tests down with it, and a pointer is ASCII either
     way -- U+FFFD is not a word character, so a replacement can neither make a document
     name nor extend one. ``utf-8-sig`` because a byte order mark is not whitespace, so a
-    file carrying one would hide its own first heading from ``HEADING``.
+    file carrying one would hide its own first heading from ``_ATX``.
     """
     try:
         return path.read_text(encoding="utf-8-sig", errors="replace")
@@ -464,6 +462,38 @@ def test_the_sweep_reads_the_pointers_it_is_there_for() -> None:
         assert len(found) >= expected, f"{relative}: {found}"
 
 
+def test_the_quoted_sweep_reports_a_pointer_that_does_not_land(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_stale`'s two verdicts, which nothing exercised: the document is not in the tree, and
+    the document is there but carries no such section. Both branches survived being replaced by
+    ``False`` with the suite green, on this branch and on `main` before it -- the same vacuity
+    `test_the_sweep_reports_a_pointer_that_does_not_land` guards for the anchor shape, and the
+    merged module is where the older half can have it too."""
+    document = (
+        "# One\n\n"
+        'See (docs/operations.md, "Rotating the database password") and\n'
+        '(docs/operations.md, "A section nobody wrote") and\n'
+        '(docs/nowhere.md, "Anything at all").\n'
+    )
+    # One file's text and no other's: the target document has to stay the real
+    # `docs/operations.md`, since the first pointer landing is half of what this proves.
+    real = _text
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_text",
+        lambda path: document if path == ROOT / "README.md" else real(path),
+    )
+    _pointers.cache_clear()
+    try:
+        assert _stale("README.md") == [
+            'README.md:4: docs/operations.md has no section "A section nobody wrote"',
+            "README.md:5: docs/nowhere.md is not a file in the tree",
+        ]
+    finally:
+        _pointers.cache_clear()
+
+
 def test_an_unreadable_file_costs_one_complaint_and_not_the_suite(tmp_path: Path) -> None:
     """Every file is read, so one bad byte must not be able to abort collection."""
     undecodable = tmp_path / "undecodable.md"
@@ -473,10 +503,15 @@ def test_an_unreadable_file_costs_one_complaint_and_not_the_suite(tmp_path: Path
     assert _stale("no/such/file.md") == [
         "no/such/file.md: unreadable, so its pointers were not checked"
     ]
+    # Both shapes, and the same answer: reading an unreadable file as an empty document would
+    # have the anchor sweep report nothing about it, which is the one thing it must not do.
+    assert _unresolved_anchors("no/such/file.md") == [
+        "no/such/file.md: unreadable, so its links were not checked"
+    ]
 
 
 def test_a_byte_order_mark_does_not_hide_the_first_heading(tmp_path: Path) -> None:
-    """U+FEFF is not whitespace, so ``HEADING`` would miss a BOM'd file's own first section."""
+    """U+FEFF is not whitespace, so ``_ATX`` would miss a BOM'd file's own first section."""
     document = tmp_path / "bom.md"
     document.write_bytes(b"\xef\xbb\xbf# First Section\n\ntext\n")
     assert "first section" in _section_titles(document)
@@ -744,7 +779,7 @@ def _pointer_complaints(name: str, text: str) -> list[str]:
             # The path existing is the whole of the check: a link may name a directory
             # (`docs/superpowers/specs/`) or a file that is not markdown (`LICENSE`).
             continue
-        if not resolved.is_file() or resolved.suffix != ".md":
+        if not resolved.is_file() or resolved.suffix.lower() != ".md":
             complaints.append(f"{where}: [...]({target}) puts an anchor on a non-markdown path")
             continue
         anchors = _anchors_of(resolved)
@@ -757,15 +792,60 @@ def _pointer_complaints(name: str, text: str) -> list[str]:
     return complaints
 
 
+def _unresolved_anchors(relative: str) -> list[str]:
+    """Every link in a swept markdown file that does not land, the file itself included.
+
+    A file this checkout cannot read is one complaint of its own rather than silence, the rule
+    `_stale` already has for the other shape: its links are unchecked either way, and a sweep
+    that says nothing about them is a sweep whose green is worth less than it looks. Reading it
+    as an empty document would have said nothing -- no links, and so no complaints.
+    """
+    text = _text(ROOT / relative)
+    if text is None:
+        return [f"{relative}: unreadable, so its links were not checked"]
+    return _pointer_complaints(relative, text)
+
+
 def test_every_anchor_resolves_against_the_headings_it_names() -> None:
     """Every markdown link in a swept file lands: the path exists, and where the link carries
     an anchor, some heading of the file it names slugs to it."""
     complaints = [
-        complaint
-        for relative in _swept_markdown()
-        for complaint in _pointer_complaints(relative, _text(ROOT / relative) or "")
+        complaint for relative in _swept_markdown() for complaint in _unresolved_anchors(relative)
     ]
     assert complaints == [], "cross-document pointers no longer resolve:\n" + "\n".join(complaints)
+
+
+# The documents the anchor sweep exists for, named so that narrowing `_swept_markdown` cannot
+# quietly drop one. The floors below catch a collapse and not a subtraction: dropping
+# `CLAUDE.md` and `SECURITY.md` takes six anchored pointers out of the sweep and leaves both
+# of them well above their thresholds, so "it still sees plenty" is not the same claim as "it
+# still sees this file".
+ANCHORED_DOCUMENTS = (
+    "README.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "configs/WORKFLOW.md",
+    "docs/operations.md",
+    "docs/security-model.md",
+    "docs/toolchains.md",
+    "docs/dashboard.md",
+    "docs/BLUEPRINT.md",
+    "docs/package-layout.md",
+    "tools/screenshots/README.md",
+    "src/issuebot/web/static/vendor/README.md",
+)
+
+
+def test_the_anchor_sweep_reads_the_documents_it_is_there_for() -> None:
+    """A list to keep complete, deliberately, and the only one left in this module: every other
+    file is swept because the repository tracks it. These are the documents whose pointers this
+    issue was filed about, so a narrowing of `_swept_markdown` that still passed the floors
+    would otherwise take one out in silence."""
+    swept = set(_swept_markdown())
+    missing = [relative for relative in ANCHORED_DOCUMENTS if relative not in swept]
+    assert missing == [], f"the anchor sweep no longer reads {missing}"
 
 
 # The slug rule is GitHub's, so it is pinned by a table rather than by the headings this tree
@@ -915,11 +995,6 @@ def test_links_skips_inline_code_spans() -> None:
 # anchor) because the prose is edited constantly; what it catches is an order-of-magnitude
 # collapse -- an unbalanced fence swallowing the tail of a document, a tightened `_LINK` -- not
 # a paragraph rewritten.
-# Today's tree, so a parser regression cannot make the sweep pass by seeing nothing. The floor
-# is well under the real figure (96 links, 80 of them inside the repository, 49 carrying an
-# anchor) because the prose is edited constantly; what it catches is an order-of-magnitude
-# collapse -- an unbalanced fence swallowing the tail of a document, a tightened `_LINK` -- not
-# a paragraph rewritten.
 MINIMUM_LINKS = 60
 MINIMUM_ANCHORED = 35
 
@@ -1028,6 +1103,34 @@ def test_the_completeness_guard_reports_a_link_it_cannot_parse(
     complaints = _unparsed_links("README.md", document + "\n", 0)
     assert complaints, f"{document!r} went unreported"
     assert expected in complaints[0], complaints
+
+
+@pytest.mark.parametrize(
+    ("target", "lands"),
+    [
+        # CommonMark's destination in angle brackets, which resolves like any other. Without
+        # the unwrap it is reported as naming no such path -- loud, but wrong.
+        ("[x](<docs/operations.md#safety>)", True),
+        ("[x](<docs/operations.md#no-such-heading>)", False),
+        # Both halves of a target may be percent-encoded: a space in a file name, and the form
+        # GitHub puts in the address bar for an anchor whose heading is not ASCII. The decode
+        # runs after the split, so a `%23` in a name is not mistaken for the separator.
+        ("[x](docs/operations.md#rotating%2Dthe%2Ddatabase%2Dpassword)", True),
+        ("[x](docs%2Foperations.md#safety)", True),
+    ],
+)
+def test_a_target_is_unwrapped_and_percent_decoded(target: str, lands: bool) -> None:
+    complaints = _pointer_complaints("README.md", target + "\n")
+    assert (complaints == []) is lands, complaints
+
+
+def test_headings_close_a_fence_only_on_its_own_terms() -> None:
+    """`_FENCE`'s two rules, which `configs/WORKFLOW.md`'s workpad template needs and which
+    nothing else exercised: a closing fence uses the same character as its opener and carries
+    no info string. Without either, the block below closes early and the lines inside it are
+    read as headings."""
+    document = "````md\n### inside\n~~~\n### still inside\n````info\n### also inside\n````\n# Out\n"
+    assert _headings(document) == ["Out"]
 
 
 def test_the_completeness_guard_passes_an_ordinary_document() -> None:

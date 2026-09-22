@@ -198,9 +198,10 @@ a quoted title beside a document's name (`(docs/operations.md, "Rotating the dat
 password")`, #210) and a markdown link carrying an anchor (`[Safety](docs/operations.md#safety)`,
 #218) both go stale on a rename with nothing to show for it -- the second still renders and
 still loads the file, and the browser simply lands at the top. `tests/test_doc_pointers.py`
-resolves both against the headings of the document named, over every file the repository
-*tracks*, so renaming a heading in this set can fail a test; its own docstring is where the
-rules are. `docs/superpowers/` is excluded: a pointer in a dated design record is a statement
+resolves both against the headings of the document named -- the quoted shape over every file
+the repository *tracks*, the anchor shape over the markdown among them -- so renaming a heading
+in a document either one reads can fail a test; that module's own docstring is where the rules
+are. `docs/superpowers/` is excluded: a pointer in a dated design record is a statement
 about where the content was when it was written.
 
 - `README.md`: the front door -- what issuebot is, the label state machine, the quick start,
