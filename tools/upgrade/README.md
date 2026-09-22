@@ -68,6 +68,21 @@ By default: this one, and every sibling directory that is a checkout of the same
 which is where the other deployments are, since a repository is added by cloning issuebot again.
 Pass paths for any other arrangement.
 
+A sibling qualifies when it holds a `compose.yaml`, its `.git` is a directory, and its
+`git remote get-url origin` is identical to this checkout's. So the **origin URL** is what
+matches, not the directory name: a `bot-two` clone of this repository is found, and an unrelated
+project beside it that happens to have a `compose.yaml` is not. Three things follow.
+
+- The URL is compared as a string, so an HTTPS clone beside an SSH one is not matched, and
+  neither is a fork. Name those paths.
+- Only the one directory level is scanned. Checkouts under `~/deploy` and `~/srv` do not see
+  each other.
+- A **git worktree is skipped**, because its `.git` is a file rather than a directory. A worktree
+  shares its parent's `origin` and is normally on a feature branch tracking no upstream, so one
+  sitting beside a checkout would otherwise be discovered and abort the whole run. That is a
+  guess about what is a deployment, not a refusal: a deployment genuinely run from a worktree is
+  reached by passing its path, which skips discovery entirely.
+
 ```bash
 python3 tools/upgrade/upgrade.py ~/deploy/issuebot ~/deploy/issuebot-docs
 ```

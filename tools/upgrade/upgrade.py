@@ -485,7 +485,19 @@ def run_command(
 
 
 def looks_like_a_checkout(path: Path) -> bool:
-    return (path / COMPOSE_FILE).is_file() and (path / ".git").exists()
+    """Whether `discover` should treat this directory as another deployment.
+
+    `.git` must be a *directory*, which is what rules out a git worktree: `git worktree add`
+    writes a `.git` file naming the real git directory, and a worktree shares its parent's
+    `origin`, so one placed beside a checkout would otherwise be discovered as a deployment. It
+    would then abort the whole run at phase 1 -- a worktree is normally on a feature branch that
+    tracks no upstream -- and an ordinary parallel-session layout would block upgrading the
+    deployments beside it.
+
+    A guess, not a rule: `inspect_checkout` asks no such question, so a deployment genuinely run
+    from a worktree is reached by passing its path.
+    """
+    return (path / COMPOSE_FILE).is_file() and (path / ".git").is_dir()
 
 
 def origin_of(path: Path) -> str | None:
