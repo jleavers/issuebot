@@ -322,11 +322,16 @@ post-clone setup run under `bash -lc`, a login shell, and `claude` snapshots one
 session's Bash tool, so a `~/.profile` one session leaves is a script every later session
 runs at that uid. That is why the sweep runs before each of those scripts as well as before
 each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-before turn 1. The same home holds the config a *tool* the session runs reads, and that is
+before turn 1 — and before the *clone*, which opens no shell but is the earliest thing a run
+does at that uid, and which reads both `gh`'s and git's config out of the home while holding
+the token. The same home holds the config a *tool* the session runs reads, and that is
 swept with it: `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
 second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
 `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
-to run. Nothing a deployment needs goes there: the bot's identity is the
+to run; and `~/.config/gh/config.yml` (#173), which can name one for `gh` (`aliases:`) and can
+also re-point where `gh` sends its requests and its `GH_TOKEN` with them (`http_unix_socket`, a
+unix socket rather than a network route, so the egress proxy never sees it) on an ordinary
+`gh api` or `gh repo clone`. Nothing a deployment needs goes there: the bot's identity is the
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
@@ -357,20 +362,13 @@ character-for-character, which is what `gh` itself does to this file on an ordin
 channel is bounded and documented in
 `docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
 substituted host, a forged answer needs a certificate authority in the system trust store, which
-is root's, and the egress proxy refuses any host off its allow-list. One thing that note is
-explicit about and this list should be too: `~/.config/gh/config.yml` beside it is **not** swept,
-so the same `git_protocol` written there with a plain `gh config set` still steers the next
-session's clone. `api_host` has no such second position and is closed outright; closing the rest
-of `config.yml` is its own piece of work.
+is root's, and the egress proxy refuses any host off its allow-list. That note was written while
+`~/.config/gh/config.yml` beside it was still a survivor, so it is explicit that the same
+`git_protocol` written there with a plain `gh config set` steered the next session's clone
+whatever this edit did. #173 closed that position too — the file is swept, above — so both are
+shut now. `api_host` never had a second position: top level is inert for it, and this edit
+closes it outright.
 
-The sweep leaves the
-rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
-the transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-sat in stay too, with whatever else is in them — the rest of `gh`'s configuration beside git's,
-`known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
-denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
-new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
 `gh`'s extension directory is swept on the same schedule (#186), and is the one thing swept
 that is a program rather than a setting: `~/.local/share/gh/extensions` is where
 `gh extension install` puts a program that `gh <name>` runs, and it needs no install step to
@@ -391,12 +389,18 @@ The sweep leaves the rest of the home alone: the credential (`.credentials.json`
 rotates its refresh token), the transcripts beside the memory it removes, `~/.claude.json`,
 and whatever else claude or a tool the session ran keeps there (`gh`'s state, npm's cache).
 The directories the tool config sat in stay too, with whatever else is in them — `gh`'s
-configuration beside git's, `known_hosts` beside ssh's, `~/.local/state/gh` beside the
-extension directory — since the sweep names a file or one directory and never empties the one
-above it. It is a denylist of what is loaded or run, not an allowlist of what is kept, so a
-new claude location, a new tool config file or another tool's plug-in directory has to be
-added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
-home is your own. Auto memory is also switched off for the session
+credential state (`hosts.yml`) beside the config of its own that goes, `known_hosts` beside
+ssh's, `~/.local/state/gh` beside the extension directory — since the sweep names a file or one
+directory and never empties the one above it; a credential authenticates the next session
+rather than steering it, which is the line `.credentials.json` sits on too. `hosts.yml` is not
+purely credential, though — `gh config set -h <host>` writes configuration there as well — which
+is why it is the one file the sweep edits rather than keeps whole, above. What survives that
+edit is bounded by the egress proxy rather than by the sweep: a substituted host is a real
+HTTPS request to a name, so the allow-list sees it, where the `http_unix_socket` in the
+`config.yml` beside it would be no route at all. It is a denylist of what is loaded or run, not
+an allowlist of what is kept, so a new claude location, a new tool config file or another
+tool's plug-in directory has to be added to it by hand. Nothing is swept on the host route
+(`agent.run_as` unset), where the home is your own. Auto memory is also switched off for the session
 (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
 `setting_sources` says and keyed by repository, so one issue's notes would be the next
 session's prompt on the same repository. So a slash command, skill, memory or profile script a

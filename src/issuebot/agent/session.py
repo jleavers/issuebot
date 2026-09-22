@@ -74,6 +74,10 @@ class RunResult:
     log_dir: Path | None
     # The reason after ``BLOCKED:`` on a blocked turn's final message; None for every other stop.
     blocker: str | None = None
+    # When the refused window reopens, for a ``usage_limited`` run: what the orchestrator waits
+    # for instead of guessing a backoff. None for every other outcome, and for a refusal that
+    # did not say when it reopens.
+    usage_reset_at: datetime | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -101,6 +105,7 @@ class _State:
     error_category: AgentErrorCategory | None = None
     error: str | None = None
     blocker: str | None = None
+    usage_reset_at: datetime | None = None
     workpad: Comment | None = None
 
     def fail(self, category: AgentErrorCategory, message: str | None) -> None:
@@ -150,6 +155,7 @@ class _State:
             duration_s=round(time.monotonic() - self.started, 3),
             final_state=self.issue.state,
             final_issue=self.final_issue,
+            usage_reset_at=self.usage_reset_at,
             workspace_path=self.workspace_path,
             log_dir=self.log_dir,
             blocker=self.blocker,
@@ -395,6 +401,9 @@ async def _turn_loop(
         _save(workspaces, workspace, state.session_record(turn_number, None))
         if not turn.ok:
             if turn.error_category != "budget_exceeded":
+                # Carried through the failure so the orchestrator waits for the window rather
+                # than for a backoff: a `usage_limited` turn knows when it reopens.
+                state.usage_reset_at = turn.usage_reset_at
                 state.fail(turn.error_category or "turn_failed", turn.error)
                 return
             # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh

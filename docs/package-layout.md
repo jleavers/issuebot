@@ -243,10 +243,39 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
   which are root's and where the image puts node and the PostgreSQL binaries.
   And `TOOL_CONFIG_SWEEP`, the same home one tool further out (#151, spec
-  `2026-09-18-session-tool-config-design.md`): `.gitconfig`, `.config/git/config` and
-  `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
+  `2026-09-18-session-tool-config-design.md`; #173, spec
+  `2026-09-22-session-gh-config-design.md`): `.gitconfig`, `.config/git/config`,
+  `.ssh/config` and `.config/gh/config.yml`, the config a *tool* the session runs reads there
+  and can take a command from --
   git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
-  `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
+  `ProxyCommand`, `gh`'s `aliases`. The `gh` entry is #173, which reversed #151's decision to
+  leave it: #151 measured `aliases:`, which runs a shell command but cannot shadow a core one,
+  and judged the channel too narrow to spend an entry on; `http_unix_socket`, one of the
+  thirteen keys `gh config list` prints, re-points `gh`'s HTTP transport at a unix socket the
+  session names and
+  *does* fire on an ordinary core command -- measured, `gh api user` handed a listener
+  `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, and so did
+  `gh repo clone`, the worker's own clone of the target repository at the session's uid, so the
+  plant reaches issuebot's own work and not only a later session's. Not the adapter's
+  `own_login()`, and so not #77's provenance rule: `GhRunner` spawns `gh` from the worker
+  process with the worker's own `HOME`. A unix socket is not a network route, so #126's `internal` networks and the
+  egress allow-list never see it. Its other command-bearing keys are already answered by the
+  protected environment (`GH_PAGER=cat`, `GH_PROMPT_DISABLED=1`, and `editor`/`browser` under
+  `TOOL_CONFIG_ENV_PREFIXES`' `GH_`), and `gh` runs with no `config.yml` at all and writes one
+  when it next has config of its own to write, so the sweep costs a hook's `gh config set`
+  nothing but the reach into the *next* session -- the same line #171 drew for those tools' environment variables.
+  `hosts.yml` beside it survives, the invariant #151 pinned: a credential authenticates the
+  next session rather than steering it, the line `.claude/.credentials.json` sits on, which is
+  what makes this a file-level entry and not a directory-level one. That file is not inert,
+  and #173's spec named the residual rather than leaving it to be found: `gh config set
+  -h <host>` writes there, and an `api_host` in it re-points `gh api` on an ordinary command
+  with no `config.yml` anywhere. #173 could not close it -- taking `hosts.yml` is the one thing
+  it may not do -- so it filed it, and #190 closed it *inside* the file, which is the
+  `GH_HOSTS_STEERING_KEYS` paragraph below: the file survives, the configuration in it does
+  not. What was always weaker about this position than `config.yml`'s stays true of whatever a
+  future key opens here: it is an ordinary HTTPS request to a name, so #126's `internal`
+  networks and the allow-listing proxy do see it, where a unix socket is not a route at all.
+  Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
   (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
   not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
   name git looks at first. That no deployment has a reason to leave one of these in a session
@@ -258,8 +287,8 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   are path components rather than names, since each is nested: `_walk` resolves one component at a
   time and yields the first symlink it meets instead of descending through it, so a `.ssh`
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
-  -- and the directories themselves stay, with `gh`'s configuration beside git's and
-  `known_hosts` beside ssh's.
+  -- and the directories themselves stay, with `gh`'s `hosts.yml` beside the config of its
+  own that goes and `known_hosts` beside ssh's.
   `GH_HOSTS_STEERING_KEYS` is the one place the sweep looks *inside* a file rather than removing
   it (#190, spec `2026-09-22-session-gh-hosts-design.md`): `~/.config/gh/hosts.yml` is credential
   state -- it carries the `oauth_token` a session authenticates `gh` with, which is why #151
@@ -297,8 +326,8 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
   makes `gh auth status` report `Git operations protocol: ssh`, and fails `gh repo clone`
   outright with `cannot run ssh: No such file or directory`, the image shipping no ssh client --
-  but it is *also* honoured from `config.yml`, which #173 takes and which **PR #189 has not
-  landed**, so that key is closed only in the position this change owns. `http_unix_socket`,
+  but it is *also* honoured from `config.yml`, which #173 takes -- #190 was written while that
+  was still open and said so; in this tree both positions are closed. `http_unix_socket`,
   `pager`, `editor` and `browser` are measured *inert* here (the same values at top level fire;
   the hostname-less lookup is what gh's own pager, editor and browser resolution uses) and the
   remaining seven are cosmetic or documented global; all are removed anyway, since a key that
@@ -393,10 +422,22 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   host route authenticates with, and whether it honours `CLAUDE_CODE_OAUTH_TOKEN` has never been
   measured here -- so it was never a flag to rest the sweep on.
   `WorkspaceManager.sweep_agent_home()` delegates it immediately before *every* turn, from
-  `session._turn_loop`, and before *every* script the session runs in a login shell, from
-  `WorkspaceManager._run_script` — the four hooks and the post-clone setup, which is the one
-  seam because what matters is the login shell rather than which hook opened it (`_run_argv`'s
-  other caller is the clone, `gh` as an argv, which reads no start-up file). That second call
+  `session._turn_loop`; before *every* script the session runs in a login shell, from
+  `WorkspaceManager._run_script` — the four hooks and the post-clone setup, which is one seam
+  because what matters is the login shell rather than which hook opened it; and before the
+  *clone*, from `WorkspaceManager._clone` (#173). That third one is the ordering #173 had to
+  fix for its own entry to mean anything: the clone opens no shell, which is why #137 left it
+  out, but `gh repo clone` reads `~/.config/gh/config.yml` and shells out to `git clone`, which
+  reads `~/.gitconfig` — and it is the *earliest* thing a run does at that uid, ahead of the
+  post-clone setup. So a plant the previous session at this account left was live for exactly
+  one command, and it was the one carrying `GH_TOKEN` and writing the tree the session then
+  works in. Two call sites rather than one inside `_run_argv`, because the ordering test wraps
+  `_run_argv` to record a spawn and a sweep inside it would stop being observably *before* what
+  it protects; `test_the_clone_is_swept_before_it_runs` pins the second so they cannot drift,
+  and workspace creation therefore pays two sudo round trips, deliberately. Best effort there
+  as everywhere — a failed sweep is a `claude_home_sweep_failed` warning and the clone still
+  runs — but it is the one call site with no later sweep before the command it was protecting,
+  so that warning ahead of a clone is the one to read as serious (a residual in #173's spec). That second call
   site is what #137 needs: `after_create` and `before_run` both run before `_turn_loop` reaches
   its first sweep, so a per-turn sweep alone would let the previous session's `~/.profile` run
   in this session's first hook. A hook that is not configured opens no shell and takes no sweep.
@@ -542,8 +583,8 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   allow-list carries no `UV_` name and the value is per account and per deployment; it is
   deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
   -- which the image no longer sets at all, the `copy` default of #161 having existed only
-  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
-  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  because the cache could not be on the venv's filesystem. What it buys is in the uv section of
+  `docs/toolchains.md` (the README's until #196 moved it), measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
   `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
   them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
   every account can reach its own directory, and sealing it at each worker start would take
@@ -665,8 +706,8 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   `--strict-mcp-config` is unconditional for the reason
   `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
   account's `~/.claude.json`, which sits in `$HOME` beside `.claude/`: outside the directory
-  the config sweep walks, and not one of the names the home sweep removes beside it (#137) --
-  claude's own file, and a denylist keeps what it does not name. So it is recreated with each
+  the config sweep walks, and not one of the names the home sweep removes beside it (#137,
+  #151, #173) -- claude's own file, and a denylist keeps what it does not name. So it is recreated with each
   container but shared by every session
   in one -- a server a session plants there is offered to whichever issue runs next. The flag
   names what survives rather than what is removed (only `--mcp-config` servers, which is
@@ -800,12 +841,16 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   `parse_rate_limits` reads a `rate_limit_event` line into `RateLimits(five_hour, seven_day,
   observed_at)` of `RateLimitWindow(utilization, resets_at)`, total like `turnlog` because the
   line's shape is claude's and undocumented, and `StreamParser` reports it as a `rate_limits`
-  turn event carrying the reading; `run_session` (turns, refresh between turns, `RunResult`,
+  turn event carrying the reading; `parse_usage_limit` reads the *refusal* out of the same
+  line into `UsageLimit(window, resets_at)` -- a separate question with a separate answer, and
+  the one structured signal that a turn failed because the account's window is spent; `run_session` (turns, refresh between turns, `RunResult`,
   publishes `RunStarted`/`RunEnded`; a turn whose final message begins `BLOCKED:` stops the run
   with `stop_reason` `blocked` and the line in `RunResult.blocker`, read by `blocker_from` off
   the first non-empty line, checked after `issue_moved` and before `max_turns`);
   `classify_result` maps a turn's last result (or its absence) to an `AgentErrorCategory`,
-  `auth_failed` among them (see `issuebot.orchestrator`), and builds the turn's message from
+  `auth_failed` and `usage_limited` among them (see `issuebot.orchestrator`; the second takes
+  `usage_limit=`, the turn's `rate_limit_event` refusal, and is asked ahead of the credential
+  markers), and builds the turn's message from
   claude's own words: the result text, or the last line of stderr. That message is the run's
   `error`, which leaves the workspace without passing `capture_turns` -- to `events`,
   `runs.error`, Slack and the blocked-escape workpad block -- so it is scrubbed at the source
@@ -904,10 +949,14 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   independent of `announce=` below, which is about a second *report* of one escalation rather
   than about whether the block landed, so the note is reported on both of this function's exits.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
-  refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
-  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
-  ceiling reaches that loop: the escape clears the chain on its way out, so an `attempts`
-  refusal readmits the issue on the next bounce rather than refusing it again. Two separate
+  refuses it as `inactive` instead. The conflict bounce used to undo that by moving it back to
+  `rework` for the gate to refuse again, bounded only by `agent.max_conflict_reworks`; since
+  the escape marks `IssueLedger.escaped` the bounce leaves it alone, so the round trip ends
+  one leg earlier and no second note is written about the same conflict. The ceiling still
+  bounds the case the mark does not cover, a bounce before any escape. Only the *spend*
+  ceiling ever reached that loop in the first place: the escape clears the chain on its way
+  out, so an `attempts` refusal readmits the issue on the next bounce rather than refusing it
+  again. Two separate
   things keep the round trip from reporting one escalation over and over, and they are
   separate because the block and the event are two writes with a failure point between them.
   The block is matched by its *reason*, on a line of its own, and not by `BUDGET_HEADING`,
@@ -992,7 +1041,13 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   a note the session strips is rewritten once per process, not per tick. `_finish` drops both
   memos with the issue, so neither grows with the worker's uptime. `_bounce_conflicts`
   runs after every fetch, observer or not (`fetch_states`), skipping issues in `_running` or
-  `_retries`.
+  `_retries` -- and issues the ledger marks `escaped`. That last one is the line between the
+  two escalations: an escape puts the issue in `review` precisely to stop it, and a bounce is
+  a re-dispatch of it, so without the mark a failure that had nothing to do with the conflict
+  spent a bounce. On 2026-09-22 that fired eight seconds after a blocked escape and took
+  #173's third and last one, for a session that then failed instantly on a spent usage window.
+  `Ledger.dispatched` clears the mark, which is what the documented recovery -- fix the cause,
+  then relabel -- produces, so a conflict after that is issuebot's again.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
@@ -1117,15 +1172,45 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
-  All four holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
-  `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()` composes the one
-  live hold from them, preflight > auth > accounts > github, for the snapshot and the gate alike -- so the reason an operator reads and
+  A *usage* limit is the same shape of fault one step along, and used to be read as the agent
+  failing its task. `claude` refuses a turn when the account's window is spent, as
+  `subtype: "success"` with `is_error` and a `rate_limit_event` line carrying
+  `status: "rejected"` and the epoch the window reopens; `parse_usage_limit` reads that
+  refusal (total, like `parse_rate_limits`, and separate from it, since a rejection with no
+  `unifiedWindows` is still a rejection, and `utilization: 1` is not one until claude says
+  `rejected`), `StreamParser` keeps it beside the windows, and `classify_result` asks it
+  *before* the credential markers -- structured evidence outranking prose, and the two wanting
+  opposite things from the worker. `USAGE_LIMIT_MARKERS` is the backstop for a turn killed
+  before that line arrived, and the status-0 case is still never mined, exactly as for
+  `auth_failed`. The category is `usage_limited`, and `_usage_limited` does none of the three
+  things a failure does: no escalation, since nothing about the issue is wrong and a human has
+  nothing to fix; no `ledger.failed`, since `agent.max_attempts` bounds an issue that keeps
+  failing and a limit is an account-wide condition every candidate meets at once; and no
+  failure backoff, since that curve is 20 s then 40 s. The issue is requeued on its own
+  attempt (retry kind `usage`) at the reset, and dispatch is held meanwhile -- the one hold
+  that needs no probe to lift, because claude said when it reopens, so `_settle_usage_hold`
+  runs at the top of `tick` and the tick that reaches the reset claims on that tick rather
+  than a poll interval later. `_hold_usage` moves the reset *out* only, since two sessions
+  refused against one window report it seconds apart and the later reading is the one to wait
+  for, and `USAGE_HOLD_KEY` keys them as one hold however differently each worded itself, so
+  `since` reports how long the board has really been stopped. Dispatch is skipped for the auth
+  hold's reason rather than the GitHub hold's: the board reads perfectly well and it is the
+  claiming that has nowhere to go. What this replaced, measured on 2026-09-22: three issues
+  burned twelve runs between them in nineteen minutes, each chain spent inside ninety seconds
+  against a window that reopened at 12:30, and each issue escalated to a human with a blocker
+  naming a limit they could not lift.
+
+  All five holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
+  `_usage_reason`, `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()`
+  composes the one live hold from them, preflight > auth > usage > accounts > github, for the
+  snapshot and the gate alike -- so the reason an operator reads and
   the reason a caller refuses on can no longer be two different claims. The preflight one used
   to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
   not it: there was nothing to consult (#112).
   Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
-  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `accounts`
+  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `usage`
+  (`claude usage limit reached: <claude's own sentence>`, the spent-window hold above), `accounts`
   (#121: the account registry will not read, so no workspace can be bound to a session
   account) or `github` (#88, below), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
@@ -1157,7 +1242,7 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
   goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
-  (preflight > auth > accounts > github) *after* the fetch, from `_current_hold()` rather than
+  (preflight > auth > usage > accounts > github) *after* the fetch, from `_current_hold()` rather than
   by recording as it goes: releasing and re-holding within a tick would restart `since` on a
   hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
   That one function is also what the admission gate asks (#112), so the account hold (#121)

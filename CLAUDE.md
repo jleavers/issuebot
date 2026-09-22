@@ -109,7 +109,8 @@ dependency-free fixture as `issuebot` with the registry pointed at a dead port (
 `$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), run one `.ps1`
 as `agent` whose assertion is a culture-formatted number (so the ICU the PowerShell arm
 installs beside the runtime is proved, not just that the binary answers), and survive
-the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
+the documented cluster recipe -- the three hook scripts are parsed out of
+`docs/toolchains.md`, where #196 moved them from the README, and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `bash -lc` with
 `LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base

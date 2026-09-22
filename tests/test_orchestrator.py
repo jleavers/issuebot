@@ -2802,6 +2802,153 @@ async def test_end_to_end_with_the_fakes(tmp_path: Path) -> None:
 # --- conflict bounce (spec 2026-09-13-conflict-rework-design.md) ----------------------------
 
 
+# --- a spent usage window (#173's incident, 2026-09-22) -----------------------------------
+
+USAGE_RESET = START + timedelta(minutes=20)
+USAGE_LIMITED = {
+    "outcome": "failed",
+    "stop_reason": "failure",
+    "error_category": "usage_limited",
+    "error": "success: You've hit your session limit \u00b7 resets 12:30pm (UTC)",
+    "final_state": StateLabel.IN_PROGRESS,
+    "usage_reset_at": USAGE_RESET,
+}
+
+
+async def test_a_usage_limit_requeues_the_issue_instead_of_spending_its_chain(
+    tmp_path: Path,
+) -> None:
+    """The account's window is spent, which is nothing about this issue. Counting it against
+    `agent.max_attempts` is what escalated three issues to a human on 2026-09-22, each after
+    a 20 s and a 40 s backoff against a window that reopened nineteen minutes later."""
+    h = Harness(tmp_path, max_attempts=3)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    # Not escalated, and still in progress: no human has anything to fix here.
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    assert h.recorder.of(Blocked) == []
+    assert h.orchestrator.snapshot().counters.blocked == 0
+    # The chain is untouched, so the run after the window is this attempt over again.
+    retry = h.retry(1)
+    assert retry.kind == "usage"
+    assert retry.attempt == 1
+    # And it waits for the window, not for the failure curve's 20 s.
+    assert retry.due_at == USAGE_RESET
+    await h.fire(20 * 60)
+    assert h.run_for(1).kwargs["attempt"] == 1
+
+
+async def test_a_usage_limit_holds_dispatch_for_every_other_issue_too(tmp_path: Path) -> None:
+    """The limit is account-wide, so without a hold every candidate grinds through the same
+    wall: on 2026-09-22 three issues burned twelve runs between them in nineteen minutes."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert len(h.sessions.runs) == 1
+    assert h.github.issue(2).state is StateLabel.TODO
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert hold.kind == "usage"
+    assert "session limit" in hold.reason
+
+
+async def test_the_usage_hold_lifts_when_the_window_reopens(tmp_path: Path) -> None:
+    """It is the one hold that needs no probe: claude said when it reopens."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert h.github.issue(2).state is StateLabel.TODO
+    h.clock.advance(20 * 60)
+    await h.tick()
+    assert h.orchestrator.snapshot().dispatch_hold is None
+    assert h.github.issue(2).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_usage_hold_keeps_its_since_across_a_second_refusal(tmp_path: Path) -> None:
+    """Two sessions refused against one window are one hold, however differently worded."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    await h.tick()
+    first = h.orchestrator.snapshot().dispatch_hold
+    assert first is not None
+    h.clock.advance(5)
+    await h.exit(h.run_for(2), **{**USAGE_LIMITED, "error": "success: limit reached, differently"})
+    await h.tick()
+    second = h.orchestrator.snapshot().dispatch_hold
+    assert second is not None
+    assert second.since == first.since
+    assert second.reason != first.reason
+
+
+# --- an escape must not be undone by the conflict bounce ----------------------------------
+
+
+async def test_a_blocked_escape_does_not_feed_the_conflict_bounce(tmp_path: Path) -> None:
+    """The escape moves the issue to `review` to stop it; the bounce moved it straight back to
+    `rework`, which re-dispatches what the escape had just stopped and spends one of
+    `agent.max_conflict_reworks` on a session that never ran. On 2026-09-22 it fired eight
+    seconds after the escape and took #173's last bounce."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, "conflicting")
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert h.recorder.of(Blocked) != []
+    await h.tick()
+    # Still where the escape left it, and no bounce spent.
+    assert h.github.issue(1).state is StateLabel.REVIEW
+    assert not any("Issuebot merge conflict" in c.body for c in h.github.comments_for(1))
+
+
+async def test_the_bounce_resumes_once_a_human_relabels_the_escaped_issue(
+    tmp_path: Path,
+) -> None:
+    """The mark is cleared by the next dispatch, which is what the documented recovery --
+    fix the cause, then relabel -- produces. A conflict after that is issuebot's again."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_issue(1, "todo")
+    await h.tick()
+    h.github.open_pr(1, pr_number=7)
+    h.github.set_pr_mergeable(7, "conflicting")
+    await h.exit(
+        h.run_for(1),
+        outcome="failed",
+        stop_reason="failure",
+        error_category="process_exit",
+        error="boom",
+        final_state=StateLabel.IN_PROGRESS,
+    )
+    h.github.human_set_state(1, StateLabel.TODO)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+    await h.exit(h.run_for(1), final_state=StateLabel.REVIEW)
+    h.github.human_set_state(1, StateLabel.REVIEW)
+    # The continuation retry holds the issue until it fires, and the bounce skips what is
+    # queued; the gate then drops it, the issue no longer being in a state this worker claims.
+    await h.fire(1)
+    await h.tick()
+    assert h.github.issue(1).state is StateLabel.REWORK
+
+
 async def test_a_conflicting_review_issue_is_bounced_then_dispatched_as_rework(
     tmp_path: Path,
 ) -> None:
@@ -4335,15 +4482,20 @@ async def test_an_escape_github_refused_is_still_announced_by_the_tick_that_retr
 
 
 async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path) -> None:
-    """The conflict bounce and the gate disagree about one issue; the bounce limit ends it.
+    """The conflict bounce and the gate disagree about one issue; the escape mark ends it.
 
     The bounce is a decision about a pull request and the gate is a decision about a claim, so
     neither consults the other -- that is the whole point of the gate owning one question. The
     two do meet on an over-budget issue in `review` whose pull request conflicts: the bounce
-    moves it to `rework`, the gate refuses it and hands it back. `agent.max_conflict_reworks`
-    is what stops that, and this pins it -- along with the escalation staying *one* escalation
-    while it lasts: the block is written once, and so are the `Blocked` event behind the Slack
-    line and the count behind the dashboard's blocked tile.
+    moves it to `rework` and the gate refuses it and hands it back.
+
+    `agent.max_conflict_reworks` used to be all that stopped that, so the issue made the round
+    trip until the bounce limit was reached and left a second conflict note nobody needed.
+    `IssueLedger.escaped` ends it one trip earlier: the budget escape marks the issue, and the
+    bounce does not move an issue a human has just been handed. The ceiling is still there and
+    still bounds the case the mark does not cover -- a bounce before any escape. What this
+    pins either way is that the escalation stays *one* escalation: one block, one `Blocked`
+    event behind the Slack line, one count behind the dashboard's blocked tile.
     """
     h = Harness(tmp_path, max_issue_cost_usd=0.4, max_conflict_reworks=2)
     h.add_issue(1)
@@ -4358,7 +4510,9 @@ async def test_an_over_budget_issue_with_a_conflicting_pr_settles(tmp_path: Path
     assert h.github.issue(1).state is StateLabel.REVIEW
     assert attempts_dispatched(h, 1) == [1]  # never claimed again
     body = h.github.comments_for(1)[0].body
-    assert body.count("### Issuebot merge conflict (") == 2  # the bounce limit held
+    # One bounce, then the escape marks the issue and the bounce leaves it alone -- so the
+    # limit of 2 is never reached, and there is no second note about the same conflict.
+    assert body.count("### Issuebot merge conflict (") == 1
     assert body.count("### Issuebot budget limit (") == 1
     # The return trips are returns, not fresh escalations: one block, one event, one count.
     assert len(h.recorder.of(Blocked)) == 1
