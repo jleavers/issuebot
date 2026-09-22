@@ -206,7 +206,9 @@ session needs *before* it knows which file to open.
   where it was 120 KB of a 143 KB whole and so the reason nothing after it reached a session.
   A module's design is reference a session reads once it knows it needs that module, which is
   what makes it the half that moves; the pointer above is what stays. Add to it there, not
-  here.
+  here -- and note that it has a budget of its own in the same test, not because anything cuts
+  it but because the growth that took this file over moved into it, and the destination of an
+  overflow is the last file anyone thinks to measure. When it fails, split it per module.
 - `docs/toolchains.md`: the *target* repository's toolchains, which #196 moved out of the
   README -- PostgreSQL, Node, uv and PowerShell as the opt-in image build arguments, the hook
   recipes the CI `docker` job parses out and runs, and `.issuebot/env`, what a hook hands the

@@ -1477,6 +1477,3 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   `_adapter_factory`, `_run_session`,
   `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
   `_serve` (`_github_status` through an autouse fixture, so no test reaches the network).
-
-Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
-`docs/superpowers/plans/` (one implementation plan per phase).

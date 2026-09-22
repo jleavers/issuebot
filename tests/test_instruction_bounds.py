@@ -21,6 +21,12 @@ remedy when it fails is never to raise the cap -- that number bounds what a clon
 a prompt for every deployment, and under ``agent.run_as`` the clone is the session's own to
 write -- but to move reference detail into a file beside ``CLAUDE.md`` and leave a pointer,
 which is what ``docs/package-layout.md`` is.
+
+That file is bounded here too, at ``LAYOUT_BUDGET``, and for the other half of the same
+lesson. No cap applies to it -- a session reads it from the working tree, so there is nothing
+to truncate and nothing to be silent about -- but the growth that took ``CLAUDE.md`` over
+moved into it with the prose, and leaving the destination of an overflow unmeasured is how
+the overflow went unnoticed to begin with.
 """
 
 from pathlib import Path
@@ -32,17 +38,39 @@ from issuebot.agent.instructions import INSTRUCTION_FILE_LIMIT, REPOSITORY_INSTR
 ROOT = Path(__file__).resolve().parents[1]
 
 # Room for a while's ordinary growth, so the failure is a prompt to move something rather than
-# a report that something has already been lost. `CLAUDE.md` grew ~500 bytes an issue over the
-# stretch that took it past the cap, so 16 KiB is tens of issues of warning -- long enough to
-# be acted on in a normal piece of work, short enough that the slack is not itself a budget
-# somebody spends.
+# a report that something has already been lost. Measured rather than guessed, over the eleven
+# merges that touched `CLAUDE.md` before this change: 119,111 bytes to the 143,136 it overran
+# at, a mean of ~2.2 KB a merged pull request. So 16 KiB is on the order of seven of them at
+# the *old* rate -- and that rate was mostly the layout section, which has now moved out, so
+# for the navigational half left here it should buy a good deal more. Long enough either way
+# to be acted on in a normal piece of work, and short enough that the slack is not itself a
+# budget somebody spends. If this starts failing every few pull requests, the rate has not
+# fallen the way the split assumed, and the answer is another move, not a bigger number.
 HEADROOM = 16 * 1024
+
+# `docs/package-layout.md` is read from the working tree, not carried in a prompt, so
+# `INSTRUCTION_FILE_LIMIT` does not apply to it and this number is not that one. It exists
+# because the half that moved took the *growth* with it, and the whole lesson of #211 is that
+# unwatched growth in a file nobody measures is exactly what goes unnoticed: the `origin/main`
+# merge on this change's own branch added 8 KB to this prose in a day. The remedy when it
+# fails is not to raise it either -- it is to give the file the structure it has so far done
+# without, one document per module under `docs/package-layout/` behind an index.
+LAYOUT_BUDGET = 160 * 1024
+LAYOUT_DOC = "docs/package-layout.md"
+
+
+def _size(name: str) -> int:
+    """The file's size, or a failure that names the file rather than a `stat` traceback."""
+    path = ROOT / name
+    if not path.is_file():
+        pytest.fail(f"{name} is not in the tree; this bound was written for it (#211)")
+    return path.stat().st_size
 
 
 @pytest.mark.parametrize("name", REPOSITORY_INSTRUCTION_FILES)
 def test_instruction_file_is_carried_whole(name: str) -> None:
     """Every byte of it reaches a session: the cut never falls inside this repository's file."""
-    size = (ROOT / name).stat().st_size
+    size = _size(name)
     assert size <= INSTRUCTION_FILE_LIMIT, (
         f"{name} is {size} bytes, {size - INSTRUCTION_FILE_LIMIT} over the "
         f"{INSTRUCTION_FILE_LIMIT}-byte instruction cap: every session's copy is cut there and "
@@ -54,7 +82,7 @@ def test_instruction_file_is_carried_whole(name: str) -> None:
 @pytest.mark.parametrize("name", REPOSITORY_INSTRUCTION_FILES)
 def test_instruction_file_keeps_headroom(name: str) -> None:
     """And with room left, so the warning lands before the first byte is lost."""
-    size = (ROOT / name).stat().st_size
+    size = _size(name)
     budget = INSTRUCTION_FILE_LIMIT - HEADROOM
     assert size <= budget, (
         f"{name} is {size} bytes, within {INSTRUCTION_FILE_LIMIT - size} of the "
@@ -91,3 +119,24 @@ def test_the_layout_pointer_names_a_file_that_is_there() -> None:
         "of it for the cap's sake (#211) and the pointer is how a session finds it"
     )
     assert (ROOT / "docs" / "package-layout.md").is_file()
+
+
+def test_the_file_the_split_created_is_bounded_too() -> None:
+    """The remedy for #211 must not become #211 (one level down) for want of being measured.
+
+    Nothing cuts this file: a session reads it from the working tree, so there is no cap and
+    no silent truncation to catch. What there is, is the growth that took `CLAUDE.md` over --
+    it moved here with the prose, and here nothing was watching it at all, which is the half
+    of #211 that was never about a number. So the file carries a budget of its own, checked
+    in the same place and for the same reason, and the remedy when it fails is the one that
+    worked: split it, one document per module under `docs/package-layout/` behind an index,
+    rather than raise the budget.
+    """
+    size = _size(LAYOUT_DOC)
+    assert size <= LAYOUT_BUDGET, (
+        f"{LAYOUT_DOC} is {size} bytes, past its {LAYOUT_BUDGET}-byte budget. Nothing truncates "
+        "it -- a session reads it from the tree -- but it is the file #211's overflow was moved "
+        "into, and an unmeasured file is how that overflow went unnoticed in the first place. "
+        "Split it per module under docs/package-layout/ behind an index, rather than raising "
+        "this number (#211)"
+    )
