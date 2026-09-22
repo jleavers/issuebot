@@ -20,7 +20,7 @@ services:
       # refuse to configure or start this service, the worker and the web until the checkout's
       # .env holds a value, so nothing in this tree is a working credential. The image applies
       # it at initdb only; a cluster that already exists keeps the password it was created
-      # with until ALTER ROLE (README, "Rotating the database password").
+      # with until ALTER ROLE (docs/operations.md, "Rotating the database password").
       POSTGRES_PASSWORD: ${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}
       POSTGRES_DB: issuebot
     volumes:
@@ -80,26 +80,26 @@ services:
       args:
         # Empty -- the default -- bakes no PostgreSQL server into the worker image. Set
         # ISSUEBOT_POSTGRES_VERSION in this checkout's .env when the target repository's tests
-        # need a real server, and `docker compose build worker` to pick it up (README, "A
-        # PostgreSQL server for the target repository's tests"). The web service builds from
-        # the same context without it: the dashboard needs no server, and a hub that sets the
-        # variable would otherwise carry the packages twice.
+        # need a real server, and `docker compose build worker` to pick it up
+        # (docs/toolchains.md, "A PostgreSQL server for the target repository's tests"). The web
+        # service builds from the same context without it: the dashboard needs no server, and a
+        # hub that sets the variable would otherwise carry the packages twice.
         POSTGRES_VERSION: "${ISSUEBOT_POSTGRES_VERSION:-}"
-        # Likewise for a JavaScript runtime, when the target repository's tests execute its
-        # own client-side code (README, "Node for the target repository's tests"). Empty bakes
-        # nothing; `docker compose build worker` to pick a change up.
+        # Likewise for a JavaScript runtime, when the target repository's tests execute its own
+        # client-side code (docs/toolchains.md, "Node for the target repository's tests"). Empty
+        # bakes nothing; `docker compose build worker` to pick a change up.
         NODE_VERSION: "${ISSUEBOT_NODE_VERSION:-}"
         # And likewise for `uv`, when the target repository is a Python project whose suite is
-        # run with it (README, "uv for the target repository's tests"). Empty bakes nothing;
-        # `docker compose build worker` to pick a change up. An exact release, not a major:
-        # uv is pre-1.0 and its minors are not interchangeable.
+        # run with it (docs/toolchains.md, "uv for the target repository's tests"). Empty bakes
+        # nothing; `docker compose build worker` to pick a change up. An exact release, not a
+        # major: uv is pre-1.0 and its minors are not interchangeable.
         UV_VERSION: "${ISSUEBOT_UV_VERSION:-}"
         # And likewise for PowerShell, when the target repository's scripts and tests are
-        # PowerShell (README, "PowerShell for the target repository's tests"). Empty bakes
-        # nothing; `docker compose build worker` to pick a change up. An exact release, not a
-        # major: GitHub publishes releases under their tags, and there is no `latest-v7.x` to
-        # resolve. It needs no ISSUEBOT_EGRESS_ALLOW entry, unlike node and uv: the runtime is
-        # in the image and a session installs nothing to use it.
+        # PowerShell (docs/toolchains.md, "PowerShell for the target repository's tests"). Empty
+        # bakes nothing; `docker compose build worker` to pick a change up. An exact release,
+        # not a major: GitHub publishes releases under their tags, and there is no `latest-v7.x`
+        # to resolve. It needs no ISSUEBOT_EGRESS_ALLOW entry, unlike node and uv: the runtime
+        # is in the image and a session installs nothing to use it.
         PWSH_VERSION: "${ISSUEBOT_PWSH_VERSION:-}"
         # How many session accounts the image builds (#121): `agent-1` .. `agent-N`, which is
         # what `agent.run_as` may then name as a pool. The image's own default is 3, matching
@@ -131,9 +131,9 @@ services:
       - path: .env
         required: false
     environment:
-      # The hub's database over the shared network, with the password from this checkout's
-      # .env: the hub's own value, copied into every worker checkout (README, "More than one
-      # repository"). Required, so a worker never starts against a store it cannot reach.
+      # The hub's database over the shared network, with the password from this checkout's .env:
+      # the hub's own value, copied into every worker checkout (docs/operations.md, "More than
+      # one repository"). Required, so a worker never starts against a store it cannot reach.
       DATABASE_URL: postgresql://issuebot:${ISSUEBOT_DB_PASSWORD:?ISSUEBOT_DB_PASSWORD is not set; fill it in this checkout's .env, see .env.example}@db:5432/issuebot
       # The directory below is what is mounted; this names the file inside it. Keep the two
       # in step if you rename either.
@@ -200,8 +200,8 @@ services:
     environment:
       # The operator's extension of the shipped default, which covers Anthropic and GitHub and
       # nothing else: a comma- or space-separated list of host names, `name:port` for a port
-      # other than 443, and a leading dot for a domain and everything under it. See the
-      # README, "What a session may reach".
+      # other than 443, and a leading dot for a domain and everything under it. See
+      # docs/security-model.md, "What a session may reach".
       ISSUEBOT_EGRESS_ALLOW: ${ISSUEBOT_EGRESS_ALLOW:-}
     healthcheck:
       # The proxy's own contract rather than a port probe: a name reserved by RFC 2606, on no
