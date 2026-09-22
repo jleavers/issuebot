@@ -305,6 +305,45 @@ def test_hub_first_is_stable_for_the_rest() -> None:
     assert upgrade.hub_first([one, two, three]) == [two, one, three]
 
 
+def _fake_checkout(root: Path, *, git_is_a_directory: bool) -> Path:
+    """A directory with the two things discovery looks at, and nothing else."""
+    (root / "compose.yaml").write_text("services: {}\n")
+    if git_is_a_directory:
+        (root / ".git").mkdir()
+    else:
+        # What `git worktree add` writes: a file naming the real git directory.
+        (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wip\n")
+    return root
+
+
+def test_discovery_skips_a_sibling_git_worktree(tmp_path: Path) -> None:
+    """A worktree's `.git` is a file, and a worktree beside a checkout is not a deployment.
+
+    It would otherwise be discovered and abort the whole run at phase 1 -- a worktree is
+    normally on a feature branch that tracks no upstream -- so an ordinary parallel-session
+    layout would block upgrading the deployments beside it.
+    """
+    assert not upgrade.looks_like_a_checkout(_fake_checkout(tmp_path, git_is_a_directory=False))
+
+
+def test_discovery_accepts_an_ordinary_clone(tmp_path: Path) -> None:
+    assert upgrade.looks_like_a_checkout(_fake_checkout(tmp_path, git_is_a_directory=True))
+
+
+def test_a_worktree_named_explicitly_is_still_inspected(tmp_path: Path) -> None:
+    """The asymmetry is deliberate: skipping one is discovery's guess, not a refusal.
+
+    A deployment genuinely run from a worktree is reached by passing its path, so
+    `inspect_checkout` must not reject it for the shape of its `.git`.
+    """
+    path = _fake_checkout(tmp_path, git_is_a_directory=False)
+
+    _checkout, problem = upgrade.inspect_checkout(path)
+
+    # It fails later, on git itself -- but never for being a worktree.
+    assert problem != "not a git checkout"
+
+
 def test_the_table_sizes_its_columns_to_their_content() -> None:
     """A branch name is as long as whoever named it, and this is most often run from a long one."""
     branch = "issuebot/a-long-feature-branch"
