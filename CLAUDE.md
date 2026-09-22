@@ -1789,6 +1789,22 @@ second copy of a section that has already moved, and the two then drift.
   stay under 500 KB, which `check-added-large-files` enforces and the capture checks first so
   the rejection comes before the commit). #199 and #200 are where the images and their dark
   theme came in.
+- `tools/watch/`: what a *running* session is doing, which nothing else can answer. The
+  snapshot `issuebot status` and the dashboard read says whether one is alive and where it has
+  got to (`turns`, `last_event`, `last_activity_at`), and no more, because `run_turns` is
+  written in the `run_ended` transaction -- so until the run finishes there is no transcript in
+  the store, and one turn can last an hour. `watch.py` reads the tail of the
+  `.issuebot/runs/<run_id>/turn-N.jsonl` the session is still writing, through
+  `docker compose exec` or `--local`, and renders the tool calls and the agent's own text.
+  Read-only, and everything it prints goes through a `Scrubber` -- the one thing about it that
+  is not convenience. Those files are the one place a credential is *not* masked on disk, since
+  `capture_turns` is their scrubbing step (#79) and runs on the way into the database, so a
+  reader going straight to the bytes would be a second exit past the step that exists to stop
+  exactly that. It builds the deployment's own scrubber where the workflow loads and falls back
+  to the credential shapes otherwise, and its first line says which, because that is the
+  difference between a DSN password masked and not. `tests/test_tools_watch.py` holds that
+  claim rather than leaving it to the docstring, which is the same reason `tools/screenshots`'
+  images are regenerated rather than trusted.
 
 ## What issuebot is
 
