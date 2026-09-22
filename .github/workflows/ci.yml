@@ -540,7 +540,7 @@ jobs:
             # the clone rests on -- #173 sweeps before it too -- but it is still true, and it
             # is asserted here, before the sweep, where the plant is still in place and a gh
             # that had started dispatching it would say so.
-            sudo -n -H -u agent gh repo --help | grep -q \"Work with GitHub repositories\"
+            sudo -n -H -u agent gh repo --help | grep -q "Work with GitHub repositories"
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
