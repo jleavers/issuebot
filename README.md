@@ -859,15 +859,16 @@ that matters on your host.
   environment and no credential of its own, so that is the same program doing the same work,
   from a place no session can write. `gh` has no system-wide extension directory, which is why
   the answer is `PATH` here and `/etc` for git and ssh.
-  It leaves the rest of the
-  home alone: the credential (`.credentials.json`, which rotates its refresh token), the
-  transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-  tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-  sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
-  `known_hosts` beside ssh's, `~/.local/state/gh` beside the extension directory — since the
-  sweep names a file or one directory and never empties the one above it. It is a
-  denylist of what is loaded or run, not an allowlist of what is kept, so a new claude location,
-  a new tool config file or another tool's plug-in directory has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+
+  The sweep leaves the rest of the home alone: the credential (`.credentials.json`, which
+  rotates its refresh token), the transcripts beside the memory it removes, `~/.claude.json`,
+  and whatever else claude or a tool the session ran keeps there (`gh`'s state, npm's cache).
+  The directories the tool config sat in stay too, with whatever else is in them — `gh`'s
+  configuration beside git's, `known_hosts` beside ssh's, `~/.local/state/gh` beside the
+  extension directory — since the sweep names a file or one directory and never empties the one
+  above it. It is a denylist of what is loaded or run, not an allowlist of what is kept, so a
+  new claude location, a new tool config file or another tool's plug-in directory has to be
+  added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next

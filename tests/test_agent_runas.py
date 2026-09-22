@@ -653,7 +653,9 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     how `projects/<project>/memory` is reached, while `claude` opens a planted path by name and
     needs no listing at all. The home itself is in the list, since locking that one reaches every
     sweep list at once, and so is `.config`, which is the only directory a swept path passes
-    *through*: locking it is what `_walk` has to see past rather than read as an empty home."""
+    *through* -- as is each of `.local`, `.local/share` and `.local/share/gh`, the deepest such
+    path there is: locking them is what `_walk` has to see past rather than read as an empty
+    home."""
     home = tmp_path / "home"
     _plant_home(home)
     (home / ".claude" / "skills" / "pwn" / "deep").mkdir()
@@ -667,6 +669,9 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         home / ".ssh",
         home / ".config" / "git",
         home / ".config",
+        home / ".local" / "share" / "gh",
+        home / ".local" / "share",
+        home / ".local",
         home,
     ]
     modes = [(path, path.stat().st_mode) for path in locked]
@@ -678,8 +683,11 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         for path, mode in reversed(modes):
             with contextlib.suppress(OSError):
                 os.chmod(path, mode)
-    for parts in TOOL_CONFIG_SWEEP:
+    for parts in (*TOOL_CONFIG_SWEEP, *TOOL_EXTENSION_SWEEP):
         assert not home.joinpath(*parts).exists(), parts
+    # The literal path beside the lists, for the reason the sweep test states: iterating a list
+    # that had been emptied would pass here exactly when the sweep is broken.
+    assert not (home / ".local" / "share" / "gh" / "extensions").exists()
     for name in SHELL_STARTUP_SWEEP:
         assert not (home / name).exists(), name
     for name in CLAUDE_HOME_SWEEP:
@@ -690,6 +698,7 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     assert not (project / "memory").exists()
     # And the neighbours the sweep does not name are still there.
     assert (home / ".config" / "gh" / "hosts.yml").exists()
+    assert (home / ".local" / "state" / "gh" / "device-id").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".claude" / ".credentials.json").read_text() == "token"
     assert (project / "a.jsonl").exists()
@@ -1123,9 +1132,11 @@ async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
     # A well-formed `hosts.yml` over the marker `_plant_home` leaves: the real `gh` refuses to
     # run at all against a host entry it cannot migrate ("cowardly refusing to continue"), and
     # a `gh` that never reached its dispatch would pass the swept half for the wrong reason.
-    # The token is a fixture, and no request is made: dispatch happens before authentication.
+    # The `oauth_token` key is what it refuses without (measured: it is the key it names), and
+    # the value is deliberately not token-shaped -- dispatch precedes authentication, so nothing
+    # here is a credential and no request is made.
     (home / ".config" / "gh" / "hosts.yml").write_text(
-        "github.com:\n    oauth_token: gho_notarealtokennotarealtokennotar\n    user: nobody\n"
+        "github.com:\n    oauth_token: placeholder-not-a-token\n    user: nobody\n"
     )
     _account_home(monkeypatch, home)
     monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))

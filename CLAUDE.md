@@ -408,7 +408,7 @@ version, and moves by hand.
   absent and `_walk` yields no target through a closed `~/.config`), and without read
   `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
   `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
-  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  throughout. `$HOME` itself is such a directory, so that reached all four lists rather than
   only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
   is an absence, and anything else is an answer this process cannot get until the modes go back.
   A symlinked `.claude` is yielded as the target rather than descended into, the rule

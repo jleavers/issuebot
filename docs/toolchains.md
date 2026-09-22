@@ -498,8 +498,9 @@ hook that would truncate it again or append a duplicate per session.
   `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
   leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
   for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
-  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
-  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
+  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched
+  (with the caveat below, since `XDG_DATA_HOME` also moves `gh`'s extension directory), and the
+  `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
   session, so what such a line would re-point is the *next* session on that issue — and it is
   the environment spelling of what the home sweep removes from the account's
   `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
@@ -538,6 +539,15 @@ hook that would truncate it again or append a duplicate per session.
     turn sees). `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not protected, which covers the cache
     and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
     for the convenience of pointing another tool's config somewhere.
+
+    One caveat, and it is the one route that survives a sweep rather than a route into a
+    protected name: `XDG_DATA_HOME` moves `gh`'s extension lookup wholesale, so a line here
+    re-points the directory the `gh extension install` bullet below says is swept (#186) — the
+    plant then lives somewhere the sweep names nothing of, for the next session on that issue.
+    Whether it should be protected like `XDG_CONFIG_HOME` is #191, weighed there against this
+    being the only escape hatch a deployment has for a `gh` extension; until then, a hook that
+    sets it is handing the next session a `gh` that dispatches from a directory of the hook's
+    choosing.
 
 - **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the

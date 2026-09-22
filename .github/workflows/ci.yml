@@ -480,8 +480,10 @@ jobs:
               # Well-formed rather than a bare key, and not incidental: the real gh refuses to
               # run at all against a host entry it cannot migrate, and a gh that never reached
               # its dispatch would pass the extension half below for the wrong reason. The
-              # token is a fixture and no request is made -- dispatch precedes authentication.
-              printf \"github.com:\\n    oauth_token: gho_notarealtokennotarealtokennotar\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
+              # oauth_token key is what it refuses without, and the value is deliberately not
+              # token-shaped -- dispatch precedes authentication, so nothing here is a
+              # credential and no request is made.
+              printf \"github.com:\\n    oauth_token: placeholder-not-a-token\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
               # The gh extension, and the neighbour the sweep is not aimed at: gh keeps its own
               # state one directory over from the one it runs extensions out of.
