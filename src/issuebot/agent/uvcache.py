@@ -68,15 +68,16 @@ not measurements of their own:
   and the cheapest way to get back the one property this issue is about: a copied ``.venv``
   entry is the workspace's own inode again, so the seal covers it as it did before #164, while
   the cache keeps its place on the volume and the persistence half is untouched. It costs the
-  measured half, and more disk than the option above rather than less: a copied venv is inodes
-  of its own, so the same two workspaces are about 230 MB -- the one shared cache still 78,
-  plus #164's 152 for two copied venvs -- against 78 today. (Speed was never the argument
-  either way; #164 timed the copy at 122 ms for this repository.) And it closes less than the
-  two above: the cache is still shared between sessions at that
-  uid, so a session can still write what the *next* one installs from, which is the pre-#164
-  level and the level accepted below. It is not the default because that trade is the one #164
-  was asked to make, and it needs no change here either way: ``uv sync --link-mode=copy`` in
-  the hook line, or ``UV_LINK_MODE=copy`` in an ``.issuebot/env`` written from ``before_run``.
+  measured half, and more disk than the per-workspace cache rather than less: a copied venv is
+  inodes of its own, so the same two workspaces are about 230 MB -- the one shared cache still
+  78, plus #164's 152 for two copied venvs -- against 156 for a cache each and 78 today.
+  (Speed was never the argument either way; #164 timed the copy at 122 ms for this
+  repository.) And it closes less than the first and third options: the cache is still shared
+  between sessions at that uid, so a session can still write what the *next* one installs
+  from, which is the pre-#164 level and the level accepted below. It is not the default
+  because that trade is the one #164 was asked to make, and it needs no change here either
+  way: ``uv sync --link-mode=copy`` in the hook line, or ``UV_LINK_MODE=copy`` in an
+  ``.issuebot/env`` written from ``before_run``.
 - *Accept*, which is what was chosen. The two sessions are the same account at the same uid,
   and that account's home is already a surface the home sweep names no cache in -- npm's sits
   there, and uv's own default did until this module moved it -- so a session that wants to
