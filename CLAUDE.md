@@ -115,6 +115,13 @@ session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `ba
 `LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base
 image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
 catches that rather than the variable that happens to produce it.
+
+A red check on a pull request here is not always this repository's code: when every failed
+job reports zero steps, Actions declined to run the job at all, and the fix is the account's
+rather than the diff's -- [`docs/operations.md`, "Checks that never
+ran"](docs/operations.md#checks-that-never-ran) is how to tell the two apart and what it
+means for an issue that is otherwise finished.
+
 Dependabot covers uv, Docker and Actions weekly.
 Every `uses:` in the workflows and every `rev:` in `.pre-commit-config.yaml` is a commit
 digest with its tag beside it (#111; `tests/test_pins.py` refuses a tag): a tag is a name its
@@ -362,8 +369,8 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101, #137, #151), clears what a prior session left in the
-  account's *home* for the next one to load. Three lists, all pinned by tests, so dropping a name
+  two blind spots; a fourth verb, `sweep` (#101, #137, #151, #186), clears what a prior session left in the
+  account's *home* for the next one to load or to run. Four lists, all pinned by tests, so dropping a name
   is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
   `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
@@ -396,6 +403,29 @@ version, and moves by hand.
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
+  And `TOOL_EXTENSION_SWEEP` (#186, spec `2026-09-22-session-gh-extension-design.md`):
+  `.local/share/gh/extensions`, the directory `gh` dispatches `gh <name>` from. Not a config
+  file a tool reads but a program the session wrote, which is why it is its own list -- that one
+  is checkable against `git-config(1)` and `ssh_config(5)`, this one against `gh extension`'s
+  layout, and the two answer "what does a deployment do instead" differently. Measured on this
+  image's `gh` (2.100.0): a directory and an executable file are dispatched with no install step,
+  no manifest and no network; an extension cannot shadow a core command and no ordinary `gh`
+  command touches the directory, the narrow shape #151 measured for `aliases:`; and `gh`
+  dispatches from that directory alone, not from `PATH` as git does for `git-<name>`, and not
+  from `GH_CONFIG_DIR`. What makes it a sweep anyway is that the directory is the account's to
+  write, so where a deployment *has* installed an extension a session can replace the program in
+  place and the plant fires on the ordinary command that deployment's sessions already run -- the
+  deployment with a reason not to sweep is the one where not sweeping costs most, and swept it
+  gets `gh`'s own `unknown command` instead. `gh` has no system-wide extension location, so such
+  a deployment installs the program root-owned on the session's `PATH` in an image built `FROM`
+  this one and invokes it under its own name; `gh` hands an extension its argv and its own
+  environment and injects no credential, so only the `gh ` prefix is lost. Directory-specific
+  like every entry above, since `~/.local/state/gh` is `gh`'s own state beside it and
+  `~/.local/share` is every tool's; walked component by component, so a link at any of the four
+  is unlinked rather than followed. The environment half holds the same way
+  `TOOL_CONFIG_SWEEP`'s git half does: `XDG_DATA_HOME` moves the lookup wholesale (measured), and
+  it is in neither `PASSTHROUGH_NAMES` nor -- since #191, the environment spelling of this sweep
+  as #171 is of #151 -- settable from `.issuebot/env`, which refuses it as a protected name.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
@@ -405,7 +435,7 @@ version, and moves by hand.
   absent and `_walk` yields no target through a closed `~/.config`), and without read
   `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
   `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
-  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  throughout. `$HOME` itself is such a directory, so that reached all four lists rather than
   only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
   is an absence, and anything else is an answer this process cannot get until the modes go back.
   A symlinked `.claude` is yielded as the target rather than descended into, the rule
@@ -1531,9 +1561,11 @@ second copy of a section that has already moved, and the two then drift.
   recipes the CI `docker` job parses out and runs, and `.issuebot/env`, what a hook hands the
   agent. Anything about what a session's own tests need to run belongs here.
 - `docs/operations.md`: running a deployment -- more than one repository against one store,
-  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Cost,
-  Restarts, Configuration changes, Upgrades, Safety). The recovery an operator performs on a
-  blocked or over-budget issue is documented there and nowhere else.
+  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Checks
+  that never ran, Cost, Restarts, How long a workspace lives, Configuration changes, Upgrades,
+  Safety). The recovery an operator performs on a blocked or over-budget issue is documented
+  there and nowhere else, as is the difference between a check that failed and one Actions
+  never ran.
 - `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
   a browser that will not speak it, the hero's six tiles, and what "issues closed" counts.
 - `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust

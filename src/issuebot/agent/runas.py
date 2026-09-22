@@ -19,8 +19,9 @@ account's; everything else is exactly what the worker built. ``python -m
 issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec``,
 ``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
 (the agent's files under a workspace, which the worker's uid may not unlink) and ``sweep``
-(what a prior session left in the account's home for the next one to load: the config under
-``~/.claude``, #101, and the shell start-up files every ``bash -lc`` hook sources, #137).
+(what a prior session left in the account's home for the next one to load or to run: the config
+under ``~/.claude``, #101, the shell start-up files every ``bash -lc`` hook sources, #137, the
+config a tool reads there, #151, and the directory ``gh`` runs its extensions from, #186).
 """
 
 import argparse
@@ -170,6 +171,54 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
     (".config", "git", "config"),
     (".ssh", "config"),
 )
+
+# The same home again, and the same class of residual, but an *executable* rather than a
+# setting (#186): the directory ``gh`` dispatches its extensions from. ``gh extension install``
+# puts a program under ``~/.local/share/gh/extensions/gh-<name>/`` and ``gh <name>`` runs it --
+# and, measured on this image's ``gh`` (2.100.0), the install step is not part of the channel:
+# a directory and an executable file written by hand are dispatched just the same, with no
+# manifest, no registry entry and no network. A list of its own rather than a fourth entry in
+# ``TOOL_CONFIG_SWEEP`` because the two are checked against different things and answer
+# differently: that one names config a tool *reads*, checkable against ``git-config(1)`` and
+# ``ssh_config(5)``, where this is a program the session *wrote*, checkable against
+# ``gh extension``'s own layout, and unlike git and ssh there is no root-owned location that
+# serves the same purpose (below).
+#   The channel has the narrow shape #151 measured for ``gh``'s ``aliases:`` and not the one
+#   that settled it: an extension cannot shadow a core command (``gh issue`` still ran the
+#   built-in with a ``gh-issue`` extension in place) and no ordinary ``gh`` command touches the
+#   directory, so a plant on an invented name fires only if some later session happens to
+#   invoke that name. What makes it a sweep anyway is the other half, which the narrow reading
+#   misses: where a deployment *has* installed an extension, a session can overwrite the
+#   executable in place, and then the plant fires on the ordinary command that deployment's
+#   sessions already run. So the deployment with a reason not to sweep is the one where the
+#   channel is widest, and sweeping leaves it an ``unknown command`` rather than someone
+#   else's program.
+#   What a deployment does instead: an extension is an executable that ``gh`` hands its argv and
+#   its own environment to -- no credential is injected, measured with ``GH_TOKEN`` unset -- so
+#   the same program installed root-owned on the session's ``PATH``, in an image built ``FROM``
+#   this one, does the same work under its own name. That is the ``/etc/gitconfig`` answer of
+#   #151 and #137 in the only spelling ``gh`` leaves: ``gh`` dispatches from this directory
+#   alone, not from ``PATH`` (``gh-pathpwn`` on ``PATH`` was an ``unknown command``) and not
+#   from ``GH_CONFIG_DIR``. What is lost is the ``gh `` prefix, and nothing else.
+#   The cost is stated plainly rather than argued away: the sweep runs before every turn and
+#   before every login shell, so an extension an ``after_create`` hook installs is gone before
+#   turn 1, and one a session installs for itself is gone at the next turn.
+# Directory-specific, like every entry above: ``extensions`` and not ``~/.local/share/gh``,
+# which is the tool's data directory, and certainly not ``~/.local/share`` or ``~/.local``,
+# which are every tool's -- ``~/.local/state/gh`` sits beside it holding ``gh``'s own state and
+# is a survivor the tests pin. Walked component by component like the nested entries above, so
+# a session that replaces any of the four with a symlink has the link unlinked rather than the
+# tree it points at swept.
+#   The other half of the guarantee is the environment, and it holds for the same reason the one
+#   above does: ``gh`` dispatches from ``$XDG_DATA_HOME/gh/extensions`` when that name is set
+#   (measured), so a sweep of the default path alone would be a default rather than a guarantee.
+#   ``XDG_DATA_HOME`` is in neither ``PASSTHROUGH_NAMES``, so it is not inherited from the
+#   worker, nor -- since #191, the environment spelling of this sweep as #171 is of #151 --
+#   settable from ``.issuebot/env``, where it is refused as a protected name. That is
+#   ``XDG_CONFIG_HOME``'s standing for ``TOOL_CONFIG_SWEEP``'s git half, and the two lists carry
+#   the same weight. What neither bounds is a session exporting the name in its *own* shell for
+#   its *own* ``gh``, which needs no extension directory to be a session running its own code.
+TOOL_EXTENSION_SWEEP: tuple[tuple[str, ...], ...] = ((".local", "share", "gh", "extensions"),)
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -541,15 +590,17 @@ def _walk(root: Path, parts: Sequence[str]) -> Path | None:
 
 def _sweep_targets(home: Path) -> Iterator[Path]:
     """Every path the sweep removes under ``home``: the shell start-up files, the tool config
-    files, the named ``.claude`` surfaces and each project's auto memory directory.
+    files, ``gh``'s extension directory, the named ``.claude`` surfaces and each project's auto
+    memory directory.
 
     ``projects`` and each entry in it are walked, never followed: claude
     creates real directories there, so a symlink at either level is a session's, planted to
     point claude's memory read at a tree the sweep would not visit, and it is yielded as the
     target -- unlinked like a symlinked surface -- rather than stepped through. ``_walk``
-    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP``."""
+    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP`` and
+    ``TOOL_EXTENSION_SWEEP``, every component of which is one a session could replace."""
     yield from (home / name for name in SHELL_STARTUP_SWEEP)
-    for parts in TOOL_CONFIG_SWEEP:
+    for parts in (*TOOL_CONFIG_SWEEP, *TOOL_EXTENSION_SWEEP):
         target = _walk(home, parts)
         if target is not None:
             yield target
@@ -611,7 +662,8 @@ def _entries(path: Path) -> list[Path]:
 def _sweep(home: Path) -> None:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
     its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
-    command (``TOOL_CONFIG_SWEEP``) and the loadable config surfaces under ``.claude``
+    command (``TOOL_CONFIG_SWEEP``), the directory ``gh`` dispatches its extensions from
+    (``TOOL_EXTENSION_SWEEP``) and the loadable config surfaces under ``.claude``
     (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
     Keeps the credential and claude's own runtime state -- and everything else in the home,
