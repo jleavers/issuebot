@@ -246,21 +246,21 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 # section and finite. Names and not an `LD_` prefix, and the counter-example is decisive:
 # `LD_RUN_PATH` is binutils `ld`'s link-time default for `-rpath`, so it is the very route a
 # hook is told to use instead of `LD_LIBRARY_PATH` below, and a prefix would refuse the
-# recommended workaround. `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_DEBUG`, `LD_DEBUG_OUTPUT`,
-# `LD_PROFILE` and `GLIBC_TUNABLES` stay out too: each was measured leaving `git --version`
-# working, and none of them names an object the loader would not otherwise have loaded.
+# recommended workaround. `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_PROFILE` and `GLIBC_TUNABLES`
+# stay out too: each was measured leaving `git --version` working, and none of them names an
+# object the loader would not otherwise have loaded.
 # `LD_DEBUG_OUTPUT` stays out as well, for a reason worth stating since `LD_DEBUG` is in: it
 # only redirects what `LD_DEBUG` asks for and is inert on its own, measured leaving
 # `git --version` working with no `LD_DEBUG` set.
 # The cost is not zero, and it is `LD_LIBRARY_PATH`'s alone: a target repository's
 # `after_create` may legitimately build against a library in a private prefix whose tests the
 # *agent's* turn then runs, which is a hand-over and so exactly what this refuses. The routes
-# that remain are in the README: a `RUNPATH` baked at link time (`-Wl,-rpath`, or `LD_RUN_PATH`,
-# which is unprotected), an `/etc/ld.so.conf.d` entry with `ldconfig` in an image built `FROM`
-# this one -- root's, outside the session's reach, the route already given for `/etc/gitconfig`
-# -- and the variable in the hook's own shell around the command the hook itself runs, which is
-# unchanged. A built artefact that needs a library at run time has `RUNPATH` for exactly that;
-# `LD_LIBRARY_PATH` is the override you reach for while testing one.
+# that remain are in `docs/toolchains.md`: a `RUNPATH` baked at link time (`-Wl,-rpath`, or
+# `LD_RUN_PATH`, which is unprotected), an `/etc/ld.so.conf.d` entry with `ldconfig` in an image
+# built `FROM` this one -- root's, outside the session's reach, the route already given for
+# `/etc/gitconfig` -- and the variable in the hook's own shell around the command the hook
+# itself runs, which is unchanged. A built artefact that needs a library at run time has
+# `RUNPATH` for exactly that; `LD_LIBRARY_PATH` is the override you reach for while testing one.
 LOADER_ENV_NAMES: frozenset[str] = frozenset(
     {
         "LD_PRELOAD",

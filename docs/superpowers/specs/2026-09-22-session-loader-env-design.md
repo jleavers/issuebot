@@ -168,7 +168,7 @@ list's rule that `PATH`, `HOME`, `GH_TOKEN` and the fixed entries already serve 
 cannot take either down in the middle of a run" — and it is the only entry in the whole file
 that fails *silently*. It is one name in the same list, found while measuring the three the
 issue names, and closing it here rather than filing it is the cheaper honest option. It is
-called out as a fourth in the pull request so a reviewer sees it was a judgement and not a
+called out as an extra name in the pull request so a reviewer sees it was a judgement and not a
 smuggled scope increase.
 
 ### `LD_DEBUG` — protected; the same denial by a second spelling, and the one nearly missed
@@ -221,7 +221,7 @@ against `bash(1)`'s "Invocation".
   `GLIBC_TUNABLES` is glibc's tunables namespace — allocator and hwcap parameters, no object —
   and is named here because it is the other name a reader will ask about.
 - **`LD_RUN_PATH`**, above: out on purpose, pinned by a test as unprotected, and the reason this
-  is four names rather than a prefix.
+  is five names rather than a prefix.
 - **musl.** The names are the same there, so the bound is spelled the same on a musl base; the
   measurements are glibc's, which is what this image is.
 - **Other tooling's variables** — `NODE_OPTIONS`, `PYTHONSTARTUP` and their kind — which is
@@ -260,7 +260,7 @@ compiler-free — three of the five are visible without building anything. A `be
 writes all five plus a `DSN` into `.issuebot/env`, with `LD_PRELOAD` naming a file that is not an
 ELF object and `LD_DEBUG` set to `help`; the `after_run` hook — run through `bash -lc`, the shipped `hook_shell` — prints
 `hook-ran` and the DSN. Its stdout is exactly those two lines, its stderr carries no `ld.so`
-complaint and not the planted path, and the worker's log names all four keys.
+complaint and not the planted path, and the worker's log names all five keys.
 
 Two-sided, and the failure is the proof: with `*LOADER_ENV_NAMES` taken back out of
 `PROTECTED_ENV_NAMES`, all eight of these tests fail, and the workspace one fails by printing

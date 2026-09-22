@@ -881,7 +881,7 @@ def test_the_loader_protections_are_pinned() -> None:
     [
         # binutils `ld`'s link-time default for `-rpath`, not the runtime loader's at all --
         # and the very route a hook is pointed at instead of `LD_LIBRARY_PATH`. Protecting it
-        # would refuse the recommended workaround, which is the decisive reason this is four
+        # would refuse the recommended workaround, which is the decisive reason this is five
         # names and not an `LD_` prefix.
         "LD_RUN_PATH",
         # Behaviour and diagnostics. Each was measured leaving `git --version` working, and
@@ -913,7 +913,7 @@ def test_a_workspace_env_line_re_pointing_the_loader_never_reaches_the_environme
 ) -> None:
     """The channel end to end (#187): what a session leaves in `.issuebot/env` is what the
     *next* session on that issue is handed, and the complaint names the key that was dropped.
-    Before this change the same file was measured handing all four straight through, and each
+    Before this change the same file was measured handing all five straight through, and each
     was measured acting on the image's own `bash`, `git` and `claude`."""
     (tmp_path / ".issuebot").mkdir()
     (tmp_path / ".issuebot" / "env").write_text(

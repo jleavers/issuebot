@@ -579,8 +579,8 @@ hook that would truncate it again or append a duplicate per session.
   - `LD_LIBRARY_PATH` names no object, but it is `PATH`'s rule one layer down: a file planted at
     a soname the target needs, in a directory of the line's choosing, is what the loader maps,
     and its constructor was measured running inside `git` with no `LD_PRELOAD` anywhere.
-  - `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG` are the odd ones out, and the only entries in this
-    whole file that fail *silently*: the loader prints — to **stdout** — and **exits 0 without
+  - `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG` are the odd ones out, and the only protected
+    names that fail *silently*: the loader prints — to **stdout** — and **exits 0 without
     entering `main`**, the dependency list for the first, the option list for `LD_DEBUG` set to
     any value containing `help` (`LD_DEBUG=help`, `LD_DEBUG=libs,help`). One line of either
     makes every hook "pass" without running its commands, displaces whatever that hook's stdout
