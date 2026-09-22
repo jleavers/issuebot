@@ -303,16 +303,16 @@ def test_parse_workspace_env_accepts_the_shapes_a_hook_writes() -> None:
     text = (
         "# a comment\n"
         "\n"
-        "export ARROWBOT_DATABASE_URL=postgresql://issuebot@/db?host=/tmp/s\r\n"
-        "  ARROWBOT_JS_HARNESS=1\n"
+        "export ACME_DATABASE_URL=postgresql://issuebot@/db?host=/tmp/s\r\n"
+        "  ACME_JS_HARNESS=1\n"
         "EQUALS=a=b=c\n"
         "EMPTY=\n"
         "  export SPACED=  padded\n"
     )
     env, warnings = parse_workspace_env(text)
     assert env == {
-        "ARROWBOT_DATABASE_URL": "postgresql://issuebot@/db?host=/tmp/s",
-        "ARROWBOT_JS_HARNESS": "1",
+        "ACME_DATABASE_URL": "postgresql://issuebot@/db?host=/tmp/s",
+        "ACME_JS_HARNESS": "1",
         "EQUALS": "a=b=c",
         "EMPTY": "",
         "SPACED": "  padded",
@@ -969,8 +969,8 @@ async def test_run_turn_hands_the_agent_the_workspace_env_file(
 ) -> None:
     (workspace / ".issuebot").mkdir()
     (workspace / ".issuebot" / "env").write_text(
-        "export ARROWBOT_DATABASE_URL=postgresql://issuebot@/db\n"
-        "ARROWBOT_JS_HARNESS=1\n"
+        "export ACME_DATABASE_URL=postgresql://issuebot@/db\n"
+        "ACME_JS_HARNESS=1\n"
         # The two a typo must not take out from under a running turn.
         "PATH=/hijacked\n"
         "GH_TOKEN=stolen\n"
@@ -980,15 +980,15 @@ async def test_run_turn_hands_the_agent_the_workspace_env_file(
         workspace,
         extra_env={
             "CLAUDE_FAKE_RECORD": str(record),
-            "CLAUDE_FAKE_RECORD_ENV": "ARROWBOT_DATABASE_URL,ARROWBOT_JS_HARNESS,PATH",
+            "CLAUDE_FAKE_RECORD_ENV": "ACME_DATABASE_URL,ACME_JS_HARNESS,PATH",
         },
         token="sekret",
     )
     turn = await run(runner, workspace)
     assert turn.ok
     recorded = json.loads(record.read_text())["env"]
-    assert recorded["ARROWBOT_DATABASE_URL"] == "postgresql://issuebot@/db"
-    assert recorded["ARROWBOT_JS_HARNESS"] == "1"
+    assert recorded["ACME_DATABASE_URL"] == "postgresql://issuebot@/db"
+    assert recorded["ACME_JS_HARNESS"] == "1"
     assert recorded["PATH"] == os.environ["PATH"]
     assert recorded["GH_TOKEN"] == "sekret"
 
