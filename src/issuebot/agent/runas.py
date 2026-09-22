@@ -148,8 +148,9 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   or a submodule URL in an image built ``FROM`` this one can, and a name on this list costs
 #   nothing where the file does not exist.
 #   ``.config/gh/config.yml``: ``gh``'s own configuration, added by #173 (spec
-#   ``2026-09-18-session-tool-config-design.md``, whose Residuals section is where #151 recorded
-#   the decision this reverses). #151 left it off on the ground that its command-bearing key is
+#   ``2026-09-22-session-gh-config-design.md``; the decision it reverses is under Residuals in
+#   #151's own, ``2026-09-18-session-tool-config-design.md``, marked superseded there).
+#   #151 left it off on the ground that its command-bearing key is
 #   ``aliases:``, which runs a shell command (``gh pwn`` -> ``GH-ALIAS-RAN``) but cannot shadow
 #   a core command (``gh issue`` still runs the built-in with an ``issue:`` alias in place), so
 #   a plant fires only if a later session happens to invoke the invented subcommand name it
@@ -176,8 +177,9 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
 # session's privilege domain, in the image or in one built ``FROM`` it.
 # ``gh`` has no system-wide file to answer with, and needs none: it runs perfectly well with
-# no ``config.yml`` at all -- measured, an empty home costs ``gh --version``, ``gh config get``
-# and ``gh api`` nothing -- and writes one when it next has config of its own to write. So a
+# no ``config.yml`` at all -- measured, an empty home gets no file at all from ``gh --version``,
+# ``gh config get`` or ``gh api`` -- and writes one when it next has config of its own to
+# write, which its ``hosts.yml`` migration is one occasion of. So a
 # hook's ``gh config set`` reaches the rest of its own shell and the sweep costs the account
 # nothing it cannot ask for again. What a hook may hand the *session* is the
 # question #171 settled for the same tools' environment variables, and the answer is the same
