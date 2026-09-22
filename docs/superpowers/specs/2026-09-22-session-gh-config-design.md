@@ -40,7 +40,7 @@ Work with GitHub issues.
 ## The decision the issue asks for: swept
 
 **The alias key is not the worst key in the file, and that is what settles it.** `gh config
-set --help` prints the list of keys `gh` respects, and `http_unix_socket` is on it. Planted in
+list` prints the thirteen keys `gh` respects, and `http_unix_socket` is one of them. Planted in
 `config.yml` it re-points `gh`'s HTTP transport at a unix socket of the session's choosing --
 and unlike an alias it fires on an **ordinary core command**, which is the exact property #151
 rested "not swept" on.
@@ -107,10 +107,12 @@ against the respected-key list, there is nothing there to lose.
 | `editor`, `browser` | Under `TOOL_CONFIG_ENV_PREFIXES`' `GH_` since #171, and named there for this reason |
 | `http_unix_socket` | The channel above |
 | `aliases` | The channel #151 measured -- and not writable by `gh config set` at all (below) |
-| `git_protocol`, `color_labels`, `accessible_colors`, `accessible_prompter`, `spinner`, `prefer_editor_prompt` | Inert: presentation and protocol preferences that name no command and re-point nothing |
+| `git_protocol`, `color_labels`, `accessible_colors`, `accessible_prompter`, `spinner`, `prefer_editor_prompt`, `telemetry` | Inert: presentation and protocol preferences that name no command and re-point nothing |
+| `api_host` | A per-host setting. Measured as a global key it resolves (`gh config get api_host` reads it back) but does not re-point an ordinary command: with `api_host: 127.0.0.1:9` in place, `gh api user` still reached api.github.com and came back with GitHub's own `Bad credentials`. Swept with the file either way |
 
 `aliases` is worth stating separately, because "the file `gh config set` writes" is what made
-the trade sound even. `gh config set` does not write an alias:
+the trade sound even. It is not on `gh config list` at all, and `gh config set` does not write
+one:
 
 ```text
 $ gh config set aliases.pwn '!echo x'

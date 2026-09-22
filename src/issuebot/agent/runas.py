@@ -154,8 +154,8 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   a core command (``gh issue`` still runs the built-in with an ``issue:`` alias in place), so
 #   a plant fires only if a later session happens to invoke the invented subcommand name it
 #   chose -- narrower than git's ``core.pager``, which fires on an ordinary command. That
-#   reasoning held for ``aliases:`` and does not hold for the file. ``http_unix_socket``, on the
-#   respected-key list ``gh config set --help`` prints, re-points ``gh``'s HTTP transport at a
+#   reasoning held for ``aliases:`` and does not hold for the file. ``http_unix_socket``, one of the
+#   thirteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
 #   unix socket the planting session names, and it *does* fire on an ordinary core command:
 #   measured, ``gh api user`` handed the socket ``Authorization: token <GH_TOKEN>`` and took a
 #   forged ``{"login": "forged"}`` back -- which is ``own_login()``, the probe #77's provenance

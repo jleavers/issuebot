@@ -367,8 +367,9 @@ version, and moves by hand.
   git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
   `ProxyCommand`, `gh`'s `aliases`. The `gh` entry is #173, which reversed #151's decision to
   leave it: #151 measured `aliases:`, which runs a shell command but cannot shadow a core one,
-  and judged the channel too narrow to spend an entry on; `http_unix_socket`, on the same
-  respected-key list, re-points `gh`'s HTTP transport at a unix socket the session names and
+  and judged the channel too narrow to spend an entry on; `http_unix_socket`, one of the
+  thirteen keys `gh config list` prints, re-points `gh`'s HTTP transport at a unix socket the
+  session names and
   *does* fire on an ordinary core command -- measured, `gh api user` handed a listener
   `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, which is
   `own_login()` and so #77's whole provenance rule, and the worker's own `gh repo clone` went
