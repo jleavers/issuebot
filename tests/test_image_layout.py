@@ -227,6 +227,44 @@ def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_sess
     assert "test -f /home/agent/.ssh/known_hosts" in CI
 
 
+def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() -> None:
+    """#190: the one file the sweep edits rather than removes. `~/.config/gh/hosts.yml` has to
+    survive -- it is the credential state #151 pinned and #173 kept -- while the `api_host` a
+    session can leave in it re-points `gh` on an ordinary core command, `gh repo clone` among
+    them, which is how issuebot builds the next session's workspace. Two-sided like the git half
+    above: the plant is shown re-pointing `gh` before the sweep, so a `gh` that stopped reading
+    the key could not pass this as a no-op. And the credential has to come through the edit,
+    which is the whole reason it is an edit."""
+    assert "api_host: 127.0.0.1" in CI
+    assert "before=$(sudo -n -H -u agent gh api user 2>&1 || true)" in CI
+    assert 'echo "the planted api_host did not re-point gh: $before" >&2; exit 1' in CI
+    assert "after=$(sudo -n -H -u agent gh api user 2>&1 || true)" in CI
+    assert 'echo "gh is still re-pointed after the sweep: $after" >&2; exit 1' in CI
+    assert (
+        'test -z "$(sudo -n -H -u agent gh config get -h github.com api_host 2>/dev/null || true)"'
+    ) in CI
+    # The file stays, the credential in it stays, and the steering key is gone.
+    assert "test -f /home/agent/.config/gh/hosts.yml" in CI
+    assert "grep -q gho_KEEPTHISCREDENTIAL0123456789012345 /home/agent/.config/gh/hosts.yml" in CI
+    assert "! grep -q api_host /home/agent/.config/gh/hosts.yml" in CI
+
+
+def test_ci_asks_the_images_own_gh_which_keys_it_writes_host_level() -> None:
+    """The other half of #190, and what lets the edit be a denylist at all. `GH_HOSTS_STEERING_KEYS`
+    is a measurement -- the keys `gh config set -h <host>` writes into `hosts.yml` -- and a
+    measurement of somebody else's tool goes stale on their release schedule, not ours. So CI
+    asks the image's own `gh` every key it advertises and compares what landed against the list,
+    and a release that adds a sixth fails a pull request rather than quietly handing the next
+    session a steering key the sweep does not name."""
+    assert "gh writes only the steering keys the sweep names into hosts.yml" in CI
+    # Every key gh advertises, read off its own help rather than hard-coded here: a new one is
+    # picked up without an edit, which is the point.
+    assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
+    assert "gh config set -h github.com $key probe-$key" in CI
+    assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
+    assert "if written != named:" in CI
+
+
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
     """The ``web`` service takes HTTP from a browser and needs no privilege transition, so it
     runs as an account that is not the worker's (#102): outside group ``issuebot``, which is

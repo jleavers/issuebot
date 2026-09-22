@@ -377,6 +377,43 @@ version, and moves by hand.
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
+  `GH_HOSTS_STEERING_KEYS` is the one place the sweep looks *inside* a file rather than removing
+  it (#190, spec `2026-09-22-session-gh-hosts-design.md`): `~/.config/gh/hosts.yml` is credential
+  state -- it carries the `oauth_token` a session authenticates `gh` with, which is why #151
+  pinned it a survivor and #173 kept it -- and it is not *only* that. `gh config set -h <host>`
+  writes there rather than into the `config.yml` #173 sweeps, and `api_host` among the keys it
+  can carry re-points `gh` on an ordinary core command: measured against `gh 2.100.0`, a planted
+  value sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` `WorkspaceManager`
+  runs for the next workspace to the host the planting session named. What the channel cannot do
+  is measured too, and is what keeps it a key-level edit rather than a fifth swept path: `gh`
+  sends no `Authorization` header to a substituted host (from `GH_TOKEN` or from the file's own
+  `oauth_token`; `gh help config` says so outright), a self-signed certificate is refused so a
+  forged answer needs a CA in root's trust store, and #126's proxy refuses a name off its
+  allow-list while an on-list one completes -- so what survives is availability, not
+  confidentiality, and it needs no network at all. The five keys are the closed set `-h` can
+  write, measured by asking for each of the thirteen `gh config --help` lists: `api_host`,
+  `http_unix_socket`, `pager`, `editor` and `browser`, every one a steering key and none
+  credential state, so `oauth_token`, `user` and the `users:` subtree cannot be touched by
+  removing them. `http_unix_socket`, `pager`, `editor` and `browser` are measured *inert* in this
+  position (the same values at top level fire; the hostname-less lookup is what gh's own pager,
+  editor and browser resolution uses) and are named anyway, since a key that does nothing costs
+  nothing to name where leaving one out costs the channel back. A denylist, unlike
+  `--strict-mcp-config`'s "name what survives", because the failures are not symmetrical: a
+  steering key a future `gh` adds and this list misses costs the bounded channel above, where a
+  keep-list stripping a credential key a future `gh` adds would break authentication for every
+  session -- so the set is *proved* instead, the `docker` CI job asking the image's own `gh`
+  which keys `-h` writes and failing on anything but these five. Fail-safe in one direction only:
+  a file that will not open even with the modes put back, one over `GH_HOSTS_LIMIT` (256 KiB),
+  bytes that are not UTF-8 or not YAML, and a document that is not the mapping of hosts `gh`
+  writes are all left exactly as they are, since rewriting a credential file on a guess is the
+  one outcome worse than the plant. It is not written at all unless a key came out, so an
+  unplanted home keeps its `hosts.yml` byte for byte across the sweep that runs before every turn
+  and every hook; the rewrite is atomic (a temporary file in the same directory, `os.replace`) and
+  carries the original's mode, since `gh` refuses one wider than `0600`; and a symlink at that
+  name or on the way to it is unlinked rather than followed, `_walk`'s rule. `_relax_file` is the
+  one new repair beside `_relax`: a removal needs the parent's bits and nothing of the file's own
+  mode, where an edit has to read its target, so a session that plants a key and then `chmod
+  0000`s the file would otherwise keep it at no cost to itself.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`

@@ -253,11 +253,29 @@ to run. Nothing a deployment needs goes there: the bot's identity is the
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
-`/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
+`/etc/ssh/ssh_config`, which are root's and which no session can write.
+
+One file is *edited* rather than removed, and it is the only one: `~/.config/gh/hosts.yml`.
+It is credential state — it holds the `oauth_token` a session authenticates `gh` with, where a
+session has one — so taking it would break authentication for every deployment that relies on
+it, and it stays. But `gh config set -h <host> <key> <value>` writes into that file rather than
+into `config.yml`, and one of the keys it can carry, `api_host`, re-points `gh` at a host of the
+planting session's choosing on an ordinary command: measured against `gh 2.100.0`, a planted
+`api_host` sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` issuebot runs
+to build the next workspace to that host instead of GitHub's. So the sweep removes exactly the
+five keys `gh config set -h` can write — `api_host`, `http_unix_socket`, `pager`, `editor` and
+`browser`, none of which is credential state — and leaves everything else in the file, the
+tokens included. A file with none of them in it is not rewritten at all. What is left of the
+channel is bounded and documented in
+`docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
+substituted host, a forged answer needs a certificate authority in the system trust store, which
+is root's, and the egress proxy refuses any host off its allow-list.
+
+It leaves the rest of the
 home alone: the credential (`.credentials.json`, which rotates its refresh token), the
 transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
 tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
+sat in stay too, with whatever else is in them — the rest of `gh`'s configuration beside git's,
 `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
 denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
 new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
