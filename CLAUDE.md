@@ -73,9 +73,18 @@ refuses all three, by name, while it is unset or empty; `.env.example` ships the
 whole file before it filters by profile, so even `--profile test` needs the variable *set*,
 though `test-db` never reads it: that cluster is a throwaway on tmpfs behind a loopback port and
 authenticates with `trust` (#62's choice for the workspace cluster), which is why its DSN above
-names no password, as does the CI `test` job's service. Every DSN in the README is a placeholder
-over the variable for the same reason. The image applies the password at initdb only; a cluster
-that already exists is rotated with `ALTER ROLE` (README, "Rotating the database password").
+names no password, as does the CI `test` job's service. No operator-facing file holds a working
+one either, for the same reason: a DSN in the prose is the `${ISSUEBOT_DB_PASSWORD}`
+placeholder over the variable, as the hub's is in `README.md`, or it carries no password at all,
+as the `trust` throwaway's does in `CONTRIBUTING.md` and `docs/toolchains.md`. That is the rule
+`tests/test_compose_credentials.py` checks, and it checks it over the whole of
+`OPERATOR_FACING` -- those three prose files, `docs/operations.md`, which documents the rotation
+without spelling a DSN, and `compose.yaml`, `.env.example`, this file, the `Dockerfile` and the
+workflows beside them -- so a claim made about the README alone is narrower than what is
+enforced, and it is the narrow claim an editor would act on. The image applies the password at
+initdb only; a cluster that already exists is rotated with `ALTER ROLE`
+([`docs/operations.md`, "Rotating the database
+password"](docs/operations.md#rotating-the-database-password)).
 
 **Do not pass `ISSUEBOT_DB_PORT=...` inline to `docker compose`.** That is the long-lived
 `db`'s port, and it belongs to the project's env file (5432 in `.env.example`, 5434 on this
@@ -171,6 +180,16 @@ version, and moves by hand.
   keep the child from exiting. The read that crosses the cap is dropped whole, so what comes
   back is at most the limit rather than exactly it. `GhRunner.run` and
   `WorkspaceManager._run_argv` are its two callers.
+- `issuebot.invocation`: `run_hint(subcommand)`, the clause a message names to say how to run
+  `issuebot <subcommand>` *here* (#169), and a leaf module for the reason `issuebot.pipes` is
+  one: `cli`, `orchestrator` and both GitHub adapters print the same remedy. Docker is the
+  standard deployment and inside the image `issuebot` is nobody's command, so there the clause
+  is `docker compose run --rm worker labels ensure` (`COMPOSE_SERVICE`, the README's own step
+  2) and on a host it stays `run issuebot labels ensure`, since that operator may have built no
+  image at all. `CONTAINER_MARKER` (`/etc/issuebot`, the directory the build creates and writes the
+  session-account list inside, root's and absent on a host) is what tells them apart,
+  stat'ed at call time so the suite -- which runs in both -- can point it elsewhere; conftest's
+  `outside_the_container` pins the host wording for every test that says nothing about it.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports
   `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a
   `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's
@@ -396,9 +415,10 @@ version, and moves by hand.
   environment and injects no credential, so only the `gh ` prefix is lost. Directory-specific
   like every entry above, since `~/.local/state/gh` is `gh`'s own state beside it and
   `~/.local/share` is every tool's; walked component by component, so a link at any of the four
-  is unlinked rather than followed. The residual is `XDG_DATA_HOME`, which moves the lookup
-  wholesale and is not in `TOOL_CONFIG_ENV_NAMES` -- the environment spelling, filed separately
-  as #191, the way #171 was filed for #151.
+  is unlinked rather than followed. The environment half holds the same way
+  `TOOL_CONFIG_SWEEP`'s git half does: `XDG_DATA_HOME` moves the lookup wholesale (measured), and
+  it is in neither `PASSTHROUGH_NAMES` nor -- since #191, the environment spelling of this sweep
+  as #171 is of #151 -- settable from `.issuebot/env`, which refuses it as a protected name.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
@@ -740,8 +760,8 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
-  `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
+  `BASHOPTS`, `PS4`, `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -761,7 +781,24 @@ version, and moves by hand.
   `EDITOR` is the shape, and `EDITOR` fires on a plain `git commit` with no terminal. A rule
   checkable against `git-var(1)` and `gh environment`, and finite because a chain has an end;
   names rather than prefixes because `SSH_AUTH_SOCK` is the deploy-key route a hook author
-  keeps. The deployment's
+  keeps. The two XDG roots are on no chain and are there under a rule of their own -- a base
+  directory is protected when a tool issuebot launches resolves through it something it will
+  execute or read as configuration: `$XDG_CONFIG_HOME/{git/config,gh/config.yml}` for the
+  first, and, since #191 (spec `2026-09-22-session-gh-extension-env-design.md`),
+  `$XDG_DATA_HOME/gh/extensions` for the second, the directory `gh` dispatches `gh <name>`
+  from, which is a *program* rather than a setting naming one and which no `GH_` name reaches
+  (`GH_CONFIG_DIR` moves the config directory alone). That is the environment spelling of the
+  same directory in the account's home, which is #186's question, and the variable also
+  *hides* the home's own extensions, so leaving it would make any sweep there conditional on a
+  name nothing checked, the way #171 stood to #151; the cost, since
+  `gh` has no system-wide extension location, is that a deployment wanting an extension for
+  every session installs the program root-owned on `PATH` and invokes it under its own name.
+  The specification's other five roots were measured unread by those two tools and stay
+  settable, a cache or state directory being what the file is for (`claude` reads XDG names
+  too, and nothing was shown to work through them: the note's residual). `XDG_` is a specification's namespace
+  rather than a tool's, so it is names here and not a prefix: its roots are a short fixed list
+  (seven in the current version) and which of them belongs is a measurement, not a manual to
+  keep up with. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
@@ -863,7 +900,8 @@ version, and moves by hand.
   `in_progress`, so a move of that label broke the chain before it ever reached the escape.
   Only a run that succeeded, or the blocked escape that ends a chain by handing the issue to a
   human (`_record_escape`, on `applied` or `skipped`), clears it; that second one is what makes
-  the README's documented recovery -- fix the cause, then relabel -- still work.
+  the documented recovery -- fix the cause, then relabel -- still work
+  ([`docs/operations.md`, "Blocked"](docs/operations.md#blocked)).
   `agent.max_issue_cost_usd` (default `0`, off) is the gate's cumulative spend ceiling, the
   bound on an issue relabelled again and again. A budget refusal is never silent, because a
   board that stops moving for an issue with nothing said about it anywhere a human looks is
@@ -1460,6 +1498,84 @@ version, and moves by hand.
 Design documents: `docs/superpowers/specs/` (phased design and one spec per phase),
 `docs/superpowers/plans/` (one implementation plan per phase).
 
+## The files beside this one
+
+Prose in this repository has one home each, and the homes have moved (#196, #199, #200, #201).
+A change to operator documentation therefore starts by choosing the file, not by opening the
+README and writing there: the README is the front door and most of what used to sit behind it
+now does not, so an edit made in the wrong file either lands where nobody reads it or becomes a
+second copy of a section that has already moved, and the two then drift.
+
+- `README.md`: the front door -- what issuebot is, the label state machine, the quick start,
+  the five-step setting-up guide, the configuration reference (every setting, the prompt and
+  its variables, model labels) and Development. Four of its passages are pinned by
+  `tests/test_readme_bounds.py`, which pins *structure* rather than behaviour (#74). Each of the four is a choice point that widens the session's
+  reach and cannot be defaulted shut -- Workflows write on the token, the classic `repo`
+  token, the host route, and the Claude credential -- so the note saying which boundary the
+  choice removes *is* the enforcement, and it has to be legible where the reader acts rather
+  than in a Safety bullet they reach later or not at all. The test holds each consequence
+  within `POINT_OF_USE` (700 characters) *after* its incentive, and each qualifier in the
+  incentive's own block; matching is over whitespace-collapsed text, so rewrapping one of
+  those paragraphs is free and rewording one is not. It is recorded here for the same reason
+  `test_pins.py`, `test_web_vendor.py` and `test_compose_credentials.py` are: a session
+  tightening the prose in Prerequisites or Development will fail it, and the failure names a
+  phrase rather than a rule.
+- `docs/toolchains.md`: the *target* repository's toolchains, which #196 moved out of the
+  README -- PostgreSQL, Node, uv and PowerShell as the opt-in image build arguments, the hook
+  recipes the CI `docker` job parses out and runs, and `.issuebot/env`, what a hook hands the
+  agent. Anything about what a session's own tests need to run belongs here.
+- `docs/operations.md`: running a deployment -- more than one repository against one store,
+  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Cost,
+  Restarts, Configuration changes, Upgrades, Safety). The recovery an operator performs on a
+  blocked or over-budget issue is documented there and nowhere else.
+- `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
+  a browser that will not speak it, the hero's six tiles, and what "issues closed" counts.
+- `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust
+  one -- what it may reach (the egress allow-list and `ISSUEBOT_EGRESS_ALLOW`), one account
+  per concurrent session, and checking that the credential took. The reasoning behind those
+  bounds is in this file; that one is the operator's view of the same line.
+- `docs/BLUEPRINT.md`: the full requirements, and `docs/superpowers/` the designs and plans
+  above.
+- `CONTRIBUTING.md`: how a change gets in -- getting set up, pull requests, the two
+  conventions a contributor trips over (digest pins; the README's images are generated), how
+  to report a security issue instead, and the licence contributions are accepted under. Since
+  #201 it also says how each kind of contributor reaches `main`: from a fork without write
+  access, and from a branch here with it, where the ruleset below is what makes the pull
+  request the only route.
+- `SECURITY.md`: the vulnerability policy -- private reporting rather than a public issue,
+  particularly because this repository's issues are read by an agent that acts on them, and
+  what is in scope and what is not.
+- `LICENSE`: the repository is Apache-2.0 since #196, declared in `pyproject.toml` as
+  `license = "Apache-2.0"` with `license-files = ["LICENSE"]` (PEP 639, so the metadata and
+  the file cannot drift apart). No source file in the tree carries a header, so that one file
+  is the whole declaration, and a session adding a dependency or vendoring a file is deciding
+  whether its licence can sit under this one. The two vendored front-end libraries are the
+  standing exception and keep their own -- htmx 0BSD, Chart.js MIT -- each with its licence
+  file beside it under `src/issuebot/web/static/vendor/`, which that directory's
+  `README.md` records and `tests/test_web_vendor.py` checks.
+- `.github/ISSUE_TEMPLATE/`: `bug_report.yml` and `feature_request.yml`, the forms a reporter
+  fills in, part of the community health files #199 added. They are not cosmetic here: the
+  body they produce is the body a session is handed as `issue.body`, so a field added or
+  reworded changes what every prompt carries. `bug_report.yml` opens by saying that issues
+  here are public and an agent reads and acts on them, and sending a vulnerability to
+  `SECURITY.md` instead; `feature_request.yml` opens by saying the issue is a brief for
+  whoever picks the work up, which may be issuebot itself.
+- `tools/screenshots/` and `docs/images/`: the README's two images,
+  `docs/images/dashboard.png` and `docs/images/issue-journey.gif`, are *generated* --
+  `tools/screenshots/capture.py` drives a real dashboard serving the fabricated data
+  `seed.py` invents (the placeholder `acme/frontend`, invented issues, runs, costs and
+  tokens), so nobody's repository names or issue titles reach a public file. They are the one
+  artefact here that nothing holds to the code: change the web templates, the board's layout
+  or `app.css`'s `--bg`/`--ink`/`--muted`/`--line` tokens, and the images quietly describe a
+  dashboard that is gone while every test still passes. That is why `CONTRIBUTING.md` makes
+  regenerating them part of such a change rather than a follow-up, and
+  `tools/screenshots/README.md` is the recipe (Playwright's
+  chromium once per machine; the committed images are the *dark* theme, and `PALETTES` in
+  `capture.py` carries those same tokens for the caption strip it draws itself; each file must
+  stay under 500 KB, which `check-added-large-files` enforces and the capture checks first so
+  the rejection comes before the commit). #199 and #200 are where the images and their dark
+  theme came in.
+
 ## What issuebot is
 
 A bespoke reimplementation of [openai/symphony](https://github.com/openai/symphony)
@@ -1497,7 +1613,14 @@ Planned infrastructure: Docker, Python 3.14, PostgreSQL, GitHub Actions CI
 `AGENTS.md` is binding for agents in this repo. Read it, and note in particular:
 
 - **Never push to `main`.** Push a feature branch and open a PR for human
-  review. Never merge or close PRs — that is a human action.
+  review. Never merge or close PRs — that is a human action. Since #201 this is
+  no longer only a convention: `main` carries a repository ruleset that refuses
+  a direct push, a force push and a deletion, with no bypass for admins, so the
+  push fails at the server rather than landing and being noticed afterwards.
+  `AGENTS.md` records it and says how to read the rejection — the rule working,
+  not an obstacle to route around — and the remedy is the same one this bullet
+  already gives, a feature branch and a PR. A contributor without write access
+  reaches `main` the same way, through a fork and a PR (`CONTRIBUTING.md`).
 - **Never run destructive commands**: `rm -rf`, `git reset --hard`,
   `git clean -fd`.
 - **The repo is used from both Windows and Linux hosts.** Detect the OS before

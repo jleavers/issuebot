@@ -44,7 +44,7 @@ from issuebot.agent.runas import (
     _walk,
     anonymous_fd,
 )
-from issuebot.agent.runner import PASSTHROUGH_NAMES, ClaudeRunner
+from issuebot.agent.runner import PASSTHROUGH_NAMES, TOOL_CONFIG_ENV_NAMES, ClaudeRunner
 from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
@@ -539,13 +539,14 @@ def test_the_extension_list_names_the_directory_gh_dispatches_from() -> None:
     # and `~/.local` belong to every tool the session runs.
     for parts in ((".local",), (".local", "share"), (".local", "share", "gh")):
         assert parts not in TOOL_EXTENSION_SWEEP
-    # `XDG_DATA_HOME` is not inherited from the worker, which is what makes `~/.local/share`
-    # the path `gh` reads by default; a change there would need a second spelling here, exactly
-    # as `XDG_CONFIG_HOME` would for the git entry above. Only half of what `XDG_CONFIG_HOME`
-    # has, though, and the asymmetry is the recorded residual (#191): that one is also in
-    # `TOOL_CONFIG_ENV_NAMES`, so a workspace's `.issuebot/env` cannot set it, while this one
-    # is in neither list and a hook can.
+    # Which is only the path `gh` reads while nothing has moved it, so both halves of that are
+    # asserted here rather than left to the two lists that hold them: `XDG_DATA_HOME` is not
+    # inherited from the worker, and since #191 a workspace's `.issuebot/env` cannot set it
+    # either. That is `XDG_CONFIG_HOME`'s standing for the git entry above, so the sweep of the
+    # default path is a guarantee and not a default. (`test_agent_runner.py` pins the name's own
+    # refusal end to end; what this pins is that this list's promise depends on it.)
     assert "XDG_DATA_HOME" not in PASSTHROUGH_NAMES
+    assert "XDG_DATA_HOME" in TOOL_CONFIG_ENV_NAMES
 
 
 def test_sweep_unlinks_a_symlinked_extension_directory_without_following_it(

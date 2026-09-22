@@ -102,10 +102,14 @@ NO
 **Invariant.** A session cannot leave a program at the path `gh` dispatches from — the
 extension directory in the session account's home — for a later session's `gh` to run.
 
-Deliberately not the stronger claim about the home as a whole, which would be false: the
-lookup itself can be moved, and `XDG_DATA_HOME` moves it (measured above). That is the
-residual under [Residuals](#residuals), filed as #191, and it is the one configuration in
-which a program a session leaves *in the home* is still dispatched.
+The path, because the lookup itself can be moved and `XDG_DATA_HOME` moves it (measured
+above). That was written here as a residual and filed as #191, which has since landed: the
+name is in `TOOL_CONFIG_ENV_NAMES`, so a workspace's `.issuebot/env` is refused it, and it
+was never in `PASSTHROUGH_NAMES`, so it is not inherited from the worker either. With both
+halves the sweep of the default path is a guarantee rather than a default, which is the
+standing `XDG_CONFIG_HOME` gives `TOOL_CONFIG_SWEEP`'s git entry. What no list bounds, here
+or there, is a session exporting the name in its own shell for its own `gh` — a session
+running its own code needs no extension directory to do that.
 
 ## The decision the issue asks for: swept
 
@@ -174,18 +178,20 @@ the home for somebody else.
 
 ## Residuals
 
-- **`XDG_DATA_HOME`, through `.issuebot/env`.** It moves the extension lookup wholesale
-  (measured above), it is not inherited from the worker (`PASSTHROUGH_NAMES`), and it is not in
-  `TOOL_CONFIG_ENV_NAMES` — which carries `XDG_CONFIG_HOME` for the git and `gh` config
-  spellings, and was drawn up (#171) when this directory was not yet anyone's question. So the
-  only way it reaches a session is the workspace's own `.issuebot/env` -- which a hook writes,
-  and which sits in the agent's own workspace, so the session can write it too -- and which
-  outlives the session: the reach is that workspace and the issue it belongs to, rather
-  than the account's every later session, which is what the home is. Exactly the shape #151
-  found and filed as #171 rather than folding in, for the same reason: protecting a name is a
-  decision about what a hook may configure. Named here and filed as #191, which also has to
-  weigh that `XDG_DATA_HOME` is the only escape hatch a deployment has for a `gh` extension,
-  since `gh` has no system-wide location for one.
+- **`XDG_DATA_HOME`, through `.issuebot/env` — recorded here, filed as #191, and closed by
+  it.** It moves the extension lookup wholesale (measured above) and is not inherited from the
+  worker (`PASSTHROUGH_NAMES`), so the one way it reached a session was the workspace's own
+  `.issuebot/env` — which a hook writes, and which sits in the agent's own workspace, so the
+  session can write it too, and which outlives the session: the reach was that workspace and
+  the issue it belongs to, rather than the account's every later session, which is what the
+  home is. Filed separately rather than folded in, exactly as #151 filed #171, and for the same
+  reason: protecting a name is a decision about what a hook may configure, and it had to be
+  weighed against `XDG_DATA_HOME` being the only escape hatch a deployment has for a `gh`
+  extension, since `gh` has no system-wide location for one. #191 weighed it that way and
+  protected the name (`2026-09-22-session-gh-extension-env-design.md`); the answer for such a
+  deployment is the `PATH` route below, which is the one this note already gives and the one a
+  session cannot reach. The pin here (`tests/test_agent_runas.py`) asserts both halves, so
+  this list's promise fails if either moves.
 
 - **Concurrency**, exactly as in #101, #137 and #151: with one account for the deployment a
   session running beside this one can plant between a sweep and the command it protects. A pool
@@ -200,8 +206,8 @@ the home for somebody else.
 `tests/test_agent_runas.py`: `_plant_home` gains a planted extension beside `gh`'s state
 directory, so every existing sweep test carries it; the sweep removes the extension directory
 and leaves `~/.local/state/gh`, `~/.local/share` and `~/.local`; the list is pinned, including
-that `XDG_DATA_HOME` is not passed through, which is what makes `~/.local/share` the path `gh`
-actually reads; a symlink at any of the four components is unlinked rather than followed, and
+both halves of what makes `~/.local/share` the path `gh` actually reads — `XDG_DATA_HOME` is
+not passed through from the worker and, since #191, not settable from `.issuebot/env` either; a symlink at any of the four components is unlinked rather than followed, and
 the tree it points at is neither removed nor walked. And, end to end beside #137's profile proof
 and #151's gitconfig one, a planted extension does not run for the next session's `gh` — the
 real wrapper, the real hook path, the real `bash -lc` and the real `gh`, only sudo a fake —

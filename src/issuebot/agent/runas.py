@@ -161,6 +161,11 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # Each is the sequence of its path components, because every one of them is nested and the
 # sweep walks rather than follows -- ``.ssh`` or ``.config`` replaced with a symlink is
 # unlinked as the plant it is, not stepped through to whatever it points at.
+# The clone's *own* ``.git/config`` is the other side of that same line and is deliberately not
+# swept (#180, spec ``2026-09-22-clone-reuse-residual-design.md``): it is the session's file in
+# a workspace that belongs to one issue, the unit of that channel is the clone rather than the
+# file, and not reusing the workspace is the only thing that would close it. This list is about
+# the *home*, which is shared with sessions working other issues; that one is not.
 TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
     (".gitconfig",),
     (".config", "git", "config"),
@@ -204,15 +209,15 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # is a survivor the tests pin. Walked component by component like the nested entries above, so
 # a session that replaces any of the four with a symlink has the link unlinked rather than the
 # tree it points at swept.
-#   One way in which this entry is *weaker* than the one above, and it is worth stating where a
-#   reader compares them: ``XDG_CONFIG_HOME`` is neither inherited nor settable from
-#   ``.issuebot/env``, which is what makes ``TOOL_CONFIG_SWEEP``'s git half a guarantee rather
-#   than a default -- but ``XDG_DATA_HOME``, which moves *this* lookup wholesale (measured), is
-#   in neither ``PASSTHROUGH_NAMES`` nor ``TOOL_CONFIG_ENV_NAMES``. So a hook's ``.issuebot/env``
-#   can point the next session on that issue at an extension directory this list names nothing
-#   of. That is the recorded residual, filed as #191 -- the environment spelling of this sweep,
-#   as #171 is of #151 -- and until it is settled the guarantee here is about the path and not
-#   about the home.
+#   The other half of the guarantee is the environment, and it holds for the same reason the one
+#   above does: ``gh`` dispatches from ``$XDG_DATA_HOME/gh/extensions`` when that name is set
+#   (measured), so a sweep of the default path alone would be a default rather than a guarantee.
+#   ``XDG_DATA_HOME`` is in neither ``PASSTHROUGH_NAMES``, so it is not inherited from the
+#   worker, nor -- since #191, the environment spelling of this sweep as #171 is of #151 --
+#   settable from ``.issuebot/env``, where it is refused as a protected name. That is
+#   ``XDG_CONFIG_HOME``'s standing for ``TOOL_CONFIG_SWEEP``'s git half, and the two lists carry
+#   the same weight. What neither bounds is a session exporting the name in its *own* shell for
+#   its *own* ``gh``, which needs no extension directory to be a session running its own code.
 TOOL_EXTENSION_SWEEP: tuple[tuple[str, ...], ...] = ((".local", "share", "gh", "extensions"),)
 
 

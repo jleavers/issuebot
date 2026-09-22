@@ -305,7 +305,7 @@ docker compose run --rm worker labels ensure
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
-[WARN] github.labels: missing: issuebot/todo, ...; run issuebot labels ensure
+[WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
@@ -315,7 +315,10 @@ docker compose run --rm worker labels ensure
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
 the target repository; run it once per repository, and again after an upgrade that adds a label.
-The labels warning disappears on the next `validate`.
+The labels warning disappears on the next `validate`. The remedy it names is the one for the
+deployment that printed it: the compose command above inside a container built from the image,
+and `issuebot labels ensure` on a host running the package directly, where there may be no
+image to run a service from.
 
 Three of those lines stand for the three things that bound what a session can do — the network
 it may reach, the account it runs as, and the credential it authenticates with. [How a session
@@ -399,7 +402,10 @@ the logs on your terminal.
   the issue); the worker removes the state label and records a cancellation, which the closed
   counts do not include.
 - **Re-queue it.** Moving `issuebot/in-progress` or `issuebot/review` back to `issuebot/todo`
-  is also allowed; the issue is picked up again from its existing workspace.
+  is also allowed; the issue is picked up again from its existing workspace -- clone, working
+  tree, venv and `.git/config` as the last session left them ([How long a workspace lives, and
+  what a reused one hands the next
+  session](docs/operations.md#how-long-a-workspace-lives-and-what-a-reused-one-hands-the-next-session)).
 
 ### Where to go next
 

@@ -158,6 +158,44 @@ other. The dashboard and the `run_ended` Slack line (opt in via
 Workspaces persist in the `workspaces` volume; on startup the worker resumes
 issues that were `issuebot/in-progress` from where they stopped.
 
+### How long a workspace lives, and what a reused one hands the next session
+
+A workspace is created when an issue is first claimed and removed when the issue closes —
+whether the worker marks it `issuebot/complete` or reads the close as an abandonment and
+clears the label; in between it outlives every one of its runs. That removal is the worker
+finding the closed issue still carrying one of its state labels, so an issue closed *and*
+stripped of its label is one whose workspace stays on disk until you remove it. An issue
+sitting in `issuebot/review` keeps its clone for as long as it waits for you, and a retry, a
+rework bounce or a re-queue picks that clone up rather than cloning again — which is the
+point, and part of what `agent.max_issue_cost_usd` pays for. No setting shortens this
+deliberately: the issue's own lifecycle is the lever, removing the workspace directory by hand
+makes the next session clone from cold, and re-binding the pool has the same effect as a side
+effect (the clone is re-cloned when its owning account moved — [One account per concurrent
+session](security-model.md#one-account-per-concurrent-session)).
+
+**So the next session on that issue inherits the clone whole** — the working tree as the last
+one left it, its untracked files, `<workspace>/.venv`, and `.git` with it. That includes the
+clone's own `.git/config` and `.git/hooks/`, which name commands git runs (`core.pager`,
+`credential.helper`, `core.fsmonitor`, `core.hooksPath`, `[alias] x = !...`). Issuebot does
+not reset them between runs, deliberately: the unit of that channel is the clone and not the
+file — `include.path` puts the same keys in a second file, `core.hooksPath` puts them in a
+directory of scripts, and the venv the session's tests run out of is wider than any of them —
+so the only thing that would close it is not reusing the workspace at all. It crosses no
+privilege boundary either way: one workspace belongs to one issue, and under a pool it is
+bound to one session account (see [One account per concurrent
+session](security-model.md#one-account-per-concurrent-session)) and sealed back to the worker
+between runs (`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`) — with one
+account for the whole deployment, or on the host route, there is no binding and no seal, but
+then every session shares a home, which is wider than any one workspace. Either way,
+everything a plant could defer to the next session the session holding it can already do
+itself, with the same token, on the same branch and the same pull request. This is recorded in
+`docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the
+`hooks.before_run` recipe for a deployment that wants the clone's config narrowed each run,
+and the four caveats that come with it. What is *not* inherited is the worker's own state in
+the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh` or the
+hook shell, and anything at all by a session working a **different** issue — see
+[Safety](#safety) below for that boundary and the sweeps that hold it.
+
 ### Configuration changes
 
 A running worker re-reads `configs/WORKFLOW.md` and
@@ -295,6 +333,12 @@ it: a Project or Local `CLAUDE.md` may then read outside the clone. Every turn t
 runs with `--settings claudeMdExcludes`, an allow-list of the workspace and the account's own
 user memory, so that approval reaches nothing outside them -- except through a symlink in the
 clone, which claude resolves after matching the exclusion, and which is the recorded residual.
+And the clone's *own* `.git/config` and `.git/hooks/`, which are the other side of the tool
+config line above and are not swept: they are the session's files in the session's workspace,
+they belong to one issue, and the next session on *that* issue inherits them along with the
+rest of the clone ([How long a workspace lives, and what a reused one hands the next
+session](#how-long-a-workspace-lives-and-what-a-reused-one-hands-the-next-session) above,
+which says why).
 The agent's environment is otherwise minimal —
 `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
 `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
