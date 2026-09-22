@@ -1033,9 +1033,10 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
     #151 pinned when it left the directory alone, and what makes this a file-level decision.
 
     Two-sided like the ``~/.gitconfig`` proof above, so it cannot pass against a ``gh`` that was
-    never going to read the file. ``gh`` writes itself a fresh default ``config.yml`` on the next
-    invocation, so the assertion after the sweep is about what the file *says* rather than about
-    whether it exists: the account gets its own config back, and not the plant.
+    never going to read the file. The assertion after the sweep is about what the file *says*
+    rather than about whether it exists, because ``gh`` writes one of its own when it next has
+    config to write and the ``hosts.yml`` migration here is such an occasion: what has to be
+    gone is the plant, not the file.
     """
     plant = 'version: "1"\naliases:\n    pwn: "!echo PLANTED-GH-ALIAS-RAN"\n'
     gh_dir = tmp_path / "home" / ".config" / "gh"
