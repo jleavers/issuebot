@@ -15,8 +15,8 @@ and Claude credential. The checkouts meet on one Docker network.
 1. Once per host: `docker network create issuebot` and
    `docker network create --internal issuebot-internal`. The second is where the workers reach
    the hub's database; `--internal` is what leaves them no route off the host except the
-   allow-listing proxy (see [What a session may
-   reach](security-model.md#what-a-session-may-reach) in the README).
+   allow-listing proxy ([`docs/security-model.md`, "What a session may
+   reach"](security-model.md#what-a-session-may-reach)).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
@@ -231,8 +231,8 @@ itself, with the same token, on the same branch and the same pull request. This 
 `hooks.before_run` recipe for a deployment that wants the clone's config narrowed each run,
 and the four caveats that come with it. What is *not* inherited is the worker's own state in
 the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh`, the
-hook shell or the dynamic loader under all but `gh`, and anything at all by a session working
-a **different** issue — see
+hook shell or the dynamic loader under all but `gh`, or change which certificate authorities
+any of them accepts, and anything at all by a session working a **different** issue — see
 [Safety](#safety) below for that boundary and the sweeps that hold it.
 
 ### Configuration changes
@@ -336,6 +336,46 @@ unix socket rather than a network route, so the egress proxy never sees it) on a
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
 `/etc/ssh/ssh_config`, which are root's and which no session can write.
+
+One file is *edited* rather than removed, and it is the only one: `~/.config/gh/hosts.yml`.
+It is credential state — it holds the `oauth_token` a session authenticates `gh` with, where a
+session has one — so taking it would break authentication for every deployment that relies on
+it, and it stays. But `gh config set -h <host> <key> <value>` writes into that file rather than
+into `config.yml`, and one of the keys it can carry, `api_host`, re-points `gh` at a host of the
+planting session's choosing on an ordinary command: measured against `gh 2.100.0`, a planted
+`api_host` sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` issuebot runs
+to build the next workspace to that host instead of GitHub's. `git_protocol` is the same channel through another key: set to
+`ssh` there, the next session's `gh repo clone` fails outright, since the image ships no ssh
+client.
+
+So the sweep removes gh's whole configuration surface from that file — the thirteen keys
+`gh config --help` advertises, every one of which `gh config set -h <host>` writes here rather
+than into `config.yml`, and none of which is credential state — and leaves everything else,
+the tokens included. The rule is not "these keys are dangerous" but "a session does not leave
+*configuration* in a credential file", so what survives is the credential state: `oauth_token`
+and `user`, and the per-account tokens in the `users:` subtree. The keys go from that subtree
+too, since `gh config set -h` mirrors every one of them there as well as at host level. If the
+sweep ever cannot parse the file it leaves it alone and *says so* — the worker logs
+`claude_home_sweep_failed` each turn — rather than reporting a success it did not have. A file with none of them in it is not rewritten at all; one that does
+carry one is rewritten by a YAML parser, so it comes back normalised rather than
+character-for-character, which is what `gh` itself does to this file on an ordinary command. What is left of the
+channel is bounded and documented in
+`docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
+substituted host, a forged answer needs a certificate authority in the system trust store, which
+is root's, and the egress proxy refuses any host off its allow-list. One thing that note is
+explicit about and this list should be too: `~/.config/gh/config.yml` beside it is **not** swept,
+so the same `git_protocol` written there with a plain `gh config set` still steers the next
+session's clone. `api_host` has no such second position and is closed outright; closing the rest
+of `config.yml` is its own piece of work.
+
+The sweep leaves the
+rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
+the transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
+tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
+sat in stay too, with whatever else is in them — the rest of `gh`'s configuration beside git's,
+`known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
+denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
+new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
 `gh`'s extension directory is swept on the same schedule (#186), and is the one thing swept
 that is a program rather than a setting: `~/.local/share/gh/extensions` is where
 `gh extension install` puts a program that `gh <name>` runs, and it needs no install step to

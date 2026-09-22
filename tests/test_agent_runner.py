@@ -6,8 +6,11 @@ import json
 import os
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -576,6 +579,15 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         # which is a program rather than a setting naming one (#191, #186).
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
+        # Not a command and not a directory a command is found in: the certificate authorities
+        # the next session's `gh` accepts (#205). The only spelling that reaches `gh`, which
+        # has no `GH_` name for its trust store, so no prefix above covers them. Each replaces
+        # its own half of the default file/directory pair, so the two together replace the
+        # store outright -- measured making `gh` trust a planted listener and stop verifying
+        # api.github.com at the same time -- and an unreadable value breaks `gh` and `curl`
+        # outright, which needs no second primitive at all.
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
         # The tails of git's and gh's own precedence chains, whose heads are covered by the
         # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` removes from the home --
         # git's and ssh's since #151, gh's `config.yml` since #173 -- so these are the whole of
@@ -612,7 +624,11 @@ def test_the_tool_config_protections_are_pinned() -> None:
     the two XDG roots, which are on no chain: a base directory is protected when a tool
     issuebot launches resolves through it something it will execute or read as configuration --
     `$XDG_CONFIG_HOME/gh/config.yml` for the aliases, `$XDG_DATA_HOME/gh/extensions` for the
-    program `gh <name>` runs (#191). Names and not prefixes, because `SSH_AUTH_SOCK` is a
+    program `gh <name>` runs (#191). The TLS pair is on no chain either and is there under a
+    third rule (#205): a name is protected when it decides which certificate authorities a tool
+    issuebot launches will accept -- a trust decision rather than a command, which is the one
+    thing on this list that is neither a command nor a file naming one.
+    Names and not prefixes, because `SSH_AUTH_SOCK` is a
     legitimate route for the deploy-key case this bound has to leave a hook author -- and
     `XDG_` is a specification's namespace rather than a tool's, so which of its seven roots
     belongs here is a measurement, against `git` and `gh`, and not a manual to keep up
@@ -626,6 +642,8 @@ def test_the_tool_config_protections_are_pinned() -> None:
         "PAGER",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
         "VISUAL",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
@@ -657,6 +675,15 @@ def test_the_tool_config_protections_are_pinned() -> None:
         # The legitimate route for a forwarded deploy key, which is why `SSH_ASKPASS` is a
         # name here and `SSH_` is not a prefix.
         "SSH_AUTH_SOCK",
+        # The per-tool spellings of a certificate authority, which is what bounds what #205
+        # costs: a hook can still hand the *target repository's* tools a private index CA.
+        # Each was measured leaving `gh` untrusting of a listener the planted CA signs -- they
+        # reach curl, pip and uv and not the tool holding `GH_TOKEN`, which is the whole
+        # difference between them and the two generic names above.
+        "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+        "PIP_CERT",
+        "UV_SYSTEM_CERTS",
     ],
 )
 def test_merge_workspace_env_does_not_over_reach_past_the_tool_config_entries(key: str) -> None:
@@ -818,6 +845,225 @@ def test_a_planted_gh_extension_is_not_dispatched_for_the_next_session(tmp_path:
     assert "PLANTED-XDG-DATA-HOME-RAN" not in after.stdout
     assert after.returncode != 0
     assert "issuebotpwn" in after.stderr
+
+
+def test_a_workspace_env_line_re_pointing_the_tls_trust_store_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#205): these two decide which certificate authorities the next
+    session's `gh` accepts, which is who it is talking to rather than what it runs -- the one
+    thing on the protected list that is not a command and does not name one.
+
+    The per-tool spellings beside them are untouched, and that is the half a hook is entitled
+    to: a private authority for the *target repository's* index reaches `curl`, `pip` and `uv`
+    through those names and was measured not to reach `gh`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "SSL_CERT_FILE=/tmp/theirs/ca.pem\n"
+        "SSL_CERT_DIR=/tmp/theirs/certs\n"
+        "CURL_CA_BUNDLE=/tmp/theirs/ca.pem\n"
+        "UV_SYSTEM_CERTS=1\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["CURL_CA_BUNDLE", "UV_SYSTEM_CERTS", "DATABASE_URL"]
+    assert "SSL_CERT_FILE" not in merged
+    assert "SSL_CERT_DIR" not in merged
+    assert merged["CURL_CA_BUNDLE"] == "/tmp/theirs/ca.pem"
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    # The keys, and never the paths they named.
+    assert ignored == ["SSL_CERT_FILE is protected", "SSL_CERT_DIR is protected"]
+
+
+def _self_signed_authority(root: Path) -> tuple[Path, Path, Path]:
+    """A certificate authority and a `localhost` certificate it signs, through `openssl`.
+
+    Nothing here touches the network or the image's own trust store: the point of the pair is
+    that the authority is one *only this test knows*, so a `gh` that accepts the certificate
+    can only have done so through the variable under test."""
+
+    def openssl(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True, timeout=60)
+
+    ca_key, ca_pem = root / "ca.key", root / "ca.pem"
+    srv_key, srv_csr, srv_pem = root / "srv.key", root / "srv.csr", root / "srv.pem"
+    extensions = root / "srv.ext"
+    extensions.write_text(
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n"
+    )
+    openssl(
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "1",
+        "-keyout",
+        str(ca_key),
+        "-out",
+        str(ca_pem),
+        "-subj",
+        "/CN=issuebot-test-authority",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    )
+    openssl(
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(srv_key),
+        "-out",
+        str(srv_csr),
+        "-subj",
+        "/CN=localhost",
+    )
+    openssl(
+        "x509",
+        "-req",
+        "-days",
+        "1",
+        "-in",
+        str(srv_csr),
+        "-CA",
+        str(ca_pem),
+        "-CAkey",
+        str(ca_key),
+        "-CAcreateserial",
+        "-extfile",
+        str(extensions),
+        "-out",
+        str(srv_pem),
+    )
+    return ca_pem, srv_pem, srv_key
+
+
+class _LoopbackTls:
+    """A loopback HTTPS listener answering any request with one fixed body.
+
+    Small enough to be the whole server: what is being measured is the handshake, so the reply
+    only has to be something `gh` will print once the certificate has been accepted."""
+
+    def __init__(self, certificate: Path, key: Path, body: str) -> None:
+        self._context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        self._context.load_cert_chain(certificate, key)
+        self._body = body.encode()
+        self._socket = socket.socket()
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind(("127.0.0.1", 0))
+        self._socket.listen(8)
+        self.port: int = self._socket.getsockname()[1]
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+        self._thread.start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                connection, _ = self._socket.accept()
+            except OSError:  # the listener was closed
+                return
+            threading.Thread(target=self._reply, args=(connection,), daemon=True).start()
+
+    def _reply(self, connection: socket.socket) -> None:
+        with connection:
+            try:
+                with self._context.wrap_socket(connection, server_side=True) as tls:
+                    tls.recv(65536)
+                    tls.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        b"Connection: close\r\nContent-Length: "
+                        + str(len(self._body)).encode()
+                        + b"\r\n\r\n"
+                        + self._body
+                    )
+            except OSError:  # a client that hung up, or refused the certificate
+                return
+
+    def close(self) -> None:
+        self._socket.close()
+
+
+@pytest.mark.skipif(
+    shutil.which("gh") is None or shutil.which("openssl") is None,
+    reason="needs gh to make the request and openssl to mint the authority",
+)
+@pytest.mark.parametrize("name", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+def test_a_planted_authority_is_not_trusted_by_the_next_sessions_gh(
+    tmp_path: Path, name: str
+) -> None:
+    """The same channel against the real `gh`, shaped like #191's extension proof and two-sided
+    for the same reason: the mapping the file itself carries makes `gh` accept a certificate
+    signed by an authority only this test knows, and the environment `workspace_environment`
+    builds from that same file does not, so the test fails if the protection is taken out
+    rather than only asserting a key is absent.
+
+    Both names, because they are not one variable: each replaces its own half of Go's default
+    file/directory pair, which is why one alone reads as "only ever widens" while the two
+    together replace the store outright. Loopback only -- no network, and the image's own trust
+    store is neither read nor written."""
+    authority, certificate, key = _self_signed_authority(tmp_path)
+    listener = _LoopbackTls(certificate, key, '{"login": "forged"}')
+    home = tmp_path / "home"
+    home.mkdir()
+    if name == "SSL_CERT_FILE":
+        value: Path = authority
+    else:
+        value = tmp_path / "certs"
+        value.mkdir()
+        shutil.copy(authority, value / "ca.pem")
+        # Go reads every file in the directory and needs no hash link; OpenSSL finds a
+        # certificate by one and would not. Laid out for both, so the directory is what the
+        # variable means rather than what this one tool happens to accept.
+        subprocess.run(["openssl", "rehash", str(value)], check=True, timeout=60)
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(f"{name}={value}\n")
+    base = agent_environment(
+        {"PATH": os.environ["PATH"], "HOME": str(home)},
+        # `gh api` sends whatever it is given and the listener answers regardless; a token has
+        # to be present at all, or `gh` stops at "please run gh auth login" before any
+        # handshake and the two arms would differ by nothing.
+        token=SecretStr("gho_0000000000000000000000000000000000"),
+    )
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+        assert applied == []
+
+        def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                # The address the listener binds, not `localhost`: the certificate carries
+                # both, and dialling the name would rest the test on Go's dual-stack retry
+                # wherever `localhost` resolves to `::1` first.
+                ["gh", "api", f"https://127.0.0.1:{listener.port}/user"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+        # What the file asked for: the planted authority is accepted.
+        raw, _ = parse_workspace_env((tmp_path / ".issuebot" / "env").read_text())
+        before = run({**base, **raw})
+        assert "forged" in before.stdout
+        # What the next session is handed: the same listener, and nothing vouches for it.
+        after = run(merged)
+        assert "forged" not in after.stdout
+        assert after.returncode != 0
+        assert "certificate" in after.stderr
+    finally:
+        listener.close()
 
 
 @pytest.mark.parametrize(

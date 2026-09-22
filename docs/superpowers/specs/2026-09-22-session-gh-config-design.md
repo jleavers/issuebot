@@ -233,6 +233,12 @@ legitimately sets is in the table above, already answered by the protected envir
   command-bearing key inside credential state is a decision of its own, and a key-level edit of
   a credential file is a different shape from the path-level denylist this list is.
 
+  **#190 has since landed, and this residual is closed.** `GH_HOSTS_STEERING_KEYS` is the
+  key-level edit it settled on -- `gh`'s whole configuration surface removed from `hosts.yml`
+  at both levels `gh` writes it, with `oauth_token` and `user` kept -- so `api_host` no longer
+  survives the sweep in either file. The measurement above stands as it was taken, in the state
+  this change alone leaves; what it describes is no longer `main`.
+
   Not measured either way, and worth naming with it: host-level `pager`, `editor` and `browser`
   also survive in `hosts.yml` and read back under `gh config get -h <host>`, while the
   hostname-less lookup that `gh`'s own pager and editor resolution uses returns empty. Probably

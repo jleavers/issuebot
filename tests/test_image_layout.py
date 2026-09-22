@@ -236,10 +236,12 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
     # The planted hosts.yml carries a token and a user, and that is load-bearing rather than
     # decorative: without either, every gh in that home fails its multi-account migration
     # before reaching the alias or the extension, so the pre-sweep lines below would fail and
-    # the post-sweep ones would pass for a reason that is not the sweep.
+    # the post-sweep ones would pass for a reason that is not the sweep. One file serves all
+    # three gh arms since #190; the steering keys beside these two are that change's to pin,
+    # so only the prefix this test rests on is asserted here.
     assert (
-        r"printf \"github.com:\\n    oauth_token: placeholder-not-a-token\\n"
-        r"    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml"
+        r"printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n"
+        r"    user: nobody\\n"
     ) in CI
     assert (
         'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN'
@@ -285,6 +287,62 @@ def test_the_sweep_steps_outer_script_carries_no_single_quote() -> None:
             nested.append(line)
     assert nested, "the nested bash -c blocks were not found"
     assert not [line for line in nested if "`" in line], nested
+
+
+def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() -> None:
+    """#190: the one file the sweep edits rather than removes. `~/.config/gh/hosts.yml` has to
+    survive -- it is the credential state #151 pinned and #173 kept -- while the `api_host` a
+    session can leave in it re-points `gh` on an ordinary core command, `gh repo clone` among
+    them, which is how issuebot builds the next session's workspace. Two-sided like the git half
+    above: the plant is shown re-pointing `gh` before the sweep, so a `gh` that stopped reading
+    the key could not pass this as a no-op. And the credential has to come through the edit,
+    which is the whole reason it is an edit."""
+    assert "api_host: 127.0.0.1" in CI
+    assert "before=$(sudo -n -H -u agent gh api user 2>&1 || true)" in CI
+    assert 'echo "the planted api_host did not re-point gh: $before" >&2; exit 1' in CI
+    assert "after=$(sudo -n -H -u agent gh api user 2>&1 || true)" in CI
+    assert 'echo "gh is still re-pointed after the sweep: $after" >&2; exit 1' in CI
+    assert (
+        'test -z "$(sudo -n -H -u agent gh config get -h github.com api_host 2>/dev/null || true)"'
+    ) in CI
+    # The file stays, the credential in it stays, and the steering key is gone.
+    assert "test -f /home/agent/.config/gh/hosts.yml" in CI
+    assert "grep -q gho_KEEPTHISCREDENTIAL0123456789012345 /home/agent/.config/gh/hosts.yml" in CI
+    assert "! grep -q api_host /home/agent/.config/gh/hosts.yml" in CI
+    assert "! grep -q git_protocol /home/agent/.config/gh/hosts.yml" in CI
+    assert 'test "$(sudo -n -H -u agent gh config get -h github.com git_protocol)" = https' in CI
+
+
+def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
+    """The other half of #190, and what lets the edit be a denylist at all.
+    `GH_HOSTS_STEERING_KEYS` is `gh`'s own configuration surface -- every key `gh config`
+    manages, all of which `gh config set -h <host>` writes into `hosts.yml` -- and that is a
+    measurement of somebody else's tool, which goes stale on their release schedule rather than
+    ours. So CI re-takes it on every pull request, off gh's own advertised key list rather than
+    a list hard-coded here, and fails when gh advertises a key the sweep does not name.
+
+    The `set` half carries a value each key accepts, which is the whole of that measurement and
+    the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
+    passing a placeholder is refused for eight of the thirteen -- and a `|| true` would report
+    only the five free-form ones and call that the closed set. No `|| true`, so a refused set
+    fails the step."""
+    assert "every gh config key is named by the hosts.yml sweep, and gh writes them there" in CI
+    assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
+    assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
+    assert "advertised = set(sys.argv[1].split())" in CI
+    assert "unnamed = advertised - set(GH_HOSTS_STEERING_KEYS)" in CI
+    # The `set` half, with a value per key and no `|| true` to swallow a refusal.
+    assert "gh config set -h github.com $key $value" in CI
+    assert "gh config set -h github.com $key $value || true" not in CI
+    # Equality, not a subset: a subset check cannot notice a key gh moved back to config.yml,
+    # which is half of what the list claims.
+    assert "if written != named:" in CI
+    assert "if advertised - written:" in CI
+    # And the extraction must not shrink silently when a help line is reformatted.
+    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 13' in CI
+    # And git_protocol by what gh resolves rather than by what it writes.
+    assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
+    assert 'test "$(gh config get git_protocol)" = https' in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
