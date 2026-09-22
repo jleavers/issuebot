@@ -396,8 +396,7 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     -- subtracts exactly those from the `written` comparison, and then proves each one by
     planting it and reading it back. Without that last half the equality below would have had
     to slacken to a subset, which is the check that notices a key moving to config.yml."""
-    name = "every gh config key is named by the hosts.yml sweep, and gh writes or resolves them"
-    assert f"{name} there" in CI
+    assert "every gh config key is named by the hosts.yml sweep, and gh resolves them there" in CI
     assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
     assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
     assert "advertised = set(sys.argv[1].split())" in CI
@@ -405,19 +404,31 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     # The `set` half, with a value per key and no `|| true` to swallow a refusal.
     assert "gh config set -h github.com $key $value" in CI
     assert "gh config set -h github.com $key $value || true" not in CI
-    # The one refusal that is an answer: recognised by what gh says, and re-raised otherwise,
-    # so this cannot decay into the `|| true` the line above forbids.
+    # The one refusal that is an answer: recognised by what gh says, and re-raised otherwise.
+    # The default branch is pinned by its own message rather than by `exit 1`, which three
+    # unrelated steps in this file already contain -- pinning that would let the branch be
+    # deleted whole, which is exactly the `|| true` the line above forbids, with this test
+    # still green.
     assert '*"cannot be used when setting"*) refused="$refused $key" ;;' in CI
-    assert "exit 1 ;;" in CI
+    assert 'echo "gh config set -h github.com $key $value failed, and not over --host"' in CI
     # Equality, not a subset: a subset check cannot notice a key gh moved back to config.yml,
-    # which is half of what the list claims. The keys gh declined are subtracted by name rather
-    # than tolerated, so one that starts being written again fails here.
+    # which is half of what the list claims. `refused` is collected at runtime from gh's own
+    # refusals, so a gh that starts writing `clipboard` host-level again leaves it empty and
+    # the equality then holds over all fourteen -- which is the right answer, the list being
+    # unchanged. What lapses in that world is the read-back proof below, since it iterates
+    # `refused`: the key would be back to being justified by what gh writes, which is what the
+    # comparison on this line measures.
     assert "if written != named - refused:" in CI
     assert "if advertised - written - refused:" in CI
-    # And each declined key proved by what gh reads back, which is why it is in the list.
+    # And each declined key proved by what gh reads back, which is why it is in the list. The
+    # two lookups are compared against each other and not against a literal, so this holds for
+    # the next declined key whatever gh defaults it to: four of the fourteen already default to
+    # `disabled`, and a literal would fail on those without the sweep being wrong at all.
     assert "for key in $refused; do" in CI
-    assert 'test "$(gh config get -h github.com $key)" = disabled' in CI
-    assert 'test "$(gh config get $key)" != disabled' in CI
+    assert "before=$(gh config get $key)" in CI
+    assert 'if [ "$(gh config get -h github.com $key)" != "$planted" ]; then' in CI
+    assert 'if [ "$(gh config get $key)" != "$before" ]; then' in CI
+    assert 'test "$(gh config get $key)" != disabled' not in CI
     # And the extraction must not shrink silently when a help line is reformatted. The floor
     # tracks the count it guards: thirteen keys until 2.101.0 added `clipboard`, fourteen since.
     assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 14' in CI

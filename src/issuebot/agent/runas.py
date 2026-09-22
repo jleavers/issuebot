@@ -164,7 +164,7 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   a plant fires only if a later session happens to invoke the invented subcommand name it
 #   chose -- narrower than git's ``core.pager``, which fires on an ordinary command. That
 #   reasoning held for ``aliases:`` and does not hold for the file. ``http_unix_socket``, one
-#   of the thirteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
+#   of the fourteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
 #   unix socket the planting session names, and it *does* fire on an ordinary core command:
 #   measured, ``gh api user`` handed the socket ``Authorization: token <GH_TOKEN>`` and took a
 #   forged ``{"login": "forged"}`` back, and so did ``gh repo clone`` -- which is the worker's
@@ -930,7 +930,7 @@ def _stripped_host(entry: object) -> object:
     Host level is where ``gh`` reads them. The ``users.<name>`` subtree is where it *mirrors*
     them: ``gh config set -h <host> <key>`` writes the key twice once the file names a user, and
     creates the subtree if it has to. Those copies are measured inert on this ``gh`` -- after a
-    host-level sweep the value no longer resolves -- but so are eleven of the thirteen at host
+    host-level sweep the value no longer resolves -- but so are twelve of the fourteen at host
     level, and they are removed for the same reason: a key that does nothing costs nothing to
     remove, where leaving a complete second copy of every planted key in the file costs the
     channel back the day a release starts reading it. ``oauth_token`` is what the subtree is for

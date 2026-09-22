@@ -354,7 +354,8 @@ the tokens included. Thirteen of the fourteen are on the list because `gh config
 writes them here rather than into `config.yml`. The fourteenth, `clipboard`, which `gh` 2.101.0
 added, is on it for the property those thirteen share rather than for that one: `gh` declines to
 write it host-level at all, but a value planted by hand under the host is still resolved from
-here ahead of the hostname-less lookup, and residue is planted rather than politely set (#231). The rule is not "these keys are dangerous" but "a session does not leave
+here ahead of the hostname-less lookup, and residue is planted rather than politely set (#231).
+The rule is not "these keys are dangerous" but "a session does not leave
 *configuration* in a credential file", so what survives is the credential state: `oauth_token`
 and `user`, and the per-account tokens in the `users:` subtree. The keys go from that subtree
 too, since `gh config set -h` mirrors the ones it writes there as well as at host level. If the

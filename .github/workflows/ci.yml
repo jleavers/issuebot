@@ -631,7 +631,7 @@ jobs:
       # No account or sudo needed: the question is about gh, not about the uid split the step
       # above proves.
       # Nothing inside the outer script may carry an apostrophe or a single quote.
-      - name: every gh config key is named by the hosts.yml sweep, and gh writes or resolves them there
+      - name: every gh config key is named by the hosts.yml sweep, and gh resolves them there
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -711,10 +711,26 @@ jobs:
             rm -rf $HOME/.config/gh
             mkdir -p $HOME/.config/gh
             # Every key gh declined: named for what gh reads back, since nothing writes it here.
+            # The two lookups are compared against each other rather than against a literal, so
+            # this generalises to the next declined key whatever gh defaults it to -- four of
+            # the fourteen already default to `disabled`, and a literal would fail on those for
+            # a reason that is not the sweep being wrong. So: read the hostname-less answer
+            # first, plant something else, and require exactly one of the two to move.
             for key in $refused; do
-              printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    $key: disabled\n" > $HOME/.config/gh/hosts.yml
-              test "$(gh config get -h github.com $key)" = disabled
-              test "$(gh config get $key)" != disabled
+              before=$(gh config get $key)
+              if [ "$before" = disabled ]; then planted=enabled; else planted=disabled; fi
+              printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    $key: $planted\n" > $HOME/.config/gh/hosts.yml
+              if [ "$(gh config get -h github.com $key)" != "$planted" ]; then
+                echo "hosts.yml carries $key and gh no longer resolves it host-level, so the"
+                echo "sweep names $key for a channel that has closed; re-take the measurement"
+                exit 1
+              fi
+              if [ "$(gh config get $key)" != "$before" ]; then
+                echo "a host-level $key changed the hostname-less lookup too; that is not the"
+                echo "shape this proof assumes -- re-take the measurement"
+                exit 1
+              fi
+              echo "resolved host-level from a planted hosts.yml: $key=$planted"
             done
             # And git_protocol, which gh does write here, by the same resolution: it is the one
             # whose planted value is measured to steer gh repo clone.

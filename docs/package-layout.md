@@ -346,8 +346,8 @@ the same because the list is over what the file carries and `gh` reads back -- p
 under the host, as residue is, `gh config get -h <host> clipboard` returns the planted value
 where `gh config get clipboard` returns the default. Resolution rather than authorship is what
 makes a key steer `gh`, which is `git_protocol`'s shape too; the CI `docker` step measures the
-two halves separately for that reason. So the rule is not "these keys are dangerous" but "a session does not
-leave *configuration* in a credential file", and what survives is the credential state:
+two halves separately for that reason. So the rule is not "these keys are dangerous" but
+"a session does not leave *configuration* in a credential file", and what survives is the credential state:
 `oauth_token` and `user`, neither of which `-h` can write. The keys come out at *both* levels
 `gh` writes them -- host level, where it reads them, and the `users.<name>` subtree, which
 `gh config set -h` mirrors the keys it writes into (creating it if need be) once the file names

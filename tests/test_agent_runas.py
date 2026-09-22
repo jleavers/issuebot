@@ -359,8 +359,9 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 # #190: what `gh config set -h github.com <key>` can write, beside the credential state the
 # same file holds. The five steering keys were measured against `gh version 2.100.0`: asked for
-# each of the thirteen keys `gh config --help` lists, exactly these landed in `hosts.yml` and
-# every other went to `config.yml`.
+# each of the thirteen keys `gh config --help` listed at the time -- fourteen since 2.101.0 added
+# `clipboard` (#231), which is the one key `-h` refuses -- exactly these landed in `hosts.yml`
+# and every other went to `config.yml`.
 GH_HOSTS_PLANT = """github.com:
     oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345
     user: nobody
@@ -601,7 +602,7 @@ def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Pa
     # Both levels gh writes them. `gh config set -h <host> <key>` mirrors into `users.<name>`
     # once the file names a user, creating the subtree if it has to, so a host-level-only sweep
     # would leave a complete second copy of every planted key. Those copies are measured inert
-    # on this gh -- but so are eleven of the thirteen at host level, and they go for the same
+    # on this gh -- but so are twelve of the fourteen at host level, and they go for the same
     # reason. `oauth_token` is what the subtree is for and stays.
     document["github.com"]["users"]["nobody"]["api_host"] = "127.0.0.1"
     document["github.com"]["users"]["nobody"]["git_protocol"] = "ssh"
