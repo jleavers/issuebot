@@ -348,13 +348,16 @@ to build the next workspace to that host instead of GitHub's. `git_protocol` is 
 `ssh` there, the next session's `gh repo clone` fails outright, since the image ships no ssh
 client.
 
-So the sweep removes gh's whole configuration surface from that file — the thirteen keys
-`gh config --help` advertises, every one of which `gh config set -h <host>` writes here rather
-than into `config.yml`, and none of which is credential state — and leaves everything else,
-the tokens included. The rule is not "these keys are dangerous" but "a session does not leave
+So the sweep removes gh's whole configuration surface from that file — the fourteen keys
+`gh config --help` advertises, none of which is credential state — and leaves everything else,
+the tokens included. Thirteen of the fourteen are on the list because `gh config set -h <host>`
+writes them here rather than into `config.yml`. The fourteenth, `clipboard`, which `gh` 2.101.0
+added, is on it for the property those thirteen share rather than for that one: `gh` declines to
+write it host-level at all, but a value planted by hand under the host is still resolved from
+here ahead of the hostname-less lookup, and residue is planted rather than politely set (#231). The rule is not "these keys are dangerous" but "a session does not leave
 *configuration* in a credential file", so what survives is the credential state: `oauth_token`
 and `user`, and the per-account tokens in the `users:` subtree. The keys go from that subtree
-too, since `gh config set -h` mirrors every one of them there as well as at host level. If the
+too, since `gh config set -h` mirrors the ones it writes there as well as at host level. If the
 sweep ever cannot parse the file it leaves it alone and *says so* — the worker logs
 `claude_home_sweep_failed` each turn — rather than reporting a success it did not have. A file with none of them in it is not rewritten at all; one that does
 carry one is rewritten by a YAML parser, so it comes back normalised rather than
