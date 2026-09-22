@@ -543,11 +543,13 @@ version, and moves by hand.
   session commits and pushes. The alternative gives up what the shape was measured for: the
   second workspace's venv is free only because it is the first one's files. #176 weighed that
   residual and accepted it rather than closing it -- a cache per workspace gives up the
-  sharing and the persistence, a read-only one needs a promise uv's cache semantics do not
-  make, and sweeping the cache between sessions shares it with nothing, while the same-uid
-  channel through the account's home predates the hardlink -- so `accounts.py`'s account-pool
-  docstring now records that the seal covers the clone and not `.venv`, and `uvcache.py` holds
-  the reasoning and the price of revisiting it.
+  sharing and so a sync per workspace, a read-only one needs a promise uv's cache semantics do
+  not make, sweeping the cache between sessions shares it with nothing, and `UV_LINK_MODE=copy`
+  buys back the seal's cover of `.venv` for the measured 152 MB while leaving the cache shared,
+  which is the pre-#164 level; the same-uid channel through the account's home predates the
+  hardlink either way. So `accounts.py`'s account-pool docstring now records that the seal
+  covers the clone and, under a hardlinking uv, not `.venv`, and `uvcache.py` holds the
+  reasoning and what each alternative would cost.
   `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
   turn (`ClaudeRunner.child_environment`) and every hook
   (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an

@@ -37,40 +37,58 @@ the sharing, since the second workspace's venv is free only because it is the fi
 files.
 
 **#176 weighed that residual and accepted it, and this is the record.** Nothing was landed to
-close it: the three bounds above are the whole of what holds it, and the reason is that the
-channel is not a new one while every way of closing it pays with the thing #164 was asked to
-deliver. The options, and why each was not taken:
+close it: what is written above is the whole of what bounds it, and the reason is that the
+channel is not a new one while every way of closing it pays with what #164 was asked to
+deliver. The options, and why each was not taken -- the figures below are arithmetic on #164's
+two measurements (78 MB of cache, 77 MB for two hardlinked venvs against 152 MB copied) and
+not measurements of their own:
 
-- *A cache per workspace, or per ``(account, workspace)``.* Correct, and it gives up
-  everything: two venvs are 77 MB rather than 152 MB only because the second one's files are
-  the first one's, so a cache that is not shared between workspaces is ``UV_LINK_MODE=copy``
-  with extra directories -- and it loses the cross-container persistence too, since a cache
-  keyed to a workspace dies with it.
+- *A cache per workspace, or per ``(account, workspace)``.* Correct, and it closes the channel
+  outright, since no other workspace's venv shares an inode with what this session may write.
+  It has to stay on the volume -- any cache a hardlink works from does -- so it outlives the
+  container as today's does, for as long as its workspace does. What it gives up is not disk:
+  the duplication moves from the venv to the cache, two caches of about 78 MB where there was
+  one, which for two workspaces is roughly what the shared cache and its hardlinked venvs cost
+  together. What it gives up is the *sharing*, and so a download: a fresh sync from PyPI for
+  every new workspace, where an account's cache is a fresh sync for every new account and
+  nothing at all for a reworked issue.
 - *A cache the session cannot write*, populated by the worker and handed over read-only. It
   rests on uv never writing to its own cache, which uv's cache semantics do not promise, and
   the failure is total rather than graceful: a ``uv sync`` needing one package the worker did
   not pre-install fails the hook instead of falling back.
 - *Sweeping the account's cache between sessions.* The only option that needs nothing new from
   uv, and it does close the channel -- a session starting from an empty cache holds no name
-  for the inodes an idle workspace's venv already points at, and the inode survives only
-  because that venv still links it. But a session is dispatched to one workspace at a time, so
-  a cache kept "within one session's workspaces" is not shared with anything: it gives up both
-  halves of #164, the cross-workspace hardlink and the cross-container persistence, and buys a
-  PyPI download per session for them.
+  for the inodes an idle workspace's venv already points at, which survive only because that
+  venv still links them. But a session is dispatched to one workspace at a time, so a cache
+  kept "within one session's workspaces" is shared with nothing: it gives up both halves of
+  #164, the cross-workspace hardlink and the cache that outlives the container, and buys a
+  PyPI sync per session for them.
+- *``UV_LINK_MODE=copy`` over the cache exactly as it is.* Not one of the options #176 listed,
+  and the cheapest way to get back the one property this issue is about: a copied ``.venv``
+  entry is the workspace's own inode again, so the seal covers it as it did before #164, while
+  the cache keeps its place on the volume and the persistence half is untouched. It costs the
+  measured half -- 152 MB for two venvs rather than 77, and the 122 ms per sync #164 timed --
+  and it closes less than the two above: the cache is still shared between sessions at that
+  uid, so a session can still write what the *next* one installs from, which is the pre-#164
+  level and the level accepted below. It is not the default because that trade is the one #164
+  was asked to make, and it needs no change here either way: ``uv sync --link-mode=copy`` in
+  the hook line, or ``UV_LINK_MODE=copy`` in an ``.issuebot/env`` written from ``before_run``.
 - *Accept*, which is what was chosen. The two sessions are the same account at the same uid,
-  and that account's home already holds a uv cache of its own (``~/.cache/uv``) that the home
-  sweep names nowhere, so a session that wants to poison what the next session at that uid
-  installs has had that channel since before this module; what the hardlink adds is that it
-  takes effect without waiting for a re-sync. And it reaches what the honest session's tests
-  *import*, never the clone it commits and pushes, so the worst of it is a broken change made
-  to look green -- in front of the human review every issuebot pull request ends at, which is
-  the backstop for everything else a session at that uid could have done to its own tree.
+  and that account's home is already a surface the home sweep names no cache in -- npm's sits
+  there, and uv's own default did until this module moved it -- so a session that wants to
+  poison what the next session at that uid installs has had a channel since before #164; what
+  the hardlink adds is that it takes effect without waiting for a re-sync. And it reaches what
+  the honest session's tests *import*, never the clone it commits and pushes, so the worst of
+  it is a broken change made to look green -- in front of the human review every issuebot pull
+  request ends at, which is the backstop for everything else a session at that uid could have
+  done to its own tree.
 
-What this decision is not is a claim that the seal still covers the venv. It does not, and
-``accounts.py``'s account-pool docstring now says so, so that the next reader of the seal is
-not told something that stopped being true in #164. If this deployment's threat model changes
--- a pool whose accounts are handed issues from genuinely untrusted authors, say -- the first
-option above is the entry, at the price stated there.
+What this decision is not is a claim that the seal still covers the venv. Under a hardlinking
+uv it does not, and ``accounts.py``'s account-pool docstring now says so, so that the next
+reader of the seal is not told something that stopped being true in #164. A deployment whose
+threat model differs -- a pool whose accounts are handed issues from genuinely untrusted
+authors, say -- has the fourth option above for the seal alone and the first for the channel
+entire, at the prices stated there.
 
 The root is the worker's (``/workspaces``, ``0755``, ``issuebot:issuebot``), so a session
 account cannot create a directory in it unaided. The worker therefore makes each one the way
