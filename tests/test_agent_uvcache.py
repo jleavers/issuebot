@@ -470,3 +470,77 @@ def test_busy_accounts_does_not_read_the_cache_directory_as_an_open_workspace(
     assert registry.allocate("example_repo-1") == ME
     ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert registry.busy_accounts() == set()
+
+
+# --- the residual #176 accepted ------------------------------------------------------------
+
+
+def test_a_hardlinked_venv_entry_reaches_past_the_seal(tmp_path: Path) -> None:
+    """The residual #176 decided to accept, as a fact rather than an assumption.
+
+    ``seal`` puts an idle workspace back to ``0700`` so that the next session bound to its
+    account cannot reach the clone inside it. A mode on a directory bounds the paths that lead
+    through it and not the inodes underneath, so a ``.venv`` entry uv hardlinked out of the
+    per-account cache is still reachable -- by its other name, in a directory that session is
+    entitled to enter -- and a write through that name lands in the sealed workspace.
+
+    Written and read as one account throughout, which is what the real pair of sessions is:
+    the residual is inode aliasing and not a mode being bypassed, so the sealed path is read
+    back here only to show which bytes the alias put there. That sameness of uid is half of
+    why the residual was accepted. The assertion is deliberately the *weakness*, so that a
+    future per-workspace cache has to come back here and delete it rather than leave a
+    docstring claiming the seal covers the venv.
+    """
+    cache = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    assert cache is not None
+    cached = cache / "pkg.py"
+    cached.write_text("honest\n")
+
+    idle = tmp_path / "example_repo-7"
+    (idle / ".venv").mkdir(parents=True)
+    installed = idle / ".venv" / "pkg.py"
+    os.link(cached, installed)  # what ``uv sync`` does with the cache on this filesystem
+    accounts.seal(idle)
+    assert mode(idle) == SEALED_DIR_MODE, "the workspace is sealed, as an idle one always is"
+
+    cached.write_text("poisoned\n")
+
+    assert installed.stat().st_ino == cached.stat().st_ino, "one inode, two names"
+    assert installed.read_text() == "poisoned\n", "the seal does not cover .venv"
+
+
+def test_a_copied_venv_entry_and_the_clone_do_not(tmp_path: Path) -> None:
+    """What the trade actually was, as the contrast that names it.
+
+    Under ``UV_LINK_MODE=copy`` -- #161's shape, which this module exists to undo, and which
+    a deployment can still put back from a hook -- a venv entry is that workspace's own inode,
+    so the sealed directory is again the only path to it, as it is the only path to the clone.
+    That is the property #164 spent and #176 decided not to buy back, and its absence is also
+    why the residual stops where it does: the clone is the session's own files, written into
+    the workspace, and the cache holds no second name for any of them.
+
+    The mode is asserted so that this stays a statement about a *sealed* workspace, but what
+    the writes prove is the inode arithmetic either side of it -- which is the whole of the
+    difference between the two link modes.
+    """
+    cache = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    assert cache is not None
+    cached = cache / "pkg.py"
+    cached.write_text("honest\n")
+
+    idle = tmp_path / "example_repo-7"
+    (idle / ".venv").mkdir(parents=True)
+    copied = idle / ".venv" / "pkg.py"
+    shutil.copy(cached, copied)  # what ``uv sync --link-mode=copy`` does instead
+    tracked = idle / "repo" / "module.py"
+    tracked.parent.mkdir()
+    tracked.write_text("honest\n")
+    accounts.seal(idle)
+    assert mode(idle) == SEALED_DIR_MODE, "the workspace is sealed, as an idle one always is"
+
+    cached.write_text("poisoned\n")
+
+    assert copied.stat().st_ino != cached.stat().st_ino, "its own inode, not the cache's"
+    assert copied.stat().st_nlink == 1, "one name, and it leads through the sealed directory"
+    assert copied.read_text() == "honest\n", "so the write through the cache did not reach it"
+    assert tracked.stat().st_nlink == 1, "as the clone has, which the cache never names"
