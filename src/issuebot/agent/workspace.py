@@ -390,9 +390,11 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear what a prior or concurrent session may have left in the account's home for
-        this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
-        login shell sources (#137) and the git and ssh config a tool would take a command from
-        (#151). Called immediately before each of this session's turns and
+        this one to load or to run: the config under ``~/.claude`` (#101), the shell start-up
+        files a login shell sources (#137), the git and ssh config a tool would take a command
+        from (#151) and the directory ``gh`` dispatches its extensions from (#186, the one of
+        the four that is a program rather than a setting). Called immediately before each of
+        this session's turns and
         before every script it runs in a login shell (``_run_script``: the hooks and the
         post-clone setup).
 

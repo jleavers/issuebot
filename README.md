@@ -1181,10 +1181,10 @@ hook that would truncate it again or append a duplicate per session.
   the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
   `git config --local` inside the clone, which is what the post-clone setup does.
-
 - **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
   schedule (#186), so an extension a hook installs is gone before the next login shell and
-  before turn 1. `gh` has no system-wide extension directory, so a deployment that wants one for
+  before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is
+  written there. `gh` has no system-wide extension directory, so a deployment that wants one for
   every session installs the program root-owned on the session's `PATH` instead and invokes it
   under its own name rather than as `gh <name>`; a hook that needs it for its own commands can
   install it into the workspace and run it by path.
@@ -1411,20 +1411,27 @@ that matters on your host.
   swept with it (#151): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
   second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
   `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
-  to run. `gh`'s extension directory goes with them (#186): `~/.local/share/gh/extensions` is
-  where `gh extension install` puts a program that `gh <name>` runs, and it needs no install
-  step to be a plant -- a directory and an executable file are dispatched just the same. Where
-  no extension is installed the entry costs nothing, and where one is, the directory is the
-  account's to write, so a session can replace the program the deployment's own sessions run.
-  A deployment that wants a `gh` extension available to every session installs the program
-  root-owned on the session's `PATH` instead -- `/usr/local/bin/<name>` in an image built
-  `FROM` this one -- and invokes it under its own name: `gh` hands an extension its argv and its
-  own environment and no credential of its own, so that is the same program doing the same work,
-  from a place no session can write. Nothing a deployment needs goes there: the bot's identity is the
+  to run. Nothing a deployment needs goes there: the bot's identity is the
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
   entry is the image's system-wide one, the clone's credential helper is written into the clone,
   and global git or ssh config for every session belongs in `/etc/gitconfig` or
-  `/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
+  `/etc/ssh/ssh_config`, which are root's and which no session can write.
+  `gh`'s extension directory goes with them (#186), and is the one entry on those lists that is
+  a program rather than a setting: `~/.local/share/gh/extensions` is where
+  `gh extension install` puts a program that `gh <name>` runs, and it needs no install step to
+  be a plant — a directory and an executable file are dispatched just the same. Here a
+  deployment *may* have a use for the directory, which is the one thing that made this a
+  question: where no extension is installed the entry costs nothing, but where one is, the
+  directory is still the account's to write, so a session can replace the program that
+  deployment's own sessions run — the plant then fires on an ordinary command rather than an
+  invented one, and swept the deployment gets `gh`'s own `unknown command` instead. So a
+  deployment that wants a `gh` extension available to every session installs the program
+  root-owned on the session's `PATH` — `/usr/local/bin/<name>` in an image built `FROM` this
+  one — and invokes it under its own name: `gh` hands an extension its argv and its own
+  environment and no credential of its own, so that is the same program doing the same work,
+  from a place no session can write. `gh` has no system-wide extension directory, which is why
+  the answer is `PATH` here and `/etc` for git and ssh.
+  It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
   tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config

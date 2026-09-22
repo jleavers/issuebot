@@ -334,7 +334,8 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 def _plant_home(home: Path) -> None:
     """A home a prior session poisoned: the shell start-up files a login shell reads (#137),
-    the tool config files that can name a command (#151) and the ``~/.claude`` config surfaces
+    the tool config files that can name a command (#151), the ``gh`` extension a later ``gh``
+    would run (#186) and the ``~/.claude`` config surfaces
     (#101), beside the credential, claude's own runtime state and the entries other tools keep
     there."""
     claude = home / ".claude"
@@ -514,6 +515,9 @@ def test_sweep_removes_the_gh_extension_directory_and_keeps_ghs_state(tmp_path: 
     home = tmp_path / "home"
     _plant_home(home)
     _sweep(home)
+    # The literal path as well as the list, so this and the pin test below fail independently:
+    # iterating an empty list would otherwise pass here for the reason the sweep is broken.
+    assert not (home / ".local" / "share" / "gh" / "extensions").exists()
     for parts in TOOL_EXTENSION_SWEEP:
         assert not home.joinpath(*parts).exists(), parts
     assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"

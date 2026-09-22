@@ -34,9 +34,13 @@ $ mkdir -p $R/home/.local/share/gh/extensions/gh-pwn
 $ printf '#!/bin/sh\necho PLANTED-GH-EXTENSION-RAN\n' > .../gh-pwn/gh-pwn && chmod +x ...
 $ HOME=$R/home gh pwn
 PLANTED-GH-EXTENSION-RAN
-$ HOME=$R/home gh extension list
+$ HOME=$R/home gh extension list        # with a hosts.yml in place; see below
 gh pwn
 ```
+
+(Paths abbreviated. `gh extension list` is the one line here that wants a credential -- it
+exits 4 with `gh auth login` advice without one -- where the dispatch itself does not, which is
+the next measurement but one.)
 
 **It has #151's narrow property for `aliases:`, not the `http_unix_socket` one that settled
 #173.** An extension cannot shadow a core command, and no ordinary `gh` command touches the
@@ -48,6 +52,10 @@ Work with GitHub issues.
 $ HOME=$R/home gh --version; gh api user; gh issue list; gh help; gh extension list
 marker absent: no ordinary command executed the plant
 ```
+
+(The last line is the summary of the check, not `gh` output: the plant was a script that
+`touch`ed a marker file, and the file was not there. `gh repo` and `gh auth` were held to the
+same test.)
 
 **`gh` dispatches from that one directory and nowhere else.** Not from `PATH`, the way `git`
 finds `git-<name>`, and not from `GH_CONFIG_DIR`; `XDG_DATA_HOME` moves the whole lookup and
@@ -119,8 +127,9 @@ an image built `FROM` this one — does the same work under its own name, from a
 session can write and the sweep never touches. That is #137's and #151's answer (`/etc/profile`,
 `/etc/gitconfig`, `/etc/ssh/ssh_config`: the system file, not the account's) in the only
 spelling `gh` leaves, because `gh` has no system-wide extension location: measured above, it
-dispatches from the data directory alone, not from `PATH` and not from `GH_CONFIG_DIR`. What
-such a deployment loses is the `gh ` prefix on the command, and nothing else.
+dispatches from the data directory alone, not from `PATH`, not from `GH_CONFIG_DIR`, and not
+from `GH_DATA_DIR`, `GH_EXTENSION_DIR` or `XDG_DATA_DIRS`, none of which this `gh` honours.
+What such a deployment loses is the `gh ` prefix on the command, and nothing else.
 
 **The cost, stated rather than argued away.** The sweep runs before every turn and before every
 script that opens a login shell, so an extension an `after_create` hook installs is gone before
@@ -162,11 +171,14 @@ the home for somebody else.
   (measured above), it is not inherited from the worker (`PASSTHROUGH_NAMES`), and it is not in
   `TOOL_CONFIG_ENV_NAMES` — which carries `XDG_CONFIG_HOME` for the git and `gh` config
   spellings, and was drawn up (#171) when this directory was not yet anyone's question. So the
-  only way it reaches a session is the workspace's own `.issuebot/env`, which a hook writes and
-  which outlives the session: the reach is that workspace and the issue it belongs to, rather
+  only way it reaches a session is the workspace's own `.issuebot/env` -- which a hook writes,
+  and which sits in the agent's own workspace, so the session can write it too -- and which
+  outlives the session: the reach is that workspace and the issue it belongs to, rather
   than the account's every later session, which is what the home is. Exactly the shape #151
   found and filed as #171 rather than folding in, for the same reason: protecting a name is a
-  decision about what a hook may configure. Named here and filed separately.
+  decision about what a hook may configure. Named here and filed as #191, which also has to
+  weigh that `XDG_DATA_HOME` is the only escape hatch a deployment has for a `gh` extension,
+  since `gh` has no system-wide location for one.
 
 - **Concurrency**, exactly as in #101, #137 and #151: with one account for the deployment a
   session running beside this one can plant between a sweep and the command it protects. A pool
