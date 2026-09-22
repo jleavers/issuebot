@@ -15,8 +15,8 @@ and Claude credential. The checkouts meet on one Docker network.
 1. Once per host: `docker network create issuebot` and
    `docker network create --internal issuebot-internal`. The second is where the workers reach
    the hub's database; `--internal` is what leaves them no route off the host except the
-   allow-listing proxy (see [What a session may
-   reach](security-model.md#what-a-session-may-reach) in the README).
+   allow-listing proxy ([`docs/security-model.md`, "What a session may
+   reach"](security-model.md#what-a-session-may-reach)).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
@@ -138,6 +138,44 @@ GitHub will later contradict, and there is no error to count. So subscribe
 [githubstatus.com](https://www.githubstatus.com/) to the same Slack channel the worker posts
 to as well, and an incident arrives in the timeline beside the runs it explains.
 
+### Checks that never ran
+
+A pull request whose checks are all red, where every failed job reports *zero steps*, has not
+failed CI: Actions declined to run it. The account is out of minutes, or on a billing hold, or
+a runner never came — whatever the cause, the job was never scheduled, so there are no steps
+for it to have failed at, and the check-run annotation says so in GitHub's own words, usually
+naming billing. A job that ran and failed looks nothing like this: it has steps, one of them
+red, and a log under it.
+
+The step count is what tells the two apart, and it is worth asking before reading a single
+line of the diff:
+
+```bash
+gh run list --branch <branch> --limit 1 --json databaseId,conclusion
+gh run view <id> --json jobs \
+  --jq '.jobs[] | select(.conclusion == "failure") | {name, steps: (.steps | length)}'
+```
+
+Every failed job at `"steps": 0` is Actions declining. A job with a step count is CI reporting
+on the code, and whatever it found is in the diff.
+
+The agent asks the same question before it hands an issue over, and a run that never executed
+does not hold a finished issue. Parking one would spend the run's remaining turns waiting for a
+check that is never coming, and end at `agent.max_turns` with the issue escalated anyway —
+all of it on a fault that is not in the code and that no session can clear. What that does
+not do is lower the bar — the evidence only moves. The same suite, lint and format must be
+green *locally* on that commit, and the agent records the run id and those local results
+under `Validation` in the workpad before it moves the issue to `issuebot/review`. A job that
+ran steps and failed still holds the issue, however much else is red beside it: the
+distinction is the step count and nothing softer.
+
+Clearing the cause is yours rather than the agent's. A billing hold is lifted by a human with
+the account's settings open, and no session can reach that page; until it is lifted, every pull
+request in the repository looks red the same way — issuebot's and your own alike — and
+re-running the checks only declines them again. So while it lasts, read the workpad rather than
+the check list: the local run recorded there is the evidence that the code is good, and the red
+checks are evidence about the account.
+
 ### Cost
 
 Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
@@ -193,8 +231,8 @@ itself, with the same token, on the same branch and the same pull request. This 
 `hooks.before_run` recipe for a deployment that wants the clone's config narrowed each run,
 and the four caveats that come with it. What is *not* inherited is the worker's own state in
 the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh`, the
-hook shell or the dynamic loader under all but `gh`, and anything at all by a session working
-a **different** issue — see
+hook shell or the dynamic loader under all but `gh`, or change which certificate authorities
+any of them accepts, and anything at all by a session working a **different** issue — see
 [Safety](#safety) below for that boundary and the sweeps that hold it.
 
 ### Configuration changes
@@ -292,14 +330,72 @@ to run. Nothing a deployment needs goes there: the bot's identity is the
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
-`/etc/ssh/ssh_config`, which are root's and which no session can write. The sweep leaves the
+`/etc/ssh/ssh_config`, which are root's and which no session can write.
+
+One file is *edited* rather than removed, and it is the only one: `~/.config/gh/hosts.yml`.
+It is credential state — it holds the `oauth_token` a session authenticates `gh` with, where a
+session has one — so taking it would break authentication for every deployment that relies on
+it, and it stays. But `gh config set -h <host> <key> <value>` writes into that file rather than
+into `config.yml`, and one of the keys it can carry, `api_host`, re-points `gh` at a host of the
+planting session's choosing on an ordinary command: measured against `gh 2.100.0`, a planted
+`api_host` sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` issuebot runs
+to build the next workspace to that host instead of GitHub's. `git_protocol` is the same channel through another key: set to
+`ssh` there, the next session's `gh repo clone` fails outright, since the image ships no ssh
+client.
+
+So the sweep removes gh's whole configuration surface from that file — the thirteen keys
+`gh config --help` advertises, every one of which `gh config set -h <host>` writes here rather
+than into `config.yml`, and none of which is credential state — and leaves everything else,
+the tokens included. The rule is not "these keys are dangerous" but "a session does not leave
+*configuration* in a credential file", so what survives is the credential state: `oauth_token`
+and `user`, and the per-account tokens in the `users:` subtree. The keys go from that subtree
+too, since `gh config set -h` mirrors every one of them there as well as at host level. If the
+sweep ever cannot parse the file it leaves it alone and *says so* — the worker logs
+`claude_home_sweep_failed` each turn — rather than reporting a success it did not have. A file with none of them in it is not rewritten at all; one that does
+carry one is rewritten by a YAML parser, so it comes back normalised rather than
+character-for-character, which is what `gh` itself does to this file on an ordinary command. What is left of the
+channel is bounded and documented in
+`docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
+substituted host, a forged answer needs a certificate authority in the system trust store, which
+is root's, and the egress proxy refuses any host off its allow-list. One thing that note is
+explicit about and this list should be too: `~/.config/gh/config.yml` beside it is **not** swept,
+so the same `git_protocol` written there with a plain `gh config set` still steers the next
+session's clone. `api_host` has no such second position and is closed outright; closing the rest
+of `config.yml` is its own piece of work.
+
+The sweep leaves the
 rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
 the transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
 tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
+sat in stay too, with whatever else is in them — the rest of `gh`'s configuration beside git's,
 `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
 denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
 new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+`gh`'s extension directory is swept on the same schedule (#186), and is the one thing swept
+that is a program rather than a setting: `~/.local/share/gh/extensions` is where
+`gh extension install` puts a program that `gh <name>` runs, and it needs no install step to
+be a plant — a directory and an executable file are dispatched just the same. Here a
+deployment *may* have a use for the directory, which is the one thing that made this a
+question: where no extension is installed the entry costs nothing, but where one is, the
+directory is still the account's to write, so a session can replace the program that
+deployment's own sessions run — the plant then fires on an ordinary command rather than an
+invented one, and swept the deployment gets `gh`'s own `unknown command` instead. So a
+deployment that wants a `gh` extension available to every session installs the program
+root-owned on the session's `PATH` — `/usr/local/bin/<name>` in an image built `FROM` this
+one — and invokes it under its own name: `gh` hands an extension its argv and its own
+environment and no credential of its own, so that is the same program doing the same work,
+from a place no session can write. `gh` has no system-wide extension directory, which is why
+the answer is `PATH` here and `/etc` for git and ssh.
+
+The sweep leaves the rest of the home alone: the credential (`.credentials.json`, which
+rotates its refresh token), the transcripts beside the memory it removes, `~/.claude.json`,
+and whatever else claude or a tool the session ran keeps there (`gh`'s state, npm's cache).
+The directories the tool config sat in stay too, with whatever else is in them — `gh`'s
+configuration beside git's, `known_hosts` beside ssh's, `~/.local/state/gh` beside the
+extension directory — since the sweep names a file or one directory and never empties the one
+above it. It is a denylist of what is loaded or run, not an allowlist of what is kept, so a
+new claude location, a new tool config file or another tool's plug-in directory has to be
+added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
 home is your own. Auto memory is also switched off for the session
 (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
 `setting_sources` says and keyed by repository, so one issue's notes would be the next

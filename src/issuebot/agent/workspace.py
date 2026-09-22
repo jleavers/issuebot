@@ -390,9 +390,11 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear what a prior or concurrent session may have left in the account's home for
-        this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
-        login shell sources (#137) and the git and ssh config a tool would take a command from
-        (#151). Called immediately before each of this session's turns and
+        this one to load or to run: the config under ``~/.claude`` (#101), the shell start-up
+        files a login shell sources (#137), the git and ssh config a tool would take a command
+        from (#151) and the directory ``gh`` dispatches its extensions from (#186, the one of
+        the four that is a program rather than a setting). Called immediately before each of
+        this session's turns and
         before every script it runs in a login shell (``_run_script``: the hooks and the
         post-clone setup).
 
@@ -669,7 +671,13 @@ class WorkspaceManager:
         # reaches its own sweep, and a ``~/.profile`` the previous session at this account left
         # would otherwise run in it. The one seam, rather than one call per hook, because what
         # matters is the login shell and not which hook opened it; ``_run_argv``'s other caller
-        # is the clone, which is ``gh`` as an argv and reads no start-up file.
+        # is the clone, which is ``gh`` as an argv and reads no start-up file. Since #186 that
+        # clone is also the one ``gh`` of a run that happens before this workspace's first
+        # sweep -- it creates the workspace, so it precedes ``after_create`` -- and what makes
+        # it safe is a property of ``gh`` rather than of the sweep: an extension cannot shadow
+        # a core command, so a ``gh-repo`` left in the account's extension directory is never
+        # what ``gh repo clone`` runs. Measured, and pinned by
+        # ``test_a_planted_extension_cannot_shadow_the_core_command_the_clone_runs``.
         await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 

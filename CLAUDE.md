@@ -115,6 +115,13 @@ session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `ba
 `LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base
 image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
 catches that rather than the variable that happens to produce it.
+
+A red check on a pull request here is not always this repository's code: when every failed
+job reports zero steps, Actions declined to run the job at all, and the fix is the account's
+rather than the diff's -- [`docs/operations.md`, "Checks that never
+ran"](docs/operations.md#checks-that-never-ran) is how to tell the two apart and what it
+means for an issue that is otherwise finished.
+
 Dependabot covers uv, Docker and Actions weekly.
 Every `uses:` in the workflows and every `rev:` in `.pre-commit-config.yaml` is a commit
 digest with its tag beside it (#111; `tests/test_pins.py` refuses a tag): a tag is a name its
@@ -362,8 +369,8 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101, #137, #151), clears what a prior session left in the
-  account's *home* for the next one to load. Three lists, all pinned by tests, so dropping a name
+  two blind spots; a fourth verb, `sweep` (#101, #137, #151, #186), clears what a prior session left in the
+  account's *home* for the next one to load or to run. Four lists, all pinned by tests, so dropping a name
   is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
   `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
@@ -396,6 +403,104 @@ version, and moves by hand.
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
+  `GH_HOSTS_STEERING_KEYS` is the one place the sweep looks *inside* a file rather than removing
+  it (#190, spec `2026-09-22-session-gh-hosts-design.md`): `~/.config/gh/hosts.yml` is credential
+  state -- it carries the `oauth_token` a session authenticates `gh` with, which is why #151
+  pinned it a survivor and #173 kept it -- and it is not *only* that. `gh config set -h <host>`
+  writes there rather than into `config.yml`, and `api_host` among the keys it can carry
+  re-points `gh` on an ordinary core command: measured against `gh 2.100.0`, a planted value
+  sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` `WorkspaceManager` runs
+  for the next workspace to the host the planting session named. What the channel cannot do is
+  measured too, and is what keeps it a key-level edit rather than a fifth swept path: `gh` sends
+  no `Authorization` header to a substituted host (from `GH_TOKEN` or from the file's own
+  `oauth_token`; `gh help config` says so outright), a self-signed certificate is refused so a
+  forged answer needs a CA in root's trust store, and #126's proxy refuses a name off its
+  allow-list while an on-list one completes -- so what survives is availability, not
+  confidentiality, and it needs no network at all.
+  The keys removed are `gh`'s whole configuration surface, the thirteen `gh config --help`
+  advertises, because `gh config set -h <host> <key> <value>` writes *every one of them* here
+  rather than into `config.yml`. That measurement has to be taken with a value each key accepts,
+  which is the easy thing to get wrong and was got wrong first time round: `gh config set`
+  validates the enum-valued keys, so a probe passing a placeholder is refused for eight of the
+  thirteen, and one that swallows the refusal reports only the five free-form ones and calls
+  that the closed set. So the rule is not "these keys are dangerous" but "a session does not
+  leave *configuration* in a credential file", and what survives is the credential state:
+  `oauth_token` and `user`, neither of which `-h` can write. The keys come out at *both* levels
+  `gh` writes them -- host level, where it reads them, and the `users.<name>` subtree, which
+  `gh config set -h` mirrors into (creating it if need be) once the file names a user, so a
+  host-level-only sweep would leave a complete second copy of every planted key. Those copies
+  are measured inert on this `gh`, but so are eleven of the thirteen at host level.
+  `GH_HOSTS_MAX_DEPTH` (8) is the other half of being able to write the file back at all: PyYAML
+  recurses per nesting level, `gh` writes this file three levels deep at most, and a key whose
+  value nests past the bound is dropped -- measured, ~900 bytes of brackets beside a plant used
+  to make the *dump* raise, so the keys came out of the document and the write was then
+  abandoned, leaving the plant for the container's lifetime. Nothing credential is that deep.
+  Two of the thirteen are live from this position and they differ in reach. `api_host` is the
+  issue's subject and the only one *only* reachable here, top level being inert for it, so this
+  closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
+  makes `gh auth status` report `Git operations protocol: ssh`, and fails `gh repo clone`
+  outright with `cannot run ssh: No such file or directory`, the image shipping no ssh client --
+  but it is *also* honoured from `config.yml`, which #173 takes and which **PR #189 has not
+  landed**, so that key is closed only in the position this change owns. `http_unix_socket`,
+  `pager`, `editor` and `browser` are measured *inert* here (the same values at top level fire;
+  the hostname-less lookup is what gh's own pager, editor and browser resolution uses) and the
+  remaining seven are cosmetic or documented global; all are removed anyway, since a key that
+  does nothing costs nothing to name where leaving one out costs the channel back.
+  A denylist, unlike `--strict-mcp-config`'s "name what survives", because the failures are not
+  symmetrical: a key a future `gh` adds and this list misses costs the bounded channel above,
+  where a keep-list stripping a credential key a future `gh` adds would break authentication for
+  every session -- so the set is *proved* instead, the `docker` CI job reading the image's own
+  `gh config --help` and failing when it advertises a key this list does not name.
+  Fail-safe in one direction only: a file that will not open even with the modes put back, one
+  over `GH_HOSTS_LIMIT` (256 KiB), one that is not a regular file (`O_NONBLOCK` and an `fstat`,
+  `Boundary.read`'s rule, since a FIFO at that name would hang the open once per turn and once
+  per hook), bytes that are not UTF-8 or not YAML, and a document that is not the mapping of
+  hosts `gh` writes are all left exactly as they are, since rewriting a credential file on a
+  guess is the one outcome worse than the plant -- and every one of those declines is
+  *reported*, which is the one answer this sweep gives. The removals elsewhere are best effort
+  because a target still there is one the next sweep retries, where a document PyYAML cannot
+  scan is one it will never scan: exiting 0 on it would be a silent, permanent bypass of the
+  control, so `_sweep_gh_hosts` returns False, the helper exits non-zero and
+  `claude_home_sweep_failed` is logged every turn. An absent file is not a decline.
+  `RecursionError` is caught beside `YAMLError` at both ends as a backstop -- the depth bound is
+  what actually keeps the write possible -- since a sweep must not raise either way.
+  It is not written at all unless a key came out, so an unplanted home keeps its
+  `hosts.yml` byte for byte across the sweep that runs before every turn and every hook.
+  `_relax_file` is the one new repair beside `_relax`: a removal needs the parent's bits and
+  nothing of the file's own mode, where an edit has to read its target, so a session that plants
+  a key and then `chmod 0000`s the file would otherwise keep it at no cost to itself. Three more
+  rules make the write safe for a credential file rather than merely atomic: `_HostsLoader`
+  strips PyYAML's implicit scalar resolvers so the round trip is value-faithful (`user: no` would
+  otherwise come back `false`, and an all-digit token starting with a zero an octal integer,
+  since PyYAML resolves YAML 1.1 where the `go-yaml` that reads this file does not); the rename
+  is declined unless the name still resolves to the `(ino, dev, mtime_ns, size)` the document was
+  parsed from and to a file this account owns, since `gh` rewrites this file on ordinary commands
+  -- it normalises the document and refreshes an OAuth token in place -- and a rename over one
+  that moved would discard a credential it had just written; and the bytes are `fsync`ed first,
+  the rename being what makes the new file the credential.
+  And `TOOL_EXTENSION_SWEEP` (#186, spec `2026-09-22-session-gh-extension-design.md`):
+  `.local/share/gh/extensions`, the directory `gh` dispatches `gh <name>` from. Not a config
+  file a tool reads but a program the session wrote, which is why it is its own list -- that one
+  is checkable against `git-config(1)` and `ssh_config(5)`, this one against `gh extension`'s
+  layout, and the two answer "what does a deployment do instead" differently. Measured on this
+  image's `gh` (2.100.0): a directory and an executable file are dispatched with no install step,
+  no manifest and no network; an extension cannot shadow a core command and no ordinary `gh`
+  command touches the directory, the narrow shape #151 measured for `aliases:`; and `gh`
+  dispatches from that directory alone, not from `PATH` as git does for `git-<name>`, and not
+  from `GH_CONFIG_DIR`. What makes it a sweep anyway is that the directory is the account's to
+  write, so where a deployment *has* installed an extension a session can replace the program in
+  place and the plant fires on the ordinary command that deployment's sessions already run -- the
+  deployment with a reason not to sweep is the one where not sweeping costs most, and swept it
+  gets `gh`'s own `unknown command` instead. `gh` has no system-wide extension location, so such
+  a deployment installs the program root-owned on the session's `PATH` in an image built `FROM`
+  this one and invokes it under its own name; `gh` hands an extension its argv and its own
+  environment and injects no credential, so only the `gh ` prefix is lost. Directory-specific
+  like every entry above, since `~/.local/state/gh` is `gh`'s own state beside it and
+  `~/.local/share` is every tool's; walked component by component, so a link at any of the four
+  is unlinked rather than followed. The environment half holds the same way
+  `TOOL_CONFIG_SWEEP`'s git half does: `XDG_DATA_HOME` moves the lookup wholesale (measured), and
+  it is in neither `PASSTHROUGH_NAMES` nor -- since #191, the environment spelling of this sweep
+  as #171 is of #151 -- settable from `.issuebot/env`, which refuses it as a protected name.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
@@ -405,7 +510,7 @@ version, and moves by hand.
   absent and `_walk` yields no target through a closed `~/.config`), and without read
   `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
   `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
-  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  throughout. `$HOME` itself is such a directory, so that reached all four lists rather than
   only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
   is an absence, and anything else is an answer this process cannot get until the modes go back.
   A symlinked `.claude` is yielded as the target rather than descended into, the rule
@@ -744,10 +849,10 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`), `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
-  `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`, `LD_AUDIT`,
-  `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary: the file
-  sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), `SHELL_ENV_NAMES`
+  (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`,
+  `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary:
+  the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -804,7 +909,22 @@ version, and moves by hand.
   too, and nothing was shown to work through them: the note's residual). `XDG_` is a specification's namespace
   rather than a tool's, so it is names here and not a prefix: its roots are a short fixed list
   (seven in the current version) and which of them belongs is a measurement, not a manual to
-  keep up with. The deployment's
+  keep up with. The TLS pair is on no chain either and is there under a third rule, since #205
+  (spec `2026-09-22-session-tls-trust-env-design.md`): a name is protected when it decides
+  which certificate authorities a tool issuebot launches will accept -- a *trust* decision
+  rather than a command, the one entry on that list that is neither a command nor a file naming
+  one, and the only spelling that reaches `gh`, which has no `GH_` name for its trust store
+  (`git` reads neither; `GIT_SSL_CAINFO` is its own and already covered). Measured, and not
+  only a widening: each replaces its own half of the default CA file/directory pair, so one
+  alone leaves the other half verifying `api.github.com` -- which is what makes a single line
+  read as additive -- while the two together replace the store outright, and a path that will
+  not load is not ignored, taking `gh` off GitHub entirely and every `curl https://` with it.
+  That half needs no second primitive, where widening needs a redirect (#190's `api_host`) to
+  pay off. The per-tool spellings stay settable, each measured not to reach `gh`
+  (`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `UV_SYSTEM_CERTS`), so a hook keeps a
+  private index authority for the target repository's own tools; `uv`'s own bundle is `--cert`,
+  a flag with no environment spelling, so a deployment-wide authority belongs in the image's
+  root-owned system trust store, the way #191's extension belongs on `PATH`. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
@@ -1531,9 +1651,11 @@ second copy of a section that has already moved, and the two then drift.
   recipes the CI `docker` job parses out and runs, and `.issuebot/env`, what a hook hands the
   agent. Anything about what a session's own tests need to run belongs here.
 - `docs/operations.md`: running a deployment -- more than one repository against one store,
-  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Cost,
-  Restarts, Configuration changes, Upgrades, Safety). The recovery an operator performs on a
-  blocked or over-budget issue is documented there and nowhere else.
+  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Checks
+  that never ran, Cost, Restarts, How long a workspace lives, Configuration changes, Upgrades,
+  Safety). The recovery an operator performs on a blocked or over-budget issue is documented
+  there and nowhere else, as is the difference between a check that failed and one Actions
+  never ran.
 - `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
   a browser that will not speak it, the hero's six tiles, and what "issues closed" counts.
 - `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust

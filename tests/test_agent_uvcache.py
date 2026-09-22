@@ -491,7 +491,7 @@ def test_a_hardlinked_venv_entry_reaches_past_the_seal(tmp_path: Path) -> None:
     future per-workspace cache has to come back here and delete it rather than leave a
     docstring claiming the seal covers the venv.
     """
-    cache = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    cache = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert cache is not None
     cached = cache / "pkg.py"
     cached.write_text("honest\n")
@@ -523,7 +523,7 @@ def test_a_copied_venv_entry_and_the_clone_do_not(tmp_path: Path) -> None:
     the writes prove is the inode arithmetic either side of it -- which is the whole of the
     difference between the two link modes.
     """
-    cache = ensure_uv_cache_dir(tmp_path, ME, HAS_UV, which=found)
+    cache = ensure_uv_cache_dir(tmp_path, ME, NO_UV_ON_PATH, which=found)
     assert cache is not None
     cached = cache / "pkg.py"
     cached.write_text("honest\n")

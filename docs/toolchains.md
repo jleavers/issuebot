@@ -21,7 +21,8 @@ a restart; and only the `worker` service takes the argument. All four end at the
 [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and issuebot
 merges into the environment of every turn -- which is the last section here.
 
-Everything else an operator needs is in the [README](../README.md).
+Everything else an operator needs is in the [README](../README.md) and the documents listed
+beside it.
 
 ## A PostgreSQL server for the target repository's tests
 
@@ -341,7 +342,7 @@ What was chosen instead is to say plainly what the residual is: the same account
 uid already shares a home that nothing sweeps a cache out of, so this is not a new channel,
 and what it reaches is what an honest session's tests import and never the clone it commits
 and pushes, in front of the human review every issuebot pull request ends at. The consequence
-a reader of the [account pool](../README.md#one-account-per-concurrent-session) has to carry
+a reader of the [account pool](security-model.md#one-account-per-concurrent-session) has to carry
 is that the seal covers the clone and, under a hardlinking uv, not `.venv`; `accounts.py`'s
 own docstring says so, and `uvcache.py` holds the reasoning. A deployment whose threat model
 differs — a pool handed issues from genuinely untrusted authors — has `UV_LINK_MODE=copy` for
@@ -593,6 +594,46 @@ hook that would truncate it again or append a duplicate per session.
   `gh` adds is a `GH_EXTENSION=1` marker, so what you lose is the `gh ` prefix on the command. That route is also the one the
   session cannot reach, where a variable in a file the session can rewrite never was.
 
+- **So are the two names that decide which certificate authorities the session's tools
+  accept**: `SSL_CERT_FILE` and `SSL_CERT_DIR`. These are on no chain either, and they are the
+  one pair here that does not name a command or a file naming one — what they decide is *who*
+  the tool is talking to. They are also the only spelling that reaches `gh`, which has no `GH_`
+  name for its trust store, so no protected prefix covered them.
+
+  They are not one variable and not only a widening. Each replaces its own half of the default
+  CA *file*/CA *directory* pair, so one alone leaves the other half still verifying
+  `api.github.com` — which is what makes a single line look harmless — while the two together
+  replace the store outright, and a value that will not load is not ignored:
+
+  | in `.issuebot/env` | the next session's `gh` | its `curl` |
+  |---|---|---|
+  | neither | verifies GitHub | verifies GitHub |
+  | `SSL_CERT_FILE` naming a private CA | trusts it **and** GitHub | trusts it **and** GitHub |
+  | both, naming a private CA | trusts it, and **not** GitHub | trusts it, and **not** GitHub |
+  | `SSL_CERT_FILE` naming a path that does not exist | still verifies GitHub | fails every `https://` with exit 77 |
+  | `SSL_CERT_DIR` naming a path that does not exist | still verifies GitHub | still verifies GitHub |
+  | both naming paths that do not exist | fails **every** request | fails every `https://` with exit 77 |
+
+  `git` reads neither — its spelling is `GIT_SSL_CAINFO` → `http.sslCAInfo`, protected by the
+  `GIT_` prefix above — and `uv` is stricter than the table: either name alone replaces its
+  whole store, and a path that does not exist leaves it trusting nothing at all (it says so,
+  which no other tool here does).
+
+  A hook with a real reason for a private authority — a package index inside your network is
+  the usual one — keeps every route but this file:
+
+  - **The per-tool variables**, which are not protected and are the better spelling anyway:
+    `CURL_CA_BUNDLE` for curl, `REQUESTS_CA_BUNDLE` or `PIP_CERT` for pip, `uv --cert` for a
+    `uv` the hook runs. Each was measured reaching the tool it names and *not* `gh`, which is
+    the whole difference between them and the two generic names.
+  - **Per-command**, in the hook's own shell, exactly as for the git variables above.
+  - **The image's system trust store**, for an authority every session needs:
+    `/usr/local/share/ca-certificates/<name>.crt` and `update-ca-certificates` in an image built
+    `FROM` this one. `gh`, `git`, `curl` and `python` then read it with no variable at all, and
+    `uv` reads it with `UV_SYSTEM_CERTS=1`, which this file may still set because it is a switch
+    and not a path. That route is the one the session cannot take back, where a variable in a
+    file the session can rewrite never was.
+
 - **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
   post-clone setup and all four hooks — goes through `bash -lc`, and `bash` reads these out of
@@ -698,6 +739,15 @@ hook that would truncate it again or append a duplicate per session.
   the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
   `git config --local` inside the clone, which is what the post-clone setup does.
+- **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
+  schedule (#186), so an extension a hook installs is gone before the next login shell and
+  before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is
+  written there. `XDG_DATA_HOME`, the one variable besides `HOME` that moves that
+  lookup, is a protected name above (#191), and `HOME` is protected too, so the sweep's
+  guarantee does not rest on a name a hook could rewrite. A
+  deployment that wants a `gh` extension for every session takes the `PATH` route that bullet
+  describes; a hook that needs one for its own commands can install it into the workspace and
+  run it by path.
 - **What the clone itself does carry over.** `git config --local` is the route that stays open,
   and it stays open in both directions: a workspace outlives its run, so what a hook — or the
   session — writes into the clone's `.git/config` is there for the next session on that issue.
