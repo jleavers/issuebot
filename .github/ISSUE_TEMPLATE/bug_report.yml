@@ -1,0 +1,75 @@
+name: Bug report
+description: Something issuebot does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security vulnerabilities.** Report those privately through
+        [private vulnerability reporting](https://github.com/jleavers/issuebot/security/advisories/new)
+        — see [SECURITY.md](https://github.com/jleavers/issuebot/blob/main/SECURITY.md).
+        Issues here are public, and an agent reads and acts on them.
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        The worker moved the issue to issuebot/review without opening a pull request, and
+        the workpad has no Blockers section explaining why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >
+        The smallest sequence that shows it. If it happened during a run, the issue number and
+        roughly when is usually enough for the maintainer to find the transcript.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Whatever you have: log lines (`docker compose logs worker`), the `issuebot status`
+        output, the `issuebot validate` lines, a dashboard screenshot. **Check it for
+        credentials first** — issuebot scrubs what it stores, but it cannot scrub what you
+        paste here.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit you are running (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: route
+    attributes:
+      label: How are you running it?
+      options:
+        - Docker Compose (the supported deployment)
+        - The host route (uv run issuebot worker, no container)
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: >
+        The commands that must pass for this to be fixed, if you know them. An agent working
+        this issue mirrors this section into its checklist and runs it, so concrete commands
+        are worth more than prose.
+      placeholder: |
+        uv run pytest tests/test_orchestrator.py -k blocked_escape
+        uv run ruff check .
+      render: shell

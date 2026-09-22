@@ -1,0 +1,63 @@
+name: Feature or change
+description: Something issuebot should do, or should do differently.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues here are written as a brief for whoever picks the work up — which may be a
+        person, or may be issuebot itself. The clearer the acceptance criteria, the better
+        either does.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What is hard, surprising or impossible today. Describe the situation rather than the
+        fix, so the fix stays open to argument.
+      placeholder: |
+        A worker whose credential lapses overnight escalates one issue and then holds
+        dispatch, but nothing tells me until I look at the dashboard the next morning.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+      description: If you have a shape in mind, describe it. If not, leave this and say so.
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: >
+        How someone would know this is done. Behaviour rather than implementation: what is
+        true afterwards that is not true now.
+      placeholder: |
+        - A dispatch hold that lasts more than one poll interval posts to Slack once.
+        - The message names the hold's kind and reason, and nothing more.
+        - Recovery posts once too, so the channel does not have to be read as a cliffhanger.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: >
+        The commands that must pass. An agent working this issue mirrors this section into its
+        checklist and runs it, so concrete commands are worth more than prose.
+      placeholder: |
+        uv run pytest
+        uv run ruff check . && uv run ruff format --check .
+      render: shell
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Anything you tried, or rejected, and why. This is often the most useful field: it
+        stops the same option being re-proposed and re-rejected.
