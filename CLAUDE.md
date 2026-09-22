@@ -178,11 +178,16 @@ This file has a *budget* as well as a scope, and the budget is what nearly cost 
 own readers (#211). issuebot reads `CLAUDE.md` and `AGENTS.md` out of the clone and carries
 them to the session as enveloped data, cut at `INSTRUCTION_FILE.limit` -- 128 KiB, declared in
 `src/issuebot/agent/boundary.py` -- and a cut is never a failure: the file renders whole on
-GitHub and in an editor, and only a session sees the end missing. At 143 KB this file was
-12 KB over, so the cut landed inside the *first* entry below and ten of the eleven were gone,
-along with "What issuebot is", the operational rules, the security-sweep note and "Creating
-PRs", which is where a session is told to open its pull request through the REST API rather
-than `gh pr create`. Adding prose here therefore spends a budget, and
+GitHub and in an editor, and only a session sees the end missing. At 143,136 bytes this file
+was 12 KB over, and the cut fell 1,384 bytes *before* this section's own heading, inside the
+package layout above it -- so the whole map went, every entry below and the two paragraphs
+introducing them, along with "What issuebot is", the operational rules, the security-sweep
+note and "Creating PRs", which is where a session is told to open its pull request through
+the REST API rather than `gh pr create`. Where the cut lands moves with the file rather than
+staying put: 3 KB earlier in its growth, at 140,452 bytes, it fell inside the *first* entry
+below, taking the ten after it and leaving the map's heading -- which is the point, since
+nothing tells a reader which of the two they are looking at.
+Adding prose here therefore spends a budget, and
 `tests/test_instruction_bounds.py` is what says so out loud: it fails while there is still
 16 KiB of headroom, so the warning arrives in CI, before the cut, rather than in a prompt
 nobody reads. Reference detail belongs in a file beside this one; what stays here is what a
@@ -227,7 +232,11 @@ session needs *before* it knows which file to open.
   per concurrent session, and checking that the credential took. The reasoning behind those
   bounds is in this file; that one is the operator's view of the same line.
 - `docs/BLUEPRINT.md`: the full requirements, and `docs/superpowers/` the designs and plans
-  above.
+  behind them -- `specs/`, the phased design and one spec per phase, and `plans/`, one
+  implementation plan per phase. That pair used to be named at the end of the package layout
+  in this file, so "above" was where this entry pointed; #211 moved that section out, and the
+  pointer now sits at the top of [`docs/package-layout.md`](docs/package-layout.md) beside
+  the modules it belongs to.
 - `CONTRIBUTING.md`: how a change gets in -- getting set up, pull requests, the two
   conventions a contributor trips over (digest pins; the README's images are generated), how
   to report a security issue instead, and the licence contributions are accepted under. Since

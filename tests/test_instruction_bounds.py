@@ -51,10 +51,15 @@ HEADROOM = 16 * 1024
 # `docs/package-layout.md` is read from the working tree, not carried in a prompt, so
 # `INSTRUCTION_FILE_LIMIT` does not apply to it and this number is not that one. It exists
 # because the half that moved took the *growth* with it, and the whole lesson of #211 is that
-# unwatched growth in a file nobody measures is exactly what goes unnoticed: the `origin/main`
-# merge on this change's own branch added 8 KB to this prose in a day. The remedy when it
-# fails is not to raise it either -- it is to give the file the structure it has so far done
-# without, one document per module under `docs/package-layout/` behind an index.
+# unwatched growth in a file nobody measures is exactly what goes unnoticed: the two
+# `origin/main` merges on this change's own branch added ~16 KB to this prose in a day
+# (121,097 -> 129,471 -> 136,911), replaying into it the layout edits #173, #190 and #225 made
+# on main while the section was moving out. That pair is a burst rather than the rate -- it is
+# what a split costs while it is in flight, and it stops once this lands -- but it is the
+# honest figure to size against, and it leaves ~26 KB here: a dozen merges at the ~2.2 KB mean
+# measured for `HEADROOM` below, three at the burst. The remedy when it fails is not to raise
+# it either -- it is to give the file the structure it has so far done without, one document
+# per module under `docs/package-layout/` behind an index.
 LAYOUT_BUDGET = 160 * 1024
 LAYOUT_DOC = "docs/package-layout.md"
 

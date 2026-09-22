@@ -1,11 +1,14 @@
 # Package layout
 
 Every module of `issuebot`: what it holds, and the reasoning behind the shape it has. This is
-the reference half of `CLAUDE.md`, moved out of it by #211 -- it was 120 KB of a 143 KB file,
-and a session's copy of `CLAUDE.md` is cut at 128 KiB, so keeping it there cost the end of the
-file the whole of "The files beside this one", the operational rules and the PR convention.
-`CLAUDE.md` stays navigational and under the cap; this is what it points at, and a session
-that needs a module's design reads it from here.
+the reference half of `CLAUDE.md`, moved out of it by #211: it was 120 KB of a 143 KB
+`CLAUDE.md` at the time of the move, and has grown on its own since. A session's copy of
+`CLAUDE.md` is cut at 128 KiB, so keeping this here cost the end of that file the whole of
+"The files beside this one", the operational rules and the PR convention. `CLAUDE.md` stays
+navigational and under the cap; this is what it points at, and a session that needs a
+module's design reads it from here. Nothing truncates *this* file -- a session reads it from
+the working tree -- but `tests/test_instruction_bounds.py` bounds it anyway, because the
+growth that took `CLAUDE.md` over the cap moved here with the prose.
 
 Design documents sit beside it: `docs/superpowers/specs/` (phased design and one spec per
 phase), `docs/superpowers/plans/` (one implementation plan per phase).
