@@ -5,12 +5,12 @@ places across three packages name the same remedy -- ``validate``'s ``github.lab
 the worker's startup complaint, and the ``label not found`` error both GitHub adapters raise
 -- and a remedy the operator cannot paste is not one.
 
-Docker is the standard deployment (README, "validate and create the labels"), and inside the
-image ``issuebot`` is nobody's command: the route in is ``docker compose run --rm worker
-<subcommand>``, which is how the operator ran the ``validate`` that printed the hint (#169).
-On a host it is the other way round -- ``uv run issuebot ...`` is the development route there,
-and an operator who has built no image cannot run a compose service at all -- so the wording
-is derived from where the process is rather than fixed either way.
+Docker is the standard deployment (README, "Step 2: validate and create the labels"), and
+inside the image ``issuebot`` is nobody's command: the route in is ``docker compose run --rm
+worker <subcommand>``, which is how the operator ran the ``validate`` that printed the hint
+(#169). On a host it is the other way round -- ``uv run issuebot ...`` is the development
+route there, and an operator who has built no image cannot run a compose service at all -- so
+the wording is derived from where the process is rather than fixed either way.
 
 ``/etc/issuebot`` is what answers that, and it is the image's own fact rather than a guess:
 the build creates the directory, beside the session-account list it writes inside it, and
