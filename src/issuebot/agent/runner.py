@@ -19,8 +19,9 @@ from pydantic import SecretStr
 from issuebot.agent.accounts import session_account
 from issuebot.agent.boundary import ENV_FILE, TURN_STDERR, Boundary, BoundaryError, split_parts
 from issuebot.agent.errors import AgentErrorCategory
-from issuebot.agent.runas import RunAs, Spawn
+from issuebot.agent.runas import CLAUDE_HOME_DIR, RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
+from issuebot.agent.uvcache import UV_CACHE_ENV, ensure_uv_cache_dir
 from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
@@ -85,10 +86,127 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # bounds egress is the container's lack of a route, not a variable the session could rewrite,
 # so a hook that emptied them would take `gh`, `git` and the next turn's `claude` off the
 # network rather than let anything off the allow-list (#126).
-PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
-    {"GH_TOKEN", "PATH", "HOME", *FIXED_ENVIRONMENT, *PROXY_ENV_NAMES}
+# The tool-config entries below are the same rule one step in (#171): `PATH` decides *which*
+# binary `git` and `gh` are, and these decide what that binary does and which further commands
+# it runs; the shell entries beside them are the same rule again for `bash`, which is the
+# process every hook and the post-clone setup *is* (#179). The file outlives the session -- a
+# workspace belongs to one issue -- so what such a line re-points is the next session on that
+# issue. It is also the environment spelling of what `TOOL_CONFIG_SWEEP` (`runas.py`, #151)
+# and `SHELL_STARTUP_SWEEP` (#137) remove from the account's home: a sweep of `~/.gitconfig`
+# or of `~/.profile` would leave a guarantee conditional on a variable nothing checked.
+#   The names are the rungs of git's and gh's own documented precedence chains that fall
+#   outside the two prefixes below. That is the rule, and it is checkable against
+#   `git-var(1)`, `git-commit(1)` and `gh environment` rather than being a list of everything
+#   that might name a command -- which matters, because protecting the head of a chain and
+#   leaving its tail closes nothing. Each chain, with the protected head first:
+#     editor    GIT_EDITOR / GH_EDITOR -> core.editor -> VISUAL -> EDITOR
+#     pager     GIT_PAGER / GH_PAGER   -> core.pager  -> PAGER
+#     browser   GH_BROWSER                            -> BROWSER
+#     askpass   GIT_ASKPASS            -> core.askPass -> SSH_ASKPASS (SSH_ASKPASS_REQUIRE)
+#     identity  GIT_AUTHOR_EMAIL       -> user.email  -> EMAIL
+#     token     GH_TOKEN               -> GITHUB_TOKEN; GH_ENTERPRISE_TOKEN ->
+#               GITHUB_ENTERPRISE_TOKEN
+#   The config rung of each is swept out of the home by `TOOL_CONFIG_SWEEP` (#151), so the
+#   environment rungs are the whole of what is left. `EDITOR` was measured firing on a plain
+#   `git commit` with no `TERM` set at all, and `EMAIL` setting the author of a commit; `PAGER`
+#   needs a terminal, which a hook may well have.
+#   `XDG_CONFIG_HOME` is not on any chain: it moves the config directory of everything
+#   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
+#   whose aliases may be shell commands.
+#   Names and not prefixes (`SSH_`, `GITHUB_`, `EDITOR`...), because `SSH_AUTH_SOCK` is a
+#   legitimate route for exactly the deploy-key case this bound has to leave a hook author, and
+#   `GITHUB_`/generic namespaces hold plenty a hook may hand over. A chain has an end, so this
+#   list has one too.
+TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "XDG_CONFIG_HOME",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "BROWSER",
+        "EMAIL",
+        "GITHUB_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    }
 )
-PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_")
+# `GIT_` and `GH_` whole, rather than the handful of names the issue started from. An
+# enumeration here is one somebody has to keep complete against those tools' own manuals, and
+# two drafts of this list were not. `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` name a command,
+# but so do `GIT_EDITOR` (on a plain `git commit`, which a session runs constantly),
+# `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_SSH`,
+# `GIT_EXEC_PATH` (the directory `git <subcommand>` is looked up in) and `GIT_TEMPLATE_DIR`
+# (the hooks copied into the next repository `git init` creates); `GIT_CONFIG_COUNT` with
+# `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` sets `alias.x = !...` with no file at all;
+# and `GIT_DIR` and `GIT_WORK_TREE` re-point which repository is being operated on. On the `gh`
+# side, `GH_CONFIG_DIR` takes precedence over `$XDG_CONFIG_HOME/gh` for the same aliases, and
+# `GH_EDITOR`/`GH_BROWSER` name commands, while `GH_PAGER` was already fixed and protected --
+# an asymmetry with no reason behind it. The prefixes cover all of them and whatever either
+# tool adds next, which is the only version of this that stays true.
+# The cost, stated where the code is: `GIT_AUTHOR_`/`GIT_COMMITTER_` are caught too, but
+# `.issuebot/env` was never the deployment's channel for them -- they are set in `.env`, reach
+# the worker's own environment and are inherited through `PASSTHROUGH_PREFIXES` exactly as
+# before, and refusing the *session-writable file* from re-pointing the identity a pull
+# request's commits carry is worth having on its own account. Behaviour-only switches with no
+# config equivalent (`GIT_TERMINAL_PROMPT`, `GIT_TRACE*`, `GIT_LFS_SKIP_SMUDGE`) are caught as
+# well, and for those the hook has its own shell around the git it runs, or a derived image.
+# Otherwise a hook that needs a setting has `git config --local` in the clone, `git -c`, and a
+# root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` for a deployment-wide one; what it may
+# not do is hand the variable to the session.
+TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_", "GH_")
+# The same rule one tool further out again (#179), and the one tool every script issuebot runs
+# for a session goes through: `WorkspaceManager.hook_shell` is `bash -lc`, which opens the
+# post-clone setup and all four hooks. These are the variables `bash` itself reads out of the
+# environment it is handed, before or around the commands the hook actually wrote -- the
+# environment spelling of the shell start-up files `SHELL_STARTUP_SWEEP` (`runas.py`, #137)
+# removes from the account's home, where a sweep of `~/.profile` would otherwise leave a
+# guarantee conditional on a variable nothing checked. Measured, each of them, against the
+# image's own `bash` 5.2:
+#   BASH_ENV    the file a non-interactive `bash` sources before the command it was given:
+#               `BASH_ENV=<script> bash -lc 'echo hook-ran'` runs the script first. #137's
+#               channel exactly, in one line of a file the session can write.
+#   SHELLOPTS   `set -o` options enabled from the environment before any start-up file is read,
+#               `xtrace` among them (`BASHOPTS` is the `shopt` half of the same thing). No
+#               command of its own, and here for what it turns on:
+#   PS4         expanded before every traced command once `xtrace` is on, command substitution
+#               and all -- the first of them inside `/etc/profile`, long before the hook's own
+#               script. `SHELLOPTS=xtrace` with `PS4='$(...)'` was measured running the
+#               substitution. It takes the pair to run anything -- `PS4` is inert without
+#               `xtrace`, and `xtrace` with the default `PS4` only prints -- so both are here.
+#   CDPATH      `PATH`'s rule for directories: `cd sub` in a hook resolves through it, so a
+#               line here sends the hook into a tree of the last session's choosing and the
+#               relative command after the `cd` is that tree's file. `PATH` is protected for
+#               this reason and `cd` is the one lookup it does not cover.
+# `ENV` is *not* here: it is POSIX's start-up file for an *interactive* shell, and nothing
+# issuebot runs is interactive. Measured unread by `bash -lc`, by `bash --posix -c`, by `bash`
+# invoked as `sh`, and by `sh -c` (dash) -- so it is a name that would close nothing, and the
+# rule this list states is what was shown to work.
+# The cost is as close to nothing as a protection gets: nothing in the tree sets any of these,
+# and a hook that wants a file sourced before its own commands has `source` in the script it
+# already owns, `set -x` for a trace and an absolute path for a `cd`. What it may not do is
+# hand the *next* session's shell the variable.
+SHELL_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "BASH_ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "CDPATH",
+    }
+)
+PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "GH_TOKEN",
+        "PATH",
+        "HOME",
+        *FIXED_ENVIRONMENT,
+        *PROXY_ENV_NAMES,
+        *TOOL_CONFIG_ENV_NAMES,
+        *SHELL_ENV_NAMES,
+    }
+)
+PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", *TOOL_CONFIG_ENV_PREFIXES)
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MESSAGE_LIMIT = 500
 STDERR_TAIL_LIMIT = 64 * 1024
@@ -106,8 +224,17 @@ TurnEventKind = Literal[
 ]
 
 
-def agent_environment(environ: Mapping[str, str], *, token: SecretStr | None) -> dict[str, str]:
-    """The minimal environment the agent child and every hook see."""
+def agent_environment(
+    environ: Mapping[str, str], *, token: SecretStr | None, uv_cache: Path | None = None
+) -> dict[str, str]:
+    """The minimal environment the agent child and every hook see.
+
+    ``uv_cache`` is the one thing here the worker *computes* rather than passes through or
+    fixes (#164): the cache directory belongs to the session account and sits under
+    ``workspace.root``, so neither the allow-list above nor a constant could carry it. It joins
+    the environment the way ``GH_TOKEN`` does, and ``None`` -- the host route, an image with no
+    uv, a directory that could not be made -- leaves uv's own default alone.
+    """
     env = {
         name: value
         for name, value in environ.items()
@@ -116,6 +243,8 @@ def agent_environment(environ: Mapping[str, str], *, token: SecretStr | None) ->
     env.update(FIXED_ENVIRONMENT)
     if token is not None:
         env["GH_TOKEN"] = token.get_secret_value()
+    if uv_cache is not None:
+        env[UV_CACHE_ENV] = str(uv_cache)
     return env
 
 
@@ -710,6 +839,69 @@ def settings_for_labels(settings: Settings, labels: Sequence[str]) -> Settings:
     return settings_with_model(settings, models.pop())
 
 
+# The CLAUDE.md allow-list (#135, the same spec as `--strict-mcp-config` below).
+#
+# `claude` reads `projects.<git root of the cwd>.hasClaudeMdExternalIncludesApproved` out of
+# the session account's `~/.claude.json` and, where it is true, lets a Project or Local
+# `CLAUDE.md` -- and a `.claude/CLAUDE.md`, and a `.claude/rules` file, and anything any of
+# them `@`-includes -- read a path from *outside* the clone. That file is the surface #119
+# closed for `mcpServers`: it sits in `$HOME` beside `.claude/`, outside the directory the home
+# sweep walks, and a `-p` session can write the key itself, so an approval is one the next
+# session at that workspace path inherits.
+#
+# `claudeMdExcludes` is claude's own answer and it is reachable from the command line, which is
+# what makes this the flag-shaped closure #119 preferred to clearing a key out of claude's own
+# file: measured, a `.claude/settings.json` in the clone setting it back to `[]` does not win
+# against the argv. It is matched against absolute paths, and only for the `User`, `Project`
+# and `Local` memory types -- never `Managed` -- so an operator's root-owned policy CLAUDE.md
+# is outside it, as it is outside the session's privilege domain.
+CLAUDE_MD_EXCLUDES_KEY = "claudeMdExcludes"
+# What a path cannot carry and still be a literal arm of the pattern below. `,` and `{}` would
+# change the arms, the rest would make the arm a glob of its own.
+_GLOB_METACHARACTERS = frozenset("*?[]{}(),!\\\n")
+
+
+def claude_md_allowlist(*, trees: Sequence[Path] = (), files: Sequence[Path] = ()) -> str | None:
+    """The ``--settings`` document keeping CLAUDE.md and its ``@`` includes to these paths.
+
+    "Keeping", not "confining": claude matches the exclusion against the path as written and
+    only then resolves it, so a symlink among these paths is still followed out of them. That
+    is measured and recorded in the spec, and it is why the argument is a narrowing rather
+    than a boundary.
+
+    ``trees`` are allowed with everything under them, ``files`` exactly. The split is the
+    point: the workspace is a tree, because a clone's instruction files may include anything
+    in the clone, while the session account's config directory is *not* -- only
+    ``CLAUDE.md`` and ``rules/`` in it are user memory (measured against the loader:
+    ``dQ("User")`` and ``age()``), and the rest of that directory is the account's
+    credential, its other sessions' transcripts and its caches. Allowing the tree would
+    leave the fence around the most valuable target in the home.
+
+    One *negated* pattern carrying every arm in one brace, and deliberately not one negation
+    per arm: picomatch matches a list when **any** pattern matches, so ``!a/**`` and ``!b/**``
+    would each match everything outside their own arm and OR together to "exclude everything"
+    -- every instruction file, the clone's and the user's alike. Braced, the negation is
+    evaluated once against the union, which makes this the shape ``--strict-mcp-config`` is: it
+    names what survives rather than what is removed, so a path nobody thought of is excluded by
+    default instead of being a hole until someone notices.
+
+    ``None`` when there is nothing to allow, or when an arm cannot be spelled: a relative path
+    (``claudeMdExcludes`` is matched against absolute paths, so a relative arm would match
+    nothing and the negation would then match *everything*), or a brace, comma or glob
+    metacharacter, which would silently change what the pattern means. The failure that matters
+    is not "too little is excluded" but "everything is", which costs the session every
+    instruction file it should have loaded.
+    """
+    arms = [f"{tree}/**" for tree in trees] + [str(file) for file in files]
+    paths = [*trees, *files]
+    if not arms or any(not path.is_absolute() for path in paths):
+        return None
+    if any(_GLOB_METACHARACTERS & set(str(path)) for path in paths):
+        return None
+    allowed = arms[0] if len(arms) == 1 else "{" + ",".join(arms) + "}"
+    return json.dumps({CLAUDE_MD_EXCLUDES_KEY: [f"!{allowed}"]})
+
+
 class ClaudeRunner:
     """Builds and runs one ``claude -p`` process per turn."""
 
@@ -728,6 +920,7 @@ class ClaudeRunner:
         # The account every turn runs as (#75), or None for the worker's own uid. One
         # account: a pool has been narrowed to this workspace's bound member above (#121).
         account = session_account(settings)
+        self._account = account
         self._runas = RunAs(account) if account else None
         # The worker's side of the line the session writes across (#104): every read of the
         # workspace's env file and of the turn files goes through it. Its session uid is that
@@ -744,7 +937,7 @@ class ClaudeRunner:
             return self._runas.prepared(argv, env)
         return contextlib.nullcontext(Spawn(argv=list(argv), env=dict(env), pass_fds=()))
 
-    def build_argv(self, *, session_id: str, resume: bool) -> list[str]:
+    def build_argv(self, *, session_id: str, resume: bool, workspace: Path) -> list[str]:
         cfg = self._claude
         argv = [
             cfg.command,
@@ -777,6 +970,22 @@ class ClaudeRunner:
             "--setting-sources",
             ",".join(cfg.setting_sources),
         ]
+        # Unconditional, for the reason `--strict-mcp-config` above is (#135). Not narrowed to
+        # `claude.setting_sources` naming the clone, although that is the only source the
+        # approval key gates: under the shipped `[user]` the argument still bounds the *user*
+        # CLAUDE.md's own `@` includes, which claude loads from outside the home whatever the
+        # key says, and which nothing else bounds on the host route -- `sweep_agent_home`
+        # returns early there, because the home is the operator's own. A bound and not a
+        # boundary: a symlink among the allowed paths is still followed out of them, which the
+        # spec measures and records.
+        trees, files = self._claude_md_allowed(workspace)
+        allowlist = claude_md_allowlist(trees=trees, files=files)
+        if allowlist is not None:
+            argv += ["--settings", allowlist]
+        elif trees or files:
+            # The other way `claude_md_allowlist` declines: a path it cannot spell as an arm.
+            # `_claude_md_allowed` has already said its piece when it returned nothing at all.
+            self._log.warning("claude_md_allowlist_unavailable", reason="path not expressible")
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         if cfg.model:
             argv += ["--model", cfg.model]
@@ -790,8 +999,89 @@ class ClaudeRunner:
             argv += ["--mcp-config", *cfg.mcp_config]
         return argv
 
+    def _claude_md_allowed(self, workspace: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        """The trees and the files a turn's instruction loading may read, or two empties (#135).
+
+        The workspace is a tree, so an operator who has named `project` or `local` still gets
+        the clone's `CLAUDE.md`, its `.claude/CLAUDE.md` and its `.claude/rules`, and an `@`
+        include of theirs still resolves anywhere inside the clone; what it no longer names is
+        the session account's home, which outlives the run. This workspace and not `self._root`,
+        which is every workspace's parent: one issue's CLAUDE.md has no more business reading
+        another issue's clone than reading the home.
+
+        The config directory is not a tree. `claude` loads exactly two things from it as user
+        memory, `CLAUDE.md` and `rules/`, and they have to be allowed or the argument would stop
+        the user memory issuebot does leave in place. The rest of that directory is
+        `.credentials.json`, the other sessions' transcripts under `projects/` that the sweep
+        deliberately keeps, and the caches, and none of it is instructions.
+
+        Those two are allowed, not trusted, and what clears them is the home sweep rather than
+        this argument -- `CLAUDE.md` and `rules` are both `CLAUDE_HOME_SWEEP` names, removed
+        before every turn and every hook on the `agent.run_as` route (#101, #137). Two gaps,
+        both recorded in the spec rather than closed here: on the host route nothing sweeps
+        them, because the home is the operator's own; and the sweep walks `~/.claude`
+        literally, so a deployment that sets `$CLAUDE_CONFIG_DIR` has its user memory allowed
+        here and swept nowhere.
+
+        `$CLAUDE_CONFIG_DIR` and not `~/.claude` whenever the deployment sets one, because that
+        is what `claude` itself resolves the pair against, and it reaches the child through
+        `PASSTHROUGH_PREFIXES`. The session cannot re-point it: `CLAUDE_` is a
+        `PROTECTED_ENV_PREFIXES` entry, so `.issuebot/env` is refused it.
+
+        The arms are the paths as written, never what they resolve to, which is a choice and
+        costs something measured: where `<config>/rules` is a symlink, claude matches the
+        exclusion against the *resolved* path and the argument then stops those rules loading.
+        Resolving here would fix that and would also feed a path the session may own into the
+        fence -- a planted `rules -> /` would widen it to everything -- so an operator who
+        keeps user memory elsewhere has `$CLAUDE_CONFIG_DIR`, which this does follow.
+
+        Two empties -- so no argument -- when the directory does not resolve, rather than an
+        allow-list of the workspace alone: that would stop the user memory loading, and the
+        residual it would be buying against is bounded and recorded, where silently dropping
+        instructions a deployment means to load is a fault that shows up nowhere.
+        """
+        config = self._session_config_dir()
+        if config is None:
+            self._log.warning("claude_md_allowlist_unavailable", reason="config dir unresolved")
+            return ((), ())
+        return ((workspace, config / "rules"), (config / "CLAUDE.md",))
+
+    def _session_config_dir(self) -> Path | None:
+        """Where the session's own ``claude`` keeps user memory: ``$CLAUDE_CONFIG_DIR``, else
+        ``~/.claude`` under the home of the account the turn runs as."""
+        configured = self._environ.get("CLAUDE_CONFIG_DIR")
+        if configured:
+            return Path(configured)
+        home = self._session_home()
+        return home / CLAUDE_HOME_DIR if home is not None else None
+
+    def _session_home(self) -> Path | None:
+        """The home of the account a turn runs as: the account's own, or this process's."""
+        if self._runas is not None:
+            # `RunAs.account()` reports a name that will not resolve as `RunAsError`, which is
+            # an `OSError`; there is no separate `KeyError` to catch here.
+            with contextlib.suppress(OSError):
+                return Path(self._runas.account().pw_dir)
+            return None
+        home = self._environ.get("HOME")
+        return Path(home) if home else None
+
     def child_environment(self) -> dict[str, str]:
-        return agent_environment(self._environ, token=self._token)
+        """What one turn's ``claude -p`` is run with.
+
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+        """
+        return agent_environment(self._environ, token=self._token, uv_cache=self._ensure_uv_cache())
+
+    def _ensure_uv_cache(self) -> Path | None:
+        """This session account's uv cache on the workspaces volume, or ``None`` (#164).
+
+        Asked per turn rather than once in ``__init__``: the directory is the worker's to
+        create, the call is idempotent, and a constructor that touched the filesystem would
+        make every runner a test builds do it too.
+        """
+        return ensure_uv_cache_dir(self._root, self._account, self._environ)
 
     async def run_turn(
         self,
@@ -880,7 +1170,7 @@ class ClaudeRunner:
                 "invalid_workspace_cwd", f"cannot use log directory {log_dir}: {exc}", None
             )
         (log_dir / f"turn-{turn_number}.prompt.md").write_text(prompt, encoding="utf-8")
-        argv = self.build_argv(session_id=session_id, resume=resume)
+        argv = self.build_argv(session_id=session_id, resume=resume, workspace=resolved)
         # Read every turn: a `before_run` that ran once still feeds a session resumed after a
         # retry, and a hook is free to rewrite the file between turns.
         env, workspace_env = workspace_environment(

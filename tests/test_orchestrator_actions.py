@@ -18,7 +18,13 @@ from issuebot.events import (
     IssueCompleted,
     StateChanged,
 )
-from issuebot.github import WORKPAD_MARKER, FakeGitHub, GitHubError, StateLabel
+from issuebot.github import (
+    WORKPAD_MARKER,
+    ErrorCategory,
+    FakeGitHub,
+    GitHubError,
+    StateLabel,
+)
 from issuebot.orchestrator.actions import (
     BUDGET_HEADING,
     BUDGET_REASON_PREFIX,
@@ -486,12 +492,17 @@ async def test_escape_is_a_no_op_for_closed_or_missing_issues(tmp_path: Path) ->
     assert h.recorder.events == []
 
 
-def fail_on(h: Harness, method: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def fail_on(
+    h: Harness,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+    category: ErrorCategory = "transport",
+) -> None:
     """Make the next call of one adapter method raise, leaving the calls before it alone."""
     original = getattr(h.github, method)
 
     async def failing(*args: object, **kwargs: object) -> object:
-        h.github.fail_next("transport")
+        h.github.fail_next(category)
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(h.github, method, failing)
@@ -523,13 +534,184 @@ async def test_escape_is_idempotent_per_run(
 async def test_escape_failure_on_the_workpad_write_leaves_the_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A *retryable* write is the next tick's, and #157 kept it that way deliberately.
+
+    The category is spelled out because it is the whole of the rule: a non-retryable write of
+    the same first block moves the label instead, which is
+    `test_escape_moves_the_label_when_a_first_block_cannot_be_written` below.
+    """
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
-    fail_on(h, "comment", monkeypatch)
+    fail_on(h, "comment", monkeypatch, "transport")
     assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "failed"
     assert h.github.issue(42).state is StateLabel.IN_PROGRESS
     assert h.github.comments_for(42) == []
     assert h.recorder.events == []
+
+
+@pytest.mark.parametrize("category", ["response", "not_found", "auth", "status", "config"])
+async def test_escape_moves_the_label_when_the_workpad_will_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """A lookup that fails non-retryably must not keep the issue in `in_progress` (#128).
+
+    The read is the block's idempotence, so the escape gives that up rather than the label
+    move: the issue reaches `review` on the *first* attempt, the block is appended blind as a
+    fresh marker comment, and a log line names the error that stopped the read.
+
+    The split is on `retryable`, so every non-retryable category belongs here -- but `auth`
+    and `config` pin the *rule* rather than a reachable end state: `fail_on` fails the one
+    call, where a real fault of either kind would fail the `set_state` behind it too and take
+    the escape back to `failed` and its retry, as `_escape_note`'s docstring says.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    h.github.open_pr(42, pr_number=43)
+    workpad = await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n\n- [ ] 1. Do it\n")
+    h.github.calls.clear()
+    fail_on(h, "find_workpad_comment", monkeypatch, category)
+    with capture_logs() as logs:
+        assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    # The label moved first; the note is written after it, blind.
+    assert [name for name, _ in h.github.calls] == [
+        "fetch_issues_by_ids",
+        "find_workpad_comment",
+        "set_state",
+        "comment",
+    ]
+    # The workpad it could not read is left alone, and the note is a marker comment of its own
+    # -- the duplicate this deliberately trades for an issue that never leaves `in_progress`.
+    comments = h.github.comments_for(42)
+    assert len(comments) == 2
+    assert comments[0].id == workpad.id
+    assert comments[0].body == workpad.body
+    assert comments[1].body.startswith(f"{WORKPAD_MARKER}\n\n### Issuebot blocked (")
+    assert comments[1].body.endswith("Moved to `issuebot/review` for a human to look at.\n")
+    assert h.calls("update_comment") == []
+    unreadable = [e for e in logs if e["event"] == "blocked_escape_workpad_unreadable"]
+    assert len(unreadable) == 1
+    assert unreadable[0]["category"] == category
+    assert unreadable[0]["error"] == f"{category}: injected {category} failure"
+    assert [e["event"] for e in logs if e["event"] == "blocked_escape_failed"] == []
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_escape_retries_a_retryable_workpad_lookup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The other half of #128: a retryable read is worth another tick, so nothing moves."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    with monkeypatch.context() as patch:
+        fail_on(h, "find_workpad_comment", patch, category)
+        with capture_logs() as logs:
+            assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.IN_PROGRESS
+    assert h.github.comments_for(42)[0].body == f"{WORKPAD_MARKER}\n\nnotes\n"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.recorder.events == []
+    assert [e["event"] for e in logs] == ["blocked_escape_failed"]
+    # And the retry the caller schedules still lands the block in the workpad it can now read.
+    assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert len(h.github.comments_for(42)) == 1
+    assert body.count("### Issuebot blocked") == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+async def test_escape_moves_the_label_even_when_the_blind_note_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `or nothing` tail of #128: the blind note's own failure costs a log line only."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    fail_on(h, "find_workpad_comment", monkeypatch, "response")
+    fail_on(h, "comment", monkeypatch, "response")
+    with capture_logs() as logs:
+        assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.github.comments_for(42) == []
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    events = [e["event"] for e in logs]
+    assert "blocked_escape_workpad_unreadable" in events
+    assert "blocked_escape_note_failed" in events
+    assert "blocked_escape_applied" in events
+
+
+@pytest.mark.parametrize("category", ["response", "not_found", "auth", "status", "config"])
+async def test_escape_moves_the_label_when_the_block_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The other half of the read #128 split: the *write* must not hold the label either (#157).
+
+    A `not_found` on a comment deleted between the read and the write, or a `response` error
+    on the POST, kept the issue in `in_progress` for the life of the process -- the very state
+    #128 set out to make unreachable. The append has already been attempted at the one moment
+    it could have been idempotent, so there is nothing to write blind afterwards: the label
+    moves and a log line says why there is no block.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    workpad = await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    h.github.calls.clear()
+    fail_on(h, "update_comment", monkeypatch, category)
+    with capture_logs() as logs:
+        assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    # The append was refused, so it is not repeated: no second, blind marker comment.
+    assert [name for name, _ in h.github.calls] == [
+        "fetch_issues_by_ids",
+        "find_workpad_comment",
+        "update_comment",
+        "set_state",
+    ]
+    assert [comment.body for comment in h.github.comments_for(42)] == [workpad.body]
+    failed = [e for e in logs if e["event"] == "blocked_escape_note_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"] == f"{category}: injected {category} failure"
+    assert [e["event"] for e in logs if e["event"] == "blocked_escape_workpad_unreadable"] == []
+    assert [e["event"] for e in logs if e["event"] == "blocked_escape_failed"] == []
+
+
+async def test_escape_moves_the_label_when_a_first_block_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule where there is no workpad yet and the write is the create."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    fail_on(h, "comment", monkeypatch, "response")
+    with capture_logs() as logs:
+        assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.github.comments_for(42) == []
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert [e["event"] for e in logs if e["event"] == "blocked_escape_note_failed"] != []
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_escape_retries_a_retryable_workpad_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """A retryable write keeps today's retry, and the retry still writes exactly one block."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/in-progress",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    with monkeypatch.context() as patch:
+        fail_on(h, "update_comment", patch, category)
+        with capture_logs() as logs:
+            assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.IN_PROGRESS
+    assert h.github.comments_for(42)[0].body == f"{WORKPAD_MARKER}\n\nnotes\n"
+    assert h.recorder.events == []
+    assert [e["event"] for e in logs] == ["blocked_escape_failed"]
+    assert await blocked_escape(h.github, h.bus, "42", CONTEXT, now=NOW) == "applied"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.github.comments_for(42)[0].body.count("### Issuebot blocked") == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
 
 
 # --- finish_terminal ------------------------------------------------------------------
@@ -868,3 +1050,157 @@ async def test_budget_escape_reports_a_github_failure(tmp_path: Path) -> None:
     assert await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW) == "failed"
     assert h.github.issue(42).state is StateLabel.TODO
     assert h.recorder.kinds == []
+
+
+@pytest.mark.parametrize("category", ["response", "not_found", "auth", "status", "config"])
+async def test_budget_escape_moves_the_label_when_the_workpad_will_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The gate's own escalation follows #128 too (#157).
+
+    `_has_budget_block` reads the same body the note is appended to, so the read is the
+    block's idempotence and the read is what can fail. A non-retryable failure used to return
+    `failed` and leave the refused issue wherever the gate found it, to be refused again on
+    every tick for the life of the process with nothing said anywhere a human looks. Now the
+    label moves first and the block is written blind.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    workpad = await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n\n- [ ] 1. Do it\n")
+    h.github.calls.clear()
+    fail_on(h, "find_workpad_comment", monkeypatch, category)
+    with capture_logs() as logs:
+        outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert [name for name, _ in h.github.calls] == [
+        "fetch_issues_by_ids",
+        "find_workpad_comment",
+        "set_state",
+        "comment",
+    ]
+    comments = h.github.comments_for(42)
+    assert len(comments) == 2
+    assert comments[0].body == workpad.body
+    assert comments[1].body.startswith(f"{WORKPAD_MARKER}\n\n{BUDGET_HEADING}")
+    assert "Raise `agent.max_issue_cost_usd`" in comments[1].body
+    unreadable = [e for e in logs if e["event"] == "budget_escape_workpad_unreadable"]
+    assert len(unreadable) == 1
+    assert unreadable[0]["category"] == category
+    assert unreadable[0]["error"] == f"{category}: injected {category} failure"
+    assert [e["event"] for e in logs if e["event"] == "budget_escape_failed"] == []
+
+
+@pytest.mark.parametrize("category", ["response", "not_found", "auth", "status", "config"])
+async def test_budget_escape_moves_the_label_when_the_block_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """And when it is the append that is refused, which is not repeated afterwards."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    workpad = await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    h.github.calls.clear()
+    fail_on(h, "update_comment", monkeypatch, category)
+    with capture_logs() as logs:
+        outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert [comment.body for comment in h.github.comments_for(42)] == [workpad.body]
+    failed = [e for e in logs if e["event"] == "budget_escape_note_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"] == f"{category}: injected {category} failure"
+    assert [e["event"] for e in logs if e["event"] == "budget_escape_workpad_unreadable"] == []
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_budget_escape_retries_a_retryable_workpad_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The other half of #157: a retryable failure is the next tick's, so nothing moves."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    with monkeypatch.context() as patch:
+        fail_on(h, "find_workpad_comment", patch, category)
+        with capture_logs() as logs:
+            outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.github.comments_for(42)[0].body == f"{WORKPAD_MARKER}\n\nnotes\n"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.recorder.events == []
+    assert [e["event"] for e in logs] == ["budget_escape_failed"]
+    # And the retry the next tick makes still lands one block, in the workpad it can now read.
+    outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_budget_escape_retries_a_retryable_block_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    """The write half of the same rule: nothing moves, and the retry lands one block."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\nnotes\n")
+    with monkeypatch.context() as patch:
+        fail_on(h, "update_comment", patch, category)
+        outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.github.comments_for(42)[0].body == f"{WORKPAD_MARKER}\n\nnotes\n"
+    assert h.recorder.events == []
+    outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert len(h.github.comments_for(42)) == 1
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+async def test_an_unannounced_budget_escape_reports_a_note_it_could_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`announce=` is about a second report of one escalation, not about the block (#112).
+
+    The two are independent, which is what makes a blind write safe here: the bounce still
+    returns the issue to `review` without a second `Blocked`, and the note is still written.
+    """
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/rework",), number=42)
+    fail_on(h, "find_workpad_comment", monkeypatch, "response")
+    with capture_logs() as logs:
+        outcome = await budget_escape(
+            h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW, announce=False
+        )
+    assert outcome == "skipped"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.recorder.kinds == ["state_changed"]
+    assert h.github.comments_for(42)[0].body.count(BUDGET_HEADING) == 1
+    events = [e["event"] for e in logs]
+    assert "budget_escape_workpad_unreadable" in events
+    assert "budget_escape_returned" in events
+
+
+async def test_budget_escape_moves_the_label_even_when_the_blind_note_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither half of the note is worth the hand-over: both failing costs two log lines."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    fail_on(h, "find_workpad_comment", monkeypatch, "response")
+    fail_on(h, "comment", monkeypatch, "response")
+    with capture_logs() as logs:
+        outcome = await budget_escape(h.github, h.bus, "42", "spend", BUDGET_REASON, now=NOW)
+    assert outcome == "applied"
+    assert h.github.issue(42).state is StateLabel.REVIEW
+    assert h.github.comments_for(42) == []
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    events = [e["event"] for e in logs]
+    assert "budget_escape_workpad_unreadable" in events
+    assert "budget_escape_note_failed" in events
+    assert "budget_escape_applied" in events

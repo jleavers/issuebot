@@ -2,7 +2,7 @@
 
 ARG PYTHON_IMAGE=python:3.14-slim
 
-FROM ghcr.io/astral-sh/uv:0.12.11 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 
 # ---------------------------------------------------------------- builder
 FROM ${PYTHON_IMAGE} AS builder
@@ -156,6 +156,36 @@ RUN if [ -n "${NODE_VERSION}" ]; then \
 # uv --version is asserted here for the reason initdb --version, node --version and
 # claude --version are: a moved download or a renamed asset has to fail the build, not the
 # first session that runs `uv sync`.
+# The profile script is the `PATH` line and nothing else. It used to carry a
+# `UV_LINK_MODE=copy` default as well (#161), because on a deployment shaped like this one the
+# hardlink uv would rather use could never work: uv's cache defaulted to $HOME/.cache/uv and a
+# session account's home is in the container's own writable layer, while the venv it builds is
+# `<workspace>/.venv` on the mounted volume. Two filesystems, and a hardlink cannot cross them,
+# so every `uv sync` fell back to a full copy and warned three lines about it on the stderr of
+# `after_create` -- the first hook of every session, logged in full on `hook_finished` and
+# quoted into the run's error (`HookResult.summary`) when that hook fails.
+# #164 removed the reason rather than the warning: the worker now puts uv's cache on the
+# workspaces volume beside the venvs, one directory per session account, and hands it to every
+# hook and every turn as `UV_CACHE_DIR` (`agent/uvcache.py`). One filesystem, so uv's own
+# default link mode -- hardlink -- is both what it wants and what works, and a `copy` default
+# here would now be the thing standing in its way: measured on the live worker, two workspaces'
+# venvs came to 152 MB copied and 77 MB hardlinked from one cache, and the cache itself now
+# outlives `docker compose up -d worker`.
+# What is left for the login shell is `PATH`, and it needs this file *in addition to* the
+# runtime `ENV`, not instead of it: Debian's /etc/profile overwrites `PATH` for a login shell,
+# which is what every hook runs under, while the `ENV` is what the worker's own process carries
+# -- and that is precisely what #164's second gate reads, since `ensure_uv_cache_dir` asks
+# `which` about the `PATH` the session will be handed. The cache directory itself takes neither
+# route but the environment issuebot builds, since it is per account and derived from
+# `workspace.root`, so no static file could state it; it is `agent_environment`'s one computed
+# entry, beside `GH_TOKEN`.
+# A deployment that wants something else still has both routes #161 documented, and they are
+# unchanged: `uv sync --link-mode=copy` in the hook line itself, or `UV_LINK_MODE=copy` in an
+# `.issuebot/env` written from `before_run`, which covers the later hooks and every turn.
+# `UV_LINK_MODE` is in neither `PASSTHROUGH_NAMES` nor `PROTECTED_ENV_NAMES`, and nor is
+# `UV_CACHE_DIR`, so both are the deployment's to override from there. (The builder stage sets
+# `UV_LINK_MODE=copy` for itself, above: that one is the buildkit cache mount, a different
+# filesystem again, and a different image.)
 ARG UV_VERSION=""
 RUN if [ -n "${UV_VERSION}" ]; then \
       case "${UV_VERSION}" in \
@@ -179,6 +209,76 @@ RUN if [ -n "${UV_VERSION}" ]; then \
    && printf 'PATH="/opt/uv/bin:$PATH"\n' > /etc/profile.d/issuebot-uv.sh \
    && chmod 0644 /etc/profile.d/issuebot-uv.sh \
    && /opt/uv/bin/uv --version; \
+    fi
+
+# Optional PowerShell toolchain, for a target repository whose scripts and tests are
+# PowerShell. Empty -- the default -- installs nothing, so the image keeps exactly the
+# contents it has without the argument. The fourth of these, and deliberately the same shape
+# as the three above: an operator whose target repository is a PowerShell project sets
+# ISSUEBOT_PWSH_VERSION and rebuilds the worker, and one whose target repository is not
+# carries none of it. It is the largest of the four by some way -- ~180 MB of .NET runtime
+# and ~40 MB of ICU -- which is what makes staying behind the guard matter here rather than
+# being a nicety.
+# PWSH_VERSION is an exact release (`7.6.6`), not a major, for uv's reason and a harder one:
+# GitHub publishes releases under their tags and there is no `latest-v7.x` to resolve, so a
+# major on its own names nothing to download. The pin moves by hand, like NODE_VERSION's and
+# UV_VERSION's: a tarball fetched by URL is invisible to Dependabot, and the release line to
+# watch is the one the target repository's own CI runs.
+# ICU first, because .NET reads its globalization data from it and the base image carries
+# none: without it `pwsh` runs in invariant mode, where `"{0:N2}"` stops grouping and a suite
+# that formats numbers or compares strings by culture quietly returns different answers than
+# it does on the developer's machine. Resolved by name rather than pinned, since the package
+# is named after the ABI (`libicu76` on trixie) and a PYTHON_IMAGE bump to the next Debian
+# renames it -- a build that cannot find one fails here rather than at the first session.
+# The checksum comes from the release's own `hashes.sha256`, which covers every asset of the
+# release, so --ignore-missing as the node stanza has it. Microsoft writes that file as
+# UTF-16 and `sha256sum -c` reads bytes, so it is transcoded first -- and in two steps rather
+# than `curl | iconv`, because a pipeline's status is its *last* command's: a 404 from curl
+# would exit 0 through iconv and leave an empty checksum file behind. `sha256sum -c` does
+# refuse one of those ("no properly formatted checksum lines found", exit 1), so the build
+# would still fail -- but one step later and for the wrong reason, which is not a thing to
+# leave resting on the next command's manners.
+# --no-same-owner for the reason the node and uv tarballs have it: tar honours stored
+# ownership when it runs as root, and the agent runs unattended, model-authored code.
+# The tarball extracts flat rather than into a versioned directory of its own, so the version
+# goes in the path here and /opt/powershell/bin holds the one symlink -- which is what keeps
+# the PATH entry the same shape as /opt/node/bin and /opt/uv/bin, and what lets a later
+# release be added beside this one rather than over it.
+# pwsh --version is asserted here for the reason initdb --version, node --version and
+# uv --version are: a moved download or a renamed asset has to fail the build, not the first
+# session that runs the suite.
+ARG PWSH_VERSION=""
+RUN if [ -n "${PWSH_VERSION}" ]; then \
+      case "${PWSH_VERSION}" in \
+        ''|*[!0-9.]*|.*|*.) echo "PWSH_VERSION is a release version, e.g. 7.6.6, not ${PWSH_VERSION}" >&2; exit 1 ;; \
+      esac \
+   && arch="$(dpkg --print-architecture)" \
+   && case "${arch}" in \
+        amd64) pwsh_arch=x64 ;; \
+        arm64) pwsh_arch=arm64 ;; \
+        *) echo "no PowerShell/PowerShell build for ${arch}" >&2; exit 1 ;; \
+      esac \
+   && apt-get update \
+   && icu="$(apt-cache --names-only search '^libicu[0-9][0-9]*$' | awk '{print $1}' | sort -V | tail -n1)" \
+   && test -n "${icu}" \
+   && apt-get install -y --no-install-recommends "${icu}" \
+   && rm -rf /var/lib/apt/lists/* \
+   && dist="https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}" \
+   && tarball="powershell-${PWSH_VERSION}-linux-${pwsh_arch}.tar.gz" \
+   && cd /tmp \
+   && curl -fsSLO "${dist}/${tarball}" \
+   && curl -fsSL "${dist}/hashes.sha256" -o hashes.utf16 \
+   && iconv -f UTF-16 -t UTF-8 hashes.utf16 > hashes.sha256 \
+   && sha256sum -c --ignore-missing hashes.sha256 \
+   && install -d -m 0755 "/opt/powershell/${PWSH_VERSION}" \
+   && tar --no-same-owner -xzf "${tarball}" -C "/opt/powershell/${PWSH_VERSION}" \
+   && chmod 0755 "/opt/powershell/${PWSH_VERSION}/pwsh" \
+   && rm -f "${tarball}" hashes.sha256 hashes.utf16 \
+   && install -d -m 0755 /opt/powershell/bin \
+   && ln -s "/opt/powershell/${PWSH_VERSION}/pwsh" /opt/powershell/bin/pwsh \
+   && printf 'PATH="/opt/powershell/bin:$PATH"\n' > /etc/profile.d/issuebot-pwsh.sh \
+   && chmod 0644 /etc/profile.d/issuebot-pwsh.sh \
+   && /opt/powershell/bin/pwsh --version; \
     fi
 
 # The worker and the session are different accounts (#75), and so is one session from the
@@ -328,7 +428,7 @@ USER issuebot
 # that could outlive the accounts (#142). The variable still overrides it for an operator who
 # wants one account, and WORKFLOW.md overrides both.
 ENV LANG=C.UTF-8 \
-    PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${UV_VERSION:+/opt/uv/bin:}${PATH}"
+    PATH="/app/.venv/bin:${POSTGRES_VERSION:+/opt/postgresql/bin:}${NODE_VERSION:+/opt/node/bin:}${UV_VERSION:+/opt/uv/bin:}${PWSH_VERSION:+/opt/powershell/bin:}${PATH}"
 
 # The flag assertions are the point of pinning: a release that drops --permission-prompts
 # or --strict-mcp-config breaks an unattended worker at runtime -- the first by prompting
@@ -340,7 +440,10 @@ ENV LANG=C.UTF-8 \
 # --mcp-config is the only route left by which a server reaches a session, so a rename there
 # would break those deployments one session at a time; --setting-sources is what keeps the
 # clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
-# passed on every turn whatever the front matter says. Then the delegation itself, as the
+# passed on every turn whatever the front matter says; and --settings carries the CLAUDE.md
+# allow-list of #135, which keeps what claude loads as instructions to the workspace and the
+# account's own user memory, is passed on every turn and is not a setting either (a symlink
+# is still followed out of those; the spec records it). Then the delegation itself, as the
 # worker will use it: sudo, the account, and claude under it.
 # The last two lines read the account list back (#142). It is what `agent.run_as` resolves to
 # in every container, so a build that wrote a list naming nothing would ship an image whose
@@ -353,6 +456,7 @@ RUN claude --version \
  && claude --help | grep -q -- '--strict-mcp-config' \
  && claude --help | grep -q -- '--mcp-config <' \
  && claude --help | grep -q -- '--setting-sources' \
+ && claude --help | grep -q -- '--settings <' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \

@@ -44,7 +44,8 @@ uv run issuebot egress [--port N] [--bind HOST]   # the allow-listing CONNECT pr
 docker compose build                 # image: git, gh, claude, app venv
                                      #   (+ a PostgreSQL server when ISSUEBOT_POSTGRES_VERSION is set,
                                      #    + node and npm when ISSUEBOT_NODE_VERSION is set,
-                                     #    + uv when ISSUEBOT_UV_VERSION is set)
+                                     #    + uv when ISSUEBOT_UV_VERSION is set,
+                                     #    + pwsh when ISSUEBOT_PWSH_VERSION is set)
 docker compose up                    # db + web (profile hub) + worker + egress (profile worker),
                                      #   COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
@@ -88,13 +89,17 @@ CI (`.github/workflows/ci.yml`) runs lint, tests (with a postgres:18 service) an
 `docker` job, a "compose config under each profile" step -- `docker compose config --quiet`
 under `COMPOSE_PROFILES=hub`, `worker` and `hub,worker`, so a profile typo fails a PR --
 before the Docker build, on every PR. That job builds the image twice (#62, #64): the default
-one, which must carry no `initdb`, `node` or `npm`, and a second, `issuebot:ci-toolchain`, with
-`POSTGRES_VERSION=18`, `NODE_VERSION=24` and `UV_VERSION` in its own `type=gha` cache scope (one build,
+one, which must carry no `initdb`, `node`, `npm`, `uv` or `pwsh`, and a second,
+`issuebot:ci-toolchain`, with `POSTGRES_VERSION=18`, `NODE_VERSION=24`, `UV_VERSION` and
+`PWSH_VERSION` in its own `type=gha` cache scope (one build,
 not two: the checks are about what is on `PATH` and under which uid, not about the arguments
-interacting), which must answer `initdb --version`, `node --version`, `npm --version` and
-`uv --version` on its own `PATH` and in a login shell, still run as `issuebot`, run one `npm ci` over a
+interacting), which must answer `initdb --version`, `node --version`, `npm --version`,
+`uv --version` and `pwsh --version` on its own `PATH` and in a login shell, still run as
+`issuebot`, run one `npm ci` over a
 dependency-free fixture as `issuebot` with the registry pointed at a dead port (so the writable
-`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), and survive
+`$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), run one `.ps1`
+as `agent` whose assertion is a culture-formatted number (so the ICU the PowerShell arm
+installs beside the runtime is proved, not just that the binary answers), and survive
 the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `bash -lc` with
@@ -270,16 +275,23 @@ version, and moves by hand.
   rather than returning a short board (#139): the query is oldest first, so a truncated answer
   would have the worker claim from it believing it had seen everything and silently starve the
   newest issues, where a refused read is the `github` dispatch hold of #88 and says so on
-  `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` passes its own,
-  looser `MAX_TERMINAL_PAGES` (50), because `complete` rests on a closed issue for ever, so
-  that role grows with everything issuebot has finished rather than with a working set a human
-  drains (that it is re-read at all is #149). The sweep's roles are read independently
-  (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped` warning and the
-  other four are still swept, since `terminal_sweep` is the only path to `finish_terminal` and
-  the role that can reach the ceiling is `complete` -- so voiding the read would stop every
-  issue closing out, every workspace being removed and every account being released, where
-  skipping the one role costs only `finish_terminal`'s retry of a removal that failed at the
-  time, for the issues in it. The poll keeps the all-or-nothing rule. The isolation is by type
+  `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` reads
+  `TERMINAL_SWEEP_ROLES` (`state.py`) and not `list(StateLabel)` (#149): every state a closed
+  issue has to be moved *off*, and never `complete`, the one it comes to rest in.
+  `finish_terminal` leaves that label alone deliberately -- it is how the dashboard's closed
+  column is built -- so the role held everything issuebot had ever finished and every issue in
+  it was read only to be classified `unchanged`, which made the sweep's cost grow with the
+  deployment's own successful work and, past the ceiling, spend fifty pages a sweep to learn
+  nothing. The four that are read are a working set the sweep itself drains. It still passes
+  its own, looser `MAX_TERMINAL_PAGES` (50), now as headroom rather than against growth: the
+  first sweep of a repository holding a backlog of closed-but-labelled issues is legitimately
+  large and the sweep is the only thing that drains it, and the two reads fail differently, so
+  a number tuned for one is not a number for the other. The sweep's roles are read
+  independently (`_collect(per_role=True)`): one over its ceiling is an `issue_role_skipped`
+  warning and the others are still swept, since `terminal_sweep` is the only path to
+  `finish_terminal`, so voiding the read would stop every issue closing out, every workspace
+  being removed and every account being released, where skipping one role costs the issues in
+  that role alone. The poll keeps the all-or-nothing rule. The isolation is by type
   and not by category: `PageCeilingError` is caught, while every other `response` error -- a
   GraphQL errors payload, which is how a server-side query timeout arrives, or a malformed
   answer -- still fails the whole read);
@@ -331,8 +343,8 @@ version, and moves by hand.
   — #115), `HOME`/`USER`/`LOGNAME` become the account's, and the `exec` verb (run by the
   worker's root-owned interpreter) installs it whole and execs. `kill` (the session's
   process group) and `remove` (the session's files under a workspace) are the worker's uid's
-  two blind spots; a fourth verb, `sweep` (#101, #137), clears what a prior session left in the
-  account's *home* for the next one to load. Two lists, both pinned by tests, so dropping a name
+  two blind spots; a fourth verb, `sweep` (#101, #137, #151), clears what a prior session left in the
+  account's *home* for the next one to load. Three lists, all pinned by tests, so dropping a name
   is a deliberate edit in both places. `CLAUDE_HOME_SWEEP`, under `~/.claude`: `CLAUDE.md`,
   `rules`, `skills`,
   `commands`, `agents`, `workflows`, `agent-memory`, `plugins`, `output-styles`, `settings.json`,
@@ -347,6 +359,41 @@ version, and moves by hand.
   session at that uid runs, for the container's lifetime. Removing them costs an account nobody
   logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
   which are root's and where the image puts node and the PostgreSQL binaries.
+  And `TOOL_CONFIG_SWEEP`, the same home one tool further out (#151, spec
+  `2026-09-18-session-tool-config-design.md`): `.gitconfig`, `.config/git/config` and
+  `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
+  git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
+  `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
+  (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
+  not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
+  name git looks at first. That no deployment has a reason to leave one of these in a session
+  account's home is what made it a sweep rather than a documented residual: commit identity comes
+  from `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (`PASSTHROUGH_PREFIXES`), `safe.directory` is the image's
+  `--system` entry, the post-clone setup's credential helper is `git config --local` inside the
+  clone, and a deployment that does want global git or ssh config for its sessions has root's
+  `/etc/gitconfig` and `/etc/ssh/ssh_config`, outside the session's privilege domain. The entries
+  are path components rather than names, since each is nested: `_walk` resolves one component at a
+  time and yields the first symlink it meets instead of descending through it, so a `.ssh`
+  replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
+  -- and the directories themselves stay, with `gh`'s configuration beside git's and
+  `known_hosts` beside ssh's.
+  A mode is not a defence against the owner: the sweep runs as the account whose home it is
+  clearing, so a target still there after the first attempt is tried again with the modes put
+  back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
+  does the same for an intermediate directory it cannot stat, and `projects` is relaxed before it
+  is read. Each bit hides a different step and the plant needs none of them: without write the
+  unlink fails, without search nothing inside can be stat'ed (so `_exists` reads the plant as
+  absent and `_walk` yields no target through a closed `~/.config`), and without read
+  `~/.claude/projects` cannot be listed, which is how auto memory is reached -- while `git`,
+  `ssh` and `claude` only read a path they already know, and `sweep_home` reported success
+  throughout. `$HOME` itself is such a directory, so that reached all three lists rather than
+  only the new one. `_exists` is where the two failures are told apart: only `FileNotFoundError`
+  is an absence, and anything else is an answer this process cannot get until the modes go back.
+  A symlinked `.claude` is yielded as the target rather than descended into, the rule
+  `projects/<project>` already had -- following one would have the *next* session's sweep delete
+  the named entries inside whatever tree the link points at -- and a symlinked target's tree is
+  not walked by the retry either, since `os.walk` follows its own top and the session chooses
+  where that points.
   A denylist: everything it does not name stays, `.claude.json` and whatever a tool the session
   ran writes in the home (`gh`'s state directory, npm's cache) among them, and
   `.credentials.json` (a credential
@@ -408,14 +455,15 @@ version, and moves by hand.
   a git repository"), which fails every git command a session runs, the post-clone setup
   first. The CI `docker` job builds that exact shape and runs git in it. Unset (the host route, the tests) runs everything as
   the worker, unchanged but for the workspace's pre-created sticky `.issuebot`/`runs/` and a
-  `created` marker file (the completion sentinel), and `session.json` trusted only when the
+  `created` marker file (the completion sentinel) and a `finished` one (#149, the removal
+  sentinel below), and `session.json` trusted only when the
   worker owns it. `boundary.py` (#104, spec `2026-09-14-session-boundary-design.md`) is the
   other half of that line: `ARTEFACTS` declares every file the worker reads back out of a
   workspace after the session has had its uid in it (`.issuebot/env`, which the session's
   side writes; the clone's `CLAUDE.md` and `AGENTS.md`, the `instructions` artefact of #107,
   which the session may own since the clone is cloned as it; `session.json`, the `created`
-  marker and the `runs/<run_id>/turn-N.*` files, the worker's own), each with its writer and
-  the most the worker will ever read of it, and
+  and `finished` markers and the `runs/<run_id>/turn-N.*` files, the worker's own), each with
+  its writer and the most the worker will ever read of it, and
   `Boundary.read` is the one seam: the path is walked from the workspace one component at a
   time under `O_NOFOLLOW` (a link at the name or above it is refused, not followed), the
   object is checked on the descriptor before a byte is read (`O_NONBLOCK`, so a FIFO cannot
@@ -426,7 +474,9 @@ version, and moves by hand.
   `capture_turns`, `read_repository_instructions` and the runner's stderr tail all go through
   it; `own_dir` creates and
   verifies a run's log directory as the worker's own, closed to others' writes, before a
-  turn file is written in it, and `create_marker` is the exclusive create of the sentinel.
+  turn file is written in it, `create_marker` is the exclusive create of a sentinel, and
+  `remove_marker` (#149) is the unlink of one by the same walk, following nothing, for a
+  `.issuebot` the session shares.
   `Boundary.current(account)` resolves the session's uid once per runner and manager, from the
   one account that session runs as -- under a pool, the account bound to *that* workspace
   (#121), so a boundary names the single member that may have written in it and no other
@@ -476,11 +526,67 @@ version, and moves by hand.
   where the home is the operator's own, is exempt. The record's
   read-modify-write is under an advisory lock (`accounts.lock`), since `run-once` may be run
   beside a live worker.
+  `uvcache.py` (#164) is the same line drawn around a *cache*: `<workspace.root>/.uv-cache/
+  <account>`, one directory per session account, created by the worker the way it creates a
+  workspace (sealed, then `share_with` -- `1770`, the worker's, enterable by that account's
+  group alone) inside a `0755` root the accounts traverse and cannot write. A cache is a
+  directory one process writes and the next installs *from*, so a shared one would be a
+  surface one session writes for another to execute, which is what the pool exists to
+  prevent; per account it is the boundary the account's own home already draws, and the next
+  session bound to it is what the cache is kept for. What the hardlink does change is that a
+  `.venv` entry *is* the cache's inode, so two workspaces bound to one account share the files
+  their venvs were installed from, and a hardlink reaches past the seal an idle workspace
+  carries -- bounded by the two sessions being the same account at the same uid, which already
+  shares a home holding a per-account uv cache the home sweep names nowhere (so the channel is
+  one uv's default location had too, and what the hardlink adds is that it takes effect without
+  waiting for a re-sync), and by the clone being untouched, so nothing reaches what that
+  session commits and pushes. The alternative gives up what the shape was measured for: the
+  second workspace's venv is free only because it is the first one's files (#176 asks
+  whether the residual is worth closing).
+  `ensure_uv_cache_dir(root, account, environ)` is the one seam, called on the way into every
+  turn (`ClaudeRunner.child_environment`) and every hook
+  (`WorkspaceManager._hook_environment`), idempotent, and `None` for the host route, for an
+  image with no `uv` on the session's `PATH` (the `ISSUEBOT_UV_VERSION` opt-in as the session
+  sees it) and for a directory it could not make -- that last one a `uv_cache_unavailable`
+  warning and then uv's own default, since exporting a path uv cannot write would break every
+  `uv` command where an unset variable only costs a hardlink. It reaches the session as
+  `agent_environment`'s one *computed* entry beside `GH_TOKEN` (`uv_cache=`), because the
+  allow-list carries no `UV_` name and the value is per account and per deployment; it is
+  deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
+  -- which the image no longer sets at all, the `copy` default of #161 having existed only
+  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
+  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
+  them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
+  every account can reach its own directory, and sealing it at each worker start would take
+  every account's cache away. `AccountRegistry.prune` works from keys and never lists the
+  root, which #161 believed and #164 proved. The terminal sweep's removal retry does list the
+  root (`finished_keys`, #149) and steps over the same `RESERVED_ROOT_NAMES` by name, for the
+  reason `seal_idle` does rather than because the boundary would catch it: those directories
+  are the worker's *own*, so the ownership checks would pass a mark planted in either, and
+  what refuses them today is only that neither carries one. A retry that took the cache root
+  for a clone would unlink every account's cache rather than chmod it.
   `WorkspaceManager` (sanitised keys, containment, `gh repo clone --depth 1`,
   `bash -lc` hooks with a timeout and a cap on what they hand back,
   `.issuebot/session.json`, whose `workpad_comment_id` is the
   workpad issuebot resolved before the last turn it ran, `null` until one existed then, so a
   one-turn run that created it still records `null`).
+  `mark_finished`/`remove`/`remove_key` write `.issuebot/finished` (#149): the intent recorded
+  ahead of the act, so a removal that failed leaves a workspace that says what should have
+  happened to it, and `finished_keys()` reads the terminal sweep's retry candidates off the
+  disk instead of off a re-read of every issue issuebot has ever completed. Bounded by the
+  failures that put those directories there, and durable across a restart. Written at two
+  moments, both needed: `finish_terminal` marks before it moves the label, since a worker
+  killed between the move and the removal would leave an issue at rest in `complete` -- which
+  nothing reads again -- beside a workspace nothing would remove; and `remove` re-asserts it
+  in its `finally`, since `rmtree` stops at the first entry it cannot unlink having already
+  taken everything it reached, which on half the readdir orderings is `.issuebot` with the
+  mark in it. Exclusive, like the `created` sentinel, because `.issuebot` is shared with the
+  session -- and a name there that is not the worker's own file is taken back
+  (`workspace_mark_replaced`), since `finished_keys` would refuse it and the retry would be
+  silently gone. Best effort otherwise (`workspace_mark_failed`): what the mark buys is the
+  retry and not the removal. Cleared by `create_or_reuse` on the reuse path, because a
+  reopened issue is not one issuebot is done with.
   The hook cap is #139: `_run_argv` reads both pipes through `read_capped` and kills the
   process *group* past `MAX_HOOK_OUTPUT_BYTES` (4 MiB each, much smaller than `GhRunner`'s
   since only `_OUTPUT_TAIL` of either survives into `HookResult`), because `hooks.timeout_ms`
@@ -608,10 +714,35 @@ version, and moves by hand.
   stripped, the value everything after the first `=`) over `agent_environment`'s allow-list
   for every turn and every hook after the one that wrote it, which is how a `before_run` DSN
   reaches `pytest` at all. `PROTECTED_ENV_NAMES` (`FIXED_ENVIRONMENT`, `GH_TOKEN`, `PATH`,
-  `HOME`, `PROXY_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and `PROTECTED_ENV_PREFIXES`
-  (`ANTHROPIC_`, `CLAUDE_`) is the trust boundary: the file sits in the agent's own
-  workspace, so the session can write it, and it must not re-point the `claude` issuebot
-  launches next. Everything else warns rather than fails, a null byte included, since
+  `HOME`, `PROXY_ENV_NAMES`) keeps `gh` and `claude` running through a typo, and
+  `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
+  `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
+  `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+  `XDG_CONFIG_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+  `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
+  `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
+  issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
+  #179 (spec `2026-09-22-session-shell-env-design.md`), the `bash -lc` that every hook and the
+  post-clone setup *is*, which is the environment spelling of what #137 sweeps -- `BASH_ENV`
+  names a file the shell sources before the hook's own commands, `SHELLOPTS`/`BASHOPTS` turn on
+  `xtrace` and `PS4` is then expanded, substitutions and all, before every traced command, and
+  `CDPATH` is `PATH`'s rule for the one lookup `PATH` does not cover. `ENV` is deliberately
+  *not* there: it is the interactive shell's start-up file, measured unread by `bash -lc`,
+  `bash --posix -c`, `bash` as `sh` and `sh -c` (dash), so it would close nothing. Whole
+  prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain
+  `git commit` as surely as `GIT_SSH_COMMAND` does and `GH_CONFIG_DIR` outranks
+  `XDG_CONFIG_HOME` for `gh`'s shell aliases -- a list is one somebody has to keep complete,
+  and successive drafts of this one were not. The names are then the *tails* of those tools'
+  documented precedence chains, which a prefix covering each chain's head does not reach and
+  whose config rung #151 sweeps from the home -- `GIT_EDITOR` -> `core.editor` -> `VISUAL` ->
+  `EDITOR` is the shape, and `EDITOR` fires on a plain `git commit` with no terminal. A rule
+  checkable against `git-var(1)` and `gh environment`, and finite because a chain has an end;
+  names rather than prefixes because `SSH_AUTH_SOCK` is the deploy-key route a hook author
+  keeps. The deployment's
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
+  `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
+  than fails, a null byte included, since
   `create_subprocess_exec` raises `ValueError` for one and that is no kind of `OSError`
   (`parse_workspace_env`/`merge_workspace_env` are the pure seam; a complaint names a line
   number, never the line, which can be most of a DSN); `settings_for_labels` (a
@@ -720,7 +851,15 @@ version, and moves by hand.
   `_resume_plan`, because what keeps it off a *running* issue is `admit` answering `busy` long
   before it reaches the budget, not the state. Its block names the way out, which differs by
   ceiling: the escape clears the chain on its way, so relabelling is enough for `attempts` and
-  is not for `spend`, whose figure never resets.
+  is not for `spend`, whose figure never resets. Its note follows the blocked escape's rule
+  (#157), through the `_escape_note` the two share: `_has_budget_block` reads the same body
+  the block is appended to, so a non-retryable failure of either half would leave the refused
+  issue where the gate found it, to be refused again on every tick with the escalation a human
+  would read never written. The label moves first, the block is written blind after an
+  unreadable lookup (`budget_escape_workpad_unreadable`) and left after a refused append
+  (`budget_escape_note_failed`), and a retryable failure keeps the next tick's retry. That is
+  independent of `announce=` below, which is about a second *report* of one escalation rather
+  than about whether the block landed, so the note is reported on both of this function's exits.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
   refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
   the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
@@ -769,10 +908,26 @@ version, and moves by hand.
   then `todo`, oldest first), `observe_transition` (agent for `in_progress`→`review`, human
   otherwise, plus `PrOpened`). `actions.py`: `claim` (`in_progress`, markers cleared),
   `blocked_escape` (workpad block then
-  `review`, idempotent per run id), `finish_terminal` (`complete`, `no_change` or `cancelled`,
+  `review`, idempotent per run id -- and label-first whenever the note fails
+  non-retryably, #128 and #157: the lookup *is* the idempotence, so a `response` error on a page past
+  `MAX_COMMENT_PAGES` or a malformed one used to keep the issue in `in_progress` for the life
+  of the process while the orchestrator retried every five minutes, and the escape's purpose is
+  the label move rather than the note explaining it. So the label moves and the block is then
+  appended blind, as a fresh marker comment, on a best-effort basis
+  (`blocked_escape_workpad_unreadable` names the read that failed,
+  `blocked_escape_note_failed` the write), trading a possible duplicate note for an issue that
+  never leaves `in_progress`. #157 extends the same rule to the *append*: a `response` error on
+  the POST, or a `not_found` on a comment deleted between the read and the write, moves the
+  label and logs `blocked_escape_note_failed` -- and is not written blind afterwards, since the
+  write has just been refused at the one moment it could have been idempotent. Both halves go
+  through one `_escape_note`, which `budget_escape` shares. A retryable failure -- `transport`,
+  `rate_limited` -- is still the next tick's to retry, since that call is likely to answer),
+  `finish_terminal` (`complete`, `no_change` or `cancelled`,
   workspace removed; the first two both rest in the `complete` label and publish
   `IssueCompleted` with `resolution` `merged_pr` or `no_change`, so the dashboard's closed
-  counts include triage, and only a genuine abandonment still clears the label).
+  counts include triage, and only a genuine abandonment still clears the label. An issue
+  already in `complete` is `unchanged`, and the sweep no longer reads that role at all, so the
+  removal it used to retry on the way past is retried off the disk instead: #149, below).
   `conflict_rework` (spec `2026-09-13-conflict-rework-design.md`, amended by #104): a `review`
   issue whose open PR reads `conflicting` is moved to `rework` by issuebot, label first and
   then a `### Issuebot merge conflict` workpad block, a note for a person. The bounce number
@@ -800,7 +955,12 @@ version, and moves by hand.
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
   restart fixes everything), then `tick()` (reconcile: stalls, running refresh with one poll
   interval of grace for `review` measured on the monotonic clock, terminal sweep on the first and every tenth
-  tick; reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
+  tick -- which reads the four non-`complete` roles, reads back by number only the issues it
+  relabelled so the store keeps what `_report_issues` refreshed (dropping an answer that still
+  shows the old role, `terminal_refresh_stale`: a replica that has not caught up would carry
+  the newest `seen_at` and overwrite the state `state_changed` had just written, permanently,
+  since nothing reads a `complete` issue again), and then retries every workspace a removal
+  marked and did not take (#149); reload; preflight; fetch `in_progress`/`rework`/`todo`, plus `review` when an
   `on_issues` observer is attached or the conflict bounce is on (`fetch_states`); dispatch while
   slots remain; snapshot) and a queue wait that fires retries (continuation 1 s; failure
   backoff; `escape`; `slots`) and handles worker exits (the session's final transition is

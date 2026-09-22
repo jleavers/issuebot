@@ -4,7 +4,7 @@ The worker's image carries Python 3.14, `git`, `gh` and `claude`, and nothing el
 the target repository's own suite needs is the deployment's to add, and `hooks.after_create` is
 where most of it goes: an `npm ci`, a `bundle install`, a `go mod download`.
 
-Three things a hook cannot install, because the session runs as a session account (by default
+Four things a hook cannot install, because the session runs as a session account (by default
 the pool the image built, `agent-1` .. `agent-N` at uids 1011 upwards) with no Docker and no way
 to invoke `sudo`:
 
@@ -13,10 +13,11 @@ to invoke `sudo`:
 | a PostgreSQL server, for a suite whose fixtures fail rather than skip without one | `ISSUEBOT_POSTGRES_VERSION` | [below](#a-postgresql-server-for-the-target-repositorys-tests) |
 | `node` and `npm`, to execute the repository's own client-side JavaScript | `ISSUEBOT_NODE_VERSION` | [below](#node-for-the-target-repositorys-tests) |
 | `uv`, to run a Python repository's suite, linter and formatter | `ISSUEBOT_UV_VERSION` | [below](#uv-for-the-target-repositorys-tests) |
+| `pwsh`, for a repository whose deliverables and suites are PowerShell | `ISSUEBOT_PWSH_VERSION` | [below](#powershell-for-the-target-repositorys-tests) |
 
 Each key is empty in `.env.example`, so a deployment that does not need one keeps the image it
 has; each is read at build time, so changing one needs `docker compose build worker` rather than
-a restart; and only the `worker` service takes the argument. All three end at the same seam --
+a restart; and only the `worker` service takes the argument. All four end at the same seam --
 [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and issuebot
 merges into the environment of every turn -- which is the last section here.
 
@@ -280,10 +281,145 @@ also an ordering: **rebuild the image before the new `configs/WORKFLOW.md` reach
 worker**, since `configs/` is bind-mounted and reloads live. `docker compose stop worker`
 before pulling, and `up -d worker` after the build, closes that window entirely.
 
+**uv's cache lives on the `workspaces` volume, one directory per session account.** The
+worker creates `<workspace.root>/.uv-cache/<account>` — `/workspaces/.uv-cache/agent-1` on a
+default deployment — and hands it to every hook and every turn as `UV_CACHE_DIR`. There is
+nothing to configure: it is derived from `workspace.root`, so a deployment whose workspaces are
+somewhere else gets its caches there too.
+
+Two things follow from it, and they are the reason it exists. uv would rather hardlink a
+package out of its cache into the venv than copy it, and a hardlink cannot cross a filesystem:
+with the cache in `$HOME/.cache/uv`, in the container's own writable layer, and the venv at
+`<workspace>/.venv` on the volume, it never could. On the same filesystem it can, so a second
+workspace's venv costs almost nothing — measured on the live worker, this repository's own
+dependency set: 152 MB for two venvs copied, 77 MB for the two hardlinked out of one 78 MB
+cache. And the cache is on the volume rather than in the container's writable layer, so it
+survives `docker compose up -d worker` instead of being re-downloaded from PyPI by the first
+session after every worker recreation.
+
+**One directory per account, and that is the point of the shape.** A cache is a directory one
+process writes and the next installs *from*, so a cache shared between session accounts would
+be a surface one session could write for another to execute — exactly what the [account
+pool](../README.md#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
+the worker and group that account's own, inside a `0755` root: an account reaches its own and
+is refused at every sibling's door. Per account it is the boundary that account's own home
+already draws, and the next session bound to it is the one the cache is kept for.
+
+What the hardlink *does* change is worth stating plainly, since it is not nothing. A hardlinked
+`.venv` entry is the cache's own inode, so two workspaces bound to one account now share the
+files their venvs were installed from — and an idle workspace is sealed `0700` precisely
+because a hostile session may later be handed an account that also holds an honest, idle one. A
+hardlink reaches past that seal into the honest workspace's `.venv`. Three things bound it. The
+two sessions are the same account at the same uid, which already shares a home, and that home
+already held a per-account uv cache the home sweep does not touch (it is a denylist of
+instruction surfaces and shell start-up files, and names no cache) — so this is a channel uv's
+default location had too, and what the hardlink adds is that a poisoning takes effect without
+waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
+that session commits and pushes; only what its tests import. And the alternative gives up the
+venv sharing this was measured for: a per-workspace cache would close it, and the second
+workspace's venv is free only because it is the first one's files. Whether the residual is
+worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
+
+Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
+hardlinks into it, removing a workspace frees very little that the cache still holds, and a
+full volume stops workspace creation rather than just caching. `uv cache prune` from a hook is
+the lever if a deployment wants one; `uv cache clean` is not, since it removes the cache
+directory itself and that directory's parent is the worker's.
+
+The host route (`agent.run_as` unset) carries none of this: there is no session account, the
+home is the operator's own, and uv's default cache stays where it is. Nor does an image built
+without `ISSUEBOT_UV_VERSION`, which has no `uv` on `PATH` for the question to be about.
+
+**`UV_LINK_MODE` is no longer set anywhere,** which is the other half of the same change. The
+build used to default it to `copy` in `/etc/profile.d/issuebot-uv.sh`, because the copy was
+unavoidable and uv warns three lines about falling back to one — on the stderr of
+`after_create`, the first hook of every session, logged in full and quoted into the run's error
+if that hook fails, which is a poor place to leave an unexplained warning about something that
+is working. With the cache on the volume the fallback is gone and uv's own default is what
+should happen, so the image states nothing and lets it. A deployment that wants something else
+still has both routes: `uv sync --link-mode=copy` in the hook line itself, which is the only
+one `after_create` has — it runs before anything has written `.issuebot/env`, and that file
+only reaches the hooks *after* the one that wrote it — or `UV_LINK_MODE=copy` in an
+`.issuebot/env` written from `before_run`, which covers the later hooks and every turn.
+`UV_CACHE_DIR` is overridable from the same file, for the same reason: neither name is on the
+protected list. Speed was never the argument either way — the copy took 122 ms for this
+repository.
+
 If a session reports `uv: command not found`, check it in a login shell, which is what the hooks
 get: `docker compose exec worker bash -lc 'command -v uv'`. If it reports a `403` from the
 proxy instead, the image is fine and the allow-list is what is missing —
 `docker compose logs egress | grep egress_denied` names the host it wanted.
+
+## PowerShell for the target repository's tests
+
+The fourth of these, for a target repository whose deliverables and suites are PowerShell. It
+is the simplest of the four to operate and the largest to carry: one build argument, no
+registry, and about 220 MB of image.
+
+**1. Build the worker image with `pwsh`.** Set `ISSUEBOT_PWSH_VERSION` in this checkout's
+`.env` — `.env.example` carries the key, empty — and rebuild:
+
+```bash
+docker compose build worker
+docker compose up -d worker
+```
+
+An exact release (`7.6.6`), not a major. That is uv's reason — pin what the target
+repository's own CI runs — plus a harder one: GitHub publishes releases under their tags and
+there is no `latest-v7.x` to resolve, so a major on its own names nothing to download. The
+build fetches `powershell-<version>-linux-<arch>.tar.gz` from
+`github.com/PowerShell/PowerShell/releases` and verifies it against the `hashes.sha256`
+published for that release. As with the other three, only the `worker` service takes the
+argument, empty installs nothing, and changing it needs `docker compose build worker` rather
+than a restart. The pin moves by hand, for the reason `ISSUEBOT_NODE_VERSION`'s and
+`ISSUEBOT_UV_VERSION`'s do.
+
+The build also installs the ICU runtime, inside the same guard, so an image built without the
+argument carries neither. .NET reads its globalization data from ICU and the base image has
+none; without it `pwsh` starts in invariant mode, where `'{0:N2}'` formats `1234.5` as
+`1234.50` with no group separator and culture-aware string comparison changes its answers. A
+runtime that starts and then quietly disagrees with the developer's machine is worse than one
+that does not start, so CI asserts the formatting rather than the version.
+
+**2. There is no step 2.** Unlike node and uv, PowerShell needs nothing added to
+[the allow-list](../README.md#what-a-session-may-reach): the runtime ships in the image, and a repository
+of plain `.ps1` deliverables installs nothing to run its tests. The exception is a suite that
+pulls modules from the PowerShell Gallery — `Install-Module`, or a `#Requires -Modules` that
+is not already vendored — which needs
+
+```bash
+ISSUEBOT_EGRESS_ALLOW=www.powershellgallery.com,psg-prod-eastus.azureedge.net
+```
+
+and then `docker compose up -d egress`, a restart of the proxy rather than a rebuild. Both
+hosts: the gallery answers the search and the CDN serves the `.nupkg`.
+
+**3. `after_create` is usually empty.** A PowerShell repository typically has no dependency
+install, so the hook has only the base workflow's unshallow in it — which still earns its
+place, since the clone is `--depth 1` and both the self-review's `git diff origin/HEAD...HEAD`
+and the merge of the default branch need the merge base:
+
+```yaml
+hooks:
+  after_create: |
+    if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow; fi
+```
+
+Remember that an overlay hook **replaces** the base one rather than appending to it. The
+shipped `configs/WORKFLOW.md` ends its `after_create` with `uv sync`, because this repository
+is itself a Python project; a deployment pointed at a PowerShell repository that leaves that
+in place fails every session at `uv: command not found` before turn 1, and one that overrides
+it has to repeat the unshallow line above.
+
+**What this does not give you.** `pwsh` on Linux is PowerShell 7 on .NET, which is not Windows
+PowerShell 5.1 and is not Windows. A suite that shells out to `w32tm`, `DISM` or `netsh`, or
+that reaches a Windows-only module, still needs a Windows runner — so the session's local run
+proves the parts that are pure logic, and the repository's own `windows-latest` checks remain
+the authority on the rest. That division is already how the workflow reads a pull request: a
+check that ran steps and failed holds the issue.
+
+If a session reports `pwsh: command not found`, check it in a login shell, which is what the
+hooks get: `docker compose exec worker bash -lc 'command -v pwsh'`.
 
 ## `.issuebot/env`: what a hook hands the agent
 
@@ -330,6 +466,106 @@ hook that would truncate it again or append a duplicate per session.
   write it as easily as a hook can, and it must not be able to re-point or re-credential the
   `claude` issuebot launches for the next turn. The file's job is to add what the target
   repository's tests need.
+- **So is anything starting `GIT_` or `GH_`, and the tails of those two tools' own fallback
+  chains**, for the reason `PATH` is and one step in: `PATH` decides
+  *which* binary `git` and `gh` are, and these decide what that binary does and which further
+  commands it runs. A git config file names commands (`core.pager`, `credential.helper`,
+  `[alias] x = !...`), and `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and the
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` triple each supply one at a
+  path — or a key with no file at all — of the line's choosing; `GIT_EDITOR` (on a plain
+  `git commit`), `GIT_SEQUENCE_EDITOR`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_SSH`,
+  `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` name one outright; `GIT_EXEC_PATH` and
+  `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
+  repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
+  name the directory holding `config.yml`, whose aliases may be shell commands, and `GH_EDITOR`
+  and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
+  holding `GH_TOKEN`.
+
+  Whole prefixes rather than a list of those names, because a list is one somebody has to keep
+  complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
+  chain those tools resolve a setting through, and the config rung in the middle is swept out
+  of the home by #151 — so the environment tails are protected too, by name:
+
+  | chain | head (prefixed) | tail (protected by name) |
+  |---|---|---|
+  | editor | `GIT_EDITOR`, `GH_EDITOR` | `VISUAL`, `EDITOR` |
+  | pager | `GIT_PAGER`, `GH_PAGER` | `PAGER` |
+  | browser | `GH_BROWSER` | `BROWSER` |
+  | askpass | `GIT_ASKPASS` | `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` |
+  | commit identity | `GIT_AUTHOR_EMAIL` | `EMAIL` |
+  | token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
+
+  `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
+  leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
+  for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
+  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
+  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
+  session, so what such a line would re-point is the *next* session on that issue — and it is
+  the environment spelling of what the home sweep removes from the account's
+  `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
+
+  **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
+  are unaffected: set in `.env`, they reach the worker's environment and the session inherits
+  them through `PASSTHROUGH_PREFIXES` exactly as before. What is refused is a file the session
+  itself can write re-pointing the identity your pull requests are committed under.
+
+  A hook with a real reason for a git setting of its own — a deploy key for the target
+  repository is the usual one — has three routes that are not this file:
+
+  - `git config --local core.sshCommand 'ssh -i /path/to/key -o IdentitiesOnly=yes'` from
+    `after_create`. The workspace directory *is* the clone, so this is the post-clone setup's
+    own idiom (it writes `credential.https://github.com.helper` exactly this way) and it reaches
+    every later turn, because the clone does.
+  - `git -c core.sshCommand=...`, or `GIT_SSH_COMMAND=... git ...` exported in the hook's own
+    shell, for git the hook itself runs — a submodule fetch, a second clone. Unchanged: what is
+    bounded is handing the variable *to the session*, not the hook's own environment.
+  - A root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` in an image built `FROM` this one,
+    for a deployment-wide setting — better than a variable for that purpose, since it is outside
+    the session's reach altogether. `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` being
+    protected is what keeps that route honest.
+
+  Two things those routes do *not* cover, so that you find out here rather than from a variable
+  that silently did not arrive (a refused key is a `workspace_env_ignored` line in the **worker's**
+  log, not something the hook sees):
+
+  - **Behaviour-only `GIT_*` switches with no config equivalent** — `GIT_TERMINAL_PROMPT=0`,
+    `GIT_TRACE*`, `GIT_CURL_VERBOSE`, `GIT_LFS_SKIP_SMUDGE`. Set them in the hook's own shell
+    around the git it runs, or system-wide in a derived image.
+  - **`XDG_CONFIG_HOME` for tools that are not `git` or `gh`** — `uv`, `ruff`, `npm` or anything
+    else following the specification. With `HOME` protected too, a hook can no longer hand the
+    session a relocated config root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
+    in the hook's own shell) and per-repository (config written into the clone, which every later
+    turn sees). `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not protected, which covers the cache
+    and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
+    for the convenience of pointing another tool's config somewhere.
+
+- **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
+  post-clone setup and all four hooks — goes through `bash -lc`, and `bash` reads these out of
+  the environment it is handed, before or around the commands the hook actually wrote:
+
+  - `BASH_ENV` names a file a non-interactive `bash` **sources before** the command it was
+    given. That is the `~/.profile` channel below in variable form, reaching every hook of the
+    next session on that issue.
+  - `SHELLOPTS` and `BASHOPTS` enable `set -o` and `shopt` options from the environment before
+    any start-up file is read, `xtrace` among them — and with `xtrace` on, `PS4` is expanded
+    before every traced command, command substitution and all, the first of them inside
+    `/etc/profile`. It takes the pair: `PS4` is inert without `xtrace`, and `xtrace` with the
+    default `PS4` only prints. So both are protected, `BASHOPTS` with them as the `shopt` half
+    of the same switch.
+  - `CDPATH` is `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so a line
+    here sends the hook into a tree of the last session's choosing and the relative command
+    after the `cd` is that tree's file.
+
+  The cost is about as small as a protection gets: a hook that wants a file sourced before its
+  own commands has `source` in the script it already owns, `set -x` for a trace, and an absolute
+  path for a `cd`. What it may not do is hand the variable to the *next* session's shell.
+
+  **`ENV` is not protected, and does not need to be.** It is POSIX's start-up file for an
+  *interactive* shell, and nothing issuebot runs is interactive: it was measured unread by
+  `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
+  `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
@@ -345,7 +581,17 @@ hook that would truncate it again or append a duplicate per session.
   installer (`rustup`, `nvm`, `pyenv`) appends its `PATH` line to. The worker sweeps the session
   account's shell start-up files before every hook and every turn, so an installer's line
   is gone before the next login shell would read it — between two sessions, which is the point,
-  and within one. `PATH` itself is a protected name here too, so the routes for a tool the image
+  and within one. Nor through `BASH_ENV`, which names such a file without writing one: it is a
+  protected name above, so the sweep's guarantee does not rest on a variable nothing
+  checked. `PATH` itself is a protected name here too, so the routes for a tool the image
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
+- **Nor through `git config --global`.** The session account's `~/.gitconfig`,
+  `~/.config/git/config` and `~/.ssh/config` are swept on the same schedule, so a hook
+  that writes user-level git or ssh config finds it gone before the next login shell — again
+  between two sessions and within one. Commit identity is already handled: set the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
+  the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
+  `git config --local` inside the clone, which is what the post-clone setup does.

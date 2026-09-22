@@ -19,7 +19,9 @@ import pytest
 
 from issuebot.agent import workspace as workspace_module
 from issuebot.agent.errors import AgentError
+from issuebot.agent.uvcache import UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import (
+    FINISHED_MARKER,
     MAX_HOOK_OUTPUT_BYTES,
     SessionRecord,
     WorkspaceManager,
@@ -61,6 +63,7 @@ def make_manager(
     hooks: dict[str, str] | None = None,
     timeout_ms: int = 5000,
     extra_env: dict[str, str] | None = None,
+    hook_shell: tuple[str, ...] = ("bash", "-c"),
 ) -> tuple[WorkspaceManager, StubGh]:
     settings = Settings.model_validate(
         {
@@ -75,7 +78,7 @@ def make_manager(
         "HOME": os.environ.get("HOME", "/tmp"),
         **(extra_env or {}),
     }
-    manager = WorkspaceManager(settings, gh=gh, environ=environ, hook_shell=("bash", "-c"))
+    manager = WorkspaceManager(settings, gh=gh, environ=environ, hook_shell=hook_shell)
     return manager, gh
 
 
@@ -318,6 +321,45 @@ async def test_hook_sees_the_workspace_env_file(
     seen_dsn, seen_path = after.stdout_tail.splitlines()
     assert seen_dsn == "postgresql://issuebot@/db"
     assert seen_path != "/hijacked"
+
+
+@posix
+async def test_a_workspace_env_line_does_not_reach_a_hooks_login_shell(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """#179, end to end through the shell a hook actually gets: `hook_shell` is `bash -lc`, and
+    `bash` sources whatever `BASH_ENV` names before the command it was given. So a
+    `before_run` line naming a script the session planted would run in every later hook --
+    the post-clone setup and all four of them -- ahead of what the hook itself wrote. It is
+    refused where the file is merged, and the worker's log names the key it dropped, while the
+    DSN beside it on the next line is handed over exactly as before."""
+    plant = tmp_path / "plant.sh"
+    plant.write_text("printf 'PLANTED-BASH_ENV-RAN\\n'\n")
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={
+            "before_run": (
+                f"printf 'BASH_ENV={plant}\\nDSN=postgresql://issuebot@/db\\n' > .issuebot/env"
+            ),
+            "after_run": "echo hook-ran; echo ${DSN:-unset}",
+        },
+        hook_shell=("bash", "-lc"),
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    before = await manager.run_hook("before_run", ws.path)
+    assert before is not None and before.ok
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        after = await manager.run_hook("after_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert after is not None and after.ok
+    # The planted script would have printed first, before the hook's own `echo`.
+    assert after.stdout_tail.splitlines() == ["hook-ran", "postgresql://issuebot@/db"]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == ["BASH_ENV is protected"]
 
 
 async def test_sweep_agent_home_is_a_no_op_on_the_host_route(tmp_path: Path) -> None:
@@ -844,3 +886,198 @@ def test_the_managers_boundary_is_exposed_for_reads_made_outside_it(tmp_path: Pa
     assert isinstance(manager.boundary, Boundary)
     assert manager.boundary.worker_uid == os.getuid()
     assert manager.boundary.session_uid is None  # no agent.run_as here
+
+
+# --- the removal mark and its retry (#149) ------------------------------------------------
+
+
+@posix
+async def test_a_failed_removal_leaves_the_mark_that_asks_for_a_retry(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry the terminal sweep used to buy by re-reading every completed issue (#149).
+
+    `remove` writes `.issuebot/finished` before it unlinks anything, so a removal that failed
+    leaves a workspace that says what should have happened to it. `finished_keys` is what the
+    sweep asks instead of GitHub, and it is bounded by the disk.
+    """
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert manager.finished_keys() == []
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert manager.finished_keys() == ["example-42"]
+
+    monkeypatch.undo()
+    assert await manager.remove_key("example-42") is True
+    assert not ws.path.exists()
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_a_successful_removal_leaves_nothing_to_retry(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    await manager.create_or_reuse(make_issue(identifier="example-42"))
+    assert await manager.remove("example-42") is True
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_reusing_a_workspace_clears_the_removal_mark(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reopened issue is not one issuebot is done with, so its clone stops asking to be
+    removed before the session that reuses it starts (#149)."""
+    manager, _ = make_manager(tmp_path)
+    issue = make_issue(identifier="example-42")
+    ws = await manager.create_or_reuse(issue)
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+    monkeypatch.undo()
+    assert manager.finished_keys() == ["example-42"]
+
+    reused = await manager.create_or_reuse(issue)
+
+    assert reused.created is False
+    assert reused.path == ws.path
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_finished_keys_ignores_what_the_worker_did_not_write(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A workspace is the worker's directory and the mark is the worker's file, both reached
+    without following a link (#104). Anything else asks for nothing."""
+    manager, _ = make_manager(tmp_path)
+    await manager.create_or_reuse(make_issue(identifier="example-42"))
+    root = manager.root
+
+    # The account registry, which is not a workspace at all (#121).
+    (root / ".issuebot").mkdir(exist_ok=True)
+    (root / ".issuebot" / FINISHED_MARKER).touch()
+    # Nor is the per-account uv cache root (#164). Both are the worker's own directories
+    # beside the workspace keys, so neither is refused by the boundary the way a session's
+    # plant is: they are stepped over by name, as `seal_idle` steps over them, because a
+    # retry that took one for a clone would unlink every session account's cache.
+    cache_root = root / UV_CACHE_ROOT_NAME
+    (cache_root / ".issuebot").mkdir(parents=True)
+    (cache_root / ".issuebot" / FINISHED_MARKER).touch()
+    # A plain file where a workspace would be.
+    (root / "not-a-workspace").write_text("", encoding="utf-8")
+    # A mark that is a symbolic link rather than a file.
+    linked = root / "linked"
+    (linked / ".issuebot").mkdir(parents=True)
+    (linked / ".issuebot" / FINISHED_MARKER).symlink_to(tmp_path / "elsewhere")
+    # A workspace directory that is a link to somewhere else entirely.
+    outside = tmp_path / "outside"
+    (outside / ".issuebot").mkdir(parents=True)
+    (outside / ".issuebot" / FINISHED_MARKER).touch()
+    (root / "escaped").symlink_to(outside)
+    # And one genuine mark, so the assertion is about what is refused and not about an
+    # answer that is empty whatever it is given.
+    (root / "example-42" / ".issuebot" / FINISHED_MARKER).touch()
+
+    assert manager.finished_keys() == ["example-42"]
+
+
+@posix
+async def test_finished_keys_survives_a_root_that_is_not_there_yet(tmp_path: Path) -> None:
+    manager, _ = make_manager(tmp_path)
+    assert not manager.root.exists()
+    assert manager.finished_keys() == []
+
+
+@posix
+async def test_a_partial_removal_that_ate_the_mark_gets_it_back(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rmtree` is not atomic, and the mark lives inside the tree it is about to delete.
+
+    It walks the workspace's entries in readdir order and stops at the first it cannot unlink,
+    having already taken everything it reached -- `.issuebot`, mark and all, on half the
+    orderings. The mark is the only thing that asks for another attempt, so `remove` puts it
+    back where the directory survived (#149).
+    """
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    (ws.path / "keep").mkdir()
+
+    real_rmtree = shutil.rmtree
+
+    def half(path: object, *args: object, **kwargs: object) -> None:
+        """Take `.issuebot` with the mark in it, then refuse, as an interrupted walk does."""
+        real_rmtree(Path(str(path)) / ".issuebot")
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", half)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+    monkeypatch.undo()
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert manager.finished_keys() == ["example-42"]
+    assert await manager.remove_key("example-42") is True
+    assert not ws.path.exists()
+
+
+@posix
+async def test_a_mark_the_worker_did_not_write_is_taken_back(
+    tmp_path: Path, make_issue: Callable[..., Issue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.issuebot` is shared with the session under `agent.run_as` (#75), so the session can
+    put the name there -- and `finished_keys` refuses a mark that is not the worker's own
+    file, so leaving one would silently cost the retry. The directory is the worker's."""
+    stream = io.StringIO()
+    configure_logging(level="WARNING", stream=stream)
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    (ws.path / ".issuebot" / FINISHED_MARKER).symlink_to(tmp_path / "nowhere")
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f"{path}: refused")
+
+    monkeypatch.setattr(shutil, "rmtree", refuse)
+    with pytest.raises(AgentError):
+        await manager.remove("example-42")
+
+    assert (ws.path / ".issuebot" / FINISHED_MARKER).is_file()
+    assert not (tmp_path / "nowhere").exists()
+    assert manager.finished_keys() == ["example-42"]
+    assert "workspace_mark_replaced" in stream.getvalue()
+
+
+@posix
+async def test_a_workspace_whose_state_directory_is_gone_is_still_removed(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """A workspace too damaged to carry a mark is still a workspace to remove (#149): the
+    state directory is recreated for it, closed, and the removal goes on either way."""
+    manager, _ = make_manager(tmp_path)
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    shutil.rmtree(ws.path / ".issuebot")
+
+    assert await manager.remove("example-42") is True
+    assert not ws.path.exists()
+
+
+@posix
+async def test_marking_a_workspace_is_a_no_op_when_there_is_none(tmp_path: Path) -> None:
+    """`finish_terminal` marks before it moves the label, and most issues have no clone."""
+    manager, _ = make_manager(tmp_path)
+    manager.mark_finished("example-42")
+    assert manager.finished_keys() == []

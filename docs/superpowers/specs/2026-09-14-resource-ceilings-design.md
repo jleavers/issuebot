@@ -36,6 +36,13 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   session open a second workpad on every turn. The blocked escape and the conflict bounce go
   through the same call, so a thread past the cap fails those loudly too
   (`blocked_escape_failed`) rather than reading forever.
+  *Amended by #128, then #157:* the conflict bounce still fails loudly past the cap. The
+  blocked escape no longer does -- it moves the label first and logs
+  `blocked_escape_workpad_unreadable` (see below) -- and #157 gave the budget escape the same
+  treatment, through the `_escape_note` helper the two now share: a thread past the cap costs
+  the block (`budget_escape_workpad_unreadable`) rather than the hand-over to `review`, since
+  a refused issue that stays where the gate found it is refused again on every tick with the
+  escalation a human would read never written.
 - **`GhCliAdapter.count_own_label_additions`** (`github/ghcli.py`, landed by #104 while this
   was in review): the conflict bounce's read of the issue's `LABELED_EVENT` timeline, one
   GraphQL page at a time, under the same rule: at most `MAX_TIMELINE_PAGES` (10) pages, past
@@ -125,6 +132,11 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   retry *and* everything else, and #149 -- not re-reading completed issues at all -- is where
   it is properly answered.
 
+  *Amended by #149:* the sweep no longer asks for `complete` at all, so the role that could
+  reach the ceiling is not read and the isolation is headroom for a backlog rather than the
+  thing standing between a long-lived deployment and a sweep that never runs. See
+  "The sweep's repetition" below.
+
   The isolation is by *type* and not by category. `PageCeilingError` is a `response`
   `GitHubError` with a name, and `_collect` catches that name alone: the category also covers a
   GraphQL `errors` payload, which is how a server-side query timeout arrives and what a large
@@ -156,24 +168,167 @@ One cap per boundary, at the seam that already owns the operation, never at its 
   as well, so a future backfill over a large table sets `SET LOCAL statement_timeout` inside
   its own transaction rather than inheriting sixty seconds.
 
+## The sweep's repetition (#149)
+
+A ceiling bounds one read. It does not bound how often the read is repeated, and the terminal
+sweep is where the two came apart -- with issuebot itself in the role of the party growing the
+resource.
+
+`finish_terminal` leaves `issuebot/complete` on a closed issue, deliberately: the label is how
+the dashboard's closed column is built. So that role never shrinks, and
+`fetch_terminal_issues` asked for every closed issue carrying each of the *five* state labels
+on the first tick and every tenth. The pages, and the 64 KiB bodies in them, grew with
+everything the deployment had ever finished, for as long as it ran. Every issue in that role
+reached `finish_terminal` only to be classified `unchanged`; past `MAX_TERMINAL_PAGES` the
+role was skipped with an `issue_role_skipped` warning and the sweep paid fifty pages to find
+that out, on every sweep, for ever.
+
+**The decision: do not ask for the role.** `TERMINAL_SWEEP_ROLES` (`github/state.py`) is every
+state a closed issue has to be moved *off* -- `todo`, `in_progress`, `review`, `rework` -- and
+not the one it comes to rest in. Those four are a working set the sweep itself drains: it
+reads them, finishes every issue in them, and the next sweep finds what has closed since.
+
+A windowed query over `complete` was the alternative, and it was rejected. It answers the cost
+and nothing else: the two things the re-read was quietly doing both turn on an issue whose
+`updatedAt` has not moved for months, which is exactly what a window excludes. It would also
+have been a second, subtler bound to reason about -- how wide, measured from when, and what a
+worker that was down for longer than the window misses -- in place of not making the request.
+
+That the read has a ceiling at all stays true and stays useful, and `MAX_TERMINAL_PAGES` keeps
+its looser number for reasons that are no longer about growth. The first sweep of a repository
+that already holds a backlog of closed-but-labelled issues is legitimately large, and the
+sweep is the only thing that drains it: a ceiling reached there refuses the one read that
+would bring the role back under it. And the two reads fail differently -- the poll's is
+all-or-nothing because four roles are not a board, this one skips the role and sweeps the rest
+-- so a number tuned for one is not a number for the other.
+
+### What the re-read was load-bearing for, and where each half went
+
+**The store's refresh.** `terminal_sweep` hands `_report_issues` each issue as it *found* it,
+carrying the label `finish_terminal` is about to take off it. The row the store then holds is
+a moment out of date, and what put it right was the next sweep re-reading the issue in its new
+role -- at the price of re-reading every other completed issue with it. The sweep now reads
+back, by number, only the issues it actually relabelled (`_report_moved` →
+`fetch_issues_by_ids`), which is bounded by the work of one sweep and costs no request at all
+in the steady state, where a sweep moves nothing. A read-back that fails is
+`terminal_refresh_failed` at WARNING and leaves the row as the sweep found it: the label move
+itself reaches the store through `state_changed` and `issue_completed`, so what a failure
+costs is an issue's stored label list and title, never its state or the board.
+
+Every answer is checked against the state the sweep moved the issue *to*, and one that still
+shows the old role is dropped (`terminal_refresh_stale`). The move is written through `gh
+issue edit` and read back over GraphQL milliseconds later, so an answer from a replica that
+has not caught up is a real possibility -- and it would carry the newest `seen_at`, which is
+what `UPSERT_ISSUE` orders by, so reporting it would overwrite the state `state_changed` had
+just recorded. The old scheme repaired that on the next sweep; nothing reads a `complete`
+issue again now, so it would be permanent. The refresh is the cheap half and the state is the
+load-bearing half: when they disagree the refresh gives way.
+
+What *does* stop happening is the periodic re-read of an issue that is already `complete` and
+that this sweep did not touch -- so a title, a label, a URL or a linked pull request's state
+and merge time, edited or moved on a closed issue months after issuebot finished with it, no
+longer reaches `issues`. Those are columns the dashboard displays and nothing in issuebot
+reads to make a decision: the board and its counts are `state`, written by the event, and a
+closed issue's row is not a live thing to keep polling. That is the trade, stated plainly.
+
+**The retry of a failed workspace removal.** `remove_workspace` runs outside
+`finish_terminal`'s `unchanged` branch, so re-reading the role was also the only thing that
+ever retried a removal that failed at the time -- and under a pool an account stays bound
+while its tree is on disk (#121). Simply dropping the role would have dropped that retry with
+it, which is the part of #149 that is not visible from the query.
+
+The answer is that the retry is a property of the workspace, not of the issue list.
+`.issuebot/finished` is the intent recorded ahead of the act, so a removal that failed leaves
+a workspace that says what should have happened to it, and `finished_keys()` reads the
+candidates off the disk. The sweep then removes each again through `_workspaces_for_key`, as
+the account bound to that workspace, since the unlink is the session's files'. The resource is
+now bounded by the failures that put those directories there rather than by everything
+issuebot has ever completed, and the record is on disk, so it survives a restart where a memo
+in the process would not.
+
+It is written at two moments, and both are needed. `finish_terminal` marks *before* it moves
+the label, because a worker killed between the move and the removal would otherwise leave an
+issue at rest in `complete` -- which nothing reads again -- beside a workspace nothing would
+remove. And `remove` re-asserts the mark in its `finally`, where a removal is known to have
+failed, because `rmtree` is not atomic: it walks the workspace's entries in readdir order and
+stops at the first it cannot unlink, having already taken everything it reached, which on half
+the orderings is `.issuebot` with the mark inside it. A partial removal that ate its own mark
+would leave a workspace nothing ever removes again, and under a pool an account bound to it
+for ever. The state directory is recreated, closed, when that is what is missing.
+
+The marker is created exclusively, through `Boundary.create_marker`, for the reason the
+`created` sentinel is (#75): `.issuebot` is shared with the session under `agent.run_as`, so a
+name already there may be the session's, and `finished_keys` re-checks that the workspace is
+the worker's own directory and the mark the worker's own regular file, reached through no
+symbolic link (#104). Those two together would be a trap on their own -- a session that
+pre-placed the name would make `create_marker` fail while `finished_keys` refused what it
+found, and the retry would be silently gone -- so a name that is not the worker's own file is
+taken back (`workspace_mark_replaced`, then `remove_marker` and create). The directory is the
+worker's; only the names inside it are shared. `finished_keys` also steps over
+`RESERVED_ROOT_NAMES` -- the account registry (#121) and the per-account uv caches (#164) --
+by name, as `seal_idle` does: those are the worker's *own* directories beside the workspace
+keys, so the boundary checks that refuse a session's plant would pass them, and a retry that
+took one for a clone would unlink every session account's cache. Writing the mark is still best effort: what it
+buys is the retry, so a workspace too damaged to carry one is still a workspace to remove, and
+the failure is `workspace_mark_failed` at WARNING.
+
+`create_or_reuse` clears the mark on the reuse path (`Boundary.remove_marker`), because a
+reopened issue is not one issuebot is done with; and the sweep skips any key with a session
+running or a retry pending -- the same set `_prune_accounts` keeps a binding for -- so a run
+in flight is never swept out from under. A clear that fails is said and not raised
+(`workspace_unmark_failed`): what an uncleared mark costs is a clone the next sweep removes
+and the run after that re-makes, never work, which is pushed.
+`_retry_finished_workspaces` runs before `_prune_accounts`, so a workspace this sweep finally
+removed gives its account back on the same sweep.
+
+### What this does not cover
+
+Three cases the `complete` re-read reached and this does not, all stated rather than closed.
+A removal whose *mark* could not be written and which then fails is not retried; the
+two failures are independent and both are logged, and the second attempt in `remove`'s
+`finally` is a third chance at the first. And a workspace already orphaned when a deployment
+takes this change carries no mark, since nothing wrote one: the old sweep was retrying those
+for as long as their issues sat in `complete`, and after the upgrade an operator removes what
+is left under `workspace.root` by hand.
+
+And the third is the store's, not the disk's: the trade above says what stops being
+*refreshed*, and assumes the row is there to refresh. `_report_issues` reaches the sink
+through `record_issues`, and a batch is lost when the write itself fails -- `db_write_failed`,
+a `StoreError` the sink drops rather than retries, which is the likeliest of these -- or on
+`db_drain_timeout` at shutdown, or silently when the sink is already closed. (Not
+`db_queue_full` or `db_sink_closed_drop`: those are `handle`'s, the event path, and
+`record_issues` has no queue limit of its own.) The next sweep's re-read of the `complete`
+role used to backfill whatever was lost; nothing does now.
+
+Which columns that costs depends on whether the row exists at all, and the two are worth
+separating. For an issue issuebot has polled while it was open -- the ordinary case, since
+the board poll reports every issue it fetches -- the row is already there, and what a dropped
+sweep-time report leaves stale is its title, labels, URL and linked pull request, while
+`state_changed` and `issue_completed` still put `state` right: those are separate events on
+the same queue, and they are `UPDATE`s that find their row. The genuinely uncovered case is an
+issue this sweep is the *first* to see, a closed `review` issue met by a freshly started
+worker among them: `UPSERT_ISSUE`, fed only by `record_issues`, is the one `INSERT INTO
+issues` in the codebase, so with its batch lost the two `UPDATE`s match no row and the issue
+is absent from `issues` entirely -- from the board, the counts, the list and its own page --
+rather than merely stale. That is the honest shape of it: rarer than the first case and
+larger.
+
+None of the three is a growing resource -- each is bounded by a failure that has already
+happened -- which is what makes them acceptable here.
+
 ## Not done here
 
 - `blocked_escape` still needs the workpad before it moves the label, so an issue whose
   thread has outgrown `MAX_COMMENT_PAGES` before the escape is bounded (ten pages every five
   minutes, each failure logged) but not escaped. Whether the escape should move the label
   first and note the block best-effort is a separate decision.
+  *Amended by #128:* it is, and the answer is label-first. A non-retryable read -- the cap, a
+  malformed page -- moves the issue to `review` on the first attempt and then appends the
+  block blind, as a fresh marker comment, best-effort; a retryable one keeps the retry. The
+  read is the block's run-marker idempotence, so the trade-off taken is a possible duplicate
+  note against an issue that never leaves `in_progress`.
 - #104's `WORKSPACE_ENV_LIMIT` and blocking read are the same defect in a different resource
   and are fixed there.
-- **The terminal sweep re-reads every issue issuebot has ever completed.** `finish_terminal`
-  leaves `complete` on a closed issue, and `fetch_terminal_issues` asks for every closed issue
-  carrying each of the five labels on the first tick and every tenth -- so the pages, and the
-  bodies in them, grow with the deployment's own successful work for as long as it runs. That
-  is the invariant's shape with issuebot in the role of the outside party, and it is why the
-  sweep needed a ceiling of its own (`MAX_TERMINAL_PAGES`) rather than the board's. The read is
-  now bounded; that it is repeated at all is not. Filed separately (#149) -- which has to
-  answer more than it looks: `finish_terminal` classifies a `complete` issue `unchanged` but
-  still calls `remove_workspace`, so simply not re-reading the role would drop the only retry
-  of a workspace removal that failed at the time.
 - **`_conflict_gave_up` is keyed on `issue.updated_at`**, which is "until the issue changes" as
   the acceptance criterion asks -- but a commenter moves `updated_at`, so an issue whose label
   history is past `MAX_TIMELINE_PAGES` can be made to cost ten pages again per comment. That is

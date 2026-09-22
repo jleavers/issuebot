@@ -94,10 +94,25 @@ issues that triage is most of the value.
    `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` — which is what Actions read buys, and
    why the workflow's "wait for checks" step is performable at all. If the agent may edit files
    under `.github/workflows/`, also grant Workflows — read and write is its only level, and
-   without it any push touching those files is rejected. A classic token with the `repo` scope
-   works too; it needs `workflow` adding for the same reason, and it reads check runs where a
-   fine-grained token cannot -- and `validate` warns on it, because the session holds the
-   token and a classic token's reach is the whole account's, not one repository's.
+   without it any push touching those files is rejected. Grant it deliberately, because what it
+   removes is human review over what CI *is*: the session pushes its branch to the target
+   repository itself, and GitHub trusts a same-repository ref where it withholds secrets from a
+   fork's, so a job definition the session wrote -- its triggers, its `permissions:`, the
+   secrets it names -- runs as written when the push or the pull request fires it, before
+   anyone has read the diff. Nothing in issuebot replaces that gate: the session's uid, the
+   token it holds and the egress allow-list all bound the *session*, and this is GitHub's
+   runner afterwards. Leaving it off narrows that blast radius rather than closing it, though,
+   and the difference is worth being exact about: wherever your existing workflows run
+   repository code -- a test file, a build script -- that code is already the session's, and it
+   already runs with whatever secrets that job is given. So grant Workflows only where the
+   agent's issues really do change those files, and either way treat every secret that
+   repository's Actions can read as one the agent can reach.
+   A classic token with the `repo` scope works too; it needs `workflow` adding for the same
+   reason and with the same consequence, and it reads check runs where a fine-grained token
+   cannot -- and `validate` warns on it, because the session holds the token and a classic
+   token's reach is the whole account's, not one repository's. That is the boundary
+   *that* choice removes: the scoping to a single repository which the Safety note below names
+   as the control, so one repository's compromise becomes the account's.
    The account needs permission to push branches and open PRs in the target repository.
    Where the token can be *sent* is bounded separately, by the network allow-list under step 2
    ("What a session may reach"): under Compose a session can open a connection to Anthropic,
@@ -105,7 +120,17 @@ issues that triage is most of the value.
 2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
-   credential comes from the environment (see step 2 below).
+   credential comes from the environment (see step 2 below) -- which means the session holds
+   this one *directly*. Choose between the two knowing what can bound each. A `setup-token`
+   credential carries your subscription's whole reach, with no equivalent of the token's
+   "restricted to this repository" to narrow it, and the spend ceilings are no substitute: a
+   subscription reports no per-token cost, so `agent.max_issue_cost_usd` never fires and
+   `claude.max_budget_usd` acts as an effort limit rather than money. What bounds a runaway
+   issue there is `agent.max_turns` and `agent.max_attempts` (see "Cost"). An API key is the
+   one you can bound from outside issuebot -- capped and revoked on its own, and better still
+   on an account dedicated to the bot rather than the login you use yourself -- and there
+   `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run) and
+   `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
 3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
@@ -119,7 +144,7 @@ issues that triage is most of the value.
    `agent-N` at uids 1011 upwards) with no Docker and no way to invoke `sudo`. Those go into
    the image instead, each behind a build variable that is empty by default:
    [Toolchains for the target repository](docs/toolchains.md) has the recipe for a PostgreSQL
-   server, for `node` and `npm`, and for `uv`.
+   server, for `node` and `npm`, for `uv` and for `pwsh`.
 
 The commands below are Bash, and they work as-is under Docker Desktop on Windows.
 
@@ -196,7 +221,7 @@ ignored.
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | both bound *silence*, not time: a turn is killed after this long without a line of output on its stream, or after this long without a turn event reaching the worker. A session that keeps printing resets both, so a run's length is `agent.run_timeout_ms`'s to bound | 1 hour; 5 minutes |
-| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
+| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way, and `--settings claudeMdExcludes` keeps what `claude` loads as instructions to the workspace and the account's own user memory, whatever a previous session approved in `~/.claude.json` -- a symlink inside the clone is still followed out of it, which #135 measured and recorded) | `[user]` |
 | `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it; `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
@@ -207,7 +232,9 @@ ignored.
 Each timer above says which layer it bounds, and a few more ceilings are fixed in the code
 rather than settable, one per boundary an outsider can grow: a `gh` response is capped at 32 MiB and
 the process killed past it; the workpad is looked for in an issue's first 1,000 comments, oldest
-first, and a longer thread with no workpad in it fails the run rather than reading as "none";
+first, and a longer thread with no workpad in it fails the run rather than reading as "none"
+(the blocked escape is the exception: it moves the label anyway and notes the block
+best-effort, since an issue that never leaves `in-progress` is worse than a duplicate note);
 the conflict bounce reads at most the first 1,000 label additions of an issue's history, and a
 bounce that fails past a cap is not tried again until the issue changes; a
 running worker admits at most one refresh-driven tick every 5 s, however many `NOTIFY`s arrive,
@@ -581,9 +608,9 @@ both the label and the default.
 
 ### The target repository's toolchain
 
-Most of what a target repository's suite needs is installed by `hooks.after_create`. Three
-things no hook can install -- a database server, a language runtime and `uv`, because the
-session runs as an unprivileged account with no Docker and no `sudo` -- go into the image
+Most of what a target repository's suite needs is installed by `hooks.after_create`. Four
+things no hook can install -- a database server, a language runtime, `uv` and `pwsh`, because
+the session runs as an unprivileged account with no Docker and no `sudo` -- go into the image
 instead, each behind a variable in this checkout's `.env` that is empty by default.
 
 [**Toolchains for the target repository**](docs/toolchains.md) has the recipe for each, and for
@@ -808,12 +835,22 @@ that matters on your host.
   session's Bash tool, so a `~/.profile` one session leaves is a script every later session
   runs at that uid. That is why the sweep runs before each of those scripts as well as before
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-  before turn 1. It leaves the rest of the
+  before turn 1. The same home holds the config a *tool* the session runs reads, and that is
+  swept with it: `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
+  second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
+  `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
+  to run. Nothing a deployment needs goes there: the bot's identity is the
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
+  entry is the image's system-wide one, the clone's credential helper is written into the clone,
+  and global git or ssh config for every session belongs in `/etc/gitconfig` or
+  `/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-  tool the session ran keeps there (`gh`'s state, npm's cache). It is a
-  denylist of what is loaded, not an allowlist of what is kept, so a new claude location has to
-  be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+  tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
+  sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
+  `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
+  denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
+  new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
   `setting_sources` says and keyed by repository, so one issue's notes would be the next
@@ -824,7 +861,12 @@ that matters on your host.
   it at the same uid can still plant -- which a pool closes, since no two concurrent sessions
   share a home; and the account's `~/.claude.json`, which sits beside the swept directory rather
   than in it, whose `mcpServers` no session loads (`--strict-mcp-config`) while its trust
-  state persists for the container's lifetime.
+  state persists for the container's lifetime. Its
+  `hasClaudeMdExternalIncludesApproved` persists too, and #135 measured that `claude` honours
+  it: a Project or Local `CLAUDE.md` may then read outside the clone. Every turn therefore also
+  runs with `--settings claudeMdExcludes`, an allow-list of the workspace and the account's own
+  user memory, so that approval reaches nothing outside them -- except through a symlink in the
+  clone, which claude resolves after matching the exclusion, and which is the recorded residual.
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches
@@ -842,13 +884,21 @@ that matters on your host.
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and,
-for the container stack, Docker with Compose. Running the CLI outside a container — the host
-route, which is what `agent.run_as` unset means and how the test suite runs — also wants
-`git`, the [GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code)
-2.1.259 or newer on `PATH`, where `claude` uses whatever login you already have. On Windows,
-use WSL. It is a development convenience rather than a deployment: the session then runs as
-your own user with none of the container's boundaries, and `validate` warns about it.
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and, for the
+container stack, Docker with Compose. Running the CLI outside a container — the host route,
+which is what `agent.run_as` unset means and how the test suite runs — also wants `git`, the
+[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
+newer on `PATH`, where `claude` uses whatever login you already have. On Windows, use WSL. It
+is a development convenience rather than a deployment, and what it removes is the container
+that the Safety note above calls the sandbox: the session runs at your own uid, with your
+`$HOME` and whatever is in it (`~/.ssh`, your own `gh` and `claude` logins), and with no
+allow-list between it and the network -- while still running, as it does everywhere, with no
+permission prompts. That uid is the worker's too, so the split #75 rests on is gone with the
+container, and the workspace defences resting on that split go with it. Nothing replaces any of
+this. `validate` warns at `agent.run_as`, and at `egress` unless you have pointed a proxy of
+your own there, and a warning is all issuebot can do about a route it is not on. Anyone can
+open an issue, so run the host route against work you would run yourself, and keep a real
+deployment in the container with a repository-scoped token.
 
 ```bash
 uv sync

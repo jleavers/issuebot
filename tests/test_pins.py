@@ -133,6 +133,59 @@ def _commands(script: str) -> str:
     return "\n".join(ln for ln in script.splitlines() if not ln.lstrip().startswith("#"))
 
 
+# `git` verbs that talk to a remote. A job whose checkout persists no credential can run
+# none of them against this private repository, whatever it does locally with `git diff`.
+REACHES_REMOTE = re.compile(r"\bgit\s+(?:ls-remote|fetch|pull|push|clone|remote\s+update)\b")
+
+
+def test_the_bump_jobs_look_up_their_branch_through_the_api_not_git() -> None:
+    """Neither half that executes unreviewed code can ask git about the remote (#138, #148).
+
+    ``persist-credentials: false`` is what the split above rests on, and dropping the
+    persisted credential drops git's own access to the remote with it. This repository is
+    private, so an unauthenticated ``git ls-remote`` fails to authenticate rather than
+    reporting an absent branch, and an ``if`` around it reads that failure as "the branch is
+    not there" -- so ``reuse`` is false whatever is on the remote.
+
+    That is not a lost optimisation. The reuse path is the recovery one: a branch with no
+    pull request is the wreckage of a run that pushed and then failed before opening it, and
+    reusing the branch is how the next run finishes the job. Without it the pushing half
+    branches off the default branch instead, and its push is rejected as a non-fast-forward
+    on every rerun until someone deletes the branch by hand.
+
+    So the lookup asks the API. ``gh`` still holds ``GH_TOKEN`` in that step and reading a
+    ref is ``contents: read``, which both jobs already have. ``matching-refs`` and not
+    ``git/ref``: it answers an absent branch with 200 and an empty list, so absence is a
+    *successful* reply and every non-zero exit is a real failure, with no parsing of gh's
+    English error text to tell "no branch" from "could not ask". It is a prefix query, hence
+    the exact-ref filter.
+
+    The invocation and not the word, in both directions: each of these scripts explains in a
+    comment what it deliberately does not do.
+    """
+    bumps = (("claude-code-version.yml", "build"), ("pre-commit-version.yml", "freeze"))
+    for name, runner in bumps:
+        config = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+        job = config["jobs"][runner]
+
+        check = next(step for step in job["steps"] if step.get("id") == "check")
+        commands = _commands(check["run"])
+        assert "git/matching-refs/heads/${branch}" in commands, name
+        assert 'select(.ref == \\"refs/heads/${branch}\\")' in commands, name
+        # A lookup that fails fails the run: answering "no branch" to a 5xx or a rate limit
+        # would have the pushing half create a branch that is already there.
+        assert "::error::could not read refs/heads/${branch}" in commands, name
+        # ... and that the answer is acted on. Asserting the question alone would hold with
+        # the arm that sets `reuse` deleted, which is the state this issue found it in.
+        assert '[ "${found}" != "0" ]' in commands, f"{name}: the lookup's answer is not used"
+        assert "reuse=true" in commands, name
+
+        # And nothing else in the job reaches the remote either, `git ls-remote` included.
+        for step in job["steps"]:
+            reaching = REACHES_REMOTE.search(_commands(step.get("run", "")))
+            assert not reaching, f"{name}: {runner} reaches the remote: {reaching.group()}"
+
+
 def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_token() -> None:
     """The new claude release is installed and executed in the job that cannot push (#138).
 
@@ -176,27 +229,253 @@ def test_the_claude_bump_job_builds_and_runs_the_new_version_without_a_write_tok
     opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
     # -F, so the version's dots are dots and not any-character.
     pin = 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}"'
-    assert f"{pin} /tmp/bump/Dockerfile" in opens["run"], "the artefact's pin is not re-checked"
-    assert f"{pin} Dockerfile" in opens["run"], "a reused branch's pin is not re-checked"
+    # Counted over the invocations, since one of these scripts explains in a comment what it
+    # deliberately does not do, and a quotation of the grep is not a grep.
+    commands = _commands(opens["run"])
+    assert commands.count(pin) == 2, "the artefact and the reused branch are not both pinned"
+    assert f"{pin} /tmp/bump/Dockerfile" in commands, "the artefact's pin is not re-checked"
+    # The other one is the reused branch's, read out of its commit rather than off a
+    # worktree; the test below pins that arm.
     # ... and the copy may move that one line and nothing else. A reused branch is held to
     # the same shape against the base, since `build` built the base plus the pin and the
-    # pull request body says so.
+    # pull request body says so -- measured from the merge base, which is the test below.
     assert "git diff --numstat -- Dockerfile" in opens["run"]
-    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}" "${BRANCH}"' in opens["run"]
 
     # The branch name is derived from the validated version rather than carried over from
     # the job that ran the unreviewed release: it names what gets written to the repository.
     assert 'BRANCH="claude-code-${LATEST}"' in opens["run"]
     assert "BRANCH" not in (opens.get("env") or {}), "the branch name is taken on trust"
 
-    # Dropping the persisted credential also drops git's own access to the remote, and this
-    # repository is private: an unauthenticated `git ls-remote` fails outright rather than
-    # reporting an absent branch, and the `if` around it would read that failure as "no
-    # branch" and lose the reuse path. So the lookup asks the API, which still has GH_TOKEN.
-    # The invocation, not the word: the line that replaced it says why in a comment.
-    check = next(step for step in build["steps"] if step.get("id") == "check")
-    # `matching-refs` answers an absent branch with 200 and an empty list, so absence is a
-    # successful reply and every non-zero exit is a real failure -- no parsing of gh's
-    # English error text to tell "no branch" from "could not ask".
-    assert "git/matching-refs/heads/${branch}" in check["run"]
-    assert "git ls-remote" not in _commands(check["run"]), "asks git for a remote ref"
+
+def test_the_claude_bump_job_re_checks_the_reused_branch_from_the_merge_base() -> None:
+    """A reused branch is what it *changes*, not how far the default branch has moved (#166).
+
+    The reuse arm is the recovery path for a run that pushed a branch and then failed before
+    opening the pull request, and a rerun is not usually immediate: the schedule is weekly, so
+    by then the default branch has almost certainly advanced. A local ``git diff <base tip>
+    <branch>`` compares two tips, so every commit merged since the branch was pushed reads as
+    another path the branch touches -- with the sign reversed, as a file the branch reverts --
+    and the arm that exists to spare a human the hand-deletion of the branch demands one
+    instead. ``compare`` measures from the merge base, as the pull request itself will, and
+    needs no history this checkout has to have: the three-dot ``git diff`` that would ask git
+    the same question fails outright there, with "no merge base".
+
+    That is #148's fix in ``pre-commit-version.yml``, and this arm reached it late for the
+    same reason that one did: until #138 the lookup that answers ``reuse=true`` could not see
+    the branch, so nothing had ever run here. Which is also why the rest of that arm's rule
+    is pinned here: what it reuses is a branch on the remote, writable by anyone who can push
+    to this repository, so the commit both gates read is resolved once from a fully qualified
+    ref, and the pin is read out of that commit rather than off a worktree, where a symlink
+    would be followed.
+    """
+    _, open_pr = _bump_split("claude-code-version.yml", "build", "open-pr")
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # Of one commit, resolved once from the fully qualified ref, and both gates are about
+    # that commit: `gitrevisions` resolves `refs/tags/${BRANCH}` ahead of `refs/heads/`, and
+    # an ordinary fetch follows a tag pointing into the history it downloads, so a bare
+    # `${BRANCH}` would let a tag of the same name -- writable by anyone who can push here --
+    # hand these gates one commit while the pull request, which is opened by branch name,
+    # proposed another. The rule `pre-commit-version.yml` has held its own arm to since #148.
+    assert 'git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"' in commands
+    assert 'tip="$(git rev-parse "refs/heads/${BRANCH}")"' in commands, "the ref is not resolved"
+    # The pin is read out of that commit and not off the disk, since `grep` follows a symlink:
+    # a `Dockerfile` that is one, pointed at the artefact this step holds, would otherwise
+    # pass the pin check carrying none of its own bytes.
+    # The read and the grep that consumes it, as one: either alone would still pass with the
+    # blob going to `/dev/null` and the pin checked against something else. Through a file
+    # and not a pipe, because `grep -q` exits at the first match and `pipefail` would then
+    # make a SIGPIPE'd `git cat-file` refuse an honest branch.
+    assert 'git cat-file blob "${tip}:Dockerfile" > /tmp/reused-Dockerfile' in commands, (
+        "a reused branch's pin is read off a worktree, through a pipe, or through an ambiguous name"
+    )
+    assert 'grep -qxF "ARG CLAUDE_CODE_VERSION=${LATEST}" /tmp/reused-Dockerfile' in commands, (
+        "the pin is not checked against what was read out of the commit"
+    )
+    assert "${BRANCH}:Dockerfile" not in commands, "reads an ambiguous name"
+    assert "git checkout ${BRANCH}" not in commands.replace('"', ""), (
+        "the reuse arm works from the worktree"
+    )
+    assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
+        "a reused branch is not held to the shape of the change it proposes"
+    )
+    # And the two-tip form is gone with it. The two-tip form, not the idiom: a local
+    # `git diff --numstat -- <path>` over what this step has just copied in is a different
+    # question with a right answer, and the other arm still asks it of the artefact.
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}"' not in commands, (
+        "compares two tips rather than the change the branch proposes"
+    )
+    # The line counts survive the move, since `build` rewrote one line of one file and the
+    # pull request body says so: `compare` reports them per file as `.additions`/`.deletions`.
+    assert r'"\(.additions)\t\(.deletions)\t\(.filename)"' in commands, (
+        "a reused branch is no longer held to the pin's line counts"
+    )
+    # The question and what is done with the answer, since each can be deleted alone: a
+    # comparison nothing reads, and one whose failure reads as "no files", both leave a
+    # workflow that asks and then pushes anyway.
+    assert r"""[ "${moved}" != "$(printf '1\t1\tDockerfile')" ]""" in commands, (
+        "the answer is not used"
+    )
+    assert "::error::could not compare" in commands, "a failed comparison is not a failure"
+
+
+def test_the_pre_commit_bump_job_re_checks_the_branch_it_reuses() -> None:
+    """A reused branch is whatever is on the remote, so it is held to what ``freeze`` proved.
+
+    The reuse arm is the recovery path for a run that pushed and then failed before opening
+    the pull request, and until #148 it could never run: the lookup that sets ``reuse`` asked
+    git for a ref it had no credential for and always answered "no branch". So nothing had
+    ever looked at what that arm checks out, and it is live now.
+
+    What it checks out is not this job's work. The branch is on the remote, where anyone who
+    can push here could have written it, and the pull request body this step goes on to write
+    says the hooks were run over the whole tree at these digests. That claim is true of the
+    config ``freeze`` froze and of no other, so the branch is reused only when it carries
+    that file byte for byte and changes it alone -- the rule ``claude-code-version.yml``
+    holds its own reused branch to (#138).
+    """
+    _, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # The artefact's shape is re-checked in the job that pushes, ahead of both arms: it is
+    # what the reuse arm compares against, so a tag smuggled into it would be a tag accepted
+    # on the branch as well as one written to a fresh branch. Both halves of that check, since
+    # the first reports only the lines that are *wrong* and says nothing about a config with
+    # no `rev:` line at all.
+    assert "grep -E '^ *rev:' /tmp/frozen/pre-commit-config.yaml" in commands
+    assert (
+        "grep -qE '^ *rev: [0-9a-f]{40}  # frozen: ' /tmp/frozen/pre-commit-config.yaml" in commands
+    ), "a config pinning no hook at a digest passes the shape check"
+
+    # Each check named separately: they guard different things, and one assertion over the
+    # pair would let either be deleted while the other kept the test green.
+    # Read out of the branch, since `cmp` follows a symlink and the artefact is a path on
+    # this runner: a `.pre-commit-config.yaml` that links to it would compare equal to itself.
+    # And out of the *commit*, resolved once from the fully qualified ref: `gitrevisions`
+    # resolves `refs/tags/${BRANCH}` ahead of `refs/heads/${BRANCH}`, and an ordinary fetch
+    # follows a tag pointing into the history it downloads, so a bare `${BRANCH}` would let a
+    # tag of the same name -- writable by anyone who can push here -- hand these gates one
+    # commit while the pull request proposed another.
+    assert 'git fetch --no-tags origin "+refs/heads/${BRANCH}:refs/heads/${BRANCH}"' in commands
+    assert 'tip="$(git rev-parse "refs/heads/${BRANCH}")"' in commands, "the ref is not resolved"
+    assert 'git cat-file blob "${tip}:.pre-commit-config.yaml"' in commands, (
+        "a reused branch's config is read off the disk, or through an ambiguous name"
+    )
+    assert "${BRANCH}:.pre-commit-config.yaml" not in commands, "reads an ambiguous name"
+    assert "cmp -s - /tmp/frozen/pre-commit-config.yaml" in commands, (
+        "a reused branch's config is not compared with the one the hooks were run over"
+    )
+    # Measured from the merge base, which is what the pull request will show and what a
+    # shallow checkout cannot compute for itself. A local `git diff <base tip> <branch>`
+    # reads every commit merged since the branch was pushed as another path the branch
+    # touches, so it refuses a week-old branch -- the ordinary case for a rerun -- for
+    # somebody else's change, and demands by hand exactly the deletion the reuse path exists
+    # to spare.
+    assert "/compare/${GITHUB_REF_NAME}...${tip}" in commands, (
+        "a reused branch is not held to the shape of the change it claims to be"
+    )
+    # The two-tip form, not the idiom: a local `git diff --numstat -- <path>` over what the
+    # step has just written is a different question with a right answer, and it is the very
+    # check `claude-code-version.yml` is held to for its own copied-in file.
+    assert 'git diff --numstat "origin/${GITHUB_REF_NAME}"' not in commands, (
+        "compares two tips rather than the change the branch proposes"
+    )
+    # The question and what is done with the answer, since each can be deleted alone: a
+    # comparison nothing reads, and one whose failure reads as "no files", both leave a
+    # workflow that asks and then pushes anyway.
+    assert '[ "${moved}" != ".pre-commit-config.yaml" ]' in commands, "the answer is not used"
+    assert "::error::could not compare" in commands, "a failed comparison is not a failure"
+
+    # And the artefact is the config the branch name was taken from -- the one link between
+    # the name `freeze` committed to before it ran the hooks and the file that arrives here
+    # after they have run.
+    assert "git hash-object /tmp/frozen/pre-commit-config.yaml | cut -c1-12" in commands
+    assert '[ "${BRANCH}" != "pre-commit-hooks-${hash}" ]' in commands, (
+        "the artefact is not tied to the branch name it is pushed under"
+    )
+
+
+def test_the_pre_commit_bump_job_derives_the_rev_list_its_body_quotes() -> None:
+    """The digests the body quotes are derived in ``open-pr``, never carried across (#168).
+
+    ``freeze`` used to write the rev list *before* it ran the hooks and copy it into the
+    artefact *after* -- and the step between those two is ``pre-commit run --all-files``, the
+    unreviewed third-party code the whole split exists to distrust, running as the same user
+    with ``/tmp`` writable. The config beside it in that artefact is checked three ways here
+    (digest shape, at least one frozen digest, the branch-name binding); the list was checked
+    no ways, and it goes into a fenced block in a pull request body authored by
+    ``github-actions[bot]``. Three backticks close the fence and the rest is Markdown of the
+    hook's choosing -- a review summary claiming the change was checked, a link, an
+    instruction to whoever reads the thread -- and the body is the one part of the proposal a
+    reviewer reads rather than diffs.
+
+    So the list is not carried at all. ``open-pr`` derives it from the config the gates above
+    have just passed and the base config it checked out, filtering to ``rev:`` diff lines: a
+    line that is not one is dropped rather than quoted, and a list with nothing left in it
+    fails the run. The body can then only quote what the gates have passed.
+
+    The invocation and not the word, in both directions: these scripts explain in a comment
+    what they deliberately do not do.
+    """
+    freeze, open_pr = _bump_split("pre-commit-version.yml", "freeze", "open-pr")
+
+    # Nothing in the job that runs the hooks derives a rev list, so there is none to rewrite,
+    # and the artefact carries the config alone.
+    for step in freeze["steps"]:
+        commands = _commands(step.get("run", ""))
+        assert "revs" not in commands, f"freeze still derives a rev list: {commands}"
+    collect = next(s for s in freeze["steps"] if "/tmp/frozen" in _commands(s.get("run", "")))
+    assert _commands(collect["run"]).count("/tmp/frozen/") == 1, (
+        "a second file crosses the boundary beside the config"
+    )
+
+    # Finding 1 of this change's own review: `mkdir -p` is not what keeps the artefact to
+    # one file -- a hook that has already created that directory and filled it loses nothing
+    # to it, and the step runs after the hooks. The upload names the file, so the artefact
+    # has one entry whatever else is sitting in /tmp/frozen.
+    upload = next(s for s in freeze["steps"] if "actions/upload-artifact@" in s.get("uses", ""))
+    assert upload["with"]["path"] == "/tmp/frozen/pre-commit-config.yaml", (
+        "the artefact is uploaded as a directory, so a hook's file rides along in it"
+    )
+
+    opens = next(step for step in open_pr["steps"] if "gh api" in step.get("run", ""))
+    commands = _commands(opens["run"])
+
+    # One file is read out of the artefact, and it is the one the gates above check. This is
+    # what closes the channel: anything else `freeze` left on that runner is not read here.
+    read = set(re.findall(r"/tmp/frozen/[\w./-]*", commands))
+    assert read == {"/tmp/frozen/pre-commit-config.yaml"}, f"reads more than the config: {read}"
+
+    # The derivation: the verified artefact against the base config this job checked out.
+    # `--no-index` because one side is a path on the runner rather than a tracked one.
+    derive = ".pre-commit-config.yaml /tmp/frozen/pre-commit-config.yaml > /tmp/revs.diff"
+    assert "git diff -U0 --no-index" in commands, "the rev list is not derived here"
+    assert derive in commands, "the rev list is not derived from the verified config"
+    # A comparison git could not make must not read as a list of no revs. The status alone
+    # does not say the comparison happened: 0 is "identical" and 1 is "they differ", which is
+    # the answer the step exists for, and git reports a path it could not read as 1 with an
+    # empty diff -- so the empty diff is the check and the status only catches a usage error.
+    assert "status=$?" in commands, "git's status is not kept"
+    assert '[ "${status}" -gt 1 ] || [ ! -s /tmp/revs.diff ]' in commands, (
+        "an unreadable artefact reads as a diff that moves no rev"
+    )
+    assert "::error::could not diff the frozen config" in commands
+
+    # The filter and the gate in one, and each can be deleted alone: a grep whose output
+    # nothing quotes, and one whose failure nothing acts on, both leave a body that quotes
+    # whatever it was handed.
+    assert "grep -E '^[-+] *rev: ' /tmp/revs.diff > /tmp/revs.txt" in commands, (
+        "the quoted list is not filtered to rev: diff lines"
+    )
+    assert "::error::the frozen config moves no rev" in commands, (
+        "a list with no rev: diff line in it is quoted rather than failing the run"
+    )
+    assert "cat /tmp/revs.txt" in commands, "the body does not quote the derived list"
+
+    # ... and derived *after* the gates, which is the whole point: a list derived from an
+    # artefact nothing had checked yet would quote whatever the artefact carried.
+    assert commands.index("git hash-object /tmp/frozen/pre-commit-config.yaml") < commands.index(
+        derive
+    ), "the rev list is derived before the artefact is checked"

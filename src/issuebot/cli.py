@@ -575,7 +575,18 @@ def _claude_auth_check(command: str, *, run_as: str | None = None) -> Check:
 
 
 def _setting_sources_check(settings: Settings) -> Check:
-    """Whether the clone's files are claude's configuration (#107): a warning when they are."""
+    """Whether the clone's files are claude's configuration (#107): a warning when they are.
+
+    The warning names what the opt-in does *not* hand over as well, because both exclusions
+    are argv-shaped and neither is this setting's to revoke: `.mcp.json` under
+    `--strict-mcp-config` (#119), and, since #135, anything a `CLAUDE.md` or a `.claude/rules`
+    file `@`-includes from outside the clone -- which `hasClaudeMdExternalIncludesApproved` in
+    the session account's `~/.claude.json` would otherwise allow, and which
+    `--settings claudeMdExcludes` now keeps to the workspace and the account's own user
+    memory -- with a measured residual the line names, since a symlink inside the clone is
+    resolved after the exclusion is matched and so is still followed. Both are measured in
+    `docs/superpowers/specs/2026-09-14-mcp-config-confinement-design.md`.
+    """
     subject = "claude.setting_sources"
     sources = ", ".join(settings.claude.setting_sources)
     if not settings.claude.loads_clone_settings:
@@ -588,7 +599,10 @@ def _setting_sources_check(settings: Settings) -> Check:
         f"{sources}; the clone's CLAUDE.md and .claude/ (settings, hooks, skills) are "
         "claude's own configuration for every session, and anyone who can merge to "
         f"{settings.github.repo} can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way); omit the setting to load only the user's"
+        "--strict-mcp-config either way, and --settings claudeMdExcludes keeps what claude "
+        "loads as instructions to the workspace and the account's own user memory, though a "
+        "symlink in the clone is still followed out of it); omit the setting to load only "
+        "the user's"
     )
     return Check(subject, "warn", detail)
 

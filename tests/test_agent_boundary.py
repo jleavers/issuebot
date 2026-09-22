@@ -14,6 +14,7 @@ from issuebot.agent.boundary import (
     ARTEFACTS,
     CREATED_MARKER,
     ENV_FILE,
+    FINISHED_MARKER,
     INSTRUCTION_FILE,
     SESSION_FILE,
     TURN_PROMPT,
@@ -52,6 +53,7 @@ def test_every_artefact_names_its_writer_and_its_bound() -> None:
         ENV_FILE,
         SESSION_FILE,
         CREATED_MARKER,
+        FINISHED_MARKER,
         TURN_STREAM,
         TURN_PROMPT,
         TURN_STDERR,
@@ -61,8 +63,10 @@ def test_every_artefact_names_its_writer_and_its_bound() -> None:
     # The session's side writes two of them: its hooks' env file, and the clone's own
     # instruction files (#107), since the clone is the session's; the rest is the worker's own.
     assert [a.name for a in ARTEFACTS if a.writer == "session"] == ["env", "instructions"]
-    assert all(a.limit > 0 for a in ARTEFACTS if a is not CREATED_MARKER)
-    assert CREATED_MARKER.limit == 0  # read for its existence, never its contents
+    markers = (CREATED_MARKER, FINISHED_MARKER)
+    assert all(a.limit > 0 for a in ARTEFACTS if a not in markers)
+    # Both sentinels are read for their existence, never for their contents.
+    assert [a.limit for a in markers] == [0, 0]
 
 
 def test_the_boundary_knows_who_may_write_what() -> None:
@@ -326,6 +330,32 @@ def test_create_marker_is_exclusive(ws: Path, tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
         b.create_marker(ws, (".issuebot", "planted"))
     assert not (tmp_path / "nowhere").exists()
+
+
+@posix
+def test_remove_marker_unlinks_the_name_and_never_what_it_points_at(
+    ws: Path, tmp_path: Path
+) -> None:
+    """The removal mark is cleared when a workspace is reused (#149), in a `.issuebot` the
+    session shares under `agent.run_as`: so the unlink takes the name and follows nothing."""
+    b = Boundary.current()
+    b.create_marker(ws, (".issuebot", "finished"))
+    b.remove_marker(ws, (".issuebot", "finished"))
+    assert not (ws / ".issuebot" / "finished").exists()
+    # Absent is the goal state, not an error: a mark the sweep already cleared is cleared.
+    b.remove_marker(ws, (".issuebot", "finished"))
+
+    target = tmp_path / "elsewhere"
+    target.write_text("keep me", encoding="utf-8")
+    os.symlink(target, ws / ".issuebot" / "finished")
+    b.remove_marker(ws, (".issuebot", "finished"))
+    assert not (ws / ".issuebot" / "finished").exists()
+    assert target.read_text(encoding="utf-8") == "keep me"
+
+    b.create_marker(ws, (".issuebot", "finished"))
+    with pytest.raises(BoundaryError, match="not by the worker"):
+        Boundary(worker_uid=ME + 1).remove_marker(ws, (".issuebot", "finished"))
+    assert (ws / ".issuebot" / "finished").is_file()
 
 
 # --- helpers --------------------------------------------------------------------------------

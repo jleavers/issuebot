@@ -24,7 +24,7 @@ from issuebot.github.ghcli import (
 )
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
 from issuebot.github.runner import GhResult
-from issuebot.github.state import LabelStyle
+from issuebot.github.state import TERMINAL_SWEEP_ROLES, LabelStyle
 from issuebot.log import configure_logging
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gh"
@@ -145,7 +145,10 @@ async def test_malformed_list_record_is_skipped_and_logged() -> None:
     assert "title" in record["reason"]
 
 
-async def test_fetch_terminal_issues_queries_closed_state_for_every_role() -> None:
+async def test_fetch_terminal_issues_queries_closed_state_for_every_role_but_complete() -> None:
+    """The sweep reads the four roles a closed issue is stuck in, and never the one it rests
+    in (#149): ``complete`` holds everything issuebot has ever finished, and every issue in it
+    reaches ``finish_terminal`` only to be classified ``unchanged``."""
     runner = StubRunner()
     empty = json.dumps(
         {
@@ -158,18 +161,35 @@ async def test_fetch_terminal_issues_queries_closed_state_for_every_role() -> No
     )
     runner.on(has("api"), stdout=empty)
     assert await make_adapter(runner).fetch_terminal_issues() == []
-    assert len(runner.calls) == 5
+    assert len(runner.calls) == 4
     labels = sorted(
         next(arg for arg in argv if arg.startswith("label=")) for argv, _ in runner.calls
     )
     assert labels == [
-        "label=issuebot/complete",
         "label=issuebot/in-progress",
         "label=issuebot/review",
         "label=issuebot/rework",
         "label=issuebot/todo",
     ]
     assert all("states: [CLOSED]" in query_of(argv) for argv, _ in runner.calls)
+
+
+async def test_fetch_terminal_issues_cost_does_not_grow_with_what_was_completed() -> None:
+    """#149's acceptance criterion, as a measurement: the sweep's requests are the same
+    whether the repository holds a hundred completed issues or a hundred thousand.
+
+    The stub answers the ``complete`` role with pages that never end, so a read that asked for
+    it would spend ``MAX_TERMINAL_PAGES`` requests before giving up. The sweep spends none.
+    """
+    runner = StubRunner()
+    _endless_board(runner, "issuebot/complete", MAX_TERMINAL_PAGES)
+    runner.on(has("label=issuebot/"), stdout=_issues_page(0, end_cursor=None))
+
+    issues = await make_adapter(runner).fetch_terminal_issues()
+
+    assert [issue.number for issue in issues] == [0]
+    assert not [argv for argv, _ in runner.calls if has("label=issuebot/complete")(argv)]
+    assert len(runner.calls) == len(TERMINAL_SWEEP_ROLES) == 4
 
 
 async def test_page_without_cursor_raises_response() -> None:
@@ -276,22 +296,20 @@ async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
 
 
 async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -> None:
-    """One role over its ceiling does not void the sweep's other four (#139).
+    """One role over its ceiling does not void the sweep's others (#139).
 
-    The role that can actually reach it is ``complete``, which grows with everything issuebot
-    has finished. Letting it refuse the whole read would stop the sweep closing *any* issue
-    out, removing any workspace and releasing any session account, since ``terminal_sweep`` is
-    the only path to ``finish_terminal``. Skipping the one role costs less, though not
-    nothing: ``remove_workspace`` runs for a ``complete`` issue too, so what is lost is the
-    retry of a workspace removal that failed at the time, for the issues in that role. The
-    board poll keeps the all-or-nothing rule: there, four roles are not a board.
+    ``terminal_sweep`` is the only path to ``finish_terminal``, so letting one overgrown role
+    refuse the whole read would stop the sweep closing *any* issue out, removing any workspace
+    and releasing any session account -- from a warning line. Skipping the one role costs the
+    issues in that role alone, and the sweep repeats. The board poll keeps the all-or-nothing
+    rule: there, four roles are not a board.
     """
     stream = io.StringIO()
     configure_logging(level="WARNING", stream=stream)
     runner = StubRunner()
-    _endless_board(runner, "issuebot/complete", MAX_TERMINAL_PAGES)
+    _endless_board(runner, "issuebot/review", MAX_TERMINAL_PAGES)
     empty = _issues_page(0, end_cursor=None)
-    for role in ("todo", "in-progress", "review", "rework"):
+    for role in ("todo", "in-progress", "rework"):
         runner.on(has(f"label=issuebot/{role}"), stdout=empty)
 
     issues = await make_adapter(runner).fetch_terminal_issues()
@@ -302,7 +320,7 @@ async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -
         for line in stream.getvalue().splitlines()
         if json.loads(line)["event"] == "issue_role_skipped"
     ]
-    assert [record["label"] for record in skipped] == ["issuebot/complete"]
+    assert [record["label"] for record in skipped] == ["issuebot/review"]
     assert str(MAX_TERMINAL_PAGES * PAGE_SIZE) in skipped[0]["reason"]
 
 
@@ -331,11 +349,11 @@ async def test_terminal_sweep_still_fails_on_anything_that_is_not_the_cap(
 
 
 async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:
-    """The closed read is a different resource, so it is a different number (#139).
+    """The closed read is a different resource, so it is a different number (#139, #149).
 
-    ``complete`` rests on a closed issue for ever, so the sweep's pages grow with everything
-    issuebot has ever finished -- not with a working set a human drains, which is what bounds
-    the open board.
+    It is no longer a *growing* one -- the sweep stopped asking for ``complete`` -- but the
+    first sweep of a repository that already holds a backlog of closed-but-labelled issues is
+    legitimately large, and the sweep is the only thing that drains it.
     """
     assert MAX_TERMINAL_PAGES > MAX_ISSUE_PAGES
     stream = io.StringIO()

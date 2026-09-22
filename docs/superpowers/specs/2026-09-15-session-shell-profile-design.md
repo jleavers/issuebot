@@ -117,7 +117,8 @@ outlives is not something the seam should be deciding.
 
 - **Other dotfiles a tool executes.** `~/.gitconfig` (aliases, `core.pager`) and `~/.ssh/config`
   (`ProxyCommand`) are the same shape one tool further out, and neither is a shell start-up file;
-  out of this issue's scope, filed as #151 rather than folded in.
+  out of this issue's scope, filed as #151 rather than folded in -- and closed there, by
+  `TOOL_CONFIG_SWEEP` beside this list (spec `2026-09-18-session-tool-config-design.md`).
 
 - **`~/.claude/shell-snapshots/`**, which the config sweep deliberately keeps as claude's own
   runtime state, is the one thing left under the home that a Bash tool sources. Claude writes a

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +20,13 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text()
 COMPOSE = (ROOT / "compose.yaml").read_text()
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 SERVICES = yaml.safe_load(COMPOSE)["services"]
+
+# What the `UV_VERSION` stanza writes to /etc/profile.d/issuebot-uv.sh: the `PATH` line the
+# hooks need, since Debian's /etc/profile overwrites `PATH` for a login shell, and nothing
+# else. It carried a `UV_LINK_MODE=copy` default until #164 moved uv's cache onto the
+# workspaces volume, where the hardlink uv would rather use finally works.
+UV_PROFILE_SCRIPT = """   && printf 'PATH="/opt/uv/bin:$PATH"\\n' > /etc/profile.d/issuebot-uv.sh \\
+"""
 
 
 def test_two_accounts_and_one_delegation() -> None:
@@ -111,9 +119,11 @@ def test_ci_proves_the_boundary_and_runs_hook_shaped_steps_as_the_session() -> N
     assert "--user agent --entrypoint sudo issuebot:ci" in CI
     assert "/proc/$!/environ" in CI
     assert "issuebot.agent.runas" in CI
-    # The npm smoke test, the README's cluster recipe, and the MCP probe (#119): three steps
-    # that mount a script from the runner and run it as the session's own account.
-    assert CI.count("docker run --rm --user agent -v /tmp/") == 3
+    # The npm smoke test, the pwsh smoke test, the README's cluster recipe, and the MCP probe
+    # (#119): four steps that mount a script from the runner and run it as the session's own
+    # account. Counted rather than listed, so a step that quietly stops running as `agent` --
+    # the uid every one of them exists to exercise -- fails here.
+    assert CI.count("docker run --rm --user agent -v /tmp/") == 4
 
 
 def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -> None:
@@ -136,14 +146,19 @@ def test_ci_proves_a_planted_mcp_server_is_not_loaded_from_the_sessions_home() -
 
 def test_the_flags_the_sessions_authority_depends_on_are_asserted_at_build() -> None:
     """#109: a claude release that dropped any of these would widen what a session may do
-    without a word -- its tool set, the servers it loads, or whose files are its configuration
-    (#107) -- and would do it one session at a time. The build fails instead."""
+    without a word -- its tool set, the servers it loads, whose files are its configuration
+    (#107), or where its instructions may be read from (#135) -- and would do it one session
+    at a time. The build fails instead."""
     assert "claude --help | grep -q -- '--disallowedTools'" in DOCKERFILE
     assert "claude --help | grep -q -- '--strict-mcp-config'" in DOCKERFILE
     assert "claude --help | grep -q -- '--setting-sources'" in DOCKERFILE
     # `--mcp-config` is matched with its argument, since a bare `--mcp-config` is a substring
     # of `--strict-mcp-config` and of the `--setting-sources` help text beside it.
     assert "claude --help | grep -q -- '--mcp-config <'" in DOCKERFILE
+    # `--settings` is matched with its argument for the same reason: a bare `--settings` is a
+    # substring of `--setting-sources`, so the bare form would pass against a claude that had
+    # dropped the flag the #135 allow-list rides on.
+    assert "claude --help | grep -q -- '--settings <'" in DOCKERFILE
 
 
 def test_ci_proves_the_session_home_sweep() -> None:
@@ -186,6 +201,30 @@ def test_ci_proves_a_planted_shell_profile_does_not_run_for_the_next_sessions_ho
     # the sweep just removed.
     assert "sudo -n -H -u agent claude --version" in CI
     assert 'sudo -n -H -u agent bash -lc "claude --version"' in CI
+
+
+def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_session() -> None:
+    """#151: the same home again, one tool further out. `git` runs in every session and reads
+    two user-level config files, either of which can name a command; `ssh` reads one. Proved in
+    the image and two-sided like the profile half above -- the same `git` runs before the
+    sweep, where the alias has to *run*, so a `git` that stopped reading the account home could
+    not pass this as a no-op -- and the neighbours in those directories have to survive it,
+    since the sweep names files and never empties a directory another tool also keeps state in.
+    """
+    assert 'printf \\"[alias]\\\\npwn = !echo GITCONFIG-RAN\\\\n\\" > /home/agent/.gitconfig' in CI
+    assert (
+        'printf \\"[alias]\\\\npwnxdg = !echo XDG-RAN\\\\n\\" > /home/agent/.config/git/config'
+    ) in CI
+    assert "echo ProxyCommand false > /home/agent/.ssh/config" in CI
+    assert 'test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN' in CI
+    assert 'test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN' in CI
+    assert "! sudo -n -H -u agent git -C / pwn 2>/dev/null" in CI
+    assert "! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null" in CI
+    for gone in (".gitconfig", ".config/git/config", ".ssh/config"):
+        assert f"test ! -e /home/agent/{gone}" in CI, gone
+    # The directories those files sat in are other tools' too.
+    assert "test -f /home/agent/.config/gh/hosts.yml" in CI
+    assert "test -f /home/agent/.ssh/known_hosts" in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:
@@ -353,13 +392,73 @@ def test_the_python_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell(
     """
     assert 'ARG UV_VERSION=""' in DOCKERFILE
     assert "${UV_VERSION:+/opt/uv/bin:}" in DOCKERFILE
-    assert "printf 'PATH=\"/opt/uv/bin:$PATH\"\\n' > /etc/profile.d/issuebot-uv.sh" in DOCKERFILE
+    # The whole `printf` run, so that the `PATH` line stays tied to *this* file: two loose
+    # substrings would still pass with it written into `issuebot-node.sh`.
+    assert UV_PROFILE_SCRIPT in DOCKERFILE
     # Asserted at build for the reason `initdb --version` and `node --version` are: a moved
     # download or a renamed asset has to fail the build, not the first session that runs it.
     assert "/opt/uv/bin/uv --version" in DOCKERFILE
     # The checksum comes from the release's own .sha256, so a tarball that is not the one
     # astral published fails the build rather than being installed.
     assert "sha256sum -c uv.sha256" in DOCKERFILE
+
+
+def test_the_uv_profile_states_no_link_mode_now_the_cache_is_on_the_volume() -> None:
+    """#161 defaulted uv's link mode to ``copy``, because uv's cache was under
+    ``$HOME/.cache/uv`` -- in the container's own writable layer -- while the venv it builds is
+    ``<workspace>/.venv`` on the mounted volume, and a hardlink cannot cross the two. Every
+    ``uv sync`` fell back to a full copy and warned three lines about it on the stderr of
+    ``after_create``, the first hook of every session.
+
+    #164 removed the reason instead: the worker puts the cache on the workspaces volume, one
+    directory per session account (``agent/uvcache.py``), and hands it to every hook and every
+    turn as ``UV_CACHE_DIR``. One filesystem, so uv's own default -- hardlink -- is what works,
+    and a ``copy`` default written into the image would now be the one thing stopping it. So
+    the profile script is the ``PATH`` line and nothing else, and the runtime stage states
+    nothing about the link mode at all.
+
+    A deployment that does want ``copy`` back still has both of #161's routes, unchanged:
+    ``uv sync --link-mode=copy`` in the hook line, or ``UV_LINK_MODE=copy`` in an
+    ``.issuebot/env`` written from ``before_run``. Neither ``UV_LINK_MODE`` nor
+    ``UV_CACHE_DIR`` is in ``PASSTHROUGH_NAMES`` or ``PROTECTED_ENV_NAMES``, which is what
+    makes that file the override.
+    """
+    assert UV_PROFILE_SCRIPT in DOCKERFILE
+    # Not a line of the runtime stage mentions it any more: every remaining occurrence is a
+    # comment. (The *builder* stage sets it for itself, over the buildkit cache mount, and is a
+    # different image.)
+    runtime = DOCKERFILE.split("AS runtime", 1)[1]
+    mentions = [line.strip() for line in runtime.splitlines() if "UV_LINK_MODE" in line]
+    assert mentions, "the reasoning for not setting it belongs in the file"
+    assert all(line.startswith("#") for line in mentions)
+    # And the same on the image CI actually builds: the opt-in build states nothing, while a
+    # value handed in still arrives, which is the `.issuebot/env` route.
+    assert (
+        'toolchain="$(docker run --rm --entrypoint bash issuebot:ci-toolchain'
+        ' -lc \'echo ${UV_LINK_MODE-}\')"\n          test -z "$toolchain"' in CI
+    )
+    assert (
+        "docker run --rm -e UV_LINK_MODE=hardlink --entrypoint bash issuebot:ci-toolchain"
+        " -lc 'echo ${UV_LINK_MODE-}'" in CI
+    )
+
+
+def test_the_uv_cache_sits_on_the_volume_that_outlives_the_container() -> None:
+    """Half of what #164 is for: a cache in the container's own writable layer is discarded on
+    every ``docker compose up -d worker``, so the next session re-downloads it from PyPI.
+
+    The worker keeps it at ``<workspace.root>/.uv-cache/<account>``, and the default root is
+    ``/workspaces`` -- which compose mounts from a *named* volume rather than binding or
+    tmpfs'ing, so recreating the container remounts the same cache. That is the whole claim,
+    and it rests on those three facts together.
+    """
+    assert Settings.model_validate({"github": {"repo": "o/r"}}).workspace.root == Path(
+        "/workspaces"
+    )
+    assert 'VOLUME ["/workspaces"]' in DOCKERFILE
+    assert "workspaces:/workspaces" in SERVICES["worker"]["volumes"]
+    volumes = yaml.safe_load(COMPOSE)["volumes"]
+    assert "workspaces" in volumes and not volumes["workspaces"]
 
 
 def test_compose_offers_the_python_toolchain_to_the_worker_alone() -> None:
@@ -380,5 +479,86 @@ def test_ci_proves_uv_answers_on_both_paths_in_the_toolchain_image() -> None:
     assert "docker run --rm --entrypoint uv issuebot:ci-toolchain --version" in CI
     # And the other half of "off by default": the *default* build must carry none of it, which
     # is the assertion that would catch a COPY --from placed outside the argument's guard.
-    assert "for tool in initdb node npm uv; do" in CI
+    assert "for tool in initdb node npm uv pwsh; do" in CI
     assert "command -v initdb && command -v node && command -v npm && command -v uv" in CI
+
+
+def test_the_powershell_toolchain_is_off_by_default_and_reaches_both_kinds_of_shell() -> None:
+    """``pwsh`` is the fourth optional toolchain, beside the PostgreSQL server (#62), node
+    (#64) and uv (#128), and it is built the same way: empty is the default, so the image
+    keeps exactly the contents it has without the argument, and a deployment whose target
+    repository is a PowerShell project sets ``ISSUEBOT_PWSH_VERSION``.
+
+    Both paths are needed for the reason uv needs both. The ``ENV`` covers a session's own
+    ``claude`` tools, and the ``profile.d`` line covers the hooks, which run under
+    ``bash -lc`` -- and Debian's ``/etc/profile`` *overwrites* ``PATH`` for a login shell, so
+    the ``ENV`` alone would leave a hook's ``pwsh`` looking for a binary that is on the
+    image's own ``PATH`` and not on the one it was handed.
+    """
+    assert 'ARG PWSH_VERSION=""' in DOCKERFILE
+    assert "${PWSH_VERSION:+/opt/powershell/bin:}" in DOCKERFILE
+    # The whole `printf`, so that the `PATH` line stays tied to *this* file: two loose
+    # substrings would still pass with it written into `issuebot-uv.sh`.
+    assert (
+        "printf 'PATH=\"/opt/powershell/bin:$PATH\"\\n' > /etc/profile.d/issuebot-pwsh.sh"
+        in DOCKERFILE
+    )
+    # Asserted at build for the reason `initdb --version`, `node --version` and `uv --version`
+    # are: a moved download or a renamed asset has to fail the build, not the first session
+    # that runs the target repository's suite.
+    assert "/opt/powershell/bin/pwsh --version" in DOCKERFILE
+    # The checksum comes from the release's own `hashes.sha256` beside the tarball, so an
+    # archive that is not the one Microsoft published fails the build rather than being
+    # installed. That file is UTF-16, and `sha256sum -c` reads bytes: without the transcode
+    # every line is unparseable and the check passes over an empty list of digests, which is
+    # the failure mode worth pinning -- it is silent.
+    assert "iconv -f UTF-16 -t UTF-8" in DOCKERFILE
+    assert "sha256sum -c --ignore-missing hashes.sha256" in DOCKERFILE
+
+
+def test_the_icu_runtime_rides_on_the_powershell_guard() -> None:
+    """.NET reads globalization data from ICU, and the base image carries none: without it
+    ``pwsh`` falls back to invariant mode, where ``"{0:N2}"`` stops grouping and a suite that
+    formats numbers or compares strings by culture quietly changes its answers.
+
+    So the package is installed *inside* the ``PWSH_VERSION`` guard -- an image built without
+    the argument carries no ICU either, which is what "off by default" has to mean for the
+    whole arm and not just the tarball -- and it is resolved by name rather than pinned,
+    because the package is named after the ABI (``libicu76`` on trixie) and a ``PYTHON_IMAGE``
+    bump to the next Debian renames it.
+    """
+    runtime = DOCKERFILE.split("AS runtime", 1)[1]
+    stanza = runtime.split('ARG PWSH_VERSION=""', 1)[1].split("\n    fi", 1)[0]
+    assert "apt-cache --names-only search '^libicu[0-9][0-9]*$'" in stanza
+    mentions = [
+        line
+        for line in runtime.splitlines()
+        if "libicu" in line and not line.strip().startswith("#")
+    ]
+    assert mentions and all(line in stanza for line in mentions)
+
+
+def test_compose_offers_the_powershell_toolchain_to_the_worker_alone() -> None:
+    """Like the other three: the worker runs the sessions, and the web service builds from the
+    same context without it, since the dashboard runs no session and would otherwise carry a
+    180 MB runtime twice."""
+    assert 'PWSH_VERSION: "${ISSUEBOT_PWSH_VERSION:-}"' in COMPOSE
+    assert "PWSH_VERSION" not in yaml.safe_dump(SERVICES["web"])
+
+
+def test_ci_proves_pwsh_answers_on_both_paths_and_at_a_session_account() -> None:
+    """``pwsh`` joins the one opt-in build rather than earning its own, for the reason uv did:
+    the checks are about what is on ``PATH`` and under which uid, not about the arguments
+    interacting.
+
+    And it runs a script as ``agent``, which is the half ``--version`` cannot prove. ``pwsh``
+    writes a history file and a module cache under ``$HOME`` on first use, so a session
+    account whose home it cannot write is a suite that fails at the session's uid and nowhere
+    else -- the same shape as the ``npm ci`` fixture (#64), which exists for ``$HOME/.npm``.
+    """
+    assert "PWSH_VERSION=" in CI
+    assert "docker run --rm --entrypoint pwsh issuebot:ci-toolchain --version" in CI
+    assert "command -v pwsh" in CI
+    assert "docker run --rm --user agent -v /tmp/pwsh-smoke:/pwsh-smoke:ro" in CI
+    # And the other half of "off by default": the *default* build must carry none of it.
+    assert "for tool in initdb node npm uv pwsh; do" in CI

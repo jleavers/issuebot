@@ -29,6 +29,7 @@ from issuebot.agent.errors import AgentError
 from issuebot.agent.runas import RunAs, Spawn
 from issuebot.agent.runner import agent_environment, workspace_environment
 from issuebot.agent.scrub import Scrubber
+from issuebot.agent.uvcache import UV_CACHE_ROOT_NAME, ensure_uv_cache_dir
 from issuebot.config import Settings
 from issuebot.events.types import RunOutcome
 from issuebot.github import GhRunner, GhRunnerLike, GitHubError, Issue
@@ -45,6 +46,11 @@ POST_CLONE_SCRIPT = (
 # Written last into ``.issuebot`` by the worker: its presence marks a workspace whose creation
 # completed, so a clone whose hooks were cut short is recreated rather than reused.
 CREATED_MARKER = "created"
+# Written by the worker before the unlink that removes a workspace (#149): a workspace
+# carrying it is one issuebot is done with, so a removal that failed at the time leaves
+# the record of its own retry behind on disk. Cleared when a workspace is reused, since a
+# reopened issue is not one issuebot is done with.
+FINISHED_MARKER = "finished"
 STATE_DIR = ".issuebot"
 # Under ``agent.run_as`` (#75) the workspace directory and ``.issuebot`` are the worker's, and
 # sticky: the agent creates what it likes inside them but can neither unlink nor rename the
@@ -52,6 +58,17 @@ STATE_DIR = ".issuebot"
 # the worker reads back out of them is declared, and guarded, in ``issuebot.agent.boundary``.
 # The mode and the group come from ``share_with`` (#121): the bound account's group and nobody
 # else's, so a sibling session at another uid cannot enter the directory at all.
+
+# Names directly under ``workspace.root`` that are not workspaces, and must not be treated as
+# one. The worker's account registry (#121) and the per-account uv caches (#164): both are the
+# worker's own directories beside the workspace keys, and both would be damaged by being taken
+# for a clone. ``path_for`` refuses either as a key -- no identifier spells one today, since a
+# key is ``<repo>-<number>`` and always ends in a digit, but neither directory is something to
+# leave resting on that -- and ``seal_idle`` steps over them, which for the cache root is
+# load-bearing rather than tidy: it is ``0755`` so that every session account can reach its own
+# directory inside it, and sealing it to ``0700`` at each worker start would take every
+# account's cache away until something re-created it.
+RESERVED_ROOT_NAMES: frozenset[str] = frozenset({REGISTRY_DIR, UV_CACHE_ROOT_NAME})
 _DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 _HASH_LENGTH = 16
 _OUTPUT_TAIL = 2000
@@ -190,14 +207,17 @@ class WorkspaceManager:
     # --- paths --------------------------------------------------------------------
 
     def path_for(self, identifier: str) -> Path:
-        path = (self.root / workspace_key(identifier)).resolve()
+        return self._path_for_key(workspace_key(identifier))
+
+    def _path_for_key(self, key: str) -> Path:
+        path = (self.root / key).resolve()
         if not self.is_contained(path):
             raise AgentError("workspace_error", f"workspace path {path} escapes {self.root}")
-        if path.name == REGISTRY_DIR:
-            # The worker keeps its account bindings there (#121), and a workspace is
-            # removed wholesale. No identifier reaches it today -- one is `<repo>-<number>`,
-            # so a key always ends in a digit -- but the record is not something to leave
-            # resting on how identifiers happen to be spelled.
+        if path.name in RESERVED_ROOT_NAMES:
+            # The worker keeps its account bindings and its per-account uv caches there (#121,
+            # #164), and a workspace is removed wholesale. No identifier reaches either today
+            # -- one is `<repo>-<number>`, so a key always ends in a digit -- but neither is
+            # something to leave resting on how identifiers happen to be spelled.
             raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
@@ -216,6 +236,11 @@ class WorkspaceManager:
             # not enter. Idempotent, and the directories are the worker's either way.
             self._share(path)
             self._share(path / ".issuebot")
+            # A workspace whose removal failed keeps the mark that asks for it to be retried
+            # (#149). Reusing it is the statement that issuebot is *not* done with the issue
+            # after all -- it reopened, or a human put it back on the board -- so the mark goes
+            # before the session starts, and the sweep leaves the clone alone.
+            self._unmark_finished(path)
             self._log.debug("workspace_reused", workspace=str(path))
             return Workspace(key=path.name, path=path, created=False)
         if path.exists():
@@ -319,7 +344,9 @@ class WorkspaceManager:
         for child in children:
             # Through the boundary (#104): a workspace is a directory of the worker's, reached
             # without following a link, so a name a session planted here is not sealed as one.
-            if child.name != REGISTRY_DIR and self._boundary.is_own_dir(self.root, (child.name,)):
+            if child.name not in RESERVED_ROOT_NAMES and self._boundary.is_own_dir(
+                self.root, (child.name,)
+            ):
                 seal(child)
 
     def _make_state_dir(self, path: Path) -> None:
@@ -363,8 +390,9 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear what a prior or concurrent session may have left in the account's home for
-        this one to load: the config under ``~/.claude`` (#101) and the shell start-up files a
-        login shell sources (#137). Called immediately before each of this session's turns and
+        this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
+        login shell sources (#137) and the git and ssh config a tool would take a command from
+        (#151). Called immediately before each of this session's turns and
         before every script it runs in a login shell (``_run_script``: the hooks and the
         post-clone setup).
 
@@ -388,10 +416,39 @@ class WorkspaceManager:
             # WARNING, since a control that silently never ran is no control.
             self._log.warning("claude_home_sweep_failed", user=self._runas.user)
 
+    def mark_finished(self, identifier: str) -> None:
+        """Record that issuebot is done with this issue's workspace (#149).
+
+        Called by `finish_terminal` *before* it moves the label, so a worker killed between
+        the label move and the removal still leaves a workspace that asks to be removed --
+        the window the sweep's re-read of the `complete` role used to cover. `remove` marks
+        again on its own account, since a removal is a removal whoever asked for it.
+        """
+        try:
+            path = self._path_for_key(workspace_key(identifier))
+        except AgentError:
+            return
+        if path.exists():
+            self._mark_finished(path)
+
     async def remove(self, identifier: str) -> bool:
-        path = self.path_for(identifier)
+        return await self.remove_key(workspace_key(identifier))
+
+    async def remove_key(self, key: str) -> bool:
+        """Remove the workspace stored under ``key``, whatever issue put it there.
+
+        Addressed by key rather than by identifier because the sweep's retry reads its
+        candidates off the disk (#149): a workspace that outlived the removal that should have
+        taken it is a directory name, and the issue it belongs to is no longer being asked
+        for. ``remove`` is the same operation reached from an identifier.
+        """
+        path = self._path_for_key(key)
         if not path.exists():
             return False
+        # Before the unlink, not after it: a removal that fails leaves the directory, and the
+        # mark is what asks the next terminal sweep to try again (#149). Marking afterwards
+        # would only ever record removals that had already succeeded.
+        self._mark_finished(path)
         # Open again: `before_remove` runs as the account and the delegated unlink is its own,
         # and a workspace reaching this is a sealed one nine times in ten (#121).
         with contextlib.suppress(AgentError):
@@ -404,9 +461,112 @@ class WorkspaceManager:
             # readable by the next session bound to the same account (#121). The caller only
             # logs the failure, so closing it again is this method's job.
             if path.exists():
+                # And so is putting the mark back. `rmtree` is not atomic: it walks the
+                # workspace's entries in readdir order and stops at the first it cannot
+                # unlink, having already taken everything it reached -- which on half the
+                # orderings is `.issuebot`, mark and all. The mark is the only thing that asks
+                # for another attempt, so a partial removal that ate it would leave a
+                # workspace nothing ever removes again, and under a pool an account bound to
+                # it for ever (#121). Re-asserted here, where the failure is known.
+                self._mark_finished(path)
                 self.seal(path)
         self._log.info("workspace_removed", workspace=str(path))
         return True
+
+    def finished_keys(self) -> list[str]:
+        """The keys of workspaces issuebot finished with and could not remove (#149).
+
+        A removal writes ``.issuebot/finished`` before it unlinks anything, so what is left
+        here is exactly the removals that did not complete -- a resource bounded by the disk,
+        and by the failures that put it there, rather than by everything issuebot has ever
+        completed. The terminal sweep used to find these by re-reading the ``complete`` role
+        for issues whose only outcome was ``unchanged``; asking the workspaces instead costs
+        one ``readdir`` and answers for a workspace whose issue nobody is asking about any
+        more, across restarts, since the record is on disk rather than in this process.
+
+        Every step goes through the boundary (#104): the workspace and its state directory
+        must be the worker's own directories reached without following a link, and the mark
+        must be the worker's own regular file. A session that plants the name in a directory
+        of its own therefore asks for nothing. Under ``agent.run_as`` the session can also
+        write in the shared, sticky ``.issuebot``, and what refuses it there is the owner
+        check rather than the directory -- so where ``fs.protected_hardlinks`` is 0 a session
+        could link the worker's ``created`` sentinel to ``finished`` and inherit its
+        ownership. That asks for its own workspace to be removed once its run has ended, a
+        key with a session running or a retry pending being skipped and its work pushed, so
+        what it costs is a re-clone -- and ``session.json`` with it, so the next run starts
+        cold rather than resuming. Never raises: this runs inside a sweep.
+        """
+        try:
+            children = sorted(child.name for child in self.root.iterdir())
+        except FileNotFoundError:
+            # The root is created with the first workspace, so its absence is "none yet".
+            return []
+        except OSError as exc:
+            self._log.warning("workspace_scan_failed", root=str(self.root), error=str(exc))
+            return []
+        return [
+            name
+            for name in children
+            # ``RESERVED_ROOT_NAMES`` rather than the registry alone: the per-account uv caches
+            # (#164) are the worker's own directories beside the workspace keys too, and a
+            # retry that took one for a clone would unlink every account's cache. Neither
+            # carries the mark today, so this steps over them by name rather than resting on
+            # that, exactly as ``seal_idle`` does.
+            if name not in RESERVED_ROOT_NAMES
+            and self._boundary.is_own_dir(self.root, (name,))
+            and self._boundary.is_own_file(self.root, (name, STATE_DIR, FINISHED_MARKER))
+        ]
+
+    def _mark_finished(self, path: Path) -> None:
+        """Record that this workspace is issuebot's to remove (#149).
+
+        Never raises: what the mark buys is the retry, so a workspace too damaged to carry
+        one is still a workspace to remove, and the failure is said rather than propagated.
+        """
+        try:
+            self._write_finished(path)
+        except OSError as exc:
+            self._log.warning("workspace_mark_failed", workspace=str(path), error=str(exc))
+
+    def _write_finished(self, path: Path) -> None:
+        """Create the mark, making room for it where the name or its directory is not free.
+
+        Exclusive, like the ``created`` sentinel and for the same reason: ``.issuebot`` is
+        shared with the session under ``agent.run_as`` (#75), so a name already there may be
+        the session's -- and ``finished_keys`` refuses a mark that is not the worker's own
+        file, so leaving one in place would silently cost the retry it looks like it bought.
+        The directory is the worker's, so the worker takes the name back. A mark that *is* the
+        worker's own is this removal's earlier attempt and is left alone.
+
+        A missing state directory is the other case: a removal that failed part way may have
+        taken it with the mark inside. It is recreated closed, as ``_make_state_dir`` creates
+        it, and never shared -- an unlink needs no hook of the session's.
+        """
+        if not self._boundary.is_own_dir(path, (STATE_DIR,)):
+            # Anything at the name that is not the worker's directory stays: `create_marker`
+            # walks through it and refuses, which is the answer this method wants.
+            with contextlib.suppress(OSError):
+                (path / STATE_DIR).mkdir(mode=SEALED_DIR_MODE)
+        try:
+            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
+        except FileExistsError:
+            if self._boundary.is_own_file(path, (STATE_DIR, FINISHED_MARKER)):
+                return
+            self._log.warning("workspace_mark_replaced", workspace=str(path))
+            self._boundary.remove_marker(path, (STATE_DIR, FINISHED_MARKER))
+            self._boundary.create_marker(path, (STATE_DIR, FINISHED_MARKER))
+
+    def _unmark_finished(self, path: Path) -> None:
+        """Drop the removal mark from a workspace that is being reused (#149).
+
+        A failure here is said and not raised: the worker owns the directory, so there is
+        little that can stop the unlink, and what an uncleared mark costs is a clone the next
+        sweep removes and the run after that re-makes -- never work, which is pushed.
+        """
+        try:
+            self._boundary.remove_marker(path, (STATE_DIR, FINISHED_MARKER))
+        except OSError as exc:
+            self._log.warning("workspace_unmark_failed", workspace=str(path), error=str(exc))
 
     # --- hooks --------------------------------------------------------------------
 
@@ -513,13 +673,31 @@ class WorkspaceManager:
         await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 
+    def _hook_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
+        """What every hook, and the clone, is run with, and the complaints about the env file.
+
+        Not free of side effects, despite the name: it ensures this session account's uv cache
+        directory exists first (#164), because the path it exports has to be one uv can write.
+
+        The later hooks see what ``before_run`` wrote: ``after_run`` and ``before_remove`` tend
+        to want the same DSN. ``after_create`` runs before any file can exist, which is fine.
+
+        ``uv_cache`` is ensured here rather than at workspace creation, so that
+        ``before_remove`` -- which runs for a workspace this manager never created -- is handed
+        the same environment as the rest (#164). ``after_create``, where the target
+        repository's ``uv sync`` runs, is the one it is for.
+        """
+        base = agent_environment(
+            self._environ,
+            token=self._settings.github.token,
+            uv_cache=ensure_uv_cache_dir(self.root, self._account, self._environ),
+        )
+        return workspace_environment(base, workspace, boundary=self._boundary)
+
     async def _run_argv(self, name: str, argv: Sequence[str], workspace: Path) -> HookResult:
         timeout_s = self._settings.hooks.timeout_ms / 1000
         started = time.monotonic()
-        # The later hooks see what `before_run` wrote: `after_run` and `before_remove` tend to
-        # want the same DSN. `after_create` runs before any file can exist, which is fine.
-        base = agent_environment(self._environ, token=self._settings.github.token)
-        env, _ = workspace_environment(base, workspace, boundary=self._boundary)
+        env, _ = self._hook_environment(workspace)
         self._log.debug("hook_started", hook=name, workspace=str(workspace))
         try:
             with self._prepared(argv, env) as spawn:

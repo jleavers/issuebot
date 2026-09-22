@@ -1,5 +1,7 @@
 """GitHub-writing actions the orchestrator takes: claim, blocked escape, terminal finish."""
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -134,6 +136,92 @@ async def _append_workpad(
         await adapter.update_comment(workpad.id, workpad.body.rstrip("\n") + "\n\n" + block + "\n")
 
 
+@dataclass(frozen=True)
+class _NoteFailure:
+    """Why an escape has no note, and which half of writing it failed: the read or the write."""
+
+    phase: Literal["read", "write"]
+    error: GitHubError
+
+
+async def _escape_note(
+    adapter: GitHubAdapter, number: int, block: str, written: Callable[[str], bool]
+) -> _NoteFailure | None:
+    """Write an escape's block, before the label moves; what failed when there is no note.
+
+    Both escapes are label-first (#128, #157): the escape's purpose is the label move, and the
+    block is only the note explaining it, so a failure that would keep answering the same way
+    for the life of the process costs the note rather than the hand-over. A retryable failure
+    -- ``transport``, ``rate_limited`` -- is worth another tick and is raised, since the same
+    call a minute later is likely to answer. A non-retryable one is *returned*, and the caller
+    moves the label and then reports it.
+
+    Both halves can fail that way, and they are not the same failure. The read is the block's
+    idempotence -- the run marker or the budget reason already in the workpad's body -- so a
+    read that will not answer (a page past ``MAX_COMMENT_PAGES`` (#110), a malformed page)
+    leaves the caller with a note it can only write blind, as a fresh marker comment, trading
+    a possible duplicate for an issue that never leaves the state the escape found it in. A
+    *write* that fails non-retryably (a ``response`` error on the POST, a ``not_found`` on a
+    comment deleted between the read and the write) has already been attempted at the one
+    moment it could have been idempotent, so the caller reports it and leaves it there.
+
+    The split is on ``retryable`` where ``conflict_rework``'s is on the category, and the two
+    rules answer different questions about the same read. The bounce's is "is this worth
+    asking again *on every poll*", where a broken token is, because nothing else in that path
+    would report it. This one is "does the label move now", and it moves for every answer that
+    is not going to change in a minute -- an ``auth`` or ``config`` failure among them, since
+    the ``set_state`` right behind it fails on the same fault and takes the escape back to
+    ``failed`` and its retry anyway.
+    """
+    try:
+        workpad = await adapter.find_workpad_comment(number)
+    except GitHubError as exc:
+        if exc.retryable:
+            raise
+        return _NoteFailure("read", exc)
+    if workpad is None or not written(workpad.body):
+        try:
+            await _append_workpad(adapter, number, workpad, block)
+        except GitHubError as exc:
+            if exc.retryable:
+                raise
+            return _NoteFailure("write", exc)
+    return None
+
+
+async def _report_note_failure(
+    adapter: GitHubAdapter,
+    issue: Issue,
+    block: str,
+    failure: _NoteFailure,
+    *,
+    prefix: str,
+    **fields: object,
+) -> None:
+    """Log an escape's missing note, and write it blind when it was the *read* that failed.
+
+    The label has moved and the issue is a human's now; the note is what is left. After a
+    failed read it is written blind, because the read that would have made it idempotent is
+    the one that failed, and both halves are logged since either can be why there is no block
+    to find. After a failed write there is nothing to retry here -- the append has just been
+    refused non-retryably, and asking again in the same tick would only cost a second request.
+    """
+    log = get_logger(__name__)
+    common = {"issue_number": issue.number, "issue_identifier": issue.identifier, **fields}
+    error = failure.error
+    if failure.phase == "read":
+        log.warning(
+            f"{prefix}_workpad_unreadable", **common, error=str(error), category=error.category
+        )
+        try:
+            await _append_workpad(adapter, issue.number, None, block)
+        except GitHubError as exc:
+            error = exc
+        else:
+            return
+    log.warning(f"{prefix}_note_failed", **common, error=str(error), category=error.category)
+
+
 async def blocked_escape(
     adapter: GitHubAdapter,
     bus: EventBus,
@@ -142,7 +230,15 @@ async def blocked_escape(
     *,
     now: datetime,
 ) -> EscapeOutcome:
-    """Roadmap §1's blocked escape: workpad block, then ``review``; retried by the caller."""
+    """Roadmap §1's blocked escape: workpad block, then ``review``; retried by the caller.
+
+    Label-first whenever the note cannot be written (#128, #157). ``_escape_note`` above
+    raises what is worth retrying and returns what is not, so a non-retryable failure of
+    either half -- the lookup that makes the block idempotent, or the append itself -- leaves
+    this function with the label to move and no note to move it with. It moves the label and
+    then reports the note, best effort. The trade-off is deliberate and stated in #128: a
+    possible duplicate note against an issue that never leaves ``in_progress``.
+    """
     log = get_logger(__name__)
     try:
         issues = await adapter.fetch_issues_by_ids([issue_id])
@@ -160,9 +256,9 @@ async def blocked_escape(
             )
             return "skipped"
         block = blocked_block(context, now, adapter.labels)
-        workpad = await adapter.find_workpad_comment(issue.number)
-        if workpad is None or _run_marker(context) not in workpad.body:
-            await _append_workpad(adapter, issue.number, workpad, block)
+        note_failure = await _escape_note(
+            adapter, issue.number, block, lambda body: _run_marker(context) in body
+        )
         await adapter.set_state(issue.number, StateLabel.REVIEW)
     except GitHubError as exc:
         log.warning(
@@ -182,6 +278,15 @@ async def blocked_escape(
     bus.publish(
         Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=context.reason)
     )
+    if note_failure is not None:
+        await _report_note_failure(
+            adapter,
+            issue,
+            block,
+            note_failure,
+            prefix="blocked_escape",
+            run_id=context.run_id,
+        )
     log.info(
         "blocked_escape_applied",
         issue_number=issue.number,
@@ -271,6 +376,15 @@ async def budget_escape(
     entry, where only a *run* clears it, and this function returns ``applied`` exactly when it
     published. The label move is published either way: it happened, and the board should say so.
 
+    The note is label-first for the same reason the blocked escape's is (#157): a workpad
+    that cannot be read or written non-retryably would keep answering that way for the life
+    of the process, and the refused issue would stay where the gate found it -- ``todo``,
+    ``rework``, an orphaned ``in_progress`` -- to be refused again on every tick with the
+    escalation a human would read never written. So ``_escape_note`` reports rather than
+    raises there, the label moves, and the block is written blind. That is independent of
+    ``announce``, which is about a second *report* of one escalation and not about whether
+    the block landed, so the note is reported on both exits.
+
     Unlike ``blocked_escape`` it accepts the issue in any of ``ACTIVE_STATES``, because a
     refused issue is wherever the gate found it -- usually ``todo`` or ``rework``, but an
     orphaned ``in_progress`` candidate is gated before it is resumed, and a continuation retry
@@ -293,11 +407,10 @@ async def budget_escape(
                 reason=f"issue is {state}",
             )
             return "skipped"
-        workpad = await adapter.find_workpad_comment(issue.number)
-        if workpad is None or not _has_budget_block(workpad.body, reason):
-            await _append_workpad(
-                adapter, issue.number, workpad, budget_block(limit, reason, now, adapter.labels)
-            )
+        block = budget_block(limit, reason, now, adapter.labels)
+        note_failure = await _escape_note(
+            adapter, issue.number, block, lambda body: _has_budget_block(body, reason)
+        )
         await adapter.set_state(issue.number, StateLabel.REVIEW)
     except GitHubError as exc:
         log.warning("budget_escape_failed", issue_id=issue_id, error=str(exc))
@@ -312,6 +425,10 @@ async def budget_escape(
             pr_url=pr_url(issue),
         )
     )
+    if note_failure is not None:
+        await _report_note_failure(
+            adapter, issue, block, note_failure, prefix="budget_escape", reason=reason
+        )
     if not announce:
         log.info(
             "budget_escape_returned",
@@ -434,6 +551,12 @@ async def finish_terminal(
     """A closed issue: ``complete``, no-change or cancelled, the events, workspace removed."""
     log = get_logger(__name__)
     outcome: FinishOutcome
+    # Before the label move, not after the removal (#149). The sweep no longer reads the
+    # ``complete`` role, so what asks for a removal to be retried is the mark on the workspace
+    # -- and a worker killed between the move and the removal below would otherwise leave an
+    # issue at rest in ``complete``, which nothing reads again, beside a workspace nothing
+    # would remove. Marking first closes that window; it is a no-op without a workspace.
+    workspaces.mark_finished(issue.identifier)
     if issue.state is StateLabel.COMPLETE:
         outcome = "unchanged"
     else:
