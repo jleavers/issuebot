@@ -521,6 +521,9 @@ def test_sweep_removes_the_gh_extension_directory_and_keeps_ghs_state(tmp_path: 
     for parts in TOOL_EXTENSION_SWEEP:
         assert not home.joinpath(*parts).exists(), parts
     assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"
+    # Every level above the entry survives, `gh`'s own data directory included: the sweep takes
+    # one directory and never the one above it, which is what the docs promise a deployment.
+    assert (home / ".local" / "share" / "gh").is_dir()
     assert (home / ".local" / "share").is_dir()
     assert (home / ".local").is_dir()
 
@@ -536,9 +539,12 @@ def test_the_extension_list_names_the_directory_gh_dispatches_from() -> None:
     # and `~/.local` belong to every tool the session runs.
     for parts in ((".local",), (".local", "share"), (".local", "share", "gh")):
         assert parts not in TOOL_EXTENSION_SWEEP
-    # `XDG_DATA_HOME` is not passed through, which is what makes `~/.local/share` the path `gh`
-    # actually reads; a change there would need a second spelling here, exactly as
-    # `XDG_CONFIG_HOME` would for the git entry above.
+    # `XDG_DATA_HOME` is not inherited from the worker, which is what makes `~/.local/share`
+    # the path `gh` reads by default; a change there would need a second spelling here, exactly
+    # as `XDG_CONFIG_HOME` would for the git entry above. Only half of what `XDG_CONFIG_HOME`
+    # has, though, and the asymmetry is the recorded residual (#191): that one is also in
+    # `TOOL_CONFIG_ENV_NAMES`, so a workspace's `.issuebot/env` cannot set it, while this one
+    # is in neither list and a hook can.
     assert "XDG_DATA_HOME" not in PASSTHROUGH_NAMES
 
 

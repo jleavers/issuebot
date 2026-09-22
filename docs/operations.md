@@ -254,7 +254,7 @@ to run. Nothing a deployment needs goes there: the bot's identity is the
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
 `/etc/ssh/ssh_config`, which are root's and which no session can write.
-`gh`'s extension directory goes with them (#186), and is the one entry on those lists that is
+`gh`'s extension directory goes on those lists too (#186), and is the one entry on them that is
 a program rather than a setting: `~/.local/share/gh/extensions` is where
 `gh extension install` puts a program that `gh <name>` runs, and it needs no install step to
 be a plant — a directory and an executable file are dispatched just the same. Here a

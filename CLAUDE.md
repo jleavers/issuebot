@@ -398,7 +398,7 @@ version, and moves by hand.
   `~/.local/share` is every tool's; walked component by component, so a link at any of the four
   is unlinked rather than followed. The residual is `XDG_DATA_HOME`, which moves the lookup
   wholesale and is not in `TOOL_CONFIG_ENV_NAMES` -- the environment spelling, filed separately
-  as #171 was for #151.
+  as #191, the way #171 was filed for #151.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`

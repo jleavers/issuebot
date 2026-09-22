@@ -84,8 +84,10 @@ SESSION-REPLACED-IT
 ```
 
 **`gh` injects no credential into an extension.** With `GH_TOKEN` unset in the caller and a
-`hosts.yml` in place, the child saw `GH_EXTENSION`, `GH_NO_UPDATE_NOTIFIER` and no `GH_TOKEN`.
-An extension is a program `gh` hands its argv and its own environment to, and nothing else.
+`hosts.yml` in place, the child saw the caller's own environment plus `GH_EXTENSION`,
+`GH_NO_UPDATE_NOTIFIER`, `GH_PAGER` and `GH_PROMPT_DISABLED` — and no `GH_TOKEN`. What the
+measurement is for is the absence rather than the list, which is `gh`'s to grow: an extension
+is a program `gh` hands its argv and its own environment to, and nothing else.
 
 And the issue's framing holds: this is `gh`'s own lookup and not the shell's. A login shell's
 `PATH` is root's, with no directory of the account's on it.
@@ -97,8 +99,13 @@ $ bash -lc 'case ":$PATH:" in *":$HOME/.local/bin:"*) echo YES ;; *) echo NO ;; 
 NO
 ```
 
-**Invariant.** A session cannot leave a program in the session account's home that a later
-session's `gh` dispatches to.
+**Invariant.** A session cannot leave a program at the path `gh` dispatches from — the
+extension directory in the session account's home — for a later session's `gh` to run.
+
+Deliberately not the stronger claim about the home as a whole, which would be false: the
+lookup itself can be moved, and `XDG_DATA_HOME` moves it (measured above). That is the
+residual under [Residuals](#residuals), filed as #191, and it is the one configuration in
+which a program a session leaves *in the home* is still dispatched.
 
 ## The decision the issue asks for: swept
 

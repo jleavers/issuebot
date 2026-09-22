@@ -204,6 +204,15 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # is a survivor the tests pin. Walked component by component like the nested entries above, so
 # a session that replaces any of the four with a symlink has the link unlinked rather than the
 # tree it points at swept.
+#   One way in which this entry is *weaker* than the one above, and it is worth stating where a
+#   reader compares them: ``XDG_CONFIG_HOME`` is neither inherited nor settable from
+#   ``.issuebot/env``, which is what makes ``TOOL_CONFIG_SWEEP``'s git half a guarantee rather
+#   than a default -- but ``XDG_DATA_HOME``, which moves *this* lookup wholesale (measured), is
+#   in neither ``PASSTHROUGH_NAMES`` nor ``TOOL_CONFIG_ENV_NAMES``. So a hook's ``.issuebot/env``
+#   can point the next session on that issue at an extension directory this list names nothing
+#   of. That is the recorded residual, filed as #191 -- the environment spelling of this sweep,
+#   as #171 is of #151 -- and until it is settled the guarantee here is about the path and not
+#   about the home.
 TOOL_EXTENSION_SWEEP: tuple[tuple[str, ...], ...] = ((".local", "share", "gh", "extensions"),)
 
 
