@@ -115,6 +115,11 @@ session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `ba
 `LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base
 image sets no locale, on `C` a cluster comes out `SQL_ASCII`, and pinning the encoding
 catches that rather than the variable that happens to produce it.
+A red check on a pull request here is not always this repository's code: when every failed
+job reports zero steps, Actions declined to run the job at all, and the fix is the account's
+rather than the diff's -- [`docs/operations.md`, "Checks that never
+ran"](docs/operations.md#checks-that-never-ran) is how to tell the two apart and what it
+means for an issue that is otherwise finished.
 Dependabot covers uv, Docker and Actions weekly.
 Every `uses:` in the workflows and every `rev:` in `.pre-commit-config.yaml` is a commit
 digest with its tag beside it (#111; `tests/test_pins.py` refuses a tag): a tag is a name its
@@ -1502,9 +1507,10 @@ second copy of a section that has already moved, and the two then drift.
   recipes the CI `docker` job parses out and runs, and `.issuebot/env`, what a hook hands the
   agent. Anything about what a session's own tests need to run belongs here.
 - `docs/operations.md`: running a deployment -- more than one repository against one store,
-  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Cost,
-  Restarts, Configuration changes, Upgrades, Safety). The recovery an operator performs on a
-  blocked or over-budget issue is documented there and nowhere else.
+  "Rotating the database password", and "When things go wrong" (Blocked, GitHub itself, Checks
+  that never ran, Cost, Restarts, Configuration changes, Upgrades, Safety). The recovery an
+  operator performs on a blocked or over-budget issue is documented there and nowhere else,
+  as is the difference between a check that failed and one Actions never ran.
 - `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
   a browser that will not speak it, the hero's six tiles, and what "issues closed" counts.
 - `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust

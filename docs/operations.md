@@ -138,6 +138,44 @@ GitHub will later contradict, and there is no error to count. So subscribe
 [githubstatus.com](https://www.githubstatus.com/) to the same Slack channel the worker posts
 to as well, and an incident arrives in the timeline beside the runs it explains.
 
+### Checks that never ran
+
+A pull request whose checks are all red, where every failed job reports *zero steps*, has not
+failed CI: Actions declined to run it. The account is out of minutes, or on a billing hold, or
+a runner never came — whatever the cause, the job was never scheduled, so there are no steps
+for it to have failed at, and the check-run annotation says so in GitHub's own words, usually
+naming billing. A job that ran and failed looks nothing like this: it has steps, one of them
+red, and a log under it.
+
+The step count is what tells the two apart, and it is worth asking before reading a single
+line of the diff:
+
+```bash
+gh run list --branch <branch> --limit 1 --json databaseId,conclusion
+gh run view <id> --json jobs \
+  --jq '.jobs[] | select(.conclusion == "failure") | {name, steps: (.steps | length)}'
+```
+
+Every failed job at `"steps": 0` is Actions declining. A job with a step count is CI reporting
+on the code, and whatever it found is in the diff.
+
+The agent asks the same question at the end of every run, and a run that never executed does
+not hold a finished issue. Parking one would spend the run's remaining turns waiting for a
+check that is never coming, and end at `agent.max_turns` with the issue escalated anyway —
+all of it on a fault that is not in the code and that no session can clear. What that does
+not do is lower the bar — the evidence only moves. The same suite, lint and format must be
+green *locally* on that commit, and the agent records the run id and those local results
+under `Validation` in the workpad before it moves the issue to `issuebot/review`. A job that
+ran steps and failed still holds the issue, however much else is red beside it: the
+distinction is the step count and nothing softer.
+
+Clearing the cause is yours rather than the agent's. A billing hold is lifted by a human with
+the account's settings open, and no session can reach that page; until it is lifted, every pull
+request in the repository looks red the same way — issuebot's and your own alike — and
+re-running the checks only declines them again. So while it lasts, read the workpad rather than
+the check list: the local run recorded there is the evidence that the code is good, and the red
+checks are evidence about the account.
+
 ### Cost
 
 Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
