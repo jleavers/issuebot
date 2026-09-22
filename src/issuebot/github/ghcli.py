@@ -26,6 +26,7 @@ from issuebot.github.state import (
     LabelStyle,
     marker_label_styles,
 )
+from issuebot.invocation import run_hint
 from issuebot.log import get_logger
 
 PAGE_SIZE = 100
@@ -259,7 +260,7 @@ class GhCliAdapter:
             ):
                 raise GitHubError(
                     "not_found",
-                    f"{exc.message}; run issuebot labels ensure",
+                    f"{exc.message}; {run_hint('labels ensure')}",
                     exit_code=exc.exit_code,
                     stderr=exc.stderr,
                 ) from exc

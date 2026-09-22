@@ -164,8 +164,9 @@ the spelling that does not touch the home.
 ## What this does not close
 
 - **The clone's own `.git/config`, and the workspace generally.** A workspace outlives its run
-  (#180). Nothing here changes that; what is closed is the `bash` issuebot starts, not the files
-  inside the tree it starts it in.
+  (#180, decided not to bound in `2026-09-22-clone-reuse-residual-design.md`). Nothing here
+  changes that; what is closed is the `bash` issuebot starts, not the files inside the tree it
+  starts it in.
 - **`BASH_FUNC_<name>%%`**, bash's exported-function import, measured defining a command in the
   shell it starts (`env 'BASH_FUNC_hookcmd%%=() { printf FUNC-RAN\n; }' bash -lc 'hookcmd'` →
   `FUNC-RAN`). It is not in `SHELL_ENV_NAMES` because it cannot be written here at all:

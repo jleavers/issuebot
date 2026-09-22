@@ -28,6 +28,7 @@ from issuebot.github.state import (
     LabelStyle,
     marker_label_styles,
 )
+from issuebot.invocation import run_hint
 
 _PR_STATE_UPPER: dict[PrState, str] = {"open": "OPEN", "closed": "CLOSED", "merged": "MERGED"}
 
@@ -406,7 +407,7 @@ class FakeGitHub:
 
     def _require_label(self, name: str) -> None:
         if name not in self.repo_labels:
-            raise GitHubError("not_found", f"'{name}' not found; run issuebot labels ensure")
+            raise GitHubError("not_found", f"'{name}' not found; {run_hint('labels ensure')}")
 
     def _require_state_labels(self) -> None:
         for role in StateLabel:

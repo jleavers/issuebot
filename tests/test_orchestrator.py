@@ -719,6 +719,24 @@ async def test_startup_fails_on_preflight_auth_or_labels(
     ]
 
 
+async def test_startup_names_the_compose_command_inside_the_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker runs in the image, so the startup complaint an operator reads in
+    `docker compose logs` names the command they would run there (#169).
+    """
+    marker = tmp_path / "etc-issuebot"
+    marker.mkdir()
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", marker)
+    h = Harness(tmp_path)
+    h.github.repo_labels.pop("issuebot/review")
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await h.orchestrator.startup()
+    assert exc.value.problems == [
+        "labels missing: issuebot/review; docker compose run --rm worker labels ensure"
+    ]
+
+
 # --- dispatch -----------------------------------------------------------------------------
 
 

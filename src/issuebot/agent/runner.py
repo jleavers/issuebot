@@ -112,16 +112,38 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   environment rungs are the whole of what is left. `EDITOR` was measured firing on a plain
 #   `git commit` with no `TERM` set at all, and `EMAIL` setting the author of a commit; `PAGER`
 #   needs a terminal, which a hook may well have.
-#   `XDG_CONFIG_HOME` is not on any chain: it moves the config directory of everything
-#   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
-#   whose aliases may be shell commands.
 #   Names and not prefixes (`SSH_`, `GITHUB_`, `EDITOR`...), because `SSH_AUTH_SOCK` is a
 #   legitimate route for exactly the deploy-key case this bound has to leave a hook author, and
 #   `GITHUB_`/generic namespaces hold plenty a hook may hand over. A chain has an end, so this
 #   list has one too.
+#   The two XDG roots are on no chain, and they are here under a rule of their own (#171,
+#   #191): a base directory is protected when a tool issuebot launches resolves through it
+#   something it will execute or read as configuration. Measured against the two tools this
+#   list is drawn for -- `gh` 2.100.0 and git 2.47.3; `claude` reads XDG names too and is the
+#   note's residual -- two of the specification's roots are:
+#     XDG_CONFIG_HOME  the config directory of everything following the specification,
+#                      `$XDG_CONFIG_HOME/gh/config.yml` among them, whose aliases may be shell
+#                      commands, and `$XDG_CONFIG_HOME/git/config`, which names commands too.
+#     XDG_DATA_HOME    `$XDG_DATA_HOME/gh/extensions`, the directory `gh` dispatches
+#                      `gh <name>` from -- a program it *runs*, one step past a setting that
+#                      names one, and the environment spelling of the same directory in the
+#                      account's home, which is #186's question. It moves that lookup
+#                      wholesale and hides the home's own extensions with it, so leaving it
+#                      would make any sweep there conditional on a variable nothing checked,
+#                      the way #171 stood to #151. No `GH_` name
+#                      reaches it -- `GH_CONFIG_DIR` moves the config directory alone, and
+#                      `gh` dispatches from no `PATH` -- so the prefix below does not cover it.
+#   `XDG_` is not a prefix here either, and for a reason of its own: `GIT_` and `GH_` are
+#   prefixes because they are those tools' own namespaces and the tools add to them, where
+#   `XDG_` is a specification's -- its roots are a short fixed list, seven in the current
+#   version, and what changes is which of them a tool reads: a measurement, rather than a
+#   manual to keep up with. `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
+#   `XDG_CONFIG_DIRS` and `XDG_DATA_DIRS` were each measured unread by those two and stay
+#   out: a hook pointing a cache or a state directory somewhere is what this file is for.
 TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
     {
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
         "EDITOR",

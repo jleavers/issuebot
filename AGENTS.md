@@ -37,6 +37,10 @@ Allowed commands:
 
 Rules:
 - Agents **must never** push directly to `main`.
+- `main` also carries a repository ruleset that refuses a direct push, a force push and a
+  deletion, with no bypass for admins. An agent that pushes to `main` anyway gets a rejection
+  from the server, not a merge — treat that rejection as this rule working, not as an
+  obstacle to route around. The fix is always the same: push a feature branch and open a PR.
 - Agents **may** push a feature branch (`git push -u origin <branch>`) and then immediately open a GitHub PR for human review using `gh pr create`.
 - All agent-initiated PRs must target `main` and include a clear summary of changes.
 - Agents must not merge or close PRs — that is a human action.
