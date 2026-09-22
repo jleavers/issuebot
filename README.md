@@ -1330,8 +1330,9 @@ that matters on your host.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
 - **How long a workspace lives, and what a reused one hands the next session.** A workspace is
-  created when an issue is first claimed and removed when the issue reaches
-  `issuebot/complete`; in between it outlives every one of its runs. An issue sitting in
+  created when an issue is first claimed and removed when the issue closes -- whether the
+  worker marks it `issuebot/complete` or reads the close as an abandonment and clears the
+  label; in between it outlives every one of its runs. An issue sitting in
   `issuebot/review` keeps its clone for as long as it waits for you, and a retry, a rework
   bounce or a re-queue picks that clone up rather than cloning again -- which is the point, and
   part of what `agent.max_issue_cost_usd` pays for. There is no setting that shortens this: the
@@ -1347,7 +1348,8 @@ that matters on your host.
   directory of scripts, and the venv the session's tests run out of is wider than any of them --
   so the only thing that would close it is not reusing the workspace at all. It crosses no
   privilege boundary either way: one workspace belongs to one issue, it is bound to one session
-  account and sealed back to the worker between runs, and everything a plant could defer to the
+  account and sealed back to the worker between runs (the pool, under "One account per
+  concurrent session"), and everything a plant could defer to the
   next session the session holding it can already do itself, with the same token, on the same
   branch and the same pull request. This is recorded in
   `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the

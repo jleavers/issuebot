@@ -31,10 +31,12 @@ session 2 workspace: created=False same_path=True
   $ git -C <workspace> commit --allow-empty     -> PLANTED-HOOKSPATH-RAN
 ```
 
-`core.pager` and `credential.helper` fire the same way (`core.pager` under a pty, which a hook
-may well have; `credential.helper` on any authenticated fetch, and directly under
-`git credential fill`), and `.git/hooks/post-checkout` is the same shape beside the file
-rather than in it.
+`credential.helper` fires the same way -- on any authenticated fetch, and directly under
+`git credential fill` -- and `.git/hooks/post-checkout` is the same shape beside the file rather
+than in it. `core.pager` is the weakest of the set and worth saying so: it needs stdout to be a
+terminal, and a hook's is a pipe (`_run_argv` spawns with `stdout=PIPE`), so it was measured
+under `script` rather than in place. The four above need no terminal at all, which is why the
+argument does not rest on it.
 
 **Reach.** A workspace key is the issue's identifier, so one workspace belongs to one issue. It
 is bound to one session account and opened to that account's group only while a session is
@@ -63,7 +65,8 @@ measurement says so twice.
 **Within `.git/`, a reset of named keys is an enumeration that the file itself defeats.** The
 keys that name a command are already several (`core.pager`, `core.editor`, `core.sshCommand`,
 `core.fsmonitor`, `core.hooksPath`, `credential.helper`, every `alias.*`, `filter.*.clean`,
-`diff.*.textconv`, `uploadpack.packObjectsHook`, `protocol.*.command`) and git adds to them. But
+`filter.*.smudge`, `diff.*.command`, `diff.*.textconv`, `uploadpack.packObjectsHook` -- all of
+them in `git help -c` on the image's own git) and git adds to them. But
 the decisive one is that `include.path` puts the whole set somewhere a reset over `.git/config`
 does not look:
 
@@ -149,8 +152,8 @@ at all). It is not shipped in `configs/WORKFLOW.md`, because shipping it would b
 channel by default, which is the decision this note declines to make.
 
 The blunt instrument is the workspace directory itself: remove it and the next session re-clones
-(`create_or_reuse` finds nothing complete and creates), and issuebot removes it on its own when
-the issue reaches `issuebot/complete`.
+(`create_or_reuse` finds nothing complete and creates), and `finish_terminal` removes it on its
+own when the issue closes -- on `complete`, `no_change` and `cancelled` alike.
 
 ## What is still bounded, and must not be read as widened
 
