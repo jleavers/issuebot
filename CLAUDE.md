@@ -311,6 +311,25 @@ about where the content was when it was written.
   difference between a DSN password masked and not. `tests/test_tools_watch.py` holds that
   claim rather than leaving it to the docstring, which is the same reason `tools/screenshots`'
   images are regenerated rather than trusted.
+- `tools/upgrade/`: pulling, rebuilding and restarting every checkout on a host. Not the
+  one-checkout recipe in [`docs/operations.md`, "Upgrades"](docs/operations.md#upgrades)
+  repeated per deployment, and the difference is not convenience: the checkouts are clones of
+  one repository against one store, and `migrate.py` refuses to start against a schema newer
+  than its own code, so whichever is upgraded first migrates and stops the rest starting until
+  they carry the same code. `upgrade.py` therefore runs each phase across every checkout before
+  the next begins -- stop the workers (only the workers, never `down`, since `./configs` is
+  mounted live and the hub's `db` serves them all), pull, report environment-key drift, build,
+  `validate`, `up -d`, health -- with the hub first within each, read off a `db` service in
+  `docker compose config --services` and nothing else: `COMPOSE_PROFILES` already decides what
+  each checkout builds. Standard library only and run as `python3`, not `uv run`, because it
+  replaces the virtual environment it would otherwise resolve through; Python rather than shell
+  because `bash` reads a script lazily and this one rewrites its own file. Three refusals are
+  the design, and `tests/test_tools_upgrade.py` holds all three the way `test_tools_watch.py`
+  holds the scrubber's: a dirty or diverged checkout ends the run *before* anything is stopped
+  (the hub checkout is usually the development checkout too), a checkout whose build or
+  `validate` failed is left stopped rather than started beside the others on an older image,
+  and the environment report names keys and never reads a value -- that file holds the database
+  password and the Claude credential.
 
 ## What issuebot is
 

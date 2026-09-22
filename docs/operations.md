@@ -283,6 +283,17 @@ error (see [What a session may reach](security-model.md#what-a-session-may-reach
 `WORKFLOW.md` introduces fails against a stale image at `validate`, as
 `<key>: Extra inputs are not permitted`.
 
+**With more than one checkout, that recipe is not the one to repeat per deployment.** They are
+clones of the same repository against one store, and a migration applied by whichever you upgrade
+first will stop the others' workers starting until they carry the same code -- so the order is
+every checkout through one step, then every checkout through the next, rather than each checkout
+to completion in turn. `tools/upgrade/upgrade.py` does that:
+`python3 tools/upgrade/upgrade.py --dry-run` reports what is pending in each and which
+environment keys a new `.env.example` expects, and without the flag it stops the workers, pulls,
+builds, validates against the new image and brings them back up hub first, leaving any checkout
+that failed stopped rather than running beside the others on an older image. See
+[tools/upgrade/README.md](../tools/upgrade/README.md).
+
 ### Safety
 
 The enforced boundary is the container, its **network**, and inside it the uid:
