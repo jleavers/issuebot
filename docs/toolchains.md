@@ -486,7 +486,9 @@ hook that would truncate it again or append a duplicate per session.
   Whole prefixes rather than a list of those names, because a list is one somebody has to keep
   complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
   chain those tools resolve a setting through, and the config rung in the middle is swept out
-  of the home by #151 — so the environment tails are protected too, by name:
+  of the home — git's and ssh's by #151, and `gh`'s `config.yml`, which carries the `editor`,
+  `pager` and `browser` rungs of the `gh` chains, by #173 — so the environment tails are
+  protected too, by name:
 
   | chain | head (prefixed) | tail (protected by name) |
   |---|---|---|
@@ -594,11 +596,11 @@ hook that would truncate it again or append a duplicate per session.
   swept on the same schedule, so a hook that writes user-level git, ssh or `gh` config finds it
   gone before the next login shell — again between two sessions and within one. Commit identity
   is already handled: set the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach
-  every session's `git` through the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
-  `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
-  `git config --local` inside the clone, which is what the post-clone setup does. `gh` has no
-  system-wide file and needs none: every key it respects that names a command or a transport is
-  already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`) or held off it
-  (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes one when it
-  next has config of its own to write, so a hook's `gh config set` still configures the `gh` in
-  its own shell.
+  every session's `git` through the environment. Anything else that has to be global belongs
+  in `/etc/gitconfig` or `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can
+  always use `git config --local` inside the clone, which is what the post-clone setup does.
+  `gh` has no system-wide file and needs none: every key it respects that names a command or a
+  transport is already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`)
+  or held off it (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes
+  one when it next has config of its own to write, so a hook's `gh config set` still configures
+  the `gh` in its own shell.

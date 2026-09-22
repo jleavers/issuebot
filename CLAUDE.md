@@ -100,7 +100,8 @@ dependency-free fixture as `issuebot` with the registry pointed at a dead port (
 `$HOME/.npm` and the wrapper's own shebang are what is proved, not the network), run one `.ps1`
 as `agent` whose assertion is a culture-formatted number (so the ICU the PowerShell arm
 installs beside the runtime is proved, not just that the binary answers), and survive
-the README's own cluster recipe -- the three hook scripts are parsed out of `README.md` and run
+the documented cluster recipe -- the three hook scripts are parsed out of
+`docs/toolchains.md`, where #196 moved them from the README, and run
 inside the image under `bash -lc`, so a recipe that stops working fails a PR rather than a
 session. Both builds must also report `LANG=C.UTF-8` under `sh -c` and under `bash -lc` with
 `LC_ALL` unset, and a bare `initdb` in the opt-in one must land on `UTF8` (#66): the base
@@ -593,8 +594,8 @@ version, and moves by hand.
   allow-list carries no `UV_` name and the value is per account and per deployment; it is
   deliberately not protected, so `.issuebot/env` is the override, as it is for `UV_LINK_MODE`
   -- which the image no longer sets at all, the `copy` default of #161 having existed only
-  because the cache could not be on the venv's filesystem. What it buys is in the README's uv
-  section, measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
+  because the cache could not be on the venv's filesystem. What it buys is in the uv section of
+  `docs/toolchains.md` (the README's until #196 moved it), measured. `workspace.py`'s `RESERVED_ROOT_NAMES` is the other half: the cache root and
   `.issuebot` are not workspace keys (`path_for` refuses either) and `seal_idle` steps over
   them, which for the cache root is load-bearing rather than tidy -- it is `0755` so that
   every account can reach its own directory, and sealing it at each worker start would take

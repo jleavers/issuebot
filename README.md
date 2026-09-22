@@ -835,7 +835,9 @@ that matters on your host.
   session's Bash tool, so a `~/.profile` one session leaves is a script every later session
   runs at that uid. That is why the sweep runs before each of those scripts as well as before
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-  before turn 1. The same home holds the config a *tool* the session runs reads, and that is
+  before turn 1 — and before the *clone*, which opens no shell but is the earliest thing a run
+  does at that uid, and which reads both `gh`'s and git's config out of the home while holding
+  the token. The same home holds the config a *tool* the session runs reads, and that is
   swept with it: `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
   second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
   `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`

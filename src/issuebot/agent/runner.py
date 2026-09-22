@@ -110,9 +110,9 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   The config rung of each is swept out of the home by `TOOL_CONFIG_SWEEP` -- git's and
 #   ssh's by #151, and gh's `config.yml`, which carries the `editor`, `pager` and `browser`
 #   rungs of the gh chains above, by #173 -- so the environment rungs are the whole of what is
-#   left. `EDITOR` was measured firing on a plain
-#   `git commit` with no `TERM` set at all, and `EMAIL` setting the author of a commit; `PAGER`
-#   needs a terminal, which a hook may well have.
+#   left. `EDITOR` was measured firing on a plain `git commit` with no `TERM` set at all, and
+#   `EMAIL` setting the author of a commit; `PAGER` needs a terminal, which a hook may well
+#   have.
 #   `XDG_CONFIG_HOME` is not on any chain: it moves the config directory of everything
 #   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
 #   whose aliases may be shell commands -- and which, at the path the sweep names, #173 now
