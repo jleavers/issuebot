@@ -318,8 +318,36 @@ default location had too, and what the hardlink adds is that a poisoning takes e
 waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
 that session commits and pushes; only what its tests import. And the alternative gives up the
 venv sharing this was measured for: a per-workspace cache would close it, and the second
-workspace's venv is free only because it is the first one's files. Whether the residual is
-worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
+workspace's venv is free only because it is the first one's files.
+
+**[#176](https://github.com/jleavers/issuebot/issues/176) weighed that residual and accepted
+it.** Nothing was landed to close it, and the bounds in the paragraph above are the whole of
+what holds it. The alternatives each pay for the fix with what this shape was built for. A
+cache per *workspace* (or per account and workspace) closes the channel outright, but it
+roughly doubles the disk — today's two hardlinked venvs *are* the one cache's inodes, so two
+workspaces at an account are about 78 MB between them where a cache each is about 156 MB, and
+it grows per workspace rather than per account — and, the costlier half, it gives up the
+sharing itself, so every new workspace syncs from PyPI where an account's cache syncs once per
+account and not at all for a reworked issue. A cache the worker populates and hands over
+read-only needs uv never to write to its own cache, which uv does not promise, and fails the
+hook outright when a package is missing rather than falling back. Sweeping the account's cache
+between sessions — the only option needing nothing new from uv, and one that does close the
+channel — gives up both halves of the change, since a session is dispatched to one workspace
+at a time and a cache shared with nothing is a PyPI sync per session. And `UV_LINK_MODE=copy`
+over the cache as it stands restores the seal's cover of `.venv`, for the measured 152 MB of
+copied venvs and no warning (declaring `copy` is what silenced uv's fallback warning below,
+never what caused it), while leaving the cache itself shared — the pre-#164 level.
+
+What was chosen instead is to say plainly what the residual is: the same account at the same
+uid already shares a home that nothing sweeps a cache out of, so this is not a new channel,
+and what it reaches is what an honest session's tests import and never the clone it commits
+and pushes, in front of the human review every issuebot pull request ends at. The consequence
+a reader of the [account pool](../README.md#one-account-per-concurrent-session) has to carry
+is that the seal covers the clone and, under a hardlinking uv, not `.venv`; `accounts.py`'s
+own docstring says so, and `uvcache.py` holds the reasoning. A deployment whose threat model
+differs — a pool handed issues from genuinely untrusted authors — has `UV_LINK_MODE=copy` for
+the seal alone, from the hook line or [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent)
+below and with no change to issuebot, and the per-workspace cache for the channel entire.
 
 Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
 hardlinks into it, removing a workspace frees very little that the cache still holds, and a
@@ -592,6 +620,55 @@ hook that would truncate it again or append a duplicate per session.
   *interactive* shell, and nothing issuebot runs is interactive: it was measured unread by
   `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
   `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
+
+- **So are the five names the dynamic loader reads** (#187): `LD_PRELOAD`, `LD_AUDIT`,
+  `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG`. This is the same rule one layer
+  *under* all of the above rather than one tool further out: `ld.so` reads these out of
+  whatever environment a process was handed, and acts on them before that process reaches
+  `main`. In this image `bash` (so every hook and the post-clone setup), `git` and `claude`
+  are all dynamically linked; `gh` is a static Go binary and is the one tool not reached.
+
+  - `LD_PRELOAD` maps objects ahead of all others, running their constructors before `main`, and
+    `LD_AUDIT` does it earlier still — measured running the named object's constructors *even
+    when it is not a valid audit module*.
+  - `LD_LIBRARY_PATH` names no object, but it is `PATH`'s rule one layer down: a file planted at
+    a soname the target needs, in a directory of the line's choosing, is what the loader maps,
+    and its constructor was measured running inside `git` with no `LD_PRELOAD` anywhere.
+  - `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG` are the odd ones out, and the only protected
+    names that fail *silently*: the loader prints — to **stdout** — and **exits 0 without
+    entering `main`**, the dependency list for the first, the option list for `LD_DEBUG` set to
+    any value containing `help` (`LD_DEBUG=help`, `LD_DEBUG=libs,help`). One line of either
+    makes every hook "pass" without running its commands, displaces whatever that hook's stdout
+    was being read for, and stops the turn's `claude` starting. Every *other* `LD_DEBUG` value
+    is inert, which is exactly what makes this one easy to miss.
+
+  **If you need `LD_LIBRARY_PATH` for a build, this is the one with a real cost**, so here is
+  what to do instead. The other four have no hand-over use and nothing is lost by refusing
+  them.
+
+  - **Bake a `RUNPATH` in at link time** — `-Wl,-rpath`, or `LD_RUN_PATH`, which is binutils
+    `ld`'s link-time default and is **not protected**. This is the correct fix rather than a
+    workaround: an artefact that needs a library at run time has `RUNPATH` for exactly that, and
+    `LD_LIBRARY_PATH` is the override you reach for while testing one. It is also why the
+    usual `after_create` never needs the variable: Python wheels and node native modules already
+    carry theirs.
+  - **`/etc/ld.so.conf.d/*.conf` plus `ldconfig`, in an image built `FROM` this one**, for a
+    deployment-wide library path — root's, outside the session's reach, the same route offered
+    above for `/etc/gitconfig`.
+  - **The hook's own shell**: `LD_LIBRARY_PATH=/opt/vendor/lib make check` inside the script the
+    hook already writes is unchanged. What is refused is handing the variable to the *session* —
+    and so to the next session on that issue, since the workspace outlives the run.
+
+  `LD_RUN_PATH` is not protected, and neither are `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`,
+  `LD_PROFILE` or `GLIBC_TUNABLES`: none of them names an object the loader would not otherwise
+  have loaded, and each was measured leaving `git --version` working. `LD_SHOW_AUXV` is not
+  protected either, and it is the one worth a sentence, because it does print: it puts the
+  auxiliary vector on **stdout** and then runs your command anyway, at exit 0. It loads nothing
+  and denies nothing, so it is out by the same rule the two silent names are *in* by — what it
+  costs is noise ahead of a hook's output, which that hook's own `echo` could add too. `LD_DEBUG_OUTPUT` is not
+  protected either, though `LD_DEBUG` is: it only redirects what `LD_DEBUG` asks for and is
+  inert on its own. That is also why this is five names and not an `LD_` prefix — a prefix
+  would refuse `LD_RUN_PATH`, which is the route recommended just above.
 
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
