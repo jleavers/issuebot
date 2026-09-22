@@ -13,51 +13,48 @@ headings. Nothing here judges prose that names a document without quoting a sect
 "the README's step 2" is a reference to a numbered step, not to a heading -- so the rule
 binds exactly the form that can go stale silently.
 
-The files swept are *derived* rather than listed. An allow-list is a list somebody has to
-keep complete, and the point of this module is that the next split leaves no residue: a
-list would have covered the two files this issue fixed and missed the pointer in
-``src/issuebot/invocation.py``, which is the same shape in a module docstring. So the
-sweep walks the tree, takes every text file it understands, and names its exclusions
-instead, each for a reason:
+The files swept are the repository's own, from ``git ls-files``, which is the idiom
+``tests/test_compose_credentials.py`` and ``tests/test_web_vendor.py`` already use. That is
+load-bearing rather than tidy: a walk of the directory sweeps whatever is *sitting* in it,
+and this repository's own parallel-session workflow nests full checkouts under
+``.claude/worktrees/`` (see ``.gitignore``), so a walk would judge another commit's files
+as if they were this branch's -- and their ``docs/superpowers/``, being one directory
+deeper, would miss the exclusion below and be complained about. The tracked list cannot see
+a nested worktree, a ``build/``, a ``.venv`` or an operator's ``configs/*.local.md``,
+because none of them is the repository's own file.
+
+What is excluded, and why each is:
 
 * ``docs/superpowers/`` holds dated design records, and a pointer in one is a statement
   about where the content was when the document was written, not a claim about today.
 * ``tests/`` is where a deliberately stale pointer belongs -- this module's own truth
   table quotes ``(README, "Rotating the database password")`` to prove the regex sees it.
+* the vendored dashboard material is somebody else's bytes, kept here byte for byte.
+
+Everything else tracked is read, minus the suffixes that are not prose at all, so the rule
+is "the repository, less what is named" rather than a list of documents to keep complete.
+Keeping such a list was the first draft's mistake: it named nine operator-facing files and
+so never looked at ``src/issuebot/invocation.py``, which carries a pointer of exactly this
+shape in its module docstring.
 """
 
 from __future__ import annotations
 
 import functools
-import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# The text files a pointer can be written in. Everything else in the tree is data, an image
-# or a lock file, where this shape is not prose and a match would be a coincidence.
-POINTER_SUFFIXES = frozenset({".md", ".yaml", ".yml", ".py", ".toml", ".sql", ".cfg"})
-POINTER_NAMES = frozenset({".env.example", "Dockerfile"})
-# Directories with nothing of the repository's own in them.
-NOT_THE_TREE = frozenset(
-    {
-        ".git",
-        ".issuebot",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "htmlcov",
-        "node_modules",
-        "site-packages",
-    }
+# Not prose: binary assets and lock files, where this shape could only match by accident.
+NOT_PROSE = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".lock", ".jsonl"}
 )
-# The two exclusions the module docstring explains, as paths relative to the root.
-EXCLUDED = ("docs/superpowers", "tests")
+# The three exclusions the module docstring explains, as paths relative to the root.
+EXCLUDED = ("docs/superpowers", "tests", "src/issuebot/web/static/vendor")
 
 # ``<document>, "<section title>"``: the document named, then the title in quotes beside it.
 # The backtick is optional because a markdown file spells the name as code
@@ -72,8 +69,20 @@ HEADING = re.compile(r"^\s{0,3}(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*#*$")
 FENCE = re.compile(r"^\s*(?:```|~~~)")
 # The leading indent and comment marker a line of prose may carry, in any of the files
 # swept: ``#`` for YAML, env, Python and a Dockerfile, and the same character for a
-# markdown heading, whose text is prose once the hashes are off.
+# markdown heading, whose text is prose once the hashes are off. It matches the empty
+# string, so every line has a start.
 MARKER = re.compile(r"^[ \t]*#*[ \t]*")
+
+
+def _tracked_files() -> list[str]:
+    """Every file the repository tracks, the idiom ``test_compose_credentials.py`` uses."""
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
+        )
+    except (OSError, subprocess.CalledProcessError) as error:  # pragma: no cover - needs no git
+        pytest.skip(f"not a git checkout, or no git: {error}")
+    return [name for name in listed.stdout.split("\0") if name]
 
 
 def _normalise(title: str) -> str:
@@ -84,6 +93,19 @@ def _normalise(title: str) -> str:
     the markup removed, the whitespace collapsed and the case folded.
     """
     return " ".join(title.replace("`", "").replace("*", "").replace("_", "").split()).casefold()
+
+
+def _text(path: Path) -> str | None:
+    """The file's characters, or ``None`` for a tracked name this checkout cannot read.
+
+    Undecodable bytes are replaced rather than raised on, and an unreadable name costs its
+    own file and nothing else: a documentation guard that aborted collection would take
+    the whole suite down with it, and a pointer is ASCII either way.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 @functools.cache
@@ -97,7 +119,7 @@ def _headings(path: Path) -> frozenset[str]:
     """
     found: set[str] = set()
     fenced = False
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in (_text(path) or "").splitlines():
         if FENCE.match(line):
             fenced = not fenced
             continue
@@ -122,7 +144,9 @@ def _runs(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
     The marker is stripped rather than required, which is what lets one function serve a
     YAML comment, an env comment, a markdown paragraph and a Python docstring alike. What
     a line *is* does not matter here: a pointer is judged by the regex, and a line that
-    holds none costs a join and nothing else.
+    holds none costs a join and nothing else. A fenced block is prose to this function,
+    unlike to ``_headings``, and deliberately: an example pointer names a section a reader
+    still has to find, and the one place a stale one belongs is ``tests/``, excluded above.
     """
     runs: list[tuple[str, list[tuple[int, int]]]] = []
     current: list[tuple[int, str]] = []
@@ -140,10 +164,10 @@ def _runs(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
         runs.append((" ".join(parts), offsets))
 
     for number, line in enumerate(text.splitlines(), start=1):
-        prose = line[MARKER.match(line).end() :].strip()  # type: ignore[union-attr]
+        prose = line[MARKER.match(line).end() :].strip()
         if not prose:
             flush()
-            current = []
+            current.clear()
             continue
         current.append((number, prose))
     flush()
@@ -171,30 +195,26 @@ def _resolve(relative: str, document: str) -> Path:
 
 
 def _swept() -> list[str]:
-    """Every file in the tree this rule binds, as paths relative to the root."""
-    found: list[str] = []
-    for directory, subdirectories, names in os.walk(ROOT):
-        subdirectories[:] = sorted(d for d in subdirectories if d not in NOT_THE_TREE)
-        here = Path(directory)
-        for name in sorted(names):
-            path = here / name
-            if path.suffix not in POINTER_SUFFIXES and name not in POINTER_NAMES:
-                continue
-            relative = path.relative_to(ROOT).as_posix()
-            if any(relative == e or relative.startswith(f"{e}/") for e in EXCLUDED):
-                continue
-            found.append(relative)
-    return found
-
-
-def _pointers(relative: str) -> list[tuple[int, str, str]]:
-    """Every pointer in the file, as ``(line, document, title)``."""
-    text = (ROOT / relative).read_text(encoding="utf-8")
+    """Every file in the repository this rule binds, as paths relative to the root."""
     return [
+        relative
+        for relative in _tracked_files()
+        if Path(relative).suffix not in NOT_PROSE
+        and not any(relative == e or relative.startswith(f"{e}/") for e in EXCLUDED)
+    ]
+
+
+@functools.cache
+def _pointers(relative: str) -> tuple[tuple[int, str, str], ...]:
+    """Every pointer in the file, as ``(line, document, title)``."""
+    text = _text(ROOT / relative)
+    if text is None:
+        return ()
+    return tuple(
         (_line_of(offsets, match.start()), match.group("document"), match.group("title"))
         for run, offsets in _runs(text)
         for match in POINTER.finditer(run)
-    ]
+    )
 
 
 def _stale(relative: str) -> list[str]:
@@ -209,36 +229,45 @@ def _stale(relative: str) -> list[str]:
     return complaints
 
 
-# The files that carry a pointer today, so that no case of the sweep passes vacuously. The
-# sweep itself is over the whole tree; this is only how the cases are named.
-CARRIES_A_POINTER = sorted(relative for relative in _swept() if _pointers(relative))
-
-
-@pytest.mark.parametrize("relative", CARRIES_A_POINTER)
-def test_every_pointer_names_the_document_the_section_lives_in(relative: str) -> None:
-    complaints = _stale(relative)
+def test_every_pointer_names_the_document_the_section_lives_in() -> None:
+    """The rule itself, over the whole repository rather than over a list of documents."""
+    complaints = [complaint for relative in _swept() for complaint in _stale(relative)]
     assert complaints == [], "\n".join(complaints)
 
 
-def test_the_sweep_reaches_every_file_in_the_tree_and_not_only_the_documentation() -> None:
-    """The gap an allow-list left: a pointer of this shape in a module docstring.
+def test_the_sweep_reads_the_repository_and_not_the_directory_it_sits_in() -> None:
+    """A nested checkout is the failure this guards: `.claude/worktrees/` holds full clones.
+
+    Every swept path is one the repository tracks, so a worktree, a ``build/``, a ``.venv``
+    or an operator's ``configs/*.local.md`` is invisible however deep it sits -- which also
+    keeps the ``docs/superpowers/`` exclusion true, since a nested checkout's copy of it is
+    one directory further down and would match no root-anchored prefix.
+    """
+    swept = set(_swept())
+    assert swept <= set(_tracked_files())
+    assert not any(relative.startswith(".claude/worktrees/") for relative in swept)
+    for excluded in EXCLUDED:
+        assert not any(relative.startswith(f"{excluded}/") for relative in swept), excluded
+
+
+def test_the_sweep_reaches_past_the_documentation() -> None:
+    """The gap the first draft's allow-list left: this shape in a module docstring.
 
     ``src/issuebot/invocation.py`` names a README section the way ``compose.yaml`` does,
-    and a list of operator-facing documents would never have looked at it. Deriving the
-    swept set is what makes "the next split cannot leave the same residue" a statement
-    about the tree rather than about nine files somebody remembered.
+    and a list of operator-facing documents would never have looked at it. Sweeping what is
+    tracked is what makes "the next split cannot leave the same residue" a statement about
+    the repository rather than about the files somebody remembered.
     """
-    swept = _swept()
-    for expected in ("compose.yaml", ".env.example", "CLAUDE.md", "src/issuebot/invocation.py"):
+    swept = set(_swept())
+    for expected in ("compose.yaml", ".env.example", "src/issuebot/invocation.py"):
         assert expected in swept, expected
-    assert not any(relative.startswith("docs/superpowers/") for relative in swept)
-    assert not any(relative.startswith("tests/") for relative in swept)
+    assert _pointers("src/issuebot/invocation.py"), "the pointer the allow-list missed"
 
 
 def test_the_sweep_reads_the_pointers_it_is_there_for() -> None:
     """The files this issue repointed carry pointers, so a regex that stopped matching fails.
 
-    Every assertion above passes over a file with no pointers in it at all, which is
+    The assertion above passes over a repository with no pointers in it at all, which is
     exactly what a broken ``POINTER`` would produce. Seven and eight are what #210 moved
     out of the README; the counts are floors, not pins, so adding a pointer does not fail
     the suite.
@@ -246,6 +275,14 @@ def test_the_sweep_reads_the_pointers_it_is_there_for() -> None:
     for relative, expected in (("compose.yaml", 7), (".env.example", 8)):
         found = _pointers(relative)
         assert len(found) >= expected, f"{relative}: {found}"
+
+
+def test_an_unreadable_file_costs_its_own_file_and_not_the_suite(tmp_path: Path) -> None:
+    """Every file is read, so one bad byte must not be able to abort collection."""
+    undecodable = tmp_path / "undecodable.md"
+    undecodable.write_bytes(b'x (README, "Prerequisites") \xff\xfe y')
+    assert "Prerequisites" in (_text(undecodable) or "")
+    assert _text(tmp_path / "absent.md") is None
 
 
 def test_a_reference_that_quotes_no_section_is_not_a_pointer() -> None:
