@@ -106,6 +106,16 @@ def fake_github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     return fake
 
 
+def _marker(tmp_path: Path) -> Path:
+    """A stand-in for `/etc/issuebot`, the directory that means "a container built from this
+    image" (#169). Its own directory rather than `tmp_path`, which these tests also write the
+    workflow into.
+    """
+    marker = tmp_path / "etc-issuebot"
+    marker.mkdir()
+    return marker
+
+
 class FakeSlackPost:
     """Stands in for urllib_post: records each payload; answers from a script, else 200."""
 
@@ -863,6 +873,24 @@ def test_validate_warns_when_the_schema_is_behind(
     assert "18 checks: 0 failed, 3 warnings" in out
 
 
+def test_validate_names_the_compose_command_for_a_migration(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    """The line beside the labels one in the same output, so it reads in the same idiom (#169)."""
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", _marker(tmp_path))
+    fake_database.probe_result = Probe(
+        server_version="PostgreSQL 18.1", schema_version=0, latest_version=1
+    )
+    assert _validate_with_database(tmp_path, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "schema version 0 of 1; docker compose run --rm worker migrate" in out
+    assert "run issuebot migrate" not in out
+
+
 # --- validate: github.status (#88) -------------------------------------------------
 
 
@@ -1464,6 +1492,28 @@ def test_validate_warns_about_missing_labels(
         "run issuebot labels ensure" in out
     )
     assert "0 failed, 4 warnings" in out
+
+
+def test_validate_names_the_compose_command_inside_the_image(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """#169: docker is the standard deployment, and there `issuebot` is nobody's command --
+    the operator reached `validate` through compose, so the remedy is in the same idiom.
+    """
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", _marker(tmp_path))
+    del fake_github.repo_labels["issuebot/rework"]
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.labels: missing: issuebot/rework; "
+        "docker compose run --rm worker labels ensure" in out
+    )
+    assert "run issuebot labels ensure" not in out
 
 
 def test_validate_warns_about_missing_model_labels(

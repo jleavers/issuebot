@@ -99,6 +99,7 @@ from issuebot.github import (
     parse_status_summary,
 )
 from issuebot.github.normalise import repo_short_name
+from issuebot.invocation import run_hint
 from issuebot.log import LOG_LEVELS, configure_logging, get_logger
 from issuebot.notifications import (
     POST_TIMEOUT_S,
@@ -447,7 +448,7 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
         checks.append(Check("github.labels", "fail", str(exc)))
     else:
         if missing:
-            detail = f"missing: {', '.join(missing)}; run issuebot labels ensure"
+            detail = f"missing: {', '.join(missing)}; {run_hint('labels ensure')}"
             checks.append(Check("github.labels", "warn", detail))
         else:
             checks.append(Check("github.labels", "ok", _labels_detail(adapter, model_labels)))
@@ -938,7 +939,7 @@ def _database_check(settings: Settings) -> Check:
         detail += f" is newer than this issuebot knows ({probe.latest_version})"
         return Check(subject, "fail", detail)
     if probe.behind:
-        detail += f" of {probe.latest_version}; run issuebot migrate"
+        detail += f" of {probe.latest_version}; {run_hint('migrate')}"
         return Check(subject, "warn", detail)
     return Check(subject, "ok", detail)
 
