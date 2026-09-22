@@ -903,8 +903,27 @@ default location had too, and what the hardlink adds is that a poisoning takes e
 waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
 that session commits and pushes; only what its tests import. And the alternative gives up the
 venv sharing this was measured for: a per-workspace cache would close it, and the second
-workspace's venv is free only because it is the first one's files. Whether the residual is
-worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
+workspace's venv is free only because it is the first one's files.
+
+**[#176](https://github.com/jleavers/issuebot/issues/176) weighed that residual and accepted
+it.** Nothing was landed to close it, and the bounds in the paragraph above are the whole of
+what holds it. Three alternatives were considered and each pays for the fix with what this
+shape was built for: a cache per *workspace* (or per account and workspace) makes the second
+venv 152 MB again and dies with the workspace, losing the cross-container persistence too; a
+cache the worker populates and hands over read-only needs uv never to write to its own cache,
+which uv does not promise, and fails the hook outright when a package is missing rather than
+falling back; and sweeping the account's cache between sessions — the only option needing
+nothing new from uv, and one that does close the channel — gives up both halves of the change,
+since a session is dispatched to one workspace at a time and a cache shared with nothing is a
+PyPI download per session. What was chosen instead is to say plainly what the residual is: the
+same account at the same uid already shares a home with a uv cache of its own that nothing
+sweeps, so this is not a new channel, and what it reaches is what an honest session's tests
+import and never the clone it commits and pushes, in front of the human review every issuebot
+pull request ends at. The consequence a reader of the
+[account pool](#one-account-per-concurrent-session) has to carry is that the seal covers the
+clone and not `.venv`; `accounts.py`'s own docstring says so, and `uvcache.py` holds the
+reasoning. A deployment whose threat model differs — a pool handed issues from genuinely
+untrusted authors — should take the per-workspace cache, at the figures above.
 
 Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
 hardlinks into it, removing a workspace frees very little that the cache still holds, and a

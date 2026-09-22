@@ -26,6 +26,20 @@ the two halves of that:
   and could rewrite the clone that issue's rework will commit and push. At most one workspace
   per account is open at a time, since dispatch will not claim an issue whose account is busy.
 
+  **The seal covers the clone. Since #164 it does not cover `.venv`,** and a reader of the
+  paragraph above should not take it to. A mode on a directory bounds the paths that lead
+  through it, not the inodes underneath, and uv hardlinks a package out of the per-account
+  cache at `<workspace.root>/.uv-cache/<account>`, so a hardlinked `.venv` entry *is* that
+  cache's inode. A session working in one workspace can therefore open a file in its own
+  account's cache directory -- which it is entitled to enter -- and write through it into the
+  venv of every sealed, idle workspace bound to that account that installed the same package,
+  for the honest session's next run to import. #176 weighed that and accepted it rather than
+  closing it: both sessions are the same account at the same uid and already share a home
+  holding a uv cache of its own, so the channel predates the hardlink, and nothing in it
+  reaches the clone the honest session commits and pushes -- only what its tests import.
+  `uvcache.py` holds the reasoning, the alternatives it was chosen over and what it would cost
+  to revisit.
+
 The worker must therefore be a member of every session account's group -- POSIX lets the
 owner of a file change its group only to one it belongs to -- which the image arranges and
 `validate` proves before a worker ever runs.

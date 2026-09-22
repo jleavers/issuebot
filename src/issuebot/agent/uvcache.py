@@ -34,7 +34,43 @@ what the honest session commits and pushes; only what its tests import. And the 
 keeping ``UV_LINK_MODE=copy`` and taking the persistence half alone -- gives up the venv
 sharing this was measured for. A per-*workspace* cache would close it and would also give up
 the sharing, since the second workspace's venv is free only because it is the first one's
-files. Whether the residual is worth closing is #176, a judgement about this deployment.
+files.
+
+**#176 weighed that residual and accepted it, and this is the record.** Nothing was landed to
+close it: the three bounds above are the whole of what holds it, and the reason is that the
+channel is not a new one while every way of closing it pays with the thing #164 was asked to
+deliver. The options, and why each was not taken:
+
+- *A cache per workspace, or per ``(account, workspace)``.* Correct, and it gives up
+  everything: two venvs are 77 MB rather than 152 MB only because the second one's files are
+  the first one's, so a cache that is not shared between workspaces is ``UV_LINK_MODE=copy``
+  with extra directories -- and it loses the cross-container persistence too, since a cache
+  keyed to a workspace dies with it.
+- *A cache the session cannot write*, populated by the worker and handed over read-only. It
+  rests on uv never writing to its own cache, which uv's cache semantics do not promise, and
+  the failure is total rather than graceful: a ``uv sync`` needing one package the worker did
+  not pre-install fails the hook instead of falling back.
+- *Sweeping the account's cache between sessions.* The only option that needs nothing new from
+  uv, and it does close the channel -- a session starting from an empty cache holds no name
+  for the inodes an idle workspace's venv already points at, and the inode survives only
+  because that venv still links it. But a session is dispatched to one workspace at a time, so
+  a cache kept "within one session's workspaces" is not shared with anything: it gives up both
+  halves of #164, the cross-workspace hardlink and the cross-container persistence, and buys a
+  PyPI download per session for them.
+- *Accept*, which is what was chosen. The two sessions are the same account at the same uid,
+  and that account's home already holds a uv cache of its own (``~/.cache/uv``) that the home
+  sweep names nowhere, so a session that wants to poison what the next session at that uid
+  installs has had that channel since before this module; what the hardlink adds is that it
+  takes effect without waiting for a re-sync. And it reaches what the honest session's tests
+  *import*, never the clone it commits and pushes, so the worst of it is a broken change made
+  to look green -- in front of the human review every issuebot pull request ends at, which is
+  the backstop for everything else a session at that uid could have done to its own tree.
+
+What this decision is not is a claim that the seal still covers the venv. It does not, and
+``accounts.py``'s account-pool docstring now says so, so that the next reader of the seal is
+not told something that stopped being true in #164. If this deployment's threat model changes
+-- a pool whose accounts are handed issues from genuinely untrusted authors, say -- the first
+option above is the entry, at the price stated there.
 
 The root is the worker's (``/workspaces``, ``0755``, ``issuebot:issuebot``), so a session
 account cannot create a directory in it unaided. The worker therefore makes each one the way
