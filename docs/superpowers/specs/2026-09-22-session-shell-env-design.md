@@ -181,7 +181,15 @@ the spelling that does not touch the home.
 - **`BASH_XTRACEFD`, `PS1`, `PS2`, `IFS`, `GLOBIGNORE`.** Measured or read as behaviour-only:
   they shape output, prompts and word splitting, and none of them names or produces a command.
   Out, by the rule.
-- **The dynamic loader: `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`.** Named separately from
+- **The dynamic loader: `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`.** *Closed by #187
+  (`2026-09-22-session-loader-env-design.md`): all three are protected, with
+  `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG` beside them — five names — in `LOADER_ENV_NAMES`. The
+  reasoning below for leaving them out is kept as written, because #187 overturns part of it: the
+  "different question with a different answer" turned out to have the same answer,
+  `LD_LIBRARY_PATH` included, once a file planted at a needed soname was measured loading into
+  `git` with no `LD_PRELOAD` anywhere. One factual point below is also corrected there: `gh` is a
+  static Go binary, so it is the one tool of the four the loader does not reach.*
+  Named separately from
   the bullet below rather than folded into it, because the usual reason for excluding another
   tool's variables does not apply: these reach *every* dynamically linked program the session's
   environment is handed to, `bash`, `git`, `gh` and the `claude` child included, which is the
