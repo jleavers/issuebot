@@ -29,7 +29,7 @@ the two halves of that:
   **The seal covers the clone. Under a hardlinking uv it does not cover `.venv`,** and a
   reader of the paragraph above should not take it to. A mode on a directory bounds the paths
   that lead through it, not the inodes underneath, and since #164 uv hardlinks a package out
-  of the per-account cache at `<workspace.root>/.uv-cache/<account>`, so a hardlinked `.venv`
+  of the per-account cache at `<workspace.root>/.uv-cache/<account>`, a hardlinked `.venv`
   entry *is* that cache's inode. A session working in one workspace can therefore open a file
   in its own account's cache directory -- which it is entitled to enter -- and write through
   it into the venv of every sealed, idle workspace bound to that account that installed the

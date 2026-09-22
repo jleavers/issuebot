@@ -46,11 +46,12 @@ not measurements of their own:
 - *A cache per workspace, or per ``(account, workspace)``.* Correct, and it closes the channel
   outright, since no other workspace's venv shares an inode with what this session may write.
   It has to stay on the volume -- any cache a hardlink works from does -- so it outlives the
-  container as today's does, for as long as its workspace does. What it gives up is not disk:
-  the duplication moves from the venv to the cache, two caches of about 78 MB where there was
-  one, which for two workspaces is roughly what the shared cache and its hardlinked venvs cost
-  together. What it gives up is the *sharing*, and so a download: a fresh sync from PyPI for
-  every new workspace, where an account's cache is a fresh sync for every new account and
+  container as today's does, for as long as its workspace does. It costs disk, and roughly
+  doubles it: today's two hardlinked venvs *are* the cache's inodes, so two workspaces at one
+  account are about 78 MB between them, where a cache each is about 156 MB -- and it grows by
+  a cache per *workspace* rather than per account. But the disk is the cheaper half of the
+  price. What it really gives up is the *sharing*, and so a download: a fresh sync from PyPI
+  for every new workspace, where an account's cache is a fresh sync for every new account and
   nothing at all for a reworked issue.
 - *A cache the session cannot write*, populated by the worker and handed over read-only. It
   rests on uv never writing to its own cache, which uv's cache semantics do not promise, and
@@ -67,8 +68,11 @@ not measurements of their own:
   and the cheapest way to get back the one property this issue is about: a copied ``.venv``
   entry is the workspace's own inode again, so the seal covers it as it did before #164, while
   the cache keeps its place on the volume and the persistence half is untouched. It costs the
-  measured half -- 152 MB for two venvs rather than 77, and the 122 ms per sync #164 timed --
-  and it closes less than the two above: the cache is still shared between sessions at that
+  measured half, and more disk than the option above rather than less: a copied venv is inodes
+  of its own, so the same two workspaces are about 230 MB -- the one shared cache still 78,
+  plus #164's 152 for two copied venvs -- against 78 today. (Speed was never the argument
+  either way; #164 timed the copy at 122 ms for this repository.) And it closes less than the
+  two above: the cache is still shared between sessions at that
   uid, so a session can still write what the *next* one installs from, which is the pre-#164
   level and the level accepted below. It is not the default because that trade is the one #164
   was asked to make, and it needs no change here either way: ``uv sync --link-mode=copy`` in
