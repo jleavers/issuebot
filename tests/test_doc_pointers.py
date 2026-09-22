@@ -911,7 +911,7 @@ def test_links_skips_inline_code_spans() -> None:
 
 
 # Today's tree, so a parser regression cannot make the sweep pass by seeing nothing. The floor
-# is well under the real figure (96 links, 80 of them inside the repository, 49 carrying an
+# is well under the real figure (99 links, 83 of them inside the repository, 49 carrying an
 # anchor) because the prose is edited constantly; what it catches is an order-of-magnitude
 # collapse -- an unbalanced fence swallowing the tail of a document, a tightened `_LINK` -- not
 # a paragraph rewritten.
