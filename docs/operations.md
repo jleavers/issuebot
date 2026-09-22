@@ -159,8 +159,8 @@ gh run view <id> --json jobs \
 Every failed job at `"steps": 0` is Actions declining. A job with a step count is CI reporting
 on the code, and whatever it found is in the diff.
 
-The agent asks the same question at the end of every run, and a run that never executed does
-not hold a finished issue. Parking one would spend the run's remaining turns waiting for a
+The agent asks the same question before it hands an issue over, and a run that never executed
+does not hold a finished issue. Parking one would spend the run's remaining turns waiting for a
 check that is never coming, and end at `agent.max_turns` with the issue escalated anyway —
 all of it on a fault that is not in the code and that no session can clear. What that does
 not do is lower the bar — the evidence only moves. The same suite, lint and format must be
