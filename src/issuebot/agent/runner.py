@@ -138,10 +138,38 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   manual to keep up with. `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
 #   `XDG_CONFIG_DIRS` and `XDG_DATA_DIRS` were each measured unread by those two and stay
 #   out: a hook pointing a cache or a state directory somewhere is what this file is for.
+#   `SSL_CERT_FILE` and `SSL_CERT_DIR` are on no chain either, and they are here under a third
+#   rule (#205): a name is protected when it decides which certificate authorities a tool
+#   issuebot launches will accept. That is the one thing on this list that is not a command and
+#   does not name one -- it is a *trust* decision, deciding who the tool is talking to rather
+#   than what it runs, which is why neither of the two rules above reaches it and why the
+#   sentence above about "a list of everything that might name a command" needed widening
+#   rather than another entry. Measured on this image (`gh` 2.100.0, `curl` 8.14.1 over
+#   OpenSSL 3.5.7, CPython 3.14.7 and `pip` 26.2.1, `uv` 0.12.11, `git` 2.47.3):
+#     SSL_CERT_FILE  the default CA *file*, and `SSL_CERT_DIR` the default CA *directory*. Each
+#     SSL_CERT_DIR   replaces its own half of that pair, so one alone leaves the other half
+#                    verifying GitHub -- which is what makes a single line read as "only ever
+#                    widens". Both together replace the store outright, and a value that will
+#                    not load is not ignored: with the pair set to unreadable paths every `gh`
+#                    request fails, and `SSL_CERT_FILE` alone does that to every `curl`
+#                    https:// (exit 77). So the pair widens *and* breaks, and the breaking half
+#                    needs no second primitive -- `_run_argv` runs `gh repo clone` under this
+#                    environment, as every hook and every turn does.
+#   They are the *only* spelling that reaches `gh`, which has no `GH_` name of its own for its
+#   trust store, so the prefixes below do not cover them and this is head and tail of that
+#   chain at once; `git` reads neither (its spelling is `GIT_SSL_CAINFO` -> `http.sslCAInfo`,
+#   and `GIT_` is already a prefix). Generic names and not a tool's own is also what bounds the
+#   cost: the per-tool spellings stay settable and were each measured *not* to reach `gh` --
+#   `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `uv --cert` and `UV_SYSTEM_CERTS` -- so
+#   a hook can still hand the target repository's own tools a private index CA, which is what
+#   this file is for. A deployment-wide authority belongs in the image's system trust store,
+#   root-owned and outside the session's privilege domain, as #191's extension does on `PATH`.
 TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
     {
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
         "EDITOR",
