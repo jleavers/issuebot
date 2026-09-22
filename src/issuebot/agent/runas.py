@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+import yaml
+
 MODULE = "issuebot.agent.runas"
 # A uid change is quick; past this sudo is treated as wedged rather than waited for.
 SUDO_TIMEOUT_S = 10
@@ -165,6 +167,66 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
     (".config", "git", "config"),
     (".ssh", "config"),
 )
+
+# The one file the sweep *edits* instead of removing, and the one place it looks inside a file
+# at all (#190). ``~/.config/gh/hosts.yml`` is credential state: it holds the ``oauth_token``
+# that authenticates the next session's ``gh`` where that session has one, so #151 pinned it as
+# a survivor and #173 kept it -- taking it would cost every deployment more than any channel in
+# it does. But it is not *only* credential state. ``gh config set -h <host> <key> <value>``
+# writes into this file rather than into the ``config.yml`` #173 sweeps, and one of the keys it
+# can carry re-points ``gh`` on an ordinary core command.
+#   Measured against ``gh version 2.100.0``, in the post-#173 state with no ``config.yml``
+#   anywhere: ``api_host: 127.0.0.1`` sends ``gh api``, ``gh issue list``, ``gh pr list`` and
+#   ``gh repo clone`` to the host the planting session named. That last one is issuebot's own
+#   (``WorkspaceManager._run_argv``, through ``RunAs``), so the previous session's leavings
+#   break the next session's workspace clone.
+# What the channel cannot do bounds how much this matters, and all of it was measured rather
+# than argued: ``gh`` sends no ``Authorization`` header to a substituted host -- neither the
+# environment's ``GH_TOKEN`` nor the file's own ``oauth_token``, which ``gh help config`` states
+# outright ("this is not a security boundary and requests to the canonical host will remain
+# authenticated") -- a self-signed certificate is refused, so forging an answer needs a CA in
+# the *system* trust store, which is root's; and #126's proxy refuses a name off its allow-list
+# (``egress_denied``, ``Forbidden`` at the client) while an on-list name completes. So what
+# survives is availability, not confidentiality: a plant needing no network at all that breaks
+# every core ``gh`` command of the next session bound to that account.
+# A key-level edit rather than a path-level entry, because the file has to keep working. That is
+# a different shape from the denylists above, and what makes it a bounded one is that the keys
+# ``-h`` can write are a closed set: asked for each of the thirteen keys ``gh config --help``
+# lists, exactly these five landed in ``hosts.yml`` and every other went to ``config.yml``.
+# Every one of them is a steering key and none is credential state -- ``oauth_token``, ``user``
+# and the ``users:`` subtree are not among what ``-h`` can write -- so removing all five cannot
+# touch what the file is kept for.
+#   ``api_host`` is the live one. ``http_unix_socket``, ``pager``, ``editor`` and ``browser``
+#   are written here by ``gh config set -h`` and then *not honoured* in this position: measured
+#   inert, against the same values at top level, which do fire. They are on the list anyway
+#   because the cost of naming a key that does nothing is nothing, while the cost of leaving one
+#   out is the channel back -- and "not honoured today" is a property of this ``gh``, where
+#   "never written by a deployment" is a property of the file.
+# A denylist rather than a keep-list of the credential keys, unlike ``--strict-mcp-config``'s
+# "name what survives", because here the two failures are not symmetrical: a steering key a
+# future ``gh`` adds and this list misses costs the bounded channel above, where a keep-list
+# that stripped a credential key a future ``gh`` adds would break authentication for every
+# session in the deployment. The asymmetry is covered by proving the set instead of asserting
+# it -- the CI ``docker`` job asks the image's own ``gh`` which keys ``-h`` accepts and fails
+# when the answer is not these five, so a release that adds a sixth fails a pull request rather
+# than a session.
+GH_HOSTS_FILE: tuple[str, ...] = (".config", "gh", "hosts.yml")
+GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
+    {
+        "api_host",
+        "http_unix_socket",
+        "pager",
+        "editor",
+        "browser",
+    }
+)
+# What the sweep will read of that file before deciding it is not the small credential document
+# it is editing. ``gh`` writes a handful of lines per host; this is four orders of magnitude of
+# headroom, and the bound is the point (#110's rule at the one seam that parses a file the
+# session can grow). Past it the file is left exactly as it is: a sweep that cannot understand
+# a credential file must not rewrite it, and an unparsed ``hosts.yml`` this large is not one
+# ``gh`` is authenticating from either.
+GH_HOSTS_LIMIT = 256 * 1024
 
 
 # The fallback descriptor's file, while it briefly has a name. A tmpfs, so the environment
@@ -470,6 +532,24 @@ def _relax(path: Path) -> None:
             os.chmod(path, st.st_mode | stat.S_IRWXU)
 
 
+def _relax_file(path: Path) -> None:
+    """``_relax`` for a regular file this account owns, which the sweep needs in one place.
+
+    The directory form above is enough for every *removal*: unlinking a file needs write and
+    search on the directory holding it and nothing at all of the file's own mode, which is why
+    it declines anything that is not a directory. The one edit the sweep makes (#190,
+    ``_sweep_gh_hosts``) has to *read* its target, so a session that plants ``api_host`` in
+    ``~/.config/gh/hosts.yml`` and then ``chmod 0000``s it would otherwise keep the plant at no
+    cost to itself -- ``gh`` reads the file as its owner, which the plant's author and this
+    sweep both are. Owner read and write only, added to whatever is there; the group and other
+    bits are left alone, since ``gh`` refuses a ``hosts.yml`` wider than its own ``0600``.
+    """
+    with contextlib.suppress(OSError):
+        st = os.lstat(path)
+        if st.st_uid == os.getuid() and stat.S_ISREG(st.st_mode):
+            os.chmod(path, st.st_mode | stat.S_IRUSR | stat.S_IWUSR)
+
+
 def _relax_tree(path: Path) -> None:
     """``_relax`` for ``path`` and every directory under it, top down.
 
@@ -603,6 +683,128 @@ def _entries(path: Path) -> list[Path]:
     return []
 
 
+def _sweep_gh_hosts(home: Path) -> None:
+    """Remove the steering keys (``GH_HOSTS_STEERING_KEYS``) from ``~/.config/gh/hosts.yml``,
+    keeping everything else in it (#190).
+
+    The one place the sweep looks *inside* a file rather than removing it, because this file is
+    credential state the next session may authenticate with and a sweep that took it would cost
+    every deployment more than the channel in it does. The keys it removes are the closed set
+    ``gh config set -h <host>`` can write, none of which is credential state, so ``oauth_token``,
+    ``user`` and the ``users:`` subtree come through untouched.
+
+    Best-effort and fail-safe, in that order: anything this cannot read, parse or understand as
+    the small mapping-of-hosts ``gh`` writes is left exactly as it is, since rewriting a
+    credential file on a guess is the one outcome worse than the plant. The file is not touched
+    at all -- not even rewritten identically -- unless a key actually came out, so a home no
+    session has planted in keeps its ``hosts.yml`` byte for byte.
+
+    A symlink at that name, or on the way to it, is unlinked instead -- the rule every other
+    surface in this sweep has, and ``_walk``'s, which yields the first link it meets rather than
+    descending through it. ``gh`` writes a regular file in a real directory, so a link at either
+    is a session's redirection, and editing through one would rewrite a file outside the home.
+    """
+    target = _walk(home, GH_HOSTS_FILE)
+    if target is None:
+        return
+    if target.is_symlink():
+        _remove_swept(target)
+        return
+    parsed = _read_gh_hosts(target)
+    if parsed is None:
+        return
+    stripped = {
+        host: {key: value for key, value in entry.items() if key not in GH_HOSTS_STEERING_KEYS}
+        if isinstance(entry, dict)
+        else entry
+        for host, entry in parsed.items()
+    }
+    if stripped == parsed:
+        return
+    _replace_gh_hosts(target, stripped)
+
+
+def _read_gh_hosts(target: Path) -> dict | None:
+    """The mapping ``hosts.yml`` parses to, or ``None`` to leave the file alone.
+
+    ``None`` covers every way this can decline: a file that will not open even with the modes
+    put back, one over ``GH_HOSTS_LIMIT``, bytes that are not UTF-8 or not YAML, and a document
+    that is not the mapping of host names ``gh`` writes. The modes are put back the way the rest
+    of the sweep does, since a session that drops read on its own ``hosts.yml`` would otherwise
+    keep a plant at no cost to itself -- ``gh`` opens the path it already knows.
+    """
+    text = _read_capped(target)
+    if text is None:
+        _relax(target.parent)
+        _relax_file(target)
+        text = _read_capped(target)
+    if text is None:
+        return None
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _read_capped(target: Path) -> str | None:
+    """At most ``GH_HOSTS_LIMIT`` bytes of ``target`` as text, or ``None``.
+
+    ``O_NOFOLLOW`` because the caller's symlink check and this open are two steps, and the
+    session owns the directory between them. One byte past the cap is read deliberately, so a
+    file *at* the limit is told from one over it.
+    """
+    fd = None
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+        raw = os.read(fd, GH_HOSTS_LIMIT + 1)
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    if len(raw) > GH_HOSTS_LIMIT:
+        return None
+    try:
+        return raw.decode()
+    except UnicodeDecodeError:
+        return None
+
+
+def _replace_gh_hosts(target: Path, stripped: dict) -> None:
+    """Write ``stripped`` over ``target`` atomically, or leave the file as it was.
+
+    Through a temporary file in the same directory and ``os.replace``, so a session's ``gh``
+    running beside this sweep reads either the old document or the new one and never a partial
+    write of its own credentials. The mode is the original's rather than the umask's: ``gh``
+    writes ``hosts.yml`` ``0600`` and complains about a wider one.
+    """
+    with contextlib.suppress(OSError, yaml.YAMLError):
+        # The temporary file is created in this directory and renamed over the target, so the
+        # replace needs write and search on it -- the same bits `_sweep`'s retry puts back for
+        # a removal, and the account's own to set either way.
+        _relax(target.parent)
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".hosts-", suffix=".yml")
+        try:
+            with os.fdopen(handle, "w") as stream:
+                yaml.safe_dump(stripped, stream, default_flow_style=False, sort_keys=False)
+            os.chmod(temporary, mode)
+            os.replace(temporary, target)
+            return
+        except OSError, yaml.YAMLError:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
+    # Suppressed rather than reported: the replace is atomic, so a failure leaves the original
+    # file intact and still carrying the plant, and the next turn sweeps again. This helper's
+    # exit status is what ``sweep_home`` reports, and a sweep that cleared every other surface
+    # should not read as a total failure because one edit did not land.
+
+
 def _sweep(home: Path) -> None:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
     its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
@@ -637,6 +839,12 @@ def _sweep(home: Path) -> None:
                 # its target's. Relaxing the parent above is the whole repair for that case.
                 _relax_tree(target)
             _remove_swept(target)
+    # After the removals rather than among them, for two reasons that point the same way: an
+    # intermediate symlink on the way to it (``~/.config`` replaced by a link) is one of the
+    # targets above and is gone by now, so the walk below resolves inside the real home; and
+    # this is an edit rather than a removal, so it belongs after every path-level decision has
+    # been made.
+    _sweep_gh_hosts(home)
 
 
 def _remove_swept(target: Path) -> None:

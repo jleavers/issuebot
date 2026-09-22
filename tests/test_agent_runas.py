@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 from structlog.testing import capture_logs
 
 from issuebot.agent import runas as runas_module
@@ -34,6 +35,9 @@ from issuebot.agent.runas import (
     CLAUDE_HOME_DIR,
     CLAUDE_HOME_MEMORY_DIR,
     CLAUDE_HOME_SWEEP,
+    GH_HOSTS_FILE,
+    GH_HOSTS_LIMIT,
+    GH_HOSTS_STEERING_KEYS,
     MODULE,
     SHELL_STARTUP_SWEEP,
     TOOL_CONFIG_SWEEP,
@@ -331,6 +335,25 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
             os.chmod(tree / "closed", 0o700)
 
 
+# #190: what `gh config set -h github.com <key>` can write, beside the credential state the
+# same file holds. The five steering keys were measured against `gh version 2.100.0`: asked for
+# each of the thirteen keys `gh config --help` lists, exactly these landed in `hosts.yml` and
+# every other went to `config.yml`.
+GH_HOSTS_PLANT = """github.com:
+    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345
+    user: nobody
+    git_protocol: https
+    api_host: 127.0.0.1:8099
+    http_unix_socket: /tmp/pwn.sock
+    pager: sh -c 'echo poison'
+    editor: sh -c 'echo poison'
+    browser: sh -c 'echo poison'
+    users:
+        nobody:
+            oauth_token: gho_KEEPTHISONETOO012345678901234567890
+"""
+
+
 def _plant_home(home: Path) -> None:
     """A home a prior session poisoned: the shell start-up files a login shell reads (#137),
     the tool config files that can name a command (#151) and the ``~/.claude`` config surfaces
@@ -351,7 +374,10 @@ def _plant_home(home: Path) -> None:
     # `.config` and `.ssh` are other tools' directories as well: `gh`'s config lives beside
     # git's, and an `.ssh` a deployment gave the account keys in is not the sweep's to empty.
     (home / ".config" / "gh").mkdir()
-    (home / ".config" / "gh" / "hosts.yml").write_text("github.com:\n")
+    # #190: credential state *and* a steering key. The file survives every sweep -- #151 pinned
+    # it and #173 kept it -- while `api_host` in it re-points the next session's `gh` on an
+    # ordinary core command, so this one is edited rather than removed.
+    (home / ".config" / "gh" / "hosts.yml").write_text(GH_HOSTS_PLANT)
     (home / ".ssh" / "known_hosts").write_text("github.com ssh-ed25519 AAAA\n")
     # What the sweep names nothing of, and must therefore leave: claude's own `.claude.json`
     # (#119 holds its `mcpServers` off with `--strict-mcp-config`; the file itself is claude's
@@ -491,6 +517,192 @@ def test_the_tool_config_list_names_both_spellings_git_reads_and_ssh_config() ->
     # `XDG_CONFIG_HOME` is not passed through, which is what makes the second entry the path
     # git actually reads; a change there would need a third spelling here.
     assert "XDG_CONFIG_HOME" not in PASSTHROUGH_NAMES
+
+
+def _hosts(home: Path) -> Path:
+    return home.joinpath(*GH_HOSTS_FILE)
+
+
+def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Path) -> None:
+    """#190: the one file the sweep edits instead of removing. `~/.config/gh/hosts.yml` is
+    credential state -- #151 pinned it as a survivor and #173 kept it -- but it is not *only*
+    that: `gh config set -h <host>` writes the steering keys there, and `api_host` among them
+    re-points `gh` on an ordinary core command (`gh api`, `gh issue list`, `gh repo clone`, the
+    last of which is issuebot's own). So the keys go and everything else stays."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _sweep(home)
+    document = yaml.safe_load(_hosts(home).read_text())
+    assert set(document["github.com"]) & GH_HOSTS_STEERING_KEYS == set()
+    # The credential the file is kept for, in both spellings gh writes it.
+    assert document["github.com"]["oauth_token"] == "gho_KEEPTHISCREDENTIAL0123456789012345"
+    assert document["github.com"]["user"] == "nobody"
+    assert document["github.com"]["git_protocol"] == "https"
+    assert document["github.com"]["users"]["nobody"]["oauth_token"] == (
+        "gho_KEEPTHISONETOO012345678901234567890"
+    )
+    # And nothing of the edit is left lying beside it.
+    assert sorted(p.name for p in _hosts(home).parent.iterdir()) == ["hosts.yml"]
+
+
+def test_sweep_strips_the_steering_keys_from_every_host_entry(tmp_path: Path) -> None:
+    """The file is a mapping of hosts, and a session writes what it likes into it: an entry for
+    an enterprise host it invented carries the same key and would steer the same commands."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).write_text(
+        "github.com:\n"
+        "    oauth_token: keep-me\n"
+        "    api_host: 127.0.0.1\n"
+        "ghe.example.com:\n"
+        "    oauth_token: keep-me-too\n"
+        "    api_host: 127.0.0.1\n"
+        "    pager: sh -c 'echo poison'\n"
+    )
+    _sweep(home)
+    document = yaml.safe_load(_hosts(home).read_text())
+    assert document == {
+        "github.com": {"oauth_token": "keep-me"},
+        "ghe.example.com": {"oauth_token": "keep-me-too"},
+    }
+
+
+def test_sweep_leaves_a_hosts_file_with_nothing_to_strip_exactly_as_it_is(
+    tmp_path: Path,
+) -> None:
+    """An ordinary home has no plant in this file, and the sweep runs before every turn and
+    every hook. Rewriting a credential file on each of those -- reformatting it, dropping the
+    comments a deployment may have put in it, racing a `gh` that is reading it -- for no change
+    at all is a cost with no benefit, so the file is only ever written when a key came out."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    original = "# a deployment's own note\ngithub.com:\n    oauth_token: keep-me\n"
+    _hosts(home).write_text(original)
+    before = _hosts(home).stat()
+    _sweep(home)
+    assert _hosts(home).read_text() == original
+    assert _hosts(home).stat().st_ino == before.st_ino
+
+
+def test_sweep_keeps_the_mode_of_the_hosts_file_it_rewrites(tmp_path: Path) -> None:
+    """`gh` refuses a `hosts.yml` wider than `0600`, so the rewrite carries the original's mode
+    across rather than taking the umask's."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    os.chmod(_hosts(home), 0o600)
+    _sweep(home)
+    assert stat.S_IMODE(_hosts(home).stat().st_mode) == 0o600
+    assert "api_host" not in _hosts(home).read_text()
+
+
+def test_sweep_strips_a_hosts_plant_the_session_locked_behind_a_file_mode(
+    tmp_path: Path,
+) -> None:
+    """A mode is not a defence against the owner, and this is the one target whose *own* mode
+    matters: removals need the parent's bits alone, where an edit has to read the file. `gh`
+    reads it as its owner, which the plant's author and this sweep both are, so the bits go back
+    and the key comes out."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    os.chmod(_hosts(home), 0o000)
+    try:
+        _sweep(home)
+        assert "api_host" not in _hosts(home).read_text()
+    finally:
+        if _hosts(home).exists():
+            os.chmod(_hosts(home), 0o600)
+
+
+def test_sweep_unlinks_a_symlinked_hosts_file_without_following_it(tmp_path: Path) -> None:
+    """`gh` writes a regular file, so a link at that name is a session's redirection -- and
+    editing through one would rewrite a file outside the home altogether. The rule every other
+    surface in this sweep has: the link goes, what it points at is untouched."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    target = tmp_path / "elsewhere.yml"
+    target.write_text("github.com:\n    api_host: 127.0.0.1\n")
+    _hosts(home).unlink()
+    _hosts(home).symlink_to(target)
+    _sweep(home)
+    assert not _hosts(home).exists()
+    assert target.read_text() == "github.com:\n    api_host: 127.0.0.1\n"
+
+
+def test_sweep_unlinks_a_symlinked_gh_directory_without_following_it(tmp_path: Path) -> None:
+    """`_walk`'s rule one component up: with `.config/gh` replaced by a link, the file the edit
+    would open is somebody else's, and the link is what `gh` would read through."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "hosts.yml").write_text("github.com:\n    api_host: 127.0.0.1\n")
+    shutil.rmtree(home / ".config" / "gh")
+    (home / ".config" / "gh").symlink_to(elsewhere)
+    _sweep(home)
+    assert not (home / ".config" / "gh").exists()
+    assert (elsewhere / "hosts.yml").read_text() == "github.com:\n    api_host: 127.0.0.1\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("not yaml at all", b"github.com: [unclosed\n"),
+        ("not a mapping", b"- github.com\n"),
+        ("not text", b"\xff\xfe\x00binary"),
+        ("empty", b""),
+    ],
+)
+def test_sweep_leaves_a_hosts_file_it_cannot_understand(
+    tmp_path: Path, name: str, content: bytes
+) -> None:
+    """Fail-safe, and in this direction deliberately: rewriting a credential file on a guess is
+    the one outcome worse than the plant, since a session whose `gh` cannot authenticate can do
+    no work at all. Anything that is not the small mapping-of-hosts `gh` writes is left alone,
+    and the channel it may still carry is the bounded one the design note measures."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).write_bytes(content)
+    _sweep(home)
+    assert _hosts(home).read_bytes() == content, name
+
+
+def test_sweep_leaves_a_hosts_file_over_the_cap(tmp_path: Path) -> None:
+    """#110's rule at the one seam that parses a file the session can grow. Past the cap the
+    file is left exactly as it is: `gh` is not authenticating from a `hosts.yml` this size
+    either, and a sweep that cannot read a credential file must not rewrite it."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    oversized = "github.com:\n    api_host: 127.0.0.1\n" + "# padding\n" * GH_HOSTS_LIMIT
+    assert len(oversized.encode()) > GH_HOSTS_LIMIT
+    _hosts(home).write_text(oversized)
+    _sweep(home)
+    assert _hosts(home).read_text() == oversized
+
+
+def test_sweep_leaves_a_home_that_never_held_a_hosts_file(tmp_path: Path) -> None:
+    """The ordinary case on the host route and in a fresh container: no `~/.config/gh` at all,
+    and nothing for the edit to do or to create."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _sweep(home)
+    assert not (home / ".config").exists()
+
+
+def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None:
+    """Pinned like the three sweep lists, and for a sharper reason: this one is a denylist over
+    a file that must keep working, so a key missing here is the channel back. Measured against
+    `gh version 2.100.0` -- `gh config set -h github.com <key>` asked for each of the thirteen
+    keys `gh config --help` lists, and exactly these five landed in `hosts.yml` while every
+    other went to `config.yml`. The `docker` CI job asks the image's own `gh` the same question
+    on every pull request, so a release that adds a sixth fails there rather than in a session.
+    Dropping one here has to be a deliberate edit in both places."""
+    measured = {"api_host", "http_unix_socket", "pager", "editor", "browser"}
+    assert measured == GH_HOSTS_STEERING_KEYS
+    # Never the credential keys: they are what the file is kept for, and `-h` cannot write them.
+    assert GH_HOSTS_STEERING_KEYS.isdisjoint({"oauth_token", "user", "users"})
+    # The file is edited, never listed for removal: #151 pinned it and #173 kept it.
+    assert GH_HOSTS_FILE not in TOOL_CONFIG_SWEEP
+    assert (".config", "gh") not in TOOL_CONFIG_SWEEP
 
 
 def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_path: Path) -> None:
