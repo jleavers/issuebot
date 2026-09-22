@@ -226,7 +226,9 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   directory, so a link at any of them is a session's redirection — and editing through one would
   rewrite a file outside the home altogether.
 - **Fail-safe in one direction only.** Anything the sweep cannot read, cannot parse, or cannot
-  understand as the mapping-of-hosts `gh` writes is left exactly as it is. Rewriting a
+  understand as the mapping-of-hosts `gh` writes keeps its contents exactly as they are (its
+  mode may have been widened to the owner read and write `gh` needs anyway, which is
+  `_relax_file`'s repair and the only mark a declined file carries). Rewriting a
   credential file on a guess is the one outcome worse than the plant: a session whose `gh`
   cannot authenticate does no work at all, where a session carrying the plant is held by the
   bounds above. `GH_HOSTS_LIMIT` (256 KiB) is #110's rule at the one seam that parses a file the

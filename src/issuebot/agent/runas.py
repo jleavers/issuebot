@@ -694,10 +694,12 @@ def _sweep_gh_hosts(home: Path) -> None:
     ``user`` and the ``users:`` subtree come through untouched.
 
     Best-effort and fail-safe, in that order: anything this cannot read, parse or understand as
-    the small mapping-of-hosts ``gh`` writes is left exactly as it is, since rewriting a
-    credential file on a guess is the one outcome worse than the plant. The file is not touched
-    at all -- not even rewritten identically -- unless a key actually came out, so a home no
-    session has planted in keeps its ``hosts.yml`` byte for byte.
+    the small mapping-of-hosts ``gh`` writes keeps its contents exactly as they are, since
+    rewriting a credential file on a guess is the one outcome worse than the plant. (Its *mode*
+    may have been widened to the owner read and write ``gh`` needs anyway, which is
+    ``_relax_file``'s repair and the only mark a declined file carries.) The contents are not
+    written at all -- not even rewritten identically -- unless a key actually came out, so a
+    home no session has planted in keeps its ``hosts.yml`` byte for byte, inode included.
 
     A symlink at that name, or on the way to it, is unlinked instead -- the rule every other
     surface in this sweep has, and ``_walk``'s, which yields the first link it meets rather than
@@ -787,7 +789,16 @@ def _replace_gh_hosts(target: Path, stripped: dict) -> None:
         # replace needs write and search on it -- the same bits `_sweep`'s retry puts back for
         # a removal, and the account's own to set either way.
         _relax(target.parent)
-        mode = stat.S_IMODE(os.stat(target).st_mode)
+        # ``lstat``, and a regular file or nothing: the read above and this write are two steps,
+        # and the session owns the directory between them. A name that has become a link since
+        # is one this function declines rather than one it takes the mode of -- ``os.replace``
+        # would unlink the link rather than follow it, so nothing outside the home could be
+        # written either way, but a file whose shape changed under the sweep is not one to
+        # rewrite from a document read before it did.
+        st = os.lstat(target)
+        if not stat.S_ISREG(st.st_mode):
+            return
+        mode = stat.S_IMODE(st.st_mode)
         handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".hosts-", suffix=".yml")
         try:
             with os.fdopen(handle, "w") as stream:
