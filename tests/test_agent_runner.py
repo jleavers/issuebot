@@ -20,6 +20,7 @@ from issuebot.agent.runner import (
     PROTECTED_ENV_NAMES,
     PROTECTED_ENV_PREFIXES,
     PROXY_ENV_NAMES,
+    SHELL_ENV_NAMES,
     TOOL_CONFIG_ENV_NAMES,
     TOOL_CONFIG_ENV_PREFIXES,
     WORKSPACE_ENV_LIMIT,
@@ -553,6 +554,124 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
         "EDITOR is protected",
         "EMAIL is protected",
     ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # The file `bash` sources before the command it was given. #137's `~/.profile` channel
+        # in one line of a file the session can write.
+        "BASH_ENV",
+        # No command of their own: the `set -o` and `shopt` options `bash` enables from the
+        # environment before any start-up file is read, `xtrace` among them.
+        "SHELLOPTS",
+        "BASHOPTS",
+        # Which `xtrace` makes live: `PS4` is expanded before every traced command, command
+        # substitution and all, the first of them inside `/etc/profile`.
+        "PS4",
+        # `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so the relative
+        # command after the `cd` is a file in a tree the line chose.
+        "CDPATH",
+    ],
+)
+def test_merge_workspace_env_refuses_the_shells_own_start_up(key: str) -> None:
+    """#179: the same rule again for the one tool every script issuebot runs goes through.
+    `WorkspaceManager.hook_shell` is `bash -lc`, so these decide what the post-clone setup and
+    all four hooks run before -- or instead of -- what the hook actually wrote."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_shell_protections_are_pinned() -> None:
+    """A deliberate edit here as well as in `runner.py`, as the sweep lists and the tool-config
+    entries are. The rule is what `bash` itself reads out of the environment it is handed and
+    acts on before, or around, the commands the hook wrote: the file it sources (`BASH_ENV`),
+    the options it enables and the prompt one of them expands (`SHELLOPTS`/`BASHOPTS`, `PS4`)
+    and the directories `cd` resolves through (`CDPATH`, which is `PATH`'s rule for the one
+    lookup `PATH` does not cover). Each was measured firing under the image's own bash 5.2."""
+    assert sorted(SHELL_ENV_NAMES) == [
+        "BASHOPTS",
+        "BASH_ENV",
+        "CDPATH",
+        "PS4",
+        "SHELLOPTS",
+    ]
+    assert SHELL_ENV_NAMES <= PROTECTED_ENV_NAMES
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # POSIX's start-up file for an *interactive* shell, and nothing issuebot runs is one.
+        # Measured unread by `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh` and by
+        # `sh -c` (dash), so protecting it would close nothing: the list states what was shown
+        # to work, as #171's does.
+        "ENV",
+        # The descriptor `xtrace` writes to, and the prompts an interactive shell draws. None
+        # of them runs anything, and a hook that wants its own output shaped is welcome to.
+        "BASH_XTRACEFD",
+        "PS1",
+        "PS2",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_shell_entries(key: str) -> None:
+    """The bound is on what makes the shell run something the hook did not write."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
+
+
+def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#179): what a session leaves in `.issuebot/env` is what the
+    *next* session's hooks are run with, and the complaint names the key that was dropped.
+    Before this change the same file was measured sourcing the planted script under
+    `bash -lc 'echo hook-ran'` and running the substitution in `PS4` during `/etc/profile`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "BASH_ENV=/tmp/theirs/plant.sh\n"
+        "SHELLOPTS=xtrace\n"
+        "BASHOPTS=xpg_echo\n"
+        "PS4=$(/tmp/theirs/plant.sh)+ \n"
+        "CDPATH=/tmp/theirs\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert not [name for name in merged if name in SHELL_ENV_NAMES]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "BASH_ENV is protected",
+        "SHELLOPTS is protected",
+        "BASHOPTS is protected",
+        "PS4 is protected",
+        "CDPATH is protected",
+    ]
+
+
+def test_a_workspace_env_line_cannot_export_a_shell_function(tmp_path: Path) -> None:
+    """`bash` imports a function from an environment entry named `BASH_FUNC_<name>%%`, which was
+    measured defining a command in the shell it starts. The key pattern is what refuses it, so
+    the refusal is a parse complaint naming the line and not the value -- recorded here because
+    it is the reason that spelling is not in `SHELL_ENV_NAMES`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "BASH_FUNC_git%%=() { /tmp/theirs/plant.sh; }\nDATABASE_URL=postgresql://issuebot@/db\n"
+    )
+    merged, applied = workspace_environment({"PATH": "/usr/bin"}, tmp_path)
+    assert applied == ["DATABASE_URL"]
+    assert not [name for name in merged if name.startswith("BASH_FUNC")]
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:

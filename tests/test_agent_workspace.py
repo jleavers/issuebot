@@ -63,6 +63,7 @@ def make_manager(
     hooks: dict[str, str] | None = None,
     timeout_ms: int = 5000,
     extra_env: dict[str, str] | None = None,
+    hook_shell: tuple[str, ...] = ("bash", "-c"),
 ) -> tuple[WorkspaceManager, StubGh]:
     settings = Settings.model_validate(
         {
@@ -77,7 +78,7 @@ def make_manager(
         "HOME": os.environ.get("HOME", "/tmp"),
         **(extra_env or {}),
     }
-    manager = WorkspaceManager(settings, gh=gh, environ=environ, hook_shell=("bash", "-c"))
+    manager = WorkspaceManager(settings, gh=gh, environ=environ, hook_shell=hook_shell)
     return manager, gh
 
 
@@ -320,6 +321,45 @@ async def test_hook_sees_the_workspace_env_file(
     seen_dsn, seen_path = after.stdout_tail.splitlines()
     assert seen_dsn == "postgresql://issuebot@/db"
     assert seen_path != "/hijacked"
+
+
+@posix
+async def test_a_workspace_env_line_does_not_reach_a_hooks_login_shell(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """#179, end to end through the shell a hook actually gets: `hook_shell` is `bash -lc`, and
+    `bash` sources whatever `BASH_ENV` names before the command it was given. So a
+    `before_run` line naming a script the session planted would run in every later hook --
+    the post-clone setup and all four of them -- ahead of what the hook itself wrote. It is
+    refused where the file is merged, and the worker's log names the key it dropped, while the
+    DSN beside it on the next line is handed over exactly as before."""
+    plant = tmp_path / "plant.sh"
+    plant.write_text("printf 'PLANTED-BASH_ENV-RAN\\n'\n")
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={
+            "before_run": (
+                f"printf 'BASH_ENV={plant}\\nDSN=postgresql://issuebot@/db\\n' > .issuebot/env"
+            ),
+            "after_run": "echo hook-ran; echo ${DSN:-unset}",
+        },
+        hook_shell=("bash", "-lc"),
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    before = await manager.run_hook("before_run", ws.path)
+    assert before is not None and before.ok
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        after = await manager.run_hook("after_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert after is not None and after.ok
+    # The planted script would have printed first, before the hook's own `echo`.
+    assert after.stdout_tail.splitlines() == ["hook-ran", "postgresql://issuebot@/db"]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == ["BASH_ENV is protected"]
 
 
 async def test_sweep_agent_home_is_a_no_op_on_the_host_route(tmp_path: Path) -> None:
