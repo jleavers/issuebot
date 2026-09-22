@@ -198,9 +198,10 @@ def test_ci_proves_a_planted_shell_profile_does_not_run_for_the_next_sessions_ho
     assert 'sudo -n -H -u agent bash -lc "claude --version"' in CI
 
 
-def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_session() -> None:
-    """#151: the same home again, one tool further out. `git` runs in every session and reads
-    two user-level config files, either of which can name a command; `ssh` reads one. Proved in
+def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() -> None:
+    """#151 and #173: the same home again, one tool further out. `git` runs in every session and
+    reads two user-level config files, either of which can name a command; `ssh` reads one; and
+    `gh`, which every session and issuebot itself run, reads `config.yml`. Proved in
     the image and two-sided like the profile half above -- the same `git` runs before the
     sweep, where the alias has to *run*, so a `git` that stopped reading the account home could
     not pass this as a no-op -- and the neighbours in those directories have to survive it,
@@ -217,7 +218,18 @@ def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_sess
     assert "! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null" in CI
     for gone in (".gitconfig", ".config/git/config", ".ssh/config"):
         assert f"test ! -e /home/agent/{gone}" in CI, gone
-    # The directories those files sat in are other tools' too.
+    # And `gh`'s own config (#173), which #151 pinned as a survivor. Asked as "the plant is
+    # gone" rather than "the file is gone": `gh` writes itself a fresh default `config.yml` on
+    # the next invocation, and the two `gh pwn` runs above are invocations.
+    assert (
+        r"""printf \"aliases:\\n    pwn: '!echo GH-ALIAS-RAN'\\n\" """
+        "> /home/agent/.config/gh/config.yml"
+    ) in CI
+    assert 'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn)" = GH-ALIAS-RAN' in CI
+    assert "! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn 2>/dev/null" in CI
+    assert "! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null" in CI
+    # The directories those files sat in are other tools' too -- and `hosts.yml`, `gh`'s
+    # credential state, is the neighbour #151 pinned and #173 keeps.
     assert "test -f /home/agent/.config/gh/hosts.yml" in CI
     assert "test -f /home/agent/.ssh/known_hosts" in CI
 

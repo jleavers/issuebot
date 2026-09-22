@@ -474,6 +474,7 @@ jobs:
               printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
+              printf \"aliases:\\n    pwn: '!echo GH-ALIAS-RAN'\\n\" > /home/agent/.config/gh/config.yml
               echo github.com: > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
             "
@@ -489,6 +490,8 @@ jobs:
             # the home rather than about whatever repository the working directory sits in.
             test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN
             test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN
+            # And for gh (#173), whose config.yml this used to pin as a survivor.
+            test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn)" = GH-ALIAS-RAN
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
@@ -497,6 +500,8 @@ jobs:
             # And the next session git has no alias left to run, by either spelling.
             ! sudo -n -H -u agent git -C / pwn 2>/dev/null
             ! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null
+            # Nor the next session gh -- while its credential state survives, below (#173).
+            ! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn 2>/dev/null
             # And the account can still do what it is for with its start-up files gone: `claude`
             # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
             # from /etc/profile and /etc/profile.d, which belong to root and are not swept.
@@ -510,9 +515,14 @@ jobs:
               test ! -e /home/agent/.gitconfig
               test ! -e /home/agent/.config/git/config
               test ! -e /home/agent/.ssh/config
+              # gh writes itself a fresh default config.yml on the next invocation, and the
+              # `gh pwn` above was one, so what must be gone is the plant and not the file.
+              ! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
-              # The directories those files sat in are other tools too, and stay.
+              # The directories those files sat in are other tools too, and stay -- and gh's
+              # credential state beside the config the sweep now takes is the invariant #151
+              # pinned and #173 keeps.
               test -f /home/agent/.config/gh/hosts.yml
               test -f /home/agent/.ssh/known_hosts
               cd /home/agent/.claude
