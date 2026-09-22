@@ -222,7 +222,7 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
     # gone" rather than "the file is gone": `gh` writes itself a fresh default `config.yml` on
     # the next invocation, and the two `gh pwn` runs above are invocations.
     assert (
-        r"""printf \"aliases:\\n    pwn: '!echo GH-ALIAS-RAN'\\n\" """
+        r"printf \"aliases:\\n    pwn: \\047!echo GH-ALIAS-RAN\\047\\n\" "
         "> /home/agent/.config/gh/config.yml"
     ) in CI
     assert 'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn)" = GH-ALIAS-RAN' in CI
@@ -232,6 +232,41 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
     # credential state, is the neighbour #151 pinned and #173 keeps.
     assert "test -f /home/agent/.config/gh/hosts.yml" in CI
     assert "test -f /home/agent/.ssh/known_hosts" in CI
+
+
+def test_the_sweep_steps_outer_script_carries_no_single_quote() -> None:
+    """The sweep step is one ``bash -c \'<script>\'`` argument written without the ``\'"\'"\'``
+    idiom other steps use, so a single quote anywhere inside it -- in a command, in a YAML
+    value it writes, or in an English possessive in a comment -- ends that quoting and splits
+    the command, failing the job in a way that reads like a docker error rather than like the
+    typo it is. The file says so in a comment above the step; this is the same rule as a check,
+    because #173 added a line to that step whose whole point was writing a YAML value ``gh``
+    quotes with apostrophes (spelled ``\\047`` for that reason).
+
+    Backticks go with it. They are harmless at the outer level, where the single quotes make
+    them literal, but the step nests a second ``bash -c "<inner>"`` whose double quotes do
+    *not*, so a backtick in a comment inside one would be command-substituted by the
+    container\'s shell before ``sudo`` ever ran.
+    """
+    lines = CI.split("\n")
+    opens = [i for i, line in enumerate(lines) if line.rstrip().endswith("-c '")]
+    scripts = []
+    for index in opens:
+        close = next(i for i in range(index + 1, len(lines)) if lines[i].strip() == "'")
+        scripts.append(lines[index + 1 : close])
+    sweep = next(s for s in scripts if any("sweep_home()" in line for line in s))
+    assert not [line for line in sweep if "'" in line], sweep
+
+    nested, quoted = [], False
+    for line in sweep:
+        if line.rstrip().endswith('bash -c "'):
+            quoted = True
+        elif quoted and line.strip() == '"':
+            quoted = False
+        elif quoted:
+            nested.append(line)
+    assert nested, "the nested bash -c blocks were not found"
+    assert not [line for line in nested if "`" in line], nested
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:

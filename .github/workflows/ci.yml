@@ -474,7 +474,7 @@ jobs:
               printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
-              printf \"aliases:\\n    pwn: '!echo GH-ALIAS-RAN'\\n\" > /home/agent/.config/gh/config.yml
+              printf \"aliases:\\n    pwn: \\047!echo GH-ALIAS-RAN\\047\\n\" > /home/agent/.config/gh/config.yml
               echo github.com: > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
             "
@@ -516,13 +516,14 @@ jobs:
               test ! -e /home/agent/.config/git/config
               test ! -e /home/agent/.ssh/config
               # gh writes itself a fresh default config.yml on the next invocation, and the
-              # `gh pwn` above was one, so what must be gone is the plant and not the file.
+              # two gh pwn runs above are invocations, so what must be gone is the plant
+              # rather than the file.
               ! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
-              # The directories those files sat in are other tools too, and stay -- and gh's
-              # credential state beside the config the sweep now takes is the invariant #151
-              # pinned and #173 keeps.
+              # The directories those files sat in are other tools too, and stay -- and the
+              # gh credential state beside the config the sweep now takes is the invariant
+              # that #151 pinned and #173 keeps.
               test -f /home/agent/.config/gh/hosts.yml
               test -f /home/agent/.ssh/known_hosts
               cd /home/agent/.claude
