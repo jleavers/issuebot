@@ -849,10 +849,10 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`), `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
-  `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`, `LD_AUDIT`,
-  `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary: the file
-  sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), `SHELL_ENV_NAMES`
+  (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`,
+  `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary:
+  the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -909,7 +909,22 @@ version, and moves by hand.
   too, and nothing was shown to work through them: the note's residual). `XDG_` is a specification's namespace
   rather than a tool's, so it is names here and not a prefix: its roots are a short fixed list
   (seven in the current version) and which of them belongs is a measurement, not a manual to
-  keep up with. The deployment's
+  keep up with. The TLS pair is on no chain either and is there under a third rule, since #205
+  (spec `2026-09-22-session-tls-trust-env-design.md`): a name is protected when it decides
+  which certificate authorities a tool issuebot launches will accept -- a *trust* decision
+  rather than a command, the one entry on that list that is neither a command nor a file naming
+  one, and the only spelling that reaches `gh`, which has no `GH_` name for its trust store
+  (`git` reads neither; `GIT_SSL_CAINFO` is its own and already covered). Measured, and not
+  only a widening: each replaces its own half of the default CA file/directory pair, so one
+  alone leaves the other half verifying `api.github.com` -- which is what makes a single line
+  read as additive -- while the two together replace the store outright, and a path that will
+  not load is not ignored, taking `gh` off GitHub entirely and every `curl https://` with it.
+  That half needs no second primitive, where widening needs a redirect (#190's `api_host`) to
+  pay off. The per-tool spellings stay settable, each measured not to reach `gh`
+  (`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `UV_SYSTEM_CERTS`), so a hook keeps a
+  private index authority for the target repository's own tools; `uv`'s own bundle is `--cert`,
+  a flag with no environment spelling, so a deployment-wide authority belongs in the image's
+  root-owned system trust store, the way #191's extension belongs on `PATH`. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since
