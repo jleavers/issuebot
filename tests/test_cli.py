@@ -863,6 +863,24 @@ def test_validate_warns_when_the_schema_is_behind(
     assert "18 checks: 0 failed, 3 warnings" in out
 
 
+def test_validate_names_the_compose_command_for_a_migration(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_database: FakeDatabase,
+) -> None:
+    """The line beside the labels one in the same output, so it reads in the same idiom (#169)."""
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", tmp_path)
+    fake_database.probe_result = Probe(
+        server_version="PostgreSQL 18.1", schema_version=0, latest_version=1
+    )
+    assert _validate_with_database(tmp_path, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "schema version 0 of 1; docker compose run --rm worker migrate" in out
+    assert "run issuebot migrate" not in out
+
+
 # --- validate: github.status (#88) -------------------------------------------------
 
 

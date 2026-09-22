@@ -17,6 +17,13 @@ the build creates the directory, beside the session-account list it writes insid
 nothing on a host does. Read at call time, never at import, so the suite can point the
 constant somewhere of its own -- the rule ``config.resolve.SESSION_ACCOUNTS_FILE`` already
 follows for that file, since the suite runs inside the image as well as on a host.
+
+The question it answers exactly is "is this a container built from the issuebot image", which
+is a shade narrower than "is compose the route in": this image run by a bare ``docker run``,
+or by an orchestrator that is not compose, reads the compose wording all the same. That is the
+side to be wrong on -- compose is what ships here, and the deployment that is not compose is
+one whose operator wrote its own invocation and can translate a named service into it -- while
+the reverse, naming a service to a host that has no image, is a remedy nobody can run at all.
 """
 
 from pathlib import Path

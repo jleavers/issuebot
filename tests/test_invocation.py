@@ -49,6 +49,12 @@ def test_a_marker_that_is_a_file_is_not_the_image(
     assert run_hint("labels ensure") == "run issuebot labels ensure"
 
 
+# Either wording hard-coded outside the helper is the same defect: one of the two deployments
+# would read a command it cannot run. `docker compose build worker` is not among them -- that
+# names a build, which has no host spelling at all.
+SPELLINGS = ("run issuebot ", "docker compose run --rm ")
+
+
 def test_no_module_spells_the_remedy_for_itself() -> None:
     """Every site that names `labels ensure` goes through the helper, so one deployment reads
     one wording: `validate`, the worker's startup complaint and both adapters' `not found`.
@@ -56,6 +62,7 @@ def test_no_module_spells_the_remedy_for_itself() -> None:
     offenders = [
         path.relative_to(SOURCE).as_posix()
         for path in SOURCE.rglob("*.py")
-        if path.name != "invocation.py" and "run issuebot " in path.read_text(encoding="utf-8")
+        if path.name != "invocation.py"
+        and any(spelling in path.read_text(encoding="utf-8") for spelling in SPELLINGS)
     ]
     assert offenders == []
