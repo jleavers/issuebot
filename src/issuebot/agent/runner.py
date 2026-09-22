@@ -88,10 +88,12 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # network rather than let anything off the allow-list (#126).
 # The tool-config entries below are the same rule one step in (#171): `PATH` decides *which*
 # binary `git` and `gh` are, and these decide what that binary does and which further commands
-# it runs. The file outlives the session -- a workspace belongs to one issue -- so what such a
-# line re-points is the next session on that issue. It is also the environment spelling of what
-# `TOOL_CONFIG_SWEEP` (`runas.py`, #151) removes from the account's home: a sweep of
-# `~/.gitconfig` would leave a guarantee conditional on a variable nothing checked.
+# it runs; the shell entries beside them are the same rule again for `bash`, which is the
+# process every hook and the post-clone setup *is* (#179). The file outlives the session -- a
+# workspace belongs to one issue -- so what such a line re-points is the next session on that
+# issue. It is also the environment spelling of what `TOOL_CONFIG_SWEEP` (`runas.py`, #151)
+# and `SHELL_STARTUP_SWEEP` (#137) remove from the account's home: a sweep of `~/.gitconfig`
+# or of `~/.profile` would leave a guarantee conditional on a variable nothing checked.
 #   The names are the rungs of git's and gh's own documented precedence chains that fall
 #   outside the two prefixes below. That is the rule, and it is checkable against
 #   `git-var(1)`, `git-commit(1)` and `gh environment` rather than being a list of everything
@@ -153,6 +155,46 @@ TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
 # root-owned `/etc/gitconfig` or `/etc/ssh/ssh_config` for a deployment-wide one; what it may
 # not do is hand the variable to the session.
 TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_", "GH_")
+# The same rule one tool further out again (#179), and the one tool every script issuebot runs
+# for a session goes through: `WorkspaceManager.hook_shell` is `bash -lc`, which opens the
+# post-clone setup and all four hooks. These are the variables `bash` itself reads out of the
+# environment it is handed, before or around the commands the hook actually wrote -- the
+# environment spelling of the shell start-up files `SHELL_STARTUP_SWEEP` (`runas.py`, #137)
+# removes from the account's home, where a sweep of `~/.profile` would otherwise leave a
+# guarantee conditional on a variable nothing checked. Measured, each of them, against the
+# image's own `bash` 5.2:
+#   BASH_ENV    the file a non-interactive `bash` sources before the command it was given:
+#               `BASH_ENV=<script> bash -lc 'echo hook-ran'` runs the script first. #137's
+#               channel exactly, in one line of a file the session can write.
+#   SHELLOPTS   `set -o` options enabled from the environment before any start-up file is read,
+#               `xtrace` among them (`BASHOPTS` is the `shopt` half of the same thing). No
+#               command of its own, and here for what it turns on:
+#   PS4         expanded before every traced command once `xtrace` is on, command substitution
+#               and all -- the first of them inside `/etc/profile`, long before the hook's own
+#               script. `SHELLOPTS=xtrace` with `PS4='$(...)'` was measured running the
+#               substitution. It takes the pair to run anything -- `PS4` is inert without
+#               `xtrace`, and `xtrace` with the default `PS4` only prints -- so both are here.
+#   CDPATH      `PATH`'s rule for directories: `cd sub` in a hook resolves through it, so a
+#               line here sends the hook into a tree of the last session's choosing and the
+#               relative command after the `cd` is that tree's file. `PATH` is protected for
+#               this reason and `cd` is the one lookup it does not cover.
+# `ENV` is *not* here: it is POSIX's start-up file for an *interactive* shell, and nothing
+# issuebot runs is interactive. Measured unread by `bash -lc`, by `bash --posix -c`, by `bash`
+# invoked as `sh`, and by `sh -c` (dash) -- so it is a name that would close nothing, and the
+# rule this list states is what was shown to work.
+# The cost is as close to nothing as a protection gets: nothing in the tree sets any of these,
+# and a hook that wants a file sourced before its own commands has `source` in the script it
+# already owns, `set -x` for a trace and an absolute path for a `cd`. What it may not do is
+# hand the *next* session's shell the variable.
+SHELL_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "BASH_ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "CDPATH",
+    }
+)
 PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
     {
         "GH_TOKEN",
@@ -161,6 +203,7 @@ PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
         *FIXED_ENVIRONMENT,
         *PROXY_ENV_NAMES,
         *TOOL_CONFIG_ENV_NAMES,
+        *SHELL_ENV_NAMES,
     }
 )
 PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", *TOOL_CONFIG_ENV_PREFIXES)

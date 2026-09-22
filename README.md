@@ -1125,6 +1125,33 @@ hook that would truncate it again or append a duplicate per session.
     and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
     for the convenience of pointing another tool's config somewhere.
 
+- **So are the five names that decide what the hook's own shell runs** (#179): `BASH_ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
+  post-clone setup and all four hooks — goes through `bash -lc`, and `bash` reads these out of
+  the environment it is handed, before or around the commands the hook actually wrote:
+
+  - `BASH_ENV` names a file a non-interactive `bash` **sources before** the command it was
+    given. That is the `~/.profile` channel below in variable form, reaching every hook of the
+    next session on that issue.
+  - `SHELLOPTS` and `BASHOPTS` enable `set -o` and `shopt` options from the environment before
+    any start-up file is read, `xtrace` among them — and with `xtrace` on, `PS4` is expanded
+    before every traced command, command substitution and all, the first of them inside
+    `/etc/profile`. It takes the pair: `PS4` is inert without `xtrace`, and `xtrace` with the
+    default `PS4` only prints. So both are protected, `BASHOPTS` with them as the `shopt` half
+    of the same switch.
+  - `CDPATH` is `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so a line
+    here sends the hook into a tree of the last session's choosing and the relative command
+    after the `cd` is that tree's file.
+
+  The cost is about as small as a protection gets: a hook that wants a file sourced before its
+  own commands has `source` in the script it already owns, `set -x` for a trace, and an absolute
+  path for a `cd`. What it may not do is hand the variable to the *next* session's shell.
+
+  **`ENV` is not protected, and does not need to be.** It is POSIX's start-up file for an
+  *interactive* shell, and nothing issuebot runs is interactive: it was measured unread by
+  `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
+  `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
@@ -1140,7 +1167,9 @@ hook that would truncate it again or append a duplicate per session.
   installer (`rustup`, `nvm`, `pyenv`) appends its `PATH` line to. The worker sweeps the session
   account's shell start-up files before every hook and every turn (#137), so an installer's line
   is gone before the next login shell would read it — between two sessions, which is the point,
-  and within one. `PATH` itself is a protected name here too, so the routes for a tool the image
+  and within one. Nor through `BASH_ENV`, which names such a file without writing one: it is a
+  protected name above (#179), so the sweep's guarantee does not rest on a variable nothing
+  checked. `PATH` itself is a protected name here too, so the routes for a tool the image
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
