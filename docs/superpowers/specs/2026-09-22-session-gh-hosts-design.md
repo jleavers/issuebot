@@ -232,7 +232,9 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   credential file on a guess is the one outcome worse than the plant: a session whose `gh`
   cannot authenticate does no work at all, where a session carrying the plant is held by the
   bounds above. `GH_HOSTS_LIMIT` (256 KiB) is #110's rule at the one seam that parses a file the
-  session can grow, and past it the file is untouched.
+  session can grow, and past it the file is untouched. The read is `O_NONBLOCK` with an `fstat`
+  on the descriptor, `Boundary.read`'s rule: a FIFO at that name would otherwise hang the open
+  waiting for a writer that never comes, once per turn and once per hook.
 - **Not written at all unless a key came out.** The sweep runs before every turn and before
   every hook, and rewriting a credential file on each of those — reformatting it, racing a `gh`
   that is reading it — for no change is a cost with no benefit. A home no session has planted in
@@ -275,7 +277,7 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
 - a plant locked behind `chmod 0000` still comes out;
 - a symlink at `hosts.yml`, and at `.config/gh`, is unlinked and what it points at is untouched;
 - a file that is not YAML, not a mapping, not UTF-8 or empty is left alone, and so is one over
-  the cap;
+  the cap and one that is not a regular file (a FIFO, which must not block the sweep);
 - a home that never held the file is a no-op;
 - and the list itself is pinned, disjoint from the credential keys and absent from
   `TOOL_CONFIG_SWEEP`.

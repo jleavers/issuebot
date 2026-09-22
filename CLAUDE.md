@@ -404,8 +404,10 @@ version, and moves by hand.
   session -- so the set is *proved* instead, the `docker` CI job asking the image's own `gh`
   which keys `-h` writes and failing on anything but these five. Fail-safe in one direction only:
   a file that will not open even with the modes put back, one over `GH_HOSTS_LIMIT` (256 KiB),
-  bytes that are not UTF-8 or not YAML, and a document that is not the mapping of hosts `gh`
-  writes are all left exactly as they are, since rewriting a credential file on a guess is the
+  one that is not a regular file (`O_NONBLOCK` and an `fstat`, `Boundary.read`'s rule, since a
+  FIFO at that name would hang the open once per turn and once per hook), bytes that are not
+  UTF-8 or not YAML, and a document that is not the mapping of hosts `gh` writes are all left
+  exactly as they are, since rewriting a credential file on a guess is the
   one outcome worse than the plant. It is not written at all unless a key came out, so an
   unplanted home keeps its `hosts.yml` byte for byte across the sweep that runs before every turn
   and every hook; the rewrite is atomic (a temporary file in the same directory, `os.replace`) and

@@ -666,6 +666,23 @@ def test_sweep_leaves_a_hosts_file_it_cannot_understand(
     assert _hosts(home).read_bytes() == content, name
 
 
+def test_sweep_declines_a_hosts_file_that_is_not_a_regular_file(tmp_path: Path) -> None:
+    """A FIFO at that name would hang an `open` waiting for a writer that never comes, and this
+    sweep runs before every turn and every hook -- so the plant would cost a hung helper per
+    turn where the file it replaced is one the session owns anyway. `O_NONBLOCK` and an `fstat`
+    on the descriptor, the rule `Boundary.read` has, and the FIFO is left where it is: the
+    removals this sweep does make have already run by then."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).unlink()
+    os.mkfifo(_hosts(home))
+    _sweep(home)
+    assert stat.S_ISFIFO(_hosts(home).lstat().st_mode)
+    # And the rest of the sweep still did its work, since this is the last step.
+    for name in SHELL_STARTUP_SWEEP:
+        assert not (home / name).exists(), name
+
+
 def test_sweep_leaves_a_hosts_file_over_the_cap(tmp_path: Path) -> None:
     """#110's rule at the one seam that parses a file the session can grow. Past the cap the
     file is left exactly as it is: `gh` is not authenticating from a `hosts.yml` this size

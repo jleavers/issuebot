@@ -755,12 +755,19 @@ def _read_capped(target: Path) -> str | None:
     """At most ``GH_HOSTS_LIMIT`` bytes of ``target`` as text, or ``None``.
 
     ``O_NOFOLLOW`` because the caller's symlink check and this open are two steps, and the
-    session owns the directory between them. One byte past the cap is read deliberately, so a
-    file *at* the limit is told from one over it.
+    session owns the directory between them. ``O_NONBLOCK`` and the ``fstat`` for the reason
+    ``Boundary.read`` has both (#104): a session that replaces its own ``hosts.yml`` with a FIFO
+    would otherwise have this ``open`` wait for a writer that never comes, and the sweep runs
+    before every turn and every hook -- so the plant would cost a hung helper per turn and a
+    ``claude_home_sweep_failed`` warning, where declining a file that is not a regular file
+    costs the plant nothing it did not already have. One byte past the cap is read deliberately,
+    so a file *at* the limit is told from one over it.
     """
     fd = None
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
         raw = os.read(fd, GH_HOSTS_LIMIT + 1)
     except OSError:
         return None
