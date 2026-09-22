@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
+    LOADER_ENV_NAMES,
     MIN_CLAUDE_VERSION,
     PROTECTED_ENV_NAMES,
     PROTECTED_ENV_PREFIXES,
@@ -814,6 +815,128 @@ def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environmen
         "PS4 is protected",
         "CDPATH is protected",
     ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # Objects mapped ahead of all others into every dynamically linked program, their ELF
+        # constructors run before `main`. Measured printing `libmemusage.so`'s output ahead of
+        # the hook's own under `bash -lc 'echo hook-ran'`, and inside `git`.
+        "LD_PRELOAD",
+        # The rtld-audit interface, loaded earlier still -- and measured running the named
+        # object's constructors even when it is not a valid audit module at all, so
+        # "it has to implement `la_version`" bounds nothing.
+        "LD_AUDIT",
+        # `PATH`'s rule one layer down: the directories a `DT_NEEDED` soname resolves through.
+        # It names no object, which is the whole case for treating it differently -- and a file
+        # planted at `libpcre2-8.so.0` in a directory of the line's choosing was what `git`
+        # loaded, its constructor running inside `git` with no `LD_PRELOAD` anywhere.
+        "LD_LIBRARY_PATH",
+        # Not a way to run code but a way to run none: the loader prints the dependency list
+        # and exits 0 without entering `main`. Measured voiding `git rev-parse`, `claude
+        # --version` and `bash -lc 'echo hook-ran'`, whose `echo` never ran while the shell
+        # still reported success -- the `PATH`/`HOME` half of this list's rule, failing
+        # silently as nothing else in the file does.
+        "LD_TRACE_LOADED_OBJECTS",
+    ],
+)
+def test_merge_workspace_env_refuses_the_dynamic_loaders_own_names(key: str) -> None:
+    """#187: the same rule one layer under every tool rather than one tool further out. These
+    are read by `ld.so` out of whatever environment the process was handed, before `bash`,
+    `git` or the `claude` child reaches `main` -- the same set #171 and #179 drew their bound
+    around, which is why the "variables of *other* tooling" filing those notes gave
+    `LD_PRELOAD` does not hold."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_loader_protections_are_pinned() -> None:
+    """A deliberate edit here as well as in `runner.py`, as the sweep lists, the tool-config
+    entries and the shell entries are. The rule is what makes the dynamic loader load an object
+    of the value's choosing into every dynamically linked program, or run none at all --
+    checkable against `ld.so(8)`'s ENVIRONMENT section, and finite. Each was measured under the
+    image's own glibc 2.41, with `libmemusage.so` standing in for the prebuilt shared object
+    the issue describes, since the default image carries no compiler."""
+    assert sorted(LOADER_ENV_NAMES) == [
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LD_TRACE_LOADED_OBJECTS",
+    ]
+    assert LOADER_ENV_NAMES <= PROTECTED_ENV_NAMES
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # binutils `ld`'s link-time default for `-rpath`, not the runtime loader's at all --
+        # and the very route a hook is pointed at instead of `LD_LIBRARY_PATH`. Protecting it
+        # would refuse the recommended workaround, which is the decisive reason this is four
+        # names and not an `LD_` prefix.
+        "LD_RUN_PATH",
+        # Behaviour and diagnostics. Each was measured leaving `git --version` working, and
+        # none names an object the loader would not otherwise have loaded.
+        "LD_BIND_NOW",
+        "LD_DYNAMIC_WEAK",
+        "LD_DEBUG",
+        "LD_DEBUG_OUTPUT",
+        "LD_PROFILE",
+        # glibc's tunables namespace: allocator and hwcap parameters, no object.
+        "GLIBC_TUNABLES",
+        # No underscore, so not that it would have matched a prefix -- but a linker flag a
+        # build hands over is exactly what this file is for.
+        "LDFLAGS",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_loader_entries(key: str) -> None:
+    """The bound is on what the loader *loads*, or refuses to run, and a list of names is only
+    worth stating if it stops where it says it does."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
+
+
+def test_a_workspace_env_line_re_pointing_the_loader_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#187): what a session leaves in `.issuebot/env` is what the
+    *next* session on that issue is handed, and the complaint names the key that was dropped.
+    Before this change the same file was measured handing all four straight through, and each
+    was measured acting on the image's own `bash`, `git` and `claude`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "LD_PRELOAD=/tmp/theirs/plant.so\n"
+        "LD_AUDIT=/tmp/theirs/plant.so\n"
+        "LD_LIBRARY_PATH=/tmp/theirs/libs\n"
+        "LD_TRACE_LOADED_OBJECTS=1\n"
+        # Not the loader's, and the route a hook is told to use instead: it stays.
+        "LD_RUN_PATH=/opt/vendor/lib\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["LD_RUN_PATH", "DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert merged["LD_RUN_PATH"] == "/opt/vendor/lib"
+    assert not [name for name in merged if name in LOADER_ENV_NAMES]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "LD_PRELOAD is protected",
+        "LD_AUDIT is protected",
+        "LD_LIBRARY_PATH is protected",
+        "LD_TRACE_LOADED_OBJECTS is protected",
+    ]
+    # The complaint names the key and never the value, as it does for every protected name.
+    assert "plant.so" not in stream.getvalue()
 
 
 def test_a_workspace_env_line_cannot_export_a_shell_function(tmp_path: Path) -> None:

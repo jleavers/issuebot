@@ -718,8 +718,9 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
-  `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`), `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+  `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`,
+  `LD_TRACE_LOADED_OBJECTS`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -727,7 +728,23 @@ version, and moves by hand.
   post-clone setup *is*, which is the environment spelling of what #137 sweeps -- `BASH_ENV`
   names a file the shell sources before the hook's own commands, `SHELLOPTS`/`BASHOPTS` turn on
   `xtrace` and `PS4` is then expanded, substitutions and all, before every traced command, and
-  `CDPATH` is `PATH`'s rule for the one lookup `PATH` does not cover. `ENV` is deliberately
+  `CDPATH` is `PATH`'s rule for the one lookup `PATH` does not cover; nor, since #187 (spec
+  `2026-09-22-session-loader-env-design.md`), the dynamic loader running under *all* of them,
+  which is the same rule one layer down rather than one tool further out -- `ld.so` reads these
+  out of whatever environment a process was handed and acts on them before it reaches `main`,
+  and in this image `bash`, `git` and `claude` are dynamically linked while `gh` is a static Go
+  binary and the one tool not reached. `LD_PRELOAD` and `LD_AUDIT` map an object and run its
+  constructors (`LD_AUDIT` measured doing so even for an object that is not a valid audit
+  module); `LD_LIBRARY_PATH` names no object but is `PATH`'s rule one layer down, a file planted
+  at a needed soname having been measured loading into `git` with no `LD_PRELOAD` anywhere,
+  which is what settles the split verdict the issue floated; and `LD_TRACE_LOADED_OBJECTS` runs
+  *nothing*, the loader printing the dependency list and exiting 0 without entering `main`, so
+  one line voids every hook and the turn's `claude` while reporting success -- the `PATH`/`HOME`
+  half of the list's rule, and the only entry in the file that fails silently. Four names and
+  not an `LD_` prefix, because `LD_RUN_PATH` is binutils `ld`'s link-time `-rpath` default and
+  so the very route a hook is pointed at instead of `LD_LIBRARY_PATH`; `LD_BIND_NOW`,
+  `LD_DEBUG`, `LD_PROFILE` and `GLIBC_TUNABLES` stay out too, each measured leaving
+  `git --version` working. `ENV` is deliberately
   *not* there: it is the interactive shell's start-up file, measured unread by `bash -lc`,
   `bash --posix -c`, `bash` as `sh` and `sh -c` (dash), so it would close nothing. Whole
   prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain

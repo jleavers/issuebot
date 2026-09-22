@@ -1152,6 +1152,47 @@ hook that would truncate it again or append a duplicate per session.
   `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
   `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
 
+- **So are the four names the dynamic loader reads** (#187): `LD_PRELOAD`, `LD_AUDIT`,
+  `LD_LIBRARY_PATH` and `LD_TRACE_LOADED_OBJECTS`. This is the same rule one layer *under* all
+  of the above rather than one tool further out: `ld.so` reads these out of whatever environment
+  a process was handed, and acts on them before that process reaches `main`. In this image
+  `bash` (so every hook and the post-clone setup), `git` and `claude` are all dynamically
+  linked; `gh` is a static Go binary and is the one tool not reached.
+
+  - `LD_PRELOAD` maps objects ahead of all others, running their constructors before `main`, and
+    `LD_AUDIT` does it earlier still — measured running the named object's constructors *even
+    when it is not a valid audit module*.
+  - `LD_LIBRARY_PATH` names no object, but it is `PATH`'s rule one layer down: a file planted at
+    a soname the target needs, in a directory of the line's choosing, is what the loader maps,
+    and its constructor was measured running inside `git` with no `LD_PRELOAD` anywhere.
+  - `LD_TRACE_LOADED_OBJECTS` is the odd one out and the only entry in this whole file that
+    fails *silently*: the loader prints the dependency list and **exits 0 without entering
+    `main`**. One line here makes every hook "pass" without running its commands and stops the
+    turn's `claude` starting.
+
+  **If you need `LD_LIBRARY_PATH` for a build, this is the one with a real cost**, so here is
+  what to do instead. The other three have no hand-over use and nothing is lost by refusing
+  them.
+
+  - **Bake a `RUNPATH` in at link time** — `-Wl,-rpath`, or `LD_RUN_PATH`, which is binutils
+    `ld`'s link-time default and is **not protected**. This is the correct fix rather than a
+    workaround: `ld.so(8)` calls `LD_LIBRARY_PATH` a facility for testing and debugging, and an
+    artefact that needs a library at run time has `RUNPATH` for exactly that. It is also why the
+    usual `after_create` never needs the variable: Python wheels and node native modules already
+    carry theirs.
+  - **`/etc/ld.so.conf.d/*.conf` plus `ldconfig`, in an image built `FROM` this one**, for a
+    deployment-wide library path — root's, outside the session's reach, the same route offered
+    above for `/etc/gitconfig`.
+  - **The hook's own shell**: `LD_LIBRARY_PATH=/opt/vendor/lib make check` inside the script the
+    hook already writes is unchanged. What is refused is handing the variable to the *session* —
+    and so to the next session on that issue, since the workspace outlives the run.
+
+  `LD_RUN_PATH` is not protected, and neither are `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_DEBUG`,
+  `LD_DEBUG_OUTPUT`, `LD_PROFILE` or `GLIBC_TUNABLES`: none of them names an object the loader
+  would not otherwise have loaded, and each was measured leaving `git --version` working. That
+  is also why this is four names and not an `LD_` prefix — a prefix would refuse `LD_RUN_PATH`,
+  which is the route recommended just above.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
