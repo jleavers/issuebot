@@ -243,6 +243,9 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
         r"printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n"
         r"    user: nobody\\n"
     ) in CI
+    # And that the file it is redirected into is still `hosts.yml`, which the prefix above
+    # stops short of naming.
+    assert r"\" > /home/agent/.config/gh/hosts.yml" in CI
     assert (
         'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN'
     ) in CI

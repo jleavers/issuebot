@@ -1719,9 +1719,9 @@ async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
     # not override: the real `gh` refuses to run at all against a host entry it cannot migrate
     # ("cowardly refusing to continue"), and a `gh` that never reached its dispatch would pass
     # the swept half for the wrong reason. The `oauth_token` key is what it refuses without
-    # (measured: it is the key it names), and the value there is deliberately not token-shaped
-    # -- dispatch precedes authentication, so nothing here is a credential and no request is
-    # made.
+    # (measured: it is the key it names). Its value is token-*shaped* since #190, which needs a
+    # keep-marker its own edit has to carry through, but it is a sentinel and not a credential,
+    # and dispatch precedes authentication either way, so no request is made.
     _account_home(monkeypatch, home)
     monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
     cfg = Settings.model_validate(

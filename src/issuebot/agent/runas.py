@@ -197,12 +197,14 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # ``hosts.yml`` beside this list's fourth entry is the invariant #151 pinned and this change
 # keeps -- it is credential state, which authenticates the next session rather than steering
 # it, the same line ``.claude/.credentials.json`` sits on. It is not inert, and #173's spec
-# names the residual rather than leaving it to be found: ``gh config set -h <host>`` writes
+# named the residual rather than leaving it to be found: ``gh config set -h <host>`` writes
 # there, and the ``api_host`` it can carry re-points ``gh api`` on an ordinary command with no
-# ``config.yml`` in sight (measured; filed as #190). What keeps it a residual rather than an
-# entry here is that it is an ordinary HTTPS request to a name -- so #126's ``internal``
-# networks and the allow-listing proxy do see it, where a unix socket is not a route at all --
-# and that the acceptance bar for this change is precisely that ``hosts.yml`` survives.
+# ``config.yml`` in sight (measured; filed as #190). What keeps it off *this* list is that the
+# acceptance bar for this change is precisely that ``hosts.yml`` survives -- so it is kept as a
+# file and edited key-wise instead, which is ``GH_HOSTS_STEERING_KEYS`` below. That the channel
+# was also the weaker of the two is why it could wait for its own change: it is an ordinary
+# HTTPS request to a name, so #126's ``internal`` networks and the allow-listing proxy do see
+# it, where a unix socket is not a route at all.
 # Each is the sequence of its path components, because every one of them is nested and the
 # sweep walks rather than follows -- ``.ssh``, ``.config`` or ``.config/gh`` replaced with a
 # symlink is unlinked as the plant it is, not stepped through to whatever it points at.

@@ -411,12 +411,14 @@ version, and moves by hand.
   `hosts.yml` beside it survives, the invariant #151 pinned: a credential authenticates the
   next session rather than steering it, the line `.claude/.credentials.json` sits on, which is
   what makes this a file-level entry and not a directory-level one. That file is not inert,
-  and #173's spec names the residual rather than leaving it to be found (#190): `gh config set
+  and #173's spec named the residual rather than leaving it to be found: `gh config set
   -h <host>` writes there, and an `api_host` in it re-points `gh api` on an ordinary command
-  with no `config.yml` anywhere. It stays a residual because taking `hosts.yml` is the one
-  thing #173 may not do, and because it is an ordinary HTTPS request to a name — so #126's
-  `internal` networks and the allow-listing proxy do see it, where a unix socket is not a
-  route at all.
+  with no `config.yml` anywhere. #173 could not close it -- taking `hosts.yml` is the one thing
+  it may not do -- so it filed it, and #190 closed it *inside* the file, which is the
+  `GH_HOSTS_STEERING_KEYS` paragraph below: the file survives, the configuration in it does
+  not. What was always weaker about this position than `config.yml`'s stays true of whatever a
+  future key opens here: it is an ordinary HTTPS request to a name, so #126's `internal`
+  networks and the allow-listing proxy do see it, where a unix socket is not a route at all.
   Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
   (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
   not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
@@ -468,8 +470,8 @@ version, and moves by hand.
   closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
   makes `gh auth status` report `Git operations protocol: ssh`, and fails `gh repo clone`
   outright with `cannot run ssh: No such file or directory`, the image shipping no ssh client --
-  but it is *also* honoured from `config.yml`, which #173 takes -- #190 was written while #189
-  was still open and said so; with it landed, both positions are closed. `http_unix_socket`,
+  but it is *also* honoured from `config.yml`, which #173 takes -- #190 was written while that
+  was still open and said so; in this tree both positions are closed. `http_unix_socket`,
   `pager`, `editor` and `browser` are measured *inert* here (the same values at top level fire;
   the hostname-less lookup is what gh's own pager, editor and browser resolution uses) and the
   remaining seven are cosmetic or documented global; all are removed anyway, since a key that

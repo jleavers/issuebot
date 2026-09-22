@@ -750,7 +750,10 @@ hook that would truncate it again or append a duplicate per session.
   transport is already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`)
   or held off it (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes
   one when it next has config of its own to write, so a hook's `gh config set` still configures
-  the `gh` in its own shell.
+  the `gh` in its own shell. `gh config set -h <host>` is the same answer by a different route:
+  it writes into `~/.config/gh/hosts.yml`, which is credential state and so is *kept* — but the
+  configuration in it is stripped key by key on the same schedule (#190), so what a hook sets
+  there lasts exactly as long, and for the same reason.
 - **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
   schedule (#186), so an extension a hook installs is gone before the next login shell and
   before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is

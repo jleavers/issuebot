@@ -369,14 +369,6 @@ whatever this edit did. #173 closed that position too — the file is swept, abo
 shut now. `api_host` never had a second position: top level is inert for it, and this edit
 closes it outright.
 
-The sweep leaves the
-rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
-the transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-sat in stay too, with whatever else is in them — the rest of `gh`'s configuration beside git's,
-`known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
-denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
-new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
 `gh`'s extension directory is swept on the same schedule (#186), and is the one thing swept
 that is a program rather than a setting: `~/.local/share/gh/extensions` is where
 `gh extension install` puts a program that `gh <name>` runs, and it needs no install step to

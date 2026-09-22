@@ -20,8 +20,9 @@ and one of the keys it can carry re-points `gh` on an ordinary core command.
 
 **Where #173 stands matters for reading the rest of this, so it is said here rather than in a
 footnote: it had not landed when this was written.** PR #189 was open, `~/.config/gh/config.yml`
-was *not* swept on `main`, and nothing in this change sweeps it. (#189 has since landed, so the
-`config.yml` half is closed too; the two places below that turn on it say so.) The
+was *not* swept on `main`, and nothing in this change sweeps it. (In the tree this note now
+sits in, #173 sweeps it, so that half is closed too; the two places below that turn on it say
+so.) The
 reproductions below are run in the state the issue specifies — a `hosts.yml`, no `config.yml`
 anywhere — because that isolates what this file contributes, which is the question asked. What
 that state is not is a description of `main`, and the section on what this does not close says
@@ -382,7 +383,7 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   closed outright is `api_host`, the issue's subject, because top level is inert for it —
   measured, a `config.yml` carrying `api_host: 127.0.0.1` left the request on the real
   `api.github.com`. Closing the other half is #189's to do and is deliberately not duplicated
-  here — and #189 has since landed, so both positions are now closed.
+  here — and in the tree this note now sits in, it is done, so both positions are closed.
 - **A YAML merge key leaves the text in the file, and the sweep reports success.** `<<: *anchor`
   pointing at a mapping of steering keys is not stripped — `_HostsLoader` clears the merge
   resolver with the rest, so the sweep sees a literal `<<` key and nothing to remove. Not a
