@@ -478,10 +478,10 @@ hook that would truncate it again or append a duplicate per session.
   `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
   repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
   name the directory holding `config.yml`, whose aliases may be shell commands and whose
-  `http_unix_socket` re-points where `gh` sends every request, and `GH_EDITOR`
-  and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
-  holding `GH_TOKEN`. (The file itself is swept from the account's home on the same schedule,
-  #173; these are the variables that would move it somewhere the sweep does not look.)
+  `http_unix_socket` re-points where `gh` sends every request, and `GH_EDITOR` and `GH_BROWSER`
+  name commands — so between them they re-point the one tool in the session holding `GH_TOKEN`.
+  (The file itself is swept from the account's home on the same schedule, #173; these are the
+  variables that would move it somewhere the sweep does not look.)
 
   Whole prefixes rather than a list of those names, because a list is one somebody has to keep
   complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
@@ -591,11 +591,10 @@ hook that would truncate it again or append a duplicate per session.
   directory's *name* through this file and the agent can use it).
 - **Nor through `git config --global` or `gh config set`.** The session account's
   `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and `~/.config/gh/config.yml` are
-  swept on the same schedule, so a hook
-  that writes user-level git, ssh or `gh` config finds it gone before the next login shell — again
-  between two sessions and within one. Commit identity is already handled: set the
-  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
-  the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
+  swept on the same schedule, so a hook that writes user-level git, ssh or `gh` config finds it
+  gone before the next login shell — again between two sessions and within one. Commit identity
+  is already handled: set the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach
+  every session's `git` through the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
   `git config --local` inside the clone, which is what the post-clone setup does. `gh` has no
   system-wide file and needs none: every key it respects that names a command or a transport is
