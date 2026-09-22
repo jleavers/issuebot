@@ -132,7 +132,7 @@ installed, and #179 protected `CDPATH` in as many words as "`PATH`'s rule for th
 The cost is real and is stated rather than waved away. A target repository's `after_create` may
 legitimately build against a library in a private prefix, whose tests the *agent's turn* then
 runs — and a turn is not the hook's shell, so "export it around your own command" does not cover
-that case. Three routes do, and the README carries them:
+that case. Three routes do, and `docs/toolchains.md` carries them:
 
 - **A `RUNPATH` baked in at link time** — `-Wl,-rpath`, or `LD_RUN_PATH`, which is binutils
   `ld`'s link-time default and is **deliberately left unprotected**. This is the correct fix
@@ -141,7 +141,7 @@ that case. Three routes do, and the README carries them:
   also why the common `after_create` never needs the variable — Python wheels (auditwheel) and
   node native modules already carry theirs.
 - **`/etc/ld.so.conf.d/*.conf` with `ldconfig`, in an image built `FROM` this one.** Root's,
-  outside the session's privilege domain — the same route the README already gives for
+  outside the session's privilege domain — the same route `docs/toolchains.md` already gives for
   `/etc/gitconfig` and `/etc/ssh/ssh_config`, and better than a variable for a deployment-wide
   setting.
 - **The hook's own shell**, `LD_LIBRARY_PATH=... cmd`, unchanged. What is bounded is the
@@ -175,7 +175,7 @@ smuggled scope increase.
 
 This one is recorded at length because the first draft of this change got it wrong, in the
 instructive way. `LD_DEBUG` was measured with `libs` and `all`, found inert, and written into the
-README and the tests as *certified safe*. It is not. **Any** value containing `help` makes the
+documentation and the tests as *certified safe*. It is not. **Any** value containing `help` makes the
 loader print its option list and exit 0 without entering `main`:
 
 ```text
@@ -237,8 +237,8 @@ against `bash(1)`'s "Invocation".
   get itself loaded by.
 - **The refusal is visible only in the worker's log** (`workspace_env_ignored`, one line naming
   the key), not to the hook that wrote it. That is the existing behaviour for every protected
-  name; the README is where a hook author finds the rule before debugging a variable that
-  silently did not arrive.
+  name; `docs/toolchains.md` is where a hook author finds the rule before debugging a
+  variable that silently did not arrive.
 
 ## Tests
 
