@@ -1718,19 +1718,24 @@ README and writing there: the README is the front door and most of what used to 
 now does not, so an edit made in the wrong file either lands where nobody reads it or becomes a
 second copy of a section that has already moved, and the two then drift.
 
-A pointer *between* these files is checked rather than trusted, because the failure is silent:
-a link carrying an anchor -- `[Safety](docs/operations.md#safety)` -- still renders and still
-loads the file after the heading it names has been renamed, and the browser simply lands at the
-top. `tests/test_doc_pointers.py` resolves every markdown link in this tree's operator-facing
-markdown against the tree, and every anchor against the slugged headings of the file it lands
-in, so a rename that moves a section out from under a pointer fails a test rather than a reader
-(#218). The swept set is `SWEPT_FILES` in that module, and it is not quite the list below: it
-takes `AGENTS.md`, `configs/WORKFLOW.md` and the two directory-local `README.md`s as well,
-while `LICENSE` and `.github/ISSUE_TEMPLATE/` are outside it, being no markdown prose. It is
-recorded here for the reason `test_readme_bounds.py` below is: an edit to a heading in that set
-can fail it, and the failure names a slug rather than a rule. `docs/superpowers/` is outside
-the sweep -- a pointer in a dated design record is a statement about where the content was
-when it was written.
+A pointer *between* these files is checked rather than trusted, because the failure is silent.
+`tests/test_doc_pointers.py` holds both shapes one such pointer takes. A section title in
+quotes beside a document's name -- `(docs/operations.md, "Rotating the database password")`,
+the form `compose.yaml` and `.env.example` use -- is resolved against that document's headings
+(#210). And a markdown link carrying an anchor -- `[Safety](docs/operations.md#safety)` --
+is resolved against GitHub's slug of them (#218): that one still renders and still loads the
+file after the heading it names has been renamed, and the browser simply lands at the top.
+Either way a rename that moves a section out from under a pointer fails a test rather than a
+reader.
+
+Both read one parse of the headings (`_headings`) and one list of files, which is every file
+the repository *tracks* rather than a list to keep complete -- so a pointer in a module
+docstring is swept like one in the README, and a nested checkout under `.claude/worktrees/` is
+not swept at all. The anchor half narrows that to the markdown among them, anchors meaning
+nothing in a file with no headings. `docs/superpowers/` is excluded by name: a pointer in a
+dated design record is a statement about where the content was when it was written. Recorded
+here for the reason `test_readme_bounds.py` below is: an edit to a heading in this set can fail
+it, and the failure names a slug or a quoted title rather than a rule.
 
 - `README.md`: the front door -- what issuebot is, the label state machine, the quick start,
   the five-step setting-up guide, the configuration reference (every setting, the prompt and
