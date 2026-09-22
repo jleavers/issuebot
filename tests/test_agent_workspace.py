@@ -184,6 +184,47 @@ async def test_reuse_skips_clone_and_hooks(
 
 
 @posix
+async def test_reuse_keeps_the_clones_own_git_config(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """The decided behaviour of #180: the reused clone is handed over whole, `.git` included.
+
+    A workspace outlives its run and the clone inside it is the session's to write (#75), so a
+    `--local` key or a `.git/hooks/` script one session leaves is there for the next session on
+    that issue -- and both name commands git runs. That is a channel, it is inside the session's
+    own privilege domain rather than across it, and
+    `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md` records the decision not
+    to bound it: the unit is the clone and not the file, and not reusing the workspace is the
+    only thing that would close it. Pinned here so that bounding it later fails this test and
+    has to edit the note with it.
+    """
+    manager, gh = make_manager(tmp_path)
+    issue = make_issue(identifier="example-42")
+    first = await manager.create_or_reuse(issue)
+    subprocess.run(
+        ["git", "-C", str(first.path), "config", "--local", "alias.st", "!printf planted"],
+        check=True,
+    )
+    hook = first.path / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\nprintf planted\n")
+    hook.chmod(0o755)
+
+    second = await manager.create_or_reuse(issue)
+
+    assert not second.created
+    assert second.path == first.path
+    assert len(gh.calls) == 1
+    read_back = subprocess.run(
+        ["git", "-C", str(second.path), "config", "--local", "--get", "alias.st"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert read_back.stdout.strip() == "!printf planted"
+    assert hook.exists()
+
+
+@posix
 async def test_remnant_without_git_is_recreated(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:

@@ -156,6 +156,11 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # credential helper is ``git config --local`` inside the clone. A deployment that does want
 # global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
 # session's privilege domain, in the image or in one built ``FROM`` it.
+# The clone's *own* ``.git/config`` is the other side of that same line and is deliberately not
+# swept (#180, spec ``2026-09-22-clone-reuse-residual-design.md``): it is the session's file in
+# a workspace that belongs to one issue, the unit of that channel is the clone rather than the
+# file, and not reusing the workspace is the only thing that would close it. This list is about
+# the *home*, which is shared with sessions working other issues; that one is not.
 # A denylist like the two above: named paths, and everything else in the home is left alone.
 # Each is the sequence of its path components, because every one of them is nested and the
 # sweep walks rather than follows -- ``.ssh`` or ``.config`` replaced with a symlink is

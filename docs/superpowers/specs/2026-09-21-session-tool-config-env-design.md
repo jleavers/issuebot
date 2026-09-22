@@ -278,7 +278,14 @@ beside `PATH` and the proxy names.
   base-directory specification that a target repository's hooks reach for. Named because
   "protected" must not be read as "the next session on this issue inherits nothing"; filed as
   #180 rather than folded in, since the answer is about workspace reuse and not about this
-  file.
+  file. **#180 decided it, and decided not to bound it**
+  (`2026-09-22-clone-reuse-residual-design.md`): the unit of that channel is the clone rather
+  than the file -- `include.path` and `core.hooksPath` put the same keys outside `.git/config`,
+  and the working tree and `<workspace>/.venv` the reuse also keeps are wider than any of them
+  -- so the only thing that would close it is not reusing the workspace, which is what
+  `_is_complete` exists to avoid. The README says so under "How long a workspace lives, and
+  what a reused one hands the next session", which is where a deployment sees a workspace
+  outlive its run; read that rather than this bullet for the current answer.
 
 - **`BASH_ENV`.** Measured firing under `bash -lc`, which is `WorkspaceManager.hook_shell`:
   `BASH_ENV=/tmp/gitprobe/bashenv.sh bash -lc 'echo hook-ran'` printed `BASH_ENV-RAN` first. That

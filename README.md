@@ -568,7 +568,9 @@ the logs on your terminal.
   the issue); the worker removes the state label and records a cancellation, which the closed
   counts do not include.
 - **Re-queue it.** Moving `issuebot/in-progress` or `issuebot/review` back to `issuebot/todo`
-  is also allowed; the issue is picked up again from its existing workspace.
+  is also allowed; the issue is picked up again from its existing workspace -- clone, working
+  tree, venv and `.git/config` as the last session left them ("How long a workspace lives, and
+  what a reused one hands the next session" under "When things go wrong").
 
 ### Choosing the model for an issue
 
@@ -1181,6 +1183,12 @@ hook that would truncate it again or append a duplicate per session.
   the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
   `git config --local` inside the clone, which is what the post-clone setup does.
+- **What the clone itself does carry over.** `git config --local` is the route that stays open,
+  and it stays open in both directions: a workspace outlives its run, so what a hook -- or the
+  session -- writes into the clone's `.git/config` is there for the next session on that issue.
+  That is a decision and not an oversight; "How long a workspace lives, and what a reused one
+  hands the next session" under "When things go wrong" says what it reaches and why issuebot
+  does not reset it.
 
 ### More than one repository
 
@@ -1321,6 +1329,33 @@ that matters on your host.
   `notifications.slack.events`) show each run's cost.
 - **Restarts.** Workspaces persist in the `workspaces` volume; on startup the worker resumes
   issues that were `issuebot/in-progress` from where they stopped.
+- **How long a workspace lives, and what a reused one hands the next session.** A workspace is
+  created when an issue is first claimed and removed when the issue reaches
+  `issuebot/complete`; in between it outlives every one of its runs. An issue sitting in
+  `issuebot/review` keeps its clone for as long as it waits for you, and a retry, a rework
+  bounce or a re-queue picks that clone up rather than cloning again -- which is the point, and
+  part of what `agent.max_issue_cost_usd` pays for. There is no setting that shortens this: the
+  issue's own lifecycle is the lever, and removing the workspace directory by hand makes the
+  next session clone from cold.
+
+  **So the next session on that issue inherits the clone whole** -- the working tree as the last
+  one left it, its untracked files, `<workspace>/.venv`, and `.git` with it. That includes the
+  clone's own `.git/config` and `.git/hooks/`, which name commands git runs (`core.pager`,
+  `credential.helper`, `core.fsmonitor`, `core.hooksPath`, `[alias] x = !...`). Issuebot does
+  not reset them between runs, deliberately: the unit of that channel is the clone and not the
+  file -- `include.path` puts the same keys in a second file, `core.hooksPath` puts them in a
+  directory of scripts, and the venv the session's tests run out of is wider than any of them --
+  so the only thing that would close it is not reusing the workspace at all. It crosses no
+  privilege boundary either way: one workspace belongs to one issue, it is bound to one session
+  account and sealed back to the worker between runs, and everything a plant could defer to the
+  next session the session holding it can already do itself, with the same token, on the same
+  branch and the same pull request. This is recorded in
+  `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the
+  `hooks.before_run` recipe for a deployment that wants the clone's config narrowed each run,
+  and the two caveats that come with it. What is *not* inherited is the worker's own state in
+  the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh` or the
+  hook shell, and anything at all by a session working a **different** issue -- see "Safety"
+  below for that boundary and the sweeps that hold it.
 - **Configuration changes.** A running worker re-reads `configs/WORKFLOW.md` and
   `configs/WORKFLOW.local.md` when either changes, or the overlay appears or disappears,
   within one `polling.interval_ms`, and logs `workflow_reloaded` naming the sections
@@ -1408,7 +1443,10 @@ that matters on your host.
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
   entry is the image's system-wide one, the clone's credential helper is written into the clone,
   and global git or ssh config for every session belongs in `/etc/gitconfig` or
-  `/etc/ssh/ssh_config`, which are root's and which no session can write. It leaves the rest of the
+  `/etc/ssh/ssh_config`, which are root's and which no session can write. The clone's *own*
+  `.git/config` is the other side of that line and is not swept: it is the session's file in the
+  session's workspace, it belongs to one issue, and the next session on that issue inherits it
+  along with the rest of the clone ("How long a workspace lives" above). It leaves the rest of the
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
   tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
