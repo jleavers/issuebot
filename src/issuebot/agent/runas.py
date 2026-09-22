@@ -180,9 +180,10 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
 # session's privilege domain, in the image or in one built ``FROM`` it.
 # ``gh`` has no system-wide file to answer with, and needs none: it runs perfectly well with
-# no ``config.yml`` at all -- measured, an empty home gets no file at all from ``gh --version``,
-# ``gh config get`` or ``gh api`` -- and writes one when it next has config of its own to
-# write, which its ``hosts.yml`` migration is one occasion of. So a
+# no ``config.yml`` at all -- measured, an empty home gets none from ``gh --version``,
+# ``gh config get`` or ``gh api``, though each does leave a ``~/.local/state/gh/device-id``,
+# which is state rather than config and which the sweep names nowhere -- and it writes one when
+# it next has config of its own to write, which its ``hosts.yml`` migration is one occasion of. So a
 # hook's ``gh config set`` reaches the rest of its own shell and the sweep costs the account
 # nothing it cannot ask for again. What a hook may hand the *session* is the
 # question #171 settled for the same tools' environment variables, and the answer is the same
@@ -190,7 +191,14 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # A denylist like the two above: named paths, and everything else in the home is left alone.
 # ``hosts.yml`` beside this list's fourth entry is the invariant #151 pinned and this change
 # keeps -- it is credential state, which authenticates the next session rather than steering
-# it, the same line ``.claude/.credentials.json`` sits on.
+# it, the same line ``.claude/.credentials.json`` sits on. It is not inert, and #173's spec
+# names the residual rather than leaving it to be found: ``gh config set -h <host>`` writes
+# there, and the ``api_host`` it can carry re-points ``gh api`` on an ordinary command with no
+# ``config.yml`` in sight (measured; filed as #190). What keeps it a residual rather than an
+# entry here is
+# that it is an ordinary HTTPS request to a name -- so #126's ``internal`` networks and the
+# allow-listing proxy do see it, where a unix socket is not a route at all -- and that the
+# acceptance bar for this change is precisely that ``hosts.yml`` survives.
 # Each is the sequence of its path components, because every one of them is nested and the
 # sweep walks rather than follows -- ``.ssh``, ``.config`` or ``.config/gh`` replaced with a
 # symlink is unlinked as the plant it is, not stepped through to whatever it points at.

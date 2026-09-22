@@ -116,10 +116,10 @@ against the respected-key list, there is nothing there to lose.
 | `http_unix_socket` | The channel above |
 | `aliases` | The channel #151 measured -- and not writable by `gh config set` at all (below) |
 | `git_protocol`, `color_labels`, `accessible_colors`, `accessible_prompter`, `spinner`, `prefer_editor_prompt`, `telemetry` | Inert: presentation and protocol preferences that name no command and re-point nothing |
-| `api_host` | A per-host setting. Measured as a global key it resolves (`gh config get api_host` reads it back) but does not re-point an ordinary command: with `api_host: 127.0.0.1:9` in place, `gh api user` still reached api.github.com and came back with GitHub's own `Bad credentials`. Swept with the file either way |
+| `api_host` | Per-host, and so **not in this file at all** -- it lives in `hosts.yml`, which this change keeps. A residual, below |
 
 `aliases` is worth stating separately, because "the file `gh config set` writes" is what made
-the trade sound even. It is not on `gh config list` at all, and `gh config set` does not write
+the trade sound even. It is not on `gh config list` at all, and `gh config set` cannot plant
 one:
 
 ```text
@@ -127,9 +127,11 @@ $ gh config set aliases.pwn '!echo x'
 ! warning: 'aliases.pwn' is not a known configuration key
 ```
 
--- and it writes a dead top-level `aliases.pwn:` key rather than an alias. The alias channel is
-`gh alias set`'s, a different command writing the same file. So the command the argument is
-about and the channel the issue is about do not meet.
+-- and it writes a dead top-level `aliases.pwn:` key rather than an entry under `aliases:`.
+(The file it writes does carry an `aliases:` map, `gh`'s own default `co: pr checkout`; the
+point is that `gh config set` cannot put anything in it.) The alias channel is `gh alias set`'s,
+a different command writing the same file. So the command the argument is about and the channel
+the issue is about do not meet.
 
 ## And the cost is nil, which is the other half
 
@@ -195,6 +197,55 @@ legitimately sets is in the table above, already answered by the protected envir
   and never a directory.
 
 ## Residuals
+
+- **`api_host` in the `hosts.yml` this change keeps**, which is the residual the decision
+  creates rather than one it inherits, so it is named here first. `gh config set -h <host>`
+  writes into `hosts.yml`, not `config.yml`, and the `api_host` it can carry re-points `gh`'s
+  API host on an ordinary command -- measured in the exact post-sweep state, no `config.yml`
+  anywhere:
+
+  ```text
+  $ cat ~/.config/gh/hosts.yml
+  github.com:
+      oauth_token: not-a-real-token
+      user: nobody
+      api_host: 127.0.0.1:8099
+  $ HOME=... GH_TOKEN=ghp_SENTINEL... gh api user
+  Get "https://127.0.0.1:8099/user": http: server gave HTTP response to HTTPS client
+  ```
+
+  So the property the decision above rests on -- fires on an ordinary core command -- is true
+  of a key in the file that survives. Three things make it a residual rather than a fifth
+  entry, and the first is the one that settles it:
+
+  - **`hosts.yml` surviving *is* the acceptance bar for this issue.** Taking it would be a
+    different decision, about credential state, and would break the invariant #151 pinned.
+  - **It is an ordinary HTTPS request to a name.** #126's `internal` networks and the
+    allow-listing `CONNECT` proxy therefore do see it and refuse a name off the list, which is
+    the exact opposite of `http_unix_socket`, where no route exists for the proxy to sit on.
+    And a session cannot present a certificate the client will trust for a name it does not
+    own. That is what makes it materially weaker than the channel that settled the decision.
+  - **`gh` validates it.** `gh repo clone` refuses an `api_host` carrying a scheme or a port
+    outright (`must be a hostname without a scheme or port`), so the two paths do not even
+    agree on what the key accepts.
+
+  Filed as #190 rather than folded in, for the reason #151 filed this one: what to do about a
+  command-bearing key inside credential state is a decision of its own, and a key-level edit of
+  a credential file is a different shape from the path-level denylist this list is.
+
+  Not measured either way, and worth naming with it: host-level `pager`, `editor` and `browser`
+  also survive in `hosts.yml` and read back under `gh config get -h <host>`, while the
+  hostname-less lookup that `gh`'s own pager and editor resolution uses returns empty. Probably
+  inert; no offline `gh` command that pages was found to close it.
+
+- **A sweep that fails before the clone.** `sweep_agent_home` is best effort everywhere -- it
+  logs `claude_home_sweep_failed` at WARNING and returns -- and `_clone` does not check it, so
+  the clone runs anyway. Everywhere else that is answered by the next sweep; here it is not,
+  because the command being protected is the very next one. Failing the clone closed is a
+  clean exit (`create_or_reuse`'s `except AgentError` already removes the workspace), but it
+  trades a run lost to a transient `sudo` for a plant nobody has evidence of, which is a
+  decision about availability rather than about this list. Named here; the warning immediately
+  before a clone is the one an operator should read as serious.
 
 - **`GH_CONFIG_DIR`**, which outranks `XDG_CONFIG_HOME` for `gh` and would move this file
   somewhere the list does not name. Closed already, and by the environment half rather than by

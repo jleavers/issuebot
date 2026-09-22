@@ -376,6 +376,18 @@ class WorkspaceManager:
             # ``git clone``, which reads ``~/.gitconfig``. So a plant the previous session at
             # this account left was live for exactly one command, and it was the one carrying
             # ``GH_TOKEN`` and writing the tree this session then works in.
+            #
+            # Two things this does not promise. It is best effort like every other call:
+            # ``sweep_agent_home`` warns (``claude_home_sweep_failed``) and returns, and the
+            # clone then runs anyway -- so the guarantee above holds while the sweep succeeds,
+            # and that warning is the one worth reading, since unlike a turn's there is no
+            # later sweep before the command it was protecting. Failing the clone closed
+            # instead would trade a plant nobody has evidence of for a run lost to a transient
+            # sudo, which is not this issue's call to make; it is named in the spec as a
+            # residual. And the post-clone setup sweeps again a few statements below, so
+            # creating a workspace costs two sudo round trips: deliberate, because the two
+            # call sites answer different questions (this one the clone, that one every login
+            # shell including the reuse path, which never reaches here).
             await self.sweep_agent_home()
             # As the agent, so the clone is the agent's to write: gh clones into the empty
             # directory the worker made. `_run_argv` has already reported a failure to run.

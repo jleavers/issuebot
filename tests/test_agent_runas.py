@@ -483,6 +483,11 @@ def test_sweep_removes_the_tool_config_files_and_keeps_their_neighbours(tmp_path
     _sweep(home)
     for parts in TOOL_CONFIG_SWEEP:
         assert not home.joinpath(*parts).exists(), parts
+    # Named as well as iterated: the loop above is over the list under test, so it would go on
+    # passing if an entry were dropped. The literal is what makes this docstring true; the
+    # pinning test below is what makes dropping one a deliberate edit.
+    assert not (home / ".config" / "gh" / "config.yml").exists()
+    assert not (home / ".gitconfig").exists()
     assert (home / ".config" / "gh" / "hosts.yml").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".config" / "git").is_dir()
@@ -557,8 +562,9 @@ def test_sweep_does_not_walk_the_tree_a_symlinked_target_points_at(tmp_path: Pat
 
 
 def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> None:
-    """The ordinary case: nothing under `.config` or `.ssh` at all. Best-effort, as the rest of
-    the sweep is -- a missing component is not a failure, and nothing beside it is touched."""
+    """The ordinary case: a home holding `gh`'s directory and none of the swept files.
+    Best-effort, as the rest of the sweep is -- a missing component is not a failure, and
+    nothing beside it is touched."""
     home = tmp_path / "home"
     (home / ".config" / "gh").mkdir(parents=True)
     _sweep(home)
@@ -568,6 +574,12 @@ def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> 
     # component that is not there yields no target at all.
     assert _walk(home, (".ssh", "config")) is None
     assert _walk(home, (".config", "git", "config")) is None
+    # And the entry whose *directory* is right there is the other half of `_walk`'s contract:
+    # it never resolves the final component, so it yields the path whether or not the file is
+    # there and leaves `_sweep` to unlink it -- which is a no-op here, as the `gh` directory
+    # surviving above shows. `None` is reserved for a missing *intermediate*.
+    assert _walk(home, (".config", "gh", "config.yml")) == home / ".config" / "gh" / "config.yml"
+    assert not (home / ".config" / "gh" / "config.yml").exists()
 
 
 def test_walk_stops_at_a_symlink_at_any_depth(tmp_path: Path) -> None:
@@ -1117,11 +1129,13 @@ async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
 ) -> None:
     """#173's other half, and the one that settles the decision. ``aliases:`` cannot shadow a
     core command, so a planted alias waits for a later session to invoke an invented subcommand
-    name; ``http_unix_socket`` re-points ``gh``'s HTTP transport on *every* command, including
-    the ``gh api`` and ``gh repo clone`` issuebot itself runs, which hands ``GH_TOKEN`` to a
-    listener the session chose and lets it forge the answer -- ``gh api user`` is ``own_login()``,
-    which #77 resolves issuebot's own artefacts by. Nor is a unix socket a network route, so
-    #126's allow-listing proxy never sees it.
+    name; ``http_unix_socket`` re-points ``gh``'s HTTP transport on *every* command, which hands
+    ``GH_TOKEN`` to a listener the session chose and lets it forge the answer. That reaches every
+    ``gh`` the session or a hook runs, and ``gh repo clone`` -- the worker's own clone of the
+    target repository, run at the session's uid. Not the adapter's ``own_login()`` and so not
+    #77's provenance rule: ``GhRunner`` spawns ``gh`` from the worker process with the worker's
+    own ``HOME``. Nor is a unix socket a network route, so #126's allow-listing proxy never
+    sees it.
 
     Asked hermetically, through ``gh`` itself: ``gh config get`` resolves the key and touches
     nothing, so this needs no listener and no network. Two-sided like the proofs above.

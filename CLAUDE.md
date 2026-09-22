@@ -383,7 +383,13 @@ version, and moves by hand.
   nothing but the reach into the *next* session -- the same line #171 drew for those tools' environment variables.
   `hosts.yml` beside it survives, the invariant #151 pinned: a credential authenticates the
   next session rather than steering it, the line `.claude/.credentials.json` sits on, which is
-  what makes this a file-level entry and not a directory-level one.
+  what makes this a file-level entry and not a directory-level one. That file is not inert,
+  and #173's spec names the residual rather than leaving it to be found (#190): `gh config set
+  -h <host>` writes there, and an `api_host` in it re-points `gh api` on an ordinary command
+  with no `config.yml` anywhere. It stays a residual because taking `hosts.yml` is the one
+  thing #173 may not do, and because it is an ordinary HTTPS request to a name — so #126's
+  `internal` networks and the allow-listing proxy do see it, where a unix socket is not a
+  route at all.
   Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
   (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
   not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
@@ -444,7 +450,11 @@ version, and moves by hand.
   one command, and it was the one carrying `GH_TOKEN` and writing the tree the session then
   works in. Two call sites rather than one inside `_run_argv`, because the ordering test wraps
   `_run_argv` to record a spawn and a sweep inside it would stop being observably *before* what
-  it protects; `test_the_clone_is_swept_before_it_runs` pins the second so they cannot drift. That second call
+  it protects; `test_the_clone_is_swept_before_it_runs` pins the second so they cannot drift,
+  and workspace creation therefore pays two sudo round trips, deliberately. Best effort there
+  as everywhere — a failed sweep is a `claude_home_sweep_failed` warning and the clone still
+  runs — but it is the one call site with no later sweep before the command it was protecting,
+  so that warning ahead of a clone is the one to read as serious (a residual in #173's spec). That second call
   site is what #137 needs: `after_create` and `before_run` both run before `_turn_loop` reaches
   its first sweep, so a per-turn sweep alone would let the previous session's `~/.profile` run
   in this session's first hook. A hook that is not configured opens no shell and takes no sweep.
