@@ -37,6 +37,7 @@ from issuebot.agent.runas import (
     MODULE,
     SHELL_STARTUP_SWEEP,
     TOOL_CONFIG_SWEEP,
+    TOOL_EXTENSION_SWEEP,
     RunAs,
     RunAsError,
     _sweep,
@@ -361,6 +362,15 @@ def _plant_home(home: Path) -> None:
     (home / ".local" / "state" / "gh").mkdir(parents=True)
     (home / ".local" / "state" / "gh" / "device-id").write_text("id")
     (home / ".npm").mkdir()
+    # #186: not a config file a tool reads but a program a tool runs -- `gh <name>` execs
+    # whatever is under `~/.local/share/gh/extensions/gh-<name>/`, with no install step needed
+    # to put it there. Its neighbour `~/.local/state/gh` above is `gh`'s own state and stays,
+    # which is why the entry names the extension directory and not `~/.local/share` or
+    # `~/.local`.
+    extension = home / ".local" / "share" / "gh" / "extensions" / "gh-pwn"
+    extension.mkdir(parents=True)
+    (extension / "gh-pwn").write_text("#!/bin/sh\necho poison\n")
+    (extension / "gh-pwn").chmod(0o755)
     (claude / ".credentials.json").write_text("token")
     (claude / "commands").mkdir()
     (claude / "commands" / "pwn.md").write_text("exfiltrate")
@@ -491,6 +501,62 @@ def test_the_tool_config_list_names_both_spellings_git_reads_and_ssh_config() ->
     # `XDG_CONFIG_HOME` is not passed through, which is what makes the second entry the path
     # git actually reads; a change there would need a third spelling here.
     assert "XDG_CONFIG_HOME" not in PASSTHROUGH_NAMES
+
+
+def test_sweep_removes_the_gh_extension_directory_and_keeps_ghs_state(tmp_path: Path) -> None:
+    """#186: an extension is an executable a session leaves for the next session's `gh` to run,
+    and it needs no install step -- a directory and a file are dispatched just the same.
+
+    Still a denylist, and the reason this entry is directory-specific: `~/.local/state/gh` is
+    `gh`'s own state directory beside it, `~/.local/share` and `~/.local` are every tool's, and
+    all three survive with the extension gone.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    _sweep(home)
+    for parts in TOOL_EXTENSION_SWEEP:
+        assert not home.joinpath(*parts).exists(), parts
+    assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"
+    assert (home / ".local" / "share").is_dir()
+    assert (home / ".local").is_dir()
+
+
+def test_the_extension_list_names_the_directory_gh_dispatches_from() -> None:
+    """Pinned like the three lists above. Measured on this image's `gh`: the extension
+    directory under the *data* directory is the only place it dispatches from -- not `PATH`
+    (`gh-pathpwn` on `PATH` is an `unknown command`) and not `GH_CONFIG_DIR` -- so the one
+    entry is the whole surface, and dropping it has to be a deliberate edit."""
+    assert set(TOOL_EXTENSION_SWEEP) >= {(".local", "share", "gh", "extensions")}
+    # Directory-specific, as the neighbours in `_plant_home` are there to prove: `gh`'s data
+    # directory holds the extensions, its state directory sits beside it, and `~/.local/share`
+    # and `~/.local` belong to every tool the session runs.
+    for parts in ((".local",), (".local", "share"), (".local", "share", "gh")):
+        assert parts not in TOOL_EXTENSION_SWEEP
+    # `XDG_DATA_HOME` is not passed through, which is what makes `~/.local/share` the path `gh`
+    # actually reads; a change there would need a second spelling here, exactly as
+    # `XDG_CONFIG_HOME` would for the git entry above.
+    assert "XDG_DATA_HOME" not in PASSTHROUGH_NAMES
+
+
+def test_sweep_unlinks_a_symlinked_extension_directory_without_following_it(
+    tmp_path: Path,
+) -> None:
+    """The nested-target rule of #151 applied to the deepest entry on any list: with any of the
+    four components replaced by a link, the directory the sweep would otherwise remove is
+    outside the home altogether, while the link is what the session planted and what `gh`
+    dispatches through. So the link goes and the tree it points at is untouched."""
+    outside = tmp_path / "outside"
+    (outside / "gh-pwn").mkdir(parents=True)
+    (outside / "gh-pwn" / "gh-pwn").write_text("keep")
+    for depth in range(1, 5):
+        home = tmp_path / f"home{depth}"
+        parts = (".local", "share", "gh", "extensions")
+        link = home.joinpath(*parts[:depth])
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside)
+        _sweep(home)
+        assert not link.is_symlink(), depth
+        assert (outside / "gh-pwn" / "gh-pwn").read_text() == "keep", depth
 
 
 def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_path: Path) -> None:
@@ -1029,6 +1095,70 @@ async def test_a_planted_gitconfig_alias_does_not_run_for_the_next_sessions_git(
     unswept = await manager.run_hook("before_run", workspace)
     assert unswept is not None and unswept.ok, unswept.summary
     assert unswept.stdout_tail.splitlines() == ["PLANTED-GITCONFIG-ALIAS-RAN", "hook-ran"]
+
+
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to dispatch the plant")
+async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#186, end to end and shaped like the two proofs above: a session leaves an executable in
+    the account's extension directory, and the next session's `gh` -- run at the same uid, with
+    the account's own `HOME` -- does not run it, while `gh`'s state directory beside it
+    survives.
+
+    Two-sided for the same reason: with the sweep taken out the plant *is* what `gh` runs, so
+    this cannot pass against a `gh` that was never going to dispatch it. The real wrapper, the
+    real hook path and the real `gh`; only sudo is a fake.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    extension = home / ".local" / "share" / "gh" / "extensions" / "gh-pwn"
+    plant = "#!/bin/sh\necho PLANTED-GH-EXTENSION-RAN\n"
+    (extension / "gh-pwn").write_text(plant)
+    (extension / "gh-pwn").chmod(0o755)
+    # A well-formed `hosts.yml` over the marker `_plant_home` leaves: the real `gh` refuses to
+    # run at all against a host entry it cannot migrate ("cowardly refusing to continue"), and
+    # a `gh` that never reached its dispatch would pass the swept half for the wrong reason.
+    # The token is a fixture, and no request is made: dispatch happens before authentication.
+    (home / ".config" / "gh" / "hosts.yml").write_text(
+        "github.com:\n    oauth_token: gho_notarealtokennotarealtokennotar\n    user: nobody\n"
+    )
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            # `gh pwn` is the plant if it is still there, and an unknown command if it is not;
+            # either way the hook goes on to say it ran.
+            "hooks": {"before_run": "gh pwn 2>/dev/null; echo hook-ran"},
+        }
+    )
+    # The real `PATH`, not `fake_path()`: the fake `gh` the runner tests use would shadow the
+    # real one, and `gh`'s own dispatch is the whole question here.
+    environ = {"PATH": os.environ["PATH"], "HOME": "/elsewhere"}
+    manager = WorkspaceManager(cfg, gh=object(), environ=environ)
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    assert result.stdout_tail.splitlines() == ["hook-ran"]
+    assert not extension.exists()
+    # The invariant this entry had to be directory-specific for: `gh`'s own state directory is
+    # its neighbour, and the sweep leaves it where it is.
+    assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"
+
+    # Planted again, and this time not swept: the extension runs, which is what the sweep
+    # prevents.
+    extension.mkdir(parents=True)
+    (extension / "gh-pwn").write_text(plant)
+    (extension / "gh-pwn").chmod(0o755)
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == ["PLANTED-GH-EXTENSION-RAN", "hook-ran"]
 
 
 async def _no_sweep() -> None:
