@@ -632,7 +632,11 @@ hook that would truncate it again or append a duplicate per session.
 
   `LD_RUN_PATH` is not protected, and neither are `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`,
   `LD_PROFILE` or `GLIBC_TUNABLES`: none of them names an object the loader would not otherwise
-  have loaded, and each was measured leaving `git --version` working. `LD_DEBUG_OUTPUT` is not
+  have loaded, and each was measured leaving `git --version` working. `LD_SHOW_AUXV` is not
+  protected either, and it is the one worth a sentence, because it does print: it puts the
+  auxiliary vector on **stdout** and then runs your command anyway, at exit 0. It loads nothing
+  and denies nothing, so it is out by the same rule the two silent names are *in* by — what it
+  costs is noise ahead of a hook's output, which that hook's own `echo` could add too. `LD_DEBUG_OUTPUT` is not
   protected either, though `LD_DEBUG` is: it only redirects what `LD_DEBUG` asks for and is
   inert on its own. That is also why this is five names and not an `LD_` prefix — a prefix
   would refuse `LD_RUN_PATH`, which is the route recommended just above.

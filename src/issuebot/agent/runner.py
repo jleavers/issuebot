@@ -261,8 +261,9 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 #               --version`, and `bash -lc 'echo hook-ran'`, whose `echo` never ran while the
 #               shell still reported success. That is the half of this list's rule that `PATH`,
 #               `HOME` and the fixed entries already serve -- a line here must not take the
-#               tooling down in the middle of a run -- and it fails *silently*, which nothing
-#               else in the file does.
+#               tooling down in the middle of a run -- and it fails *silently*, which is one of
+#               only two ways a protected name in `.issuebot/env` can: `LD_DEBUG` below is the
+#               other, and nothing else in the file is either.
 # The rule is *what makes the dynamic loader load an object of the value's choosing into every
 # dynamically linked program, or not run one at all*, checkable against `ld.so(8)`'s ENVIRONMENT
 # section and finite. Names and not an `LD_` prefix, and the counter-example is decisive:
@@ -270,7 +271,12 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 # hook is told to use instead of `LD_LIBRARY_PATH` below, and a prefix would refuse the
 # recommended workaround. `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_PROFILE` and `GLIBC_TUNABLES`
 # stay out too: each was measured leaving `git --version` working, and none of them names an
-# object the loader would not otherwise have loaded.
+# object the loader would not otherwise have loaded. So does `LD_SHOW_AUXV`, which is the one
+# exclusion that touches a stream issuebot reads: it prints the auxiliary vector to stdout and
+# *then* runs the command, at exit 0, so it loads nothing and denies nothing -- which is the
+# whole difference from the two above -- and the noise it leaves ahead of a hook's output is
+# something that hook's own `echo` could add, while `StreamParser` counts a non-JSON line and
+# carries on.
 # `LD_DEBUG_OUTPUT` stays out as well, for a reason worth stating since `LD_DEBUG` is in: it
 # only redirects what `LD_DEBUG` asks for and is inert on its own, measured leaving
 # `git --version` working with no `LD_DEBUG` set.

@@ -165,8 +165,8 @@ $ LD_TRACE_LOADED_OBJECTS=1 bash -lc 'echo hook-ran'        -> a library list; `
 One line voids every dynamically linked tool the next session touches **while reporting
 success**: every hook "passes", and the turn's `claude` never starts. That is the half of this
 list's rule that `PATH`, `HOME`, `GH_TOKEN` and the fixed entries already serve — "so a typo
-cannot take either down in the middle of a run" — and it is the only entry in the whole file
-that fails *silently*. It is one name in the same list, found while measuring the three the
+cannot take either down in the middle of a run" — and it fails *silently*, which only one other
+protected name does: `LD_DEBUG` below, and nothing else in `.issuebot/env` at all. It is one name in the same list, found while measuring the three the
 issue names, and closing it here rather than filing it is the cheaper honest option. It is
 called out as an extra name in the pull request so a reviewer sees it was a judgement and not a
 smuggled scope increase.
@@ -220,6 +220,21 @@ against `bash(1)`'s "Invocation".
   loaded. (`LD_DEBUG` was in this bullet in the first draft and is now protected: see above.)
   `GLIBC_TUNABLES` is glibc's tunables namespace — allocator and hwcap parameters, no object —
   and is named here because it is the other name a reader will ask about.
+- **`LD_SHOW_AUXV`, the one name in that section worth its own paragraph**, because it is the
+  only other one that touches a stream this deployment reads. `LD_SHOW_AUXV=1 bash -lc 'echo
+  hook-ran'` prints 22 lines of the auxiliary vector to **stdout** and *then* runs the hook's
+  own `echo`, at exit 0, and it is inherited, so a `git` inside that hook prints its own 22
+  lines too. It is out by the rule and the rule is what decides it: no object of the value's
+  choosing is loaded, and — unlike `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG=help`, which is why
+  those two are in — the command still runs. What is left is noise ahead of a stream, and both
+  streams that matter tolerate it: a hook's stdout is read as a bounded tail for the run's
+  error, and the turn's `claude` emits stream-json line by line, where a line that is not a
+  JSON object is counted and logged `claude_stream_unparseable` and the turn goes on. So the
+  cost of leaving it settable is legible noise, against a real if small hand-over use (reading
+  `AT_HWCAP` for a build), and the line this list draws stays "loads an object, or runs none"
+  rather than "anything that writes on stdout" — which `echo` in the hook's own script does
+  too. Pinned as unprotected by the same test as `LD_RUN_PATH`, so it is a decision and not an
+  omission.
 - **`LD_RUN_PATH`**, above: out on purpose, pinned by a test as unprotected, and the reason this
   is five names rather than a prefix.
 - **musl.** The names are the same there, so the bound is spelled the same on a musl base; the

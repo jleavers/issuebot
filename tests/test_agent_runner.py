@@ -943,7 +943,8 @@ def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environmen
         # and exits 0 without entering `main`. Measured voiding `git rev-parse`, `claude
         # --version` and `bash -lc 'echo hook-ran'`, whose `echo` never ran while the shell
         # still reported success -- the `PATH`/`HOME` half of this list's rule, failing
-        # silently as nothing else in the file does.
+        # silently, which only `LD_DEBUG` below also does and nothing else in `.issuebot/env`
+        # does at all.
         "LD_TRACE_LOADED_OBJECTS",
         # The same denial by a second spelling, and the one easiest to certify as safe by
         # measuring the wrong value: `libs`, `all` and `unused` are inert, but *any* value
@@ -999,6 +1000,14 @@ def test_the_loader_protections_are_pinned() -> None:
         # what `LD_DEBUG` asks for and is inert on its own, measured leaving `git --version`
         # working with no `LD_DEBUG` set.
         "LD_DEBUG_OUTPUT",
+        # The other name that touches a stream this deployment reads, and still out by the
+        # rule: `LD_SHOW_AUXV=1 bash -lc 'echo hook-ran'` prints 22 lines of the auxiliary
+        # vector to stdout and *then* runs the hook's `echo`, at exit 0, inherited by the
+        # `git` inside it. No object of the value's choosing is loaded and the command still
+        # runs, which is the whole difference from `LD_TRACE_LOADED_OBJECTS`; what is left is
+        # noise ahead of a stream a hook's own `echo` can add to anyway, and `StreamParser`
+        # counts a non-JSON line rather than failing the turn.
+        "LD_SHOW_AUXV",
         # glibc's tunables namespace: allocator and hwcap parameters, no object.
         "GLIBC_TUNABLES",
         # No underscore, so not that it would have matched a prefix -- but a linker flag a
