@@ -47,9 +47,15 @@ argument does not rest on it.
 **Reach.** A workspace key is the issue's identifier, so one workspace belongs to one issue. It
 is bound to one session account and opened to that account's group only while a session is
 working in it, sealed `0700` back to the worker between runs (#121, #75), and `_is_complete`
-re-clones rather than reuses when the binding moved. Issuebot itself runs no git in the clone
-after the post-clone setup: the only other git-shaped thing the worker spawns is `gh repo
-clone`, in the workspace *root*, before that clone exists. So this is persistence inside the
+re-clones rather than reuses when the binding moved. That binding and that seal are what
+`agent.run_as` buys: with one account for the deployment every session is the same uid anyway,
+and on the host route (`agent.run_as` unset, which `validate` warns about) the session is the
+worker, so neither holds -- and on neither route is this the *narrowest* channel between two
+sessions, since the home they share is wider than one workspace. Issuebot itself runs no git in a *reused*
+clone: the post-clone setup and `hooks.after_create` -- which in the shipped `WORKFLOW.md` does
+run git, `rev-parse --is-shallow-repository` and `fetch --unshallow` -- are both on the creation
+path alone, and the only other git-shaped thing the worker spawns is `gh repo clone`, in the
+workspace *root*, before that clone exists. So this is persistence inside the
 session's own privilege domain and reaches the next session on this issue, as #101, #137 and
 #171 did, not an escalation across one -- #75 closed that and nothing here re-opens it.
 
@@ -192,7 +198,10 @@ than they think:
    the list for that reason, and so is `core.sshCommand`: that is the key #171 tells a
    deploy-key deployment to write with `git config --local` from `after_create`, `after_create`
    runs on *creation* only, and unsetting it each run would take the deploy key away on the
-   first reuse and fail every `git fetch` and `push` after it. The file records no difference
+   first reuse and fail every `git fetch` and `push` after it. The first line has the same
+   problem in the other direction: `--remove-section alias` takes *every* alias, a convenience
+   a deployment's own `after_create` wrote included, so a deployment that writes aliases must
+   unset them by name instead. The file records no difference
    between a key the deployment wrote and a key the session wrote, which is the same objection
    this note makes to a shipped reset two paragraphs above -- it does not stop applying because
    the reset is a deployment's rather than issuebot's.

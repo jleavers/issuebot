@@ -162,12 +162,16 @@ issues that were `issuebot/in-progress` from where they stopped.
 
 A workspace is created when an issue is first claimed and removed when the issue closes —
 whether the worker marks it `issuebot/complete` or reads the close as an abandonment and
-clears the label; in between it outlives every one of its runs. An issue sitting in
-`issuebot/review` keeps its clone for as long as it waits for you, and a retry, a rework
-bounce or a re-queue picks that clone up rather than cloning again — which is the point, and
-part of what `agent.max_issue_cost_usd` pays for. There is no setting that shortens this: the
-issue's own lifecycle is the lever, and removing the workspace directory by hand makes the
-next session clone from cold.
+clears the label; in between it outlives every one of its runs. That removal is the worker
+finding the closed issue still carrying one of its state labels, so an issue closed *and*
+stripped of its label is one whose workspace stays on disk until you remove it. An issue
+sitting in `issuebot/review` keeps its clone for as long as it waits for you, and a retry, a
+rework bounce or a re-queue picks that clone up rather than cloning again — which is the
+point, and part of what `agent.max_issue_cost_usd` pays for. No setting shortens this
+deliberately: the issue's own lifecycle is the lever, removing the workspace directory by hand
+makes the next session clone from cold, and re-binding the pool has the same effect as a side
+effect (the clone is re-cloned when its owning account moved — [One account per concurrent
+session](security-model.md#one-account-per-concurrent-session)).
 
 **So the next session on that issue inherits the clone whole** — the working tree as the last
 one left it, its untracked files, `<workspace>/.venv`, and `.git` with it. That includes the
@@ -177,10 +181,12 @@ not reset them between runs, deliberately: the unit of that channel is the clone
 file — `include.path` puts the same keys in a second file, `core.hooksPath` puts them in a
 directory of scripts, and the venv the session's tests run out of is wider than any of them —
 so the only thing that would close it is not reusing the workspace at all. It crosses no
-privilege boundary either way: one workspace belongs to one issue, it is bound to one session
-account (see [One account per concurrent
+privilege boundary either way: one workspace belongs to one issue, and under a pool it is
+bound to one session account (see [One account per concurrent
 session](security-model.md#one-account-per-concurrent-session)) and sealed back to the worker
-between runs (`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`), and
+between runs (`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`) — with one
+account for the whole deployment, or on the host route, there is no binding and no seal, but
+then every session shares a home, which is wider than any one workspace. Either way,
 everything a plant could defer to the next session the session holding it can already do
 itself, with the same token, on the same branch and the same pull request. This is recorded in
 `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the

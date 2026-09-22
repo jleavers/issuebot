@@ -265,8 +265,8 @@ open for the convenience of pointing `ruff`'s config somewhere. If a deployment 
 need the general case, the answer is a narrower variable for the tool that needs it, not this
 one back.
 
-The README's `.issuebot/env` section says all of this where a hook author will be reading it,
-beside `PATH` and the proxy names.
+The `.issuebot/env` section says all of this where a hook author will be reading it, beside
+`PATH` and the proxy names -- in `docs/toolchains.md` since the README's split moved it there.
 
 ## Residuals
 
