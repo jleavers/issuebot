@@ -14,7 +14,7 @@ KEYWORDS = "host=db port=5432 user=issuebot password=s3cretpassword dbname=issue
         URL,
         "postgres://u@h/db",
         "postgresql://db/issuebot",
-        "postgresql://issuebot@/arrowbot_test?host=/var/run/postgresql",
+        "postgresql://issuebot@/acme_test?host=/var/run/postgresql",
         "POSTGRESQL://u@h/db",
         # libpq's multi-host list, an IPv6 literal, and a port libpq will refuse at connect:
         # all URLs, all describable without their password.
