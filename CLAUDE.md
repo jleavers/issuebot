@@ -159,6 +159,13 @@ that shape, is [`docs/package-layout.md`](docs/package-layout.md) -- `issuebot.c
 `log`, `pipes`, `invocation`, `dsn`, `egress`, `events`, `github`, `agent`, `orchestrator`,
 `notifications`, `db`, `web` and `cli`, in that order, with the design documents it draws on.
 
+Each module is a `##` heading of its own, so read *one* rather than the file: ~134 KB is
+roughly 33k tokens, and one entry is a fraction of that (#221). The heading is the module's
+dotted name in backticks under a `##`, which is what you search the file for from the working
+tree, and the anchor is that name with the dot dropped, as GitHub slugs it:
+[`docs/package-layout.md#issuebotegress`](docs/package-layout.md#issuebotegress),
+`#issuebotorchestrator`, and so on for all fourteen.
+
 It is not in this file because it would not reach you here: issuebot cuts each instruction
 file at `INSTRUCTION_FILE.limit` (128 KiB, `src/issuebot/agent/boundary.py`) before handing it
 to a session, and at 120 KB the layout took the file past that cap, so what was silently

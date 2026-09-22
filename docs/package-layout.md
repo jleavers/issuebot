@@ -1606,4 +1606,3 @@ Tests substitute `_which`, `_claude_version`, `_claude_auth`, `_github_status`,
 `_adapter_factory`, `_run_session`,
 `_runner_factory`, `_orchestrator_factory`, `_slack_post`, `_database_factory` and
 `_serve` (`_github_status` through an autouse fixture, so no test reaches the network).
-
