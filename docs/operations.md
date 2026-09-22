@@ -263,18 +263,25 @@ into `config.yml`, and one of the keys it can carry, `api_host`, re-points `gh` 
 planting session's choosing on an ordinary command: measured against `gh 2.100.0`, a planted
 `api_host` sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` issuebot runs
 to build the next workspace to that host instead of GitHub's. `git_protocol` is the same channel through another key: set to
-`ssh` there — which `gh auth login --git-protocol ssh` does — the next session's `gh repo clone`
-fails outright, since the image ships no ssh client.
+`ssh` there, the next session's `gh repo clone` fails outright, since the image ships no ssh
+client.
 
-So the sweep removes exactly six keys — `api_host`, `git_protocol`, `http_unix_socket`, `pager`,
-`editor` and `browser`, none of which is credential state — and leaves everything else in the
-file, the tokens included. A file with none of them in it is not rewritten at all; one that does
+So the sweep removes gh's whole configuration surface from that file — the thirteen keys
+`gh config --help` advertises, every one of which `gh config set -h <host>` writes here rather
+than into `config.yml`, and none of which is credential state — and leaves everything else,
+the tokens included. The rule is not "these keys are dangerous" but "a session does not leave
+*configuration* in a credential file", so what survives is what `gh config` does not manage:
+`oauth_token`, `user` and the per-account `users:` subtree. A file with none of them in it is not rewritten at all; one that does
 carry one is rewritten by a YAML parser, so it comes back normalised rather than
 character-for-character, which is what `gh` itself does to this file on an ordinary command. What is left of the
 channel is bounded and documented in
 `docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
 substituted host, a forged answer needs a certificate authority in the system trust store, which
-is root's, and the egress proxy refuses any host off its allow-list.
+is root's, and the egress proxy refuses any host off its allow-list. One thing that note is
+explicit about and this list should be too: `~/.config/gh/config.yml` beside it is **not** swept,
+so the same `git_protocol` written there with a plain `gh config set` still steers the next
+session's clone. `api_host` has no such second position and is closed outright; closing the rest
+of `config.yml` is its own piece of work.
 
 It leaves the rest of the
 home alone: the credential (`.credentials.json`, which rotates its refresh token), the

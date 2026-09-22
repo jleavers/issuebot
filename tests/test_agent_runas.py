@@ -754,6 +754,31 @@ def test_sweep_declines_a_hosts_file_that_is_not_a_regular_file(tmp_path: Path) 
         assert not (home / name).exists(), name
 
 
+@pytest.mark.parametrize("depth", [400, 5000])
+def test_sweep_declines_a_deeply_nested_hosts_file_without_raising(
+    tmp_path: Path, depth: int
+) -> None:
+    """The sweep never raises, and PyYAML does. Its scanner and its representer both recurse per
+    nesting level, so a document a few hundred bytes of brackets deep -- far inside
+    `GH_HOSTS_LIMIT` -- raises `RecursionError`, which is not a `YAMLError`. Left uncaught it
+    leaves `_sweep` altogether: the sweep reports failure on every turn and every hook for the
+    container's lifetime, *and* the plant in that same file is never stripped, which is the
+    channel this whole function exists to close. Both depths, because the two ends of PyYAML
+    fail at different ones -- the dump first, then the load."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    nested = "[" * depth + "]" * depth
+    document = f"github.com:\n    oauth_token: keep-me\n    api_host: 127.0.0.1\n    d: {nested}\n"
+    _hosts(home).write_text(document)
+    _sweep(home)
+    # Declined, not mangled, and nothing of the abandoned edit beside it.
+    assert _hosts(home).read_text() == document
+    assert sorted(entry.name for entry in _hosts(home).parent.iterdir()) == ["hosts.yml"]
+    # And the rest of the sweep still ran.
+    for name in SHELL_STARTUP_SWEEP:
+        assert not (home / name).exists(), name
+
+
 def test_sweep_leaves_a_hosts_file_over_the_cap(tmp_path: Path) -> None:
     """#110's rule at the one seam that parses a file the session can grow. Past the cap the
     file is left exactly as it is: `gh` is not authenticating from a `hosts.yml` this size
@@ -778,16 +803,35 @@ def test_sweep_leaves_a_home_that_never_held_a_hosts_file(tmp_path: Path) -> Non
 
 def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None:
     """Pinned like the three sweep lists, and for a sharper reason: this one is a denylist over
-    a file that must keep working, so a key missing here is the channel back. Enumerated two
-    ways against `gh version 2.100.0`, because one route does not find them all. `gh config set
-    -h github.com <key>`, asked for each of the thirteen keys `gh config --help` lists, puts
-    five of them in `hosts.yml` and every other in `config.yml`. `git_protocol` is the sixth and
-    that probe never sees it -- `gh config set -h` writes it to `config.yml` -- while `gh auth
-    login --git-protocol ssh` writes it here and `gh` honours it from here, which is the test
-    below. The `docker` CI job asks the image's own `gh` both questions on every pull request.
-    Dropping one here has to be a deliberate edit in both places."""
-    measured = {"api_host", "git_protocol", "http_unix_socket", "pager", "editor", "browser"}
-    assert measured == GH_HOSTS_STEERING_KEYS
+    a file that must keep working, so a key missing here is the channel back.
+
+    It is `gh`'s own configuration surface -- every key `gh config` manages -- because
+    `gh config set -h <host> <key> <value>` writes *all thirteen* into `hosts.yml` rather than
+    into `config.yml`. Measured against `gh version 2.100.0` with a value each key accepts,
+    which is the whole of the measurement and the easy thing to get wrong: `gh config set`
+    validates the enum-valued keys, so a probe passing a placeholder is refused for eight of the
+    thirteen, and a probe that swallows the refusal reports only the five free-form ones and
+    calls that the closed set. So what survives the sweep is what `gh config` does not manage:
+    `oauth_token`, `user` and the `users:` subtree. The `docker` CI job re-takes the
+    measurement off the image's own `gh config --help` on every pull request, so a release that
+    adds a fourteenth key fails there. Dropping one here has to be a deliberate edit in both
+    places."""
+    advertised = {
+        "api_host",
+        "git_protocol",
+        "editor",
+        "prompt",
+        "prefer_editor_prompt",
+        "pager",
+        "http_unix_socket",
+        "browser",
+        "color_labels",
+        "accessible_colors",
+        "accessible_prompter",
+        "spinner",
+        "telemetry",
+    }
+    assert advertised == GH_HOSTS_STEERING_KEYS
     # Never the credential keys: they are what the file is kept for, and `-h` cannot write them.
     assert GH_HOSTS_STEERING_KEYS.isdisjoint({"oauth_token", "user", "users"})
     # The file is edited, never listed for removal: #151 pinned it and #173 kept it.

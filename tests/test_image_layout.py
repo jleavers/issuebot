@@ -247,28 +247,33 @@ def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() 
     assert "test -f /home/agent/.config/gh/hosts.yml" in CI
     assert "grep -q gho_KEEPTHISCREDENTIAL0123456789012345 /home/agent/.config/gh/hosts.yml" in CI
     assert "! grep -q api_host /home/agent/.config/gh/hosts.yml" in CI
+    assert "! grep -q git_protocol /home/agent/.config/gh/hosts.yml" in CI
+    assert 'test "$(sudo -n -H -u agent gh config get -h github.com git_protocol)" = https' in CI
 
 
 def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     """The other half of #190, and what lets the edit be a denylist at all.
-    `GH_HOSTS_STEERING_KEYS` is a measurement of somebody else's tool, which goes stale on their
-    release schedule rather than ours, so CI re-takes it on every pull request -- and it takes it
-    two ways, because one route does not find them all.
+    `GH_HOSTS_STEERING_KEYS` is `gh`'s own configuration surface -- every key `gh config`
+    manages, all of which `gh config set -h <host>` writes into `hosts.yml` -- and that is a
+    measurement of somebody else's tool, which goes stale on their release schedule rather than
+    ours. So CI re-takes it on every pull request, off gh's own advertised key list rather than
+    a list hard-coded here, and fails when gh advertises a key the sweep does not name.
 
-    `gh config set -h <host>` writes five of the six, read off gh's own advertised key list
-    rather than hard-coded here, so a new one is picked up without an edit. The comparison is a
-    *subset*: what fails is gh writing a host-level key the sweep does not name, not the list
-    naming a key this probe cannot reach -- which is exactly `git_protocol`, sent to `config.yml`
-    by `gh config set -h` and honoured from `hosts.yml` all the same. That one is pinned by its
-    own behaviour instead: a hand-written host entry has to out-rank the hostname-less lookup."""
-    assert "gh writes and reads no host-level key the hosts.yml sweep does not name" in CI
+    The `set` half carries a value each key accepts, which is the whole of that measurement and
+    the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
+    passing a placeholder is refused for eight of the thirteen -- and a `|| true` would report
+    only the five free-form ones and call that the closed set. No `|| true`, so a refused set
+    fails the step."""
+    assert "every gh config key is named by the hosts.yml sweep, and gh writes them there" in CI
     assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
-    assert "gh config set -h github.com $key probe-$key" in CI
     assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
+    assert "advertised = set(sys.argv[1].split())" in CI
+    assert "unnamed = advertised - set(GH_HOSTS_STEERING_KEYS)" in CI
+    # The `set` half, with a value per key and no `|| true` to swallow a refusal.
+    assert "gh config set -h github.com $key $value" in CI
+    assert "gh config set -h github.com $key $value || true" not in CI
     assert "unnamed = written - set(GH_HOSTS_STEERING_KEYS)" in CI
-    assert "if unnamed:" in CI
-    # And the key the probe above cannot see, by what gh resolves rather than by what it writes.
-    assert "git_protocol: ssh" in CI
+    # And git_protocol by what gh resolves rather than by what it writes.
     assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
     assert 'test "$(gh config get git_protocol)" = https' in CI
 

@@ -192,49 +192,65 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # survives is availability, not confidentiality: a plant needing no network at all that breaks
 # every core ``gh`` command of the next session bound to that account.
 # A key-level edit rather than a path-level entry, because the file has to keep working. What
-# makes it a bounded one is that the keys this position carries are enumerable, and they were
-# enumerated two ways, because one route does not find them all.
-#   ``gh config set -h <host> <key>``, asked for each of the thirteen keys ``gh config --help``
-#   lists: five land in ``hosts.yml`` and every other goes to ``config.yml`` -- ``api_host``,
-#   ``http_unix_socket``, ``pager``, ``editor`` and ``browser``.
-#   ``git_protocol`` is the sixth, and no ``gh config set -h`` probe finds it: that route writes
-#   it to ``config.yml``, while ``gh auth login --git-protocol ssh`` writes it *here* and ``gh``
-#   honours it from here. Measured: with ``git_protocol: ssh`` under the host and no
-#   ``config.yml`` anywhere, ``gh config get -h github.com git_protocol`` reads ``ssh`` where the
-#   hostname-less lookup still reads ``https``, ``gh auth status`` reports ``Git operations
-#   protocol: ssh``, and ``gh repo clone`` -- issuebot's own -- fails outright with ``error:
-#   cannot run ssh: No such file or directory``, since the image installs no ssh client. So it is
-#   the same availability channel as ``api_host``, reached through a different key, and a list
-#   built from the ``config set`` probe alone would have missed it.
-# None of the six is credential state: ``oauth_token``, ``user`` and the ``users:`` subtree are
-# untouched, and dropping ``git_protocol`` restores ``gh``'s own ``https`` default, which is what
-# issuebot clones and pushes over anyway (the post-clone setup's credential helper is a token,
-# not a key). So removing all six cannot touch what the file is kept for.
-#   ``api_host`` is the live one. ``http_unix_socket``, ``pager``, ``editor`` and ``browser``
-#   are written here by ``gh config set -h`` and then *not honoured* in this position: measured
-#   inert, against the same values at top level, which do fire. They are on the list anyway
-#   because the cost of naming a key that does nothing is nothing, while the cost of leaving one
-#   out is the channel back -- and "not honoured today" is a property of this ``gh``, where
-#   "never written by a deployment" is a property of the file.
+# makes it bounded is that the keys this position carries are enumerable: ``gh config`` manages
+# a fixed set, ``gh config --help`` advertises it, and ``gh config set -h <host> <key> <value>``
+# writes *every one of them* into ``hosts.yml`` rather than into ``config.yml``. Measured by
+# asking for each of the thirteen with a value that key accepts -- which is the whole of the
+# measurement, and the easy thing to get wrong: ``gh config set`` validates the enum-valued keys,
+# so a probe that passes a placeholder is refused for eight of the thirteen and reports only the
+# five free-form ones. All thirteen land here.
+# So the list is ``gh``'s own configuration surface, removed whole from a file that also holds
+# credentials, and what survives is what ``gh config`` does not manage: ``oauth_token``, ``user``
+# and the ``users:`` subtree. That is the shape of the decision -- the sweep does not judge which
+# keys are dangerous, it declines to let a session leave *configuration* in a credential file --
+# and it is why the list can be a denylist without being a guess.
+#   ``api_host`` is what #190 was opened about, and the only one of the thirteen that is *only*
+#   reachable from here: at top level it is inert. A planted value sends ``gh api``,
+#   ``gh issue list``, ``gh pr list`` and ``gh repo clone`` -- issuebot's own, for the next
+#   session's workspace -- to the host the planting session named.
+#   ``git_protocol`` is the other one measured live from this position, and the one that shows
+#   why the list is the whole surface rather than a hand-picked pair: set to ``ssh`` it reads
+#   back ahead of the hostname-less lookup, ``gh auth status`` reports ``Git operations protocol:
+#   ssh``, and ``gh repo clone`` then fails outright with ``cannot run ssh: No such file or
+#   directory``, since the image installs no ssh client.
+#   ``http_unix_socket``, ``pager``, ``editor`` and ``browser`` are measured *inert* in this
+#   position -- the same values at top level do fire, so it is where the key sits and not the
+#   test -- and the remaining seven are cosmetic or, like ``prompt``, documented as global. They
+#   are removed all the same: naming a key that does nothing costs nothing, where leaving one out
+#   costs the channel back if a later ``gh`` starts honouring it from here.
+# What the live channel cannot do bounds how much of this is urgent, and all of it was measured:
+# ``gh`` sends no ``Authorization`` header to a substituted host (from ``GH_TOKEN`` or from the
+# file's own ``oauth_token``; ``gh help config`` says so outright), a self-signed certificate is
+# refused so forging an answer needs a CA in root's trust store, and #126's proxy refuses a name
+# off its allow-list while an on-list one completes. So what survives is availability, not
+# confidentiality, and it needs no network at all.
+# None of the thirteen is credential state, so removing them cannot touch what the file is kept
+# for; dropping ``git_protocol`` leaves ``gh``'s own ``https`` default, which is what issuebot
+# clones and pushes over (the post-clone setup's credential helper is a token, not a key).
 # A denylist rather than a keep-list of the credential keys, unlike ``--strict-mcp-config``'s
-# "name what survives", because here the two failures are not symmetrical: a steering key a
-# future ``gh`` adds and this list misses costs the bounded channel above, where a keep-list
-# that stripped a credential key a future ``gh`` adds would break authentication for every
-# session in the deployment. The asymmetry is covered by proving the set instead of asserting
-# it -- the CI ``docker`` job asks the image's own ``gh`` which keys ``gh config set -h`` writes
-# and fails on any this list does not name, so a release that starts writing a new one host-level
-# fails a pull request rather than a session. A *subset* check rather than an equality one,
-# because ``git_protocol`` above is on this list precisely because that probe does not reach it;
-# the job pins that key by its own behaviour instead.
+# "name what survives", because the two failures are not symmetrical: a key a future ``gh`` adds
+# and this list misses costs the bounded channel above, where a keep-list that stripped a
+# credential key a future ``gh`` adds would break authentication for every session in the
+# deployment. The asymmetry is covered by proving the set rather than asserting it -- the CI
+# ``docker`` job reads the image's own ``gh config --help`` and fails when it advertises a key
+# this list does not name, so a release that adds a fourteenth fails a pull request rather than a
+# session.
 GH_HOSTS_FILE: tuple[str, ...] = (".config", "gh", "hosts.yml")
 GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
     {
         "api_host",
         "git_protocol",
-        "http_unix_socket",
-        "pager",
         "editor",
+        "prompt",
+        "prefer_editor_prompt",
+        "pager",
+        "http_unix_socket",
         "browser",
+        "color_labels",
+        "accessible_colors",
+        "accessible_prompter",
+        "spinner",
+        "telemetry",
     }
 )
 # What the sweep will read of that file before deciding it is not the small credential document
@@ -788,7 +804,14 @@ def _read_gh_hosts(target: Path) -> tuple[dict, os.stat_result] | None:
     try:
         # `_HostsLoader` is a `SafeLoader`; only its scalar resolvers differ.
         parsed = yaml.load(text, Loader=_HostsLoader)
-    except yaml.YAMLError:
+    except yaml.YAMLError, RecursionError:
+        # `RecursionError` beside `YAMLError` because PyYAML's scanner and representer both
+        # recurse per nesting level, and a document nested a few thousand deep -- well inside
+        # `GH_HOSTS_LIMIT`, a few hundred bytes of brackets -- raises it rather than complaining.
+        # It is not a `YAMLError`, so without this it would leave `_sweep` altogether: the sweep
+        # would report failure on every turn and every hook for the container's lifetime, and
+        # the plant in that same file would never be stripped. Declining is the fail-safe branch
+        # the rest of this function already has.
         return None
     if not isinstance(parsed, dict):
         return None
@@ -813,7 +836,15 @@ def _read_capped(target: Path) -> tuple[str, os.stat_result] | None:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None
-        raw = os.read(fd, GH_HOSTS_LIMIT + 1)
+        # To the end rather than one `os.read`: a short read is allowed to happen, and a
+        # truncated document that still parses would be written back over the whole file --
+        # which the staleness guard could not catch, the file not having changed.
+        raw = b""
+        while len(raw) <= GH_HOSTS_LIMIT:
+            chunk = os.read(fd, GH_HOSTS_LIMIT + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
     except OSError:
         return None
     finally:
@@ -833,8 +864,10 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
 
     Through a temporary file in the same directory and ``os.replace``, so a session's ``gh``
     running beside this sweep reads either the old document or the new one and never a partial
-    write of its own credentials. The mode is the original's rather than the umask's: ``gh``
-    writes ``hosts.yml`` ``0600`` and complains about a wider one.
+    write of its own credentials. The mode is the original's rather than the umask's, which is
+    about the file and not about ``gh``: ``gh`` writes ``hosts.yml`` ``0600`` but reads a wider
+    one without complaint (measured), so nothing would *report* a sweep that quietly widened the
+    permissions on a file holding a token.
 
     ``seen`` is the file the document was parsed from, and the write is declined unless the name
     still resolves to it. Reading and writing are two steps, the session owns the directory
@@ -847,7 +880,11 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
     ``hosts.yml`` an operator seeded as root is not a session's plant, and replacing it with an
     account-owned copy would hand the next session a file it can rewrite freely.
     """
-    with contextlib.suppress(OSError, yaml.YAMLError):
+    # `RecursionError` beside the other two for the reason `_read_gh_hosts` catches it: the
+    # representer recurses per nesting level, so a document this deep raises on the way out as
+    # well as on the way in -- and a sweep that raises is one that never finishes, where a sweep
+    # that declines leaves a plant the next turn tries again.
+    with contextlib.suppress(OSError, yaml.YAMLError, RecursionError):
         # The temporary file is created in this directory and renamed over the target, so the
         # replace needs write and search on it -- the same bits `_sweep`'s retry puts back for
         # a removal, and the account's own to set either way.
@@ -870,7 +907,15 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> Non
         handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".hosts-", suffix=".yml")
         replaced = False
         try:
-            with os.fdopen(handle, "w") as stream:
+            # `os.fdopen` takes ownership of the descriptor, but only once it returns: if it
+            # raises, the descriptor is still this process's to close, and the sweep runs before
+            # every turn and every hook.
+            try:
+                stream = os.fdopen(handle, "w")
+            except OSError:
+                os.close(handle)
+                raise
+            with stream:
                 yaml.safe_dump(stripped, stream, default_flow_style=False, sort_keys=False)
                 # Flushed and synced before the rename: the rename is what makes the new file
                 # the credential, and a rename that reached the disk ahead of the bytes would

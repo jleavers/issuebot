@@ -15,8 +15,15 @@ invariant #151 pinned: `hosts.yml` is credential state, the line `~/.claude/.cre
 sits on — it authenticates the next session rather than steering it.
 
 That decision left a residual, and this is it. **`hosts.yml` is not only credential state.**
-`gh config set -h <host> <key> <value>` writes *there*, not into the `config.yml` #173 sweeps,
+`gh config set -h <host> <key> <value>` writes *there*, not into the `config.yml` #173 takes,
 and one of the keys it can carry re-points `gh` on an ordinary core command.
+
+**Where #173 stands matters for reading the rest of this, so it is said here rather than in a
+footnote: it has not landed.** PR #189 is open, `~/.config/gh/config.yml` is *not* swept on
+`main` today, and nothing in this change sweeps it. The reproductions below are run in the state
+the issue specifies — a `hosts.yml`, no `config.yml` anywhere — because that isolates what this
+file contributes, which is the question asked. What that state is not is a description of
+`main`, and the section on what this does not close says exactly which half is left over.
 
 ## Reproduction
 
@@ -126,7 +133,7 @@ $ HOME=... GH_TOKEN=ghp_SENTINEL... gh api user
   ...
 ```
 
-#173's sweep of `config.yml` closes that channel completely.
+So `http_unix_socket` is #173's to close and not this file's — once #189 lands.
 
 ## The `pager`, `editor` and `browser` question, closed
 
@@ -173,55 +180,71 @@ certain, persistent for the container's lifetime, and it fires on an ordinary co
 is the exact property that settled #173 against #151's earlier reading.
 
 The issue asks whether a key-level edit of a credential file is a shape this project should
-take, and the answer is yes because measurement makes it a bounded one. The keys this position
-carries were enumerated two ways, because one route does not find them all.
+take, and the answer is yes because the keys this position can carry are enumerable: `gh config`
+manages a fixed set, `gh config --help` advertises it, and `gh config set -h <host> <key> <value>`
+writes **every one of them** into `hosts.yml` rather than into `config.yml`.
 
-`gh config set -h github.com <key>` was asked for each of the thirteen keys `gh config --help`
-lists. Exactly five landed in `hosts.yml`; every other went to `config.yml`:
+Getting that measurement right took two attempts, and the first one is worth recording because
+it is the easy thing to get wrong. `gh config set` *validates* the enum-valued keys, so a probe
+passing a placeholder value is refused for eight of the thirteen — and a probe that swallows the
+refusal reports only the five free-form ones and calls that the closed set. With a value each
+key accepts, all thirteen land here:
 
 ```text
 github.com:
-    api_host: VALUE-api_host
-    editor: VALUE-editor
-    pager: VALUE-pager
-    http_unix_socket: VALUE-http_unix_socket
-    browser: VALUE-browser
+    api_host: api.example.com
+    git_protocol: ssh
+    editor: vi
+    prompt: disabled
+    prefer_editor_prompt: enabled
+    pager: cat
+    http_unix_socket: /tmp/s
+    browser: firefox
+    color_labels: enabled
+    accessible_colors: enabled
+    accessible_prompter: enabled
+    spinner: disabled
+    telemetry: disabled
 ```
 
-**`git_protocol` is the sixth, and that probe never sees it.** `gh config set -h` routes it to
-`config.yml`, while `gh auth login --git-protocol ssh` writes it *here* — and `gh` honours it
-from here. Measured, with `git_protocol: ssh` under the host and no `config.yml` anywhere:
+So the list is gh's own configuration surface, removed whole. That is the shape of the decision:
+the sweep does not judge which keys are dangerous, it declines to let a session leave
+*configuration* in a credential file — and what survives is what `gh config` does not manage,
+which is `oauth_token`, `user` and the `users:` subtree. None of the thirteen is credential
+state, so the acceptance bar is met by construction rather than by care.
 
-```text
-$ gh config get -h github.com git_protocol      -> ssh
-$ gh config get git_protocol                    -> https
-$ gh auth status                                -> Git operations protocol: ssh
-$ gh repo clone jleavers/issuebot /tmp/gp-clone
-Cloning into '/tmp/gp-clone'...
-error: cannot run ssh: No such file or directory
-fatal: unable to fork
-$ which ssh
-(no ssh)
-```
+Two of the thirteen are measured live from this position, and they are different shapes:
 
-That is the same availability channel as `api_host`, reached through a different key, on
-issuebot's own clone, and the image installs no ssh client so the failure is total. A list built
-from the `config set` probe alone would have missed it — which is why the CI check is a *subset*
-check (gh must write no host-level key the list does not name) with `git_protocol` pinned by its
-own behaviour beside it.
+- **`api_host`**, #190's subject, and the only one that is *only* reachable from here — at top
+  level it is inert (measured: a `config.yml` carrying `api_host: 127.0.0.1` left the request on
+  the real `api.github.com`). So this change closes it completely.
+- **`git_protocol`**, which shows why the list is the whole surface rather than a hand-picked
+  pair:
 
-All six are steering keys. **None is credential state** — `oauth_token`, `user` and the
-`users:` subtree are not among what `-h` can write, and dropping `git_protocol` restores gh's
-own `https` default, which is what issuebot clones and pushes over anyway (the post-clone
-setup's credential helper is a token, not a key). So removing all six cannot touch what the
-file is kept for.
+  ```text
+  $ gh config get -h github.com git_protocol      -> ssh      (bare lookup reads https)
+  $ gh auth status                                -> Git operations protocol: ssh
+  $ gh repo clone jleavers/issuebot /tmp/gp-clone
+  Cloning into '/tmp/gp-clone'...
+  error: cannot run ssh: No such file or directory
+  $ which ssh
+  (no ssh)
+  ```
 
-They are removed from directly under a host and never deeper, which is also measured: the same
-key inside the `users:` subtree is not honoured. `users.<name>.api_host` left the request on the
-real `api.github.com`, where the identical key one level up re-pointed it — so the subtree
-holding the per-account tokens can be preserved whole without leaving the channel open beneath
-it. The acceptance bar, that `oauth_token` keeps working for a session that has
-one, is met by construction rather than by care.
+  Dropping the key leaves gh's own `https` default, which is what issuebot clones and pushes
+  over — the post-clone setup's credential helper is a token, not a key. Unlike `api_host`,
+  this one is *also* reachable at top level, which the section below is honest about.
+
+The remaining eleven are `http_unix_socket`, `pager`, `editor` and `browser` — measured **inert**
+in this position, against the same values at top level, which do fire — and seven that are
+cosmetic or, like `prompt`, documented as global. They are removed all the same: naming a key
+that does nothing costs nothing, where leaving one out costs the channel back if a later `gh`
+starts honouring it from here.
+
+Host-level only, and never deeper: a steering key inside the `users:` subtree is measured *not*
+honoured. `users.<name>.api_host` left the request on the real `api.github.com`, where the
+identical key one level up re-pointed it — so the subtree holding the per-account tokens is
+preserved whole without leaving the channel open beneath it.
 
 ### Why a denylist, where `--strict-mcp-config` names what survives
 
@@ -234,9 +257,11 @@ carries no credential, forges nothing without root's trust store and reaches no 
 allow-list. A keep-list that stripped a *credential* key a future `gh` adds would break
 authentication for every session in the deployment, which is the cost the issue names as larger
 than the channel. So the list is a denylist, and the asymmetry is covered by proving the set
-rather than asserting it: the `docker` CI job asks the image's own `gh` which keys
-`gh config set -h` writes, and fails on any the list does not name. A release that starts
-writing a new one host-level fails a pull request rather than a session.
+rather than asserting it: the `docker` CI job reads the image's own `gh config --help` and
+fails when it advertises a key this list does not name, and separately checks that
+`gh config set -h` really does route each of them here — with a value each key accepts, and with
+no `|| true` to swallow a refusal, which is what made the first attempt wrong. A release that
+adds a fourteenth fails a pull request rather than a session.
 
 The other half of #119's argument does not apply either: `~/.claude.json` is claude's own file
 in a format nobody documents, while `hosts.yml` is a file `gh` itself rewrites in place. It
@@ -307,13 +332,21 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   touching root's store. They are an environment question, not a home one: `.issuebot/env` is
   the spelling that matters and neither name is in `TOOL_CONFIG_ENV_NAMES` today. Filed
   separately rather than folded in, since it is #171's list and not this file.
-- **A key `gh` starts honouring host-level that it does not write through `gh config set -h`.**
-  `git_protocol` was exactly that and is now named, but finding it took a second measurement
-  rather than the probe, and nothing guarantees a third key could not arrive the same way. The
-  subset check notices a key gh starts *writing* host-level; a key it starts *reading* from
-  there without writing it is still a read of gh's release notes. Six keys, two routes, and the
-  honest statement is that the list is as complete as two measurements of somebody else's tool
-  can make it.
+- **A key `gh` starts honouring host-level that `gh config` does not manage.** The list is gh's
+  advertised configuration surface, and CI fails when that surface grows a key the list does not
+  name — but a key `gh` reads from `hosts.yml` without ever advertising it in `gh config --help`
+  would be invisible to both. Nothing suggests one exists today; the honest statement is that
+  the list is as complete as gh's own documentation of itself.
+- **The top-level half of the same keys, which is #173's and is not on `main`.** `config.yml`
+  is not swept here and PR #189 is still open, so a session can write `gh config set
+  git_protocol ssh` — no `-h` — and the next session's `gh repo clone` fails exactly as it does
+  from `hosts.yml`. Measured: with the key only in `config.yml`, `gh config get -h github.com
+  git_protocol` still reads `ssh`, `gh auth status` reports `Git operations protocol: ssh`, and
+  the clone fails with `cannot run ssh`. **So `git_protocol` is closed by this change only in
+  the position this change owns.** The one key closed outright is `api_host`, the issue's
+  subject, because top level is inert for it — measured, a `config.yml` carrying
+  `api_host: 127.0.0.1` left the request on the real `api.github.com`. Closing the other half is
+  #189's to do and is deliberately not duplicated here.
 - **A session can still deny the next one its `gh` by leaving the file unparseable.** The
   fail-safe branch deliberately keeps a `hosts.yml` it cannot understand, and `gh` then refuses
   to run at all (`failed to migrate config: cowardly refusing to continue`). That is the same
@@ -326,10 +359,13 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
 
 `tests/test_agent_runas.py`, beside the three sweep lists' own:
 
-- the steering keys come out and `oauth_token`, `user` and the `users:` subtree stay, with
+- all thirteen keys come out and `oauth_token`, `user` and the `users:` subtree stay, with
   nothing left beside the file, and a steering key *inside* `users:` is kept, since gh does not
   read it from there;
 - `git_protocol` comes out, with its own test naming the clone measurement;
+- a document nested deep enough to make PyYAML recurse is declined rather than raising, at both
+  the depth that fails the dump and the one that fails the load — the sweep never raises, and a
+  `RecursionError` is not a `YAMLError`;
 - every host entry is stripped, not just `github.com`;
 - a file with nothing to strip is left byte for byte, same inode;
 - the mode is carried across a rewrite;
@@ -346,6 +382,9 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   `TOOL_CONFIG_SWEEP`.
 
 The `docker` CI job proves it in the image, on the real uid split through `RunAs.sweep_home`:
-the plant re-points `gh` before the sweep and does not after, `gh config get -h github.com
-api_host` is empty, and the credential is still in the file. A second step asks the image's own
-`gh` which keys `-h` writes and fails if the answer is not `GH_HOSTS_STEERING_KEYS`.
+the plant re-points `gh` before the sweep and does not after, `gh config get -h github.com`
+reads nothing for `api_host` and `https` for `git_protocol`, and the credential is still in the
+file. A second step reads the image's own `gh config --help` and fails when it advertises a key
+`GH_HOSTS_STEERING_KEYS` does not name, then checks that `gh config set -h` routes each of them
+into `hosts.yml` — with a value each key accepts and no `|| true`, since that is what made the
+first attempt at this measurement wrong.
