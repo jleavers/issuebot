@@ -262,10 +262,15 @@ it, and it stays. But `gh config set -h <host> <key> <value>` writes into that f
 into `config.yml`, and one of the keys it can carry, `api_host`, re-points `gh` at a host of the
 planting session's choosing on an ordinary command: measured against `gh 2.100.0`, a planted
 `api_host` sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` issuebot runs
-to build the next workspace to that host instead of GitHub's. So the sweep removes exactly the
-five keys `gh config set -h` can write — `api_host`, `http_unix_socket`, `pager`, `editor` and
-`browser`, none of which is credential state — and leaves everything else in the file, the
-tokens included. A file with none of them in it is not rewritten at all. What is left of the
+to build the next workspace to that host instead of GitHub's. `git_protocol` is the same channel through another key: set to
+`ssh` there — which `gh auth login --git-protocol ssh` does — the next session's `gh repo clone`
+fails outright, since the image ships no ssh client.
+
+So the sweep removes exactly six keys — `api_host`, `git_protocol`, `http_unix_socket`, `pager`,
+`editor` and `browser`, none of which is credential state — and leaves everything else in the
+file, the tokens included. A file with none of them in it is not rewritten at all; one that does
+carry one is rewritten by a YAML parser, so it comes back normalised rather than
+character-for-character, which is what `gh` itself does to this file on an ordinary command. What is left of the
 channel is bounded and documented in
 `docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
 substituted host, a forged answer needs a certificate authority in the system trust store, which

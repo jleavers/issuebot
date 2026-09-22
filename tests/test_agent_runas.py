@@ -43,6 +43,7 @@ from issuebot.agent.runas import (
     TOOL_CONFIG_SWEEP,
     RunAs,
     RunAsError,
+    _replace_gh_hosts,
     _sweep,
     _walk,
     anonymous_fd,
@@ -342,7 +343,7 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 GH_HOSTS_PLANT = """github.com:
     oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345
     user: nobody
-    git_protocol: https
+    git_protocol: ssh
     api_host: 127.0.0.1:8099
     http_unix_socket: /tmp/pwn.sock
     pager: sh -c 'echo poison'
@@ -537,12 +538,82 @@ def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Pa
     # The credential the file is kept for, in both spellings gh writes it.
     assert document["github.com"]["oauth_token"] == "gho_KEEPTHISCREDENTIAL0123456789012345"
     assert document["github.com"]["user"] == "nobody"
-    assert document["github.com"]["git_protocol"] == "https"
     assert document["github.com"]["users"]["nobody"]["oauth_token"] == (
         "gho_KEEPTHISONETOO012345678901234567890"
     )
+    # Host level and no deeper. A steering key inside `users:` is measured not honoured --
+    # `users.<name>.api_host` left the request on the real api.github.com where the same key one
+    # level up re-pointed it -- so the subtree holding the per-account tokens is kept whole.
+    document["github.com"]["users"]["nobody"]["api_host"] = "127.0.0.1"
+    _hosts(home).write_text(yaml.safe_dump(document))
+    _sweep(home)
+    again = yaml.safe_load(_hosts(home).read_text())
+    assert again["github.com"]["users"]["nobody"]["api_host"] == "127.0.0.1"
     # And nothing of the edit is left lying beside it.
     assert sorted(p.name for p in _hosts(home).parent.iterdir()) == ["hosts.yml"]
+
+
+def test_sweep_strips_the_host_level_git_protocol(tmp_path: Path) -> None:
+    """The one steering key no `gh config set -h` probe finds, and the reason the list is not
+    just that probe's output: `gh config set -h github.com git_protocol ssh` writes to
+    `config.yml`, while `gh auth login --git-protocol ssh` writes it *here* -- and `gh` reads it
+    from here. Measured against `gh 2.100.0`: with `git_protocol: ssh` under the host and no
+    `config.yml` anywhere, `gh config get -h github.com git_protocol` reads `ssh` where the
+    hostname-less lookup still reads `https`, `gh auth status` reports `Git operations protocol:
+    ssh`, and `gh repo clone` -- which is issuebot's own, run through `RunAs` for the next
+    workspace -- fails outright with `error: cannot run ssh: No such file or directory`, since
+    the image installs no ssh client. The same availability channel as `api_host`, through a
+    different key. Removing it restores gh's own `https` default, which is what issuebot clones
+    and pushes over: the post-clone setup's credential helper is a token, not a key."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).write_text(
+        "github.com:\n    oauth_token: keep-me\n    user: nobody\n    git_protocol: ssh\n"
+    )
+    _sweep(home)
+    document = yaml.safe_load(_hosts(home).read_text())
+    assert "git_protocol" not in document["github.com"]
+    assert document["github.com"]["oauth_token"] == "keep-me"
+
+
+def test_sweep_does_not_let_the_yaml_round_trip_rewrite_a_value(tmp_path: Path) -> None:
+    """The sweep parses this file only to drop keys from it and then writes the rest back, so
+    the round trip has to be value-faithful -- it is a credential file. PyYAML resolves YAML 1.1
+    scalars where `go-yaml`, which is what reads this file, does not: under a plain `safe_load`
+    a `user: no` comes back `False` and an all-digit token starting with a zero comes back an
+    *integer* in octal. `_HostsLoader` loads every plain scalar as the text `gh` wrote."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    _hosts(home).write_text(
+        "github.com:\n    oauth_token: 0755\n    user: no\n    api_host: 127.0.0.1\n"
+    )
+    _sweep(home)
+    document = yaml.safe_load(_hosts(home).read_text())
+    assert "api_host" not in document["github.com"]
+    assert document["github.com"]["oauth_token"] == "0755"
+    assert document["github.com"]["user"] == "no"
+
+
+def test_the_hosts_rewrite_declines_a_file_that_moved_under_it(tmp_path: Path) -> None:
+    """Reading and writing are two steps, and `gh` rewrites this file on ordinary commands of
+    its own -- it normalises the document, and it refreshes an OAuth token in place. A rename
+    over a file that changed in that window would discard a credential `gh` had just written, so
+    the write is declined unless the name still resolves to the file the document was parsed
+    from. Declining costs the plant one more turn, where the sweep runs again; the other order
+    costs a login. Driven at the seam, since the window it closes is one a test cannot schedule
+    from outside."""
+    home = tmp_path / "home"
+    _plant_home(home)
+    planted = _hosts(home)
+    seen = planted.stat()
+    # What a `gh` running beside the sweep wrote after the document was parsed, and a different
+    # length, so the guard is decided by more than a timestamp's resolution.
+    written_by_gh = "github.com:\n    oauth_token: refreshed-by-gh-mid-sweep\n"
+    planted.write_text(written_by_gh)
+    _replace_gh_hosts(planted, {"github.com": {"oauth_token": "stale"}}, seen)
+    assert planted.read_text() == written_by_gh
+    # And nothing of the abandoned edit is left beside it.
+    assert sorted(entry.name for entry in planted.parent.iterdir()) == ["hosts.yml"]
 
 
 def test_sweep_strips_the_steering_keys_from_every_host_entry(tmp_path: Path) -> None:
@@ -707,13 +778,15 @@ def test_sweep_leaves_a_home_that_never_held_a_hosts_file(tmp_path: Path) -> Non
 
 def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None:
     """Pinned like the three sweep lists, and for a sharper reason: this one is a denylist over
-    a file that must keep working, so a key missing here is the channel back. Measured against
-    `gh version 2.100.0` -- `gh config set -h github.com <key>` asked for each of the thirteen
-    keys `gh config --help` lists, and exactly these five landed in `hosts.yml` while every
-    other went to `config.yml`. The `docker` CI job asks the image's own `gh` the same question
-    on every pull request, so a release that adds a sixth fails there rather than in a session.
+    a file that must keep working, so a key missing here is the channel back. Enumerated two
+    ways against `gh version 2.100.0`, because one route does not find them all. `gh config set
+    -h github.com <key>`, asked for each of the thirteen keys `gh config --help` lists, puts
+    five of them in `hosts.yml` and every other in `config.yml`. `git_protocol` is the sixth and
+    that probe never sees it -- `gh config set -h` writes it to `config.yml` -- while `gh auth
+    login --git-protocol ssh` writes it here and `gh` honours it from here, which is the test
+    below. The `docker` CI job asks the image's own `gh` both questions on every pull request.
     Dropping one here has to be a deliberate edit in both places."""
-    measured = {"api_host", "http_unix_socket", "pager", "editor", "browser"}
+    measured = {"api_host", "git_protocol", "http_unix_socket", "pager", "editor", "browser"}
     assert measured == GH_HOSTS_STEERING_KEYS
     # Never the credential keys: they are what the file is kept for, and `-h` cannot write them.
     assert GH_HOSTS_STEERING_KEYS.isdisjoint({"oauth_token", "user", "users"})

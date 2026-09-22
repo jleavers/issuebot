@@ -394,7 +394,14 @@ version, and moves by hand.
   write, measured by asking for each of the thirteen `gh config --help` lists: `api_host`,
   `http_unix_socket`, `pager`, `editor` and `browser`, every one a steering key and none
   credential state, so `oauth_token`, `user` and the `users:` subtree cannot be touched by
-  removing them. `http_unix_socket`, `pager`, `editor` and `browser` are measured *inert* in this
+  removing them. `git_protocol` is the sixth and no `gh config set -h` probe finds it -- that
+  route writes it to `config.yml`, while `gh auth login --git-protocol ssh` writes it here and
+  `gh` honours it from here: measured, `gh config get -h github.com git_protocol` reads `ssh`
+  where the hostname-less lookup still reads `https`, and `gh repo clone` then fails outright
+  with `cannot run ssh: No such file or directory`, since the image installs no ssh client. The
+  same availability channel through a different key, and dropping it restores gh's own `https`
+  default, which is what issuebot clones and pushes over.
+  `http_unix_socket`, `pager`, `editor` and `browser` are measured *inert* in this
   position (the same values at top level fire; the hostname-less lookup is what gh's own pager,
   editor and browser resolution uses) and are named anyway, since a key that does nothing costs
   nothing to name where leaving one out costs the channel back. A denylist, unlike
@@ -402,7 +409,9 @@ version, and moves by hand.
   steering key a future `gh` adds and this list misses costs the bounded channel above, where a
   keep-list stripping a credential key a future `gh` adds would break authentication for every
   session -- so the set is *proved* instead, the `docker` CI job asking the image's own `gh`
-  which keys `-h` writes and failing on anything but these five. Fail-safe in one direction only:
+  which keys `gh config set -h` writes and failing on any this list does not name (a subset
+  check, since `git_protocol` is on the list precisely because that probe cannot reach it; the
+  job pins that one by its own behaviour beside it). Fail-safe in one direction only:
   a file that will not open even with the modes put back, one over `GH_HOSTS_LIMIT` (256 KiB),
   one that is not a regular file (`O_NONBLOCK` and an `fstat`, `Boundary.read`'s rule, since a
   FIFO at that name would hang the open once per turn and once per hook), bytes that are not
@@ -415,7 +424,16 @@ version, and moves by hand.
   name or on the way to it is unlinked rather than followed, `_walk`'s rule. `_relax_file` is the
   one new repair beside `_relax`: a removal needs the parent's bits and nothing of the file's own
   mode, where an edit has to read its target, so a session that plants a key and then `chmod
-  0000`s the file would otherwise keep it at no cost to itself.
+  0000`s the file would otherwise keep it at no cost to itself. Three more rules make the write
+  safe for a credential file rather than merely atomic: `_HostsLoader` strips PyYAML's implicit
+  scalar resolvers so the round trip is value-faithful (`user: no` would otherwise come back
+  `false`, and an all-digit token starting with a zero an octal integer, since PyYAML resolves
+  YAML 1.1 where the `go-yaml` that reads this file does not); the rename is declined unless the
+  name still resolves to the `(ino, dev, mtime_ns, size)` the document was parsed from and to a
+  file this account owns, since `gh` rewrites this file on ordinary commands -- it normalises the
+  document and refreshes an OAuth token in place -- and a rename over one that moved would
+  discard a credential it had just written; and the bytes are `fsync`ed first, the rename being
+  what makes the new file the credential.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`

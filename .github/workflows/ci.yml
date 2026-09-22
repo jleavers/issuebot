@@ -550,15 +550,21 @@ jobs:
             "
           '
       # The other half of #190, and the reason the key-level edit above can be a denylist at
-      # all: the keys `gh config set -h <host>` writes into hosts.yml are a closed set, and this
-      # asks the image its own gh which ones they are rather than trusting the measurement that
-      # produced the list. Every key `gh config --help` advertises is set host-level and the
-      # file is read back, so a release that moves a fourteenth key -- or moves an existing one
-      # from config.yml into hosts.yml -- fails a pull request here instead of quietly handing
-      # the next session a steering key the sweep does not name. No account or sudo needed: the
-      # question is about gh, not about the uid split the step above proves.
+      # all: the keys this position carries are enumerable, and this asks the image its own gh
+      # rather than trusting the measurement that produced the list. Two questions, because one
+      # route does not find them all.
+      #   Which keys `gh config set -h <host>` writes into hosts.yml: every key
+      #   `gh config --help` advertises is set host-level and the file is read back. A *subset*
+      #   check -- the list may name keys this probe does not reach, and does -- so what fails
+      #   here is gh writing a host-level key the sweep does not name.
+      #   And git_protocol by its own behaviour, since that probe never sees it: `gh config set
+      #   -h` sends it to config.yml, while it is honoured from hosts.yml, which is why it is on
+      #   the list at all. A hand-written host entry has to out-rank the hostname-less lookup,
+      #   the shape that makes it a steering key in this file.
+      # No account or sudo needed: the question is about gh, not about the uid split the step
+      # above proves.
       # Nothing inside the outer script may carry an apostrophe or a single quote.
-      - name: gh writes only the steering keys the sweep names into hosts.yml
+      - name: gh writes and reads no host-level key the hosts.yml sweep does not name
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -575,14 +581,24 @@ jobs:
             from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
             path = pathlib.Path(os.environ[\"HOME\"], \".config\", \"gh\", \"hosts.yml\")
             written = set(yaml.safe_load(path.read_text())[\"github.com\"])
-            named = set(GH_HOSTS_STEERING_KEYS)
-            if written != named:
+            unnamed = written - set(GH_HOSTS_STEERING_KEYS)
+            if unnamed:
                 raise SystemExit(
-                    f\"gh writes {sorted(written)} into hosts.yml, GH_HOSTS_STEERING_KEYS names \"
-                    f\"{sorted(named)}; update the list in runas.py and its test\"
+                    f\"gh writes {sorted(unnamed)} into hosts.yml and GH_HOSTS_STEERING_KEYS \"
+                    f\"does not name it; add it in runas.py and in its test\"
                 )
-            print(\"host-level keys:\", sorted(written))
+            print(\"host-level keys gh config set -h writes:\", sorted(written))
             "
+            # And git_protocol, which that probe cannot reach: gh config set -h sends it to
+            # config.yml, so the only way to see it is to write the host entry and ask gh what
+            # it resolves. Host level has to win over the hostname-less lookup, which is what
+            # makes it a steering key in this file -- and what makes gh clone over ssh, which
+            # this image has no client for, for the next session at that uid.
+            rm -rf $HOME/.config/gh
+            mkdir -p $HOME/.config/gh
+            printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    git_protocol: ssh\n" > $HOME/.config/gh/hosts.yml
+            test "$(gh config get -h github.com git_protocol)" = ssh
+            test "$(gh config get git_protocol)" = https
           '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza, the nodejs.org download or either

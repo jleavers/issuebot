@@ -249,20 +249,28 @@ def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() 
     assert "! grep -q api_host /home/agent/.config/gh/hosts.yml" in CI
 
 
-def test_ci_asks_the_images_own_gh_which_keys_it_writes_host_level() -> None:
-    """The other half of #190, and what lets the edit be a denylist at all. `GH_HOSTS_STEERING_KEYS`
-    is a measurement -- the keys `gh config set -h <host>` writes into `hosts.yml` -- and a
-    measurement of somebody else's tool goes stale on their release schedule, not ours. So CI
-    asks the image's own `gh` every key it advertises and compares what landed against the list,
-    and a release that adds a sixth fails a pull request rather than quietly handing the next
-    session a steering key the sweep does not name."""
-    assert "gh writes only the steering keys the sweep names into hosts.yml" in CI
-    # Every key gh advertises, read off its own help rather than hard-coded here: a new one is
-    # picked up without an edit, which is the point.
+def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
+    """The other half of #190, and what lets the edit be a denylist at all.
+    `GH_HOSTS_STEERING_KEYS` is a measurement of somebody else's tool, which goes stale on their
+    release schedule rather than ours, so CI re-takes it on every pull request -- and it takes it
+    two ways, because one route does not find them all.
+
+    `gh config set -h <host>` writes five of the six, read off gh's own advertised key list
+    rather than hard-coded here, so a new one is picked up without an edit. The comparison is a
+    *subset*: what fails is gh writing a host-level key the sweep does not name, not the list
+    naming a key this probe cannot reach -- which is exactly `git_protocol`, sent to `config.yml`
+    by `gh config set -h` and honoured from `hosts.yml` all the same. That one is pinned by its
+    own behaviour instead: a hand-written host entry has to out-rank the hostname-less lookup."""
+    assert "gh writes and reads no host-level key the hosts.yml sweep does not name" in CI
     assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
     assert "gh config set -h github.com $key probe-$key" in CI
     assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
-    assert "if written != named:" in CI
+    assert "unnamed = written - set(GH_HOSTS_STEERING_KEYS)" in CI
+    assert "if unnamed:" in CI
+    # And the key the probe above cannot see, by what gh resolves rather than by what it writes.
+    assert "git_protocol: ssh" in CI
+    assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
+    assert 'test "$(gh config get git_protocol)" = https' in CI
 
 
 def test_the_dashboard_is_a_third_account_that_cannot_invoke_sudo() -> None:

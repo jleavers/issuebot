@@ -20,7 +20,9 @@ issuebot.agent.runas`` is the module's other face, and it has four verbs: ``exec
 ``kill`` (the agent's process group, since the worker's uid may not signal it), ``remove``
 (the agent's files under a workspace, which the worker's uid may not unlink) and ``sweep``
 (what a prior session left in the account's home for the next one to load: the config under
-``~/.claude``, #101, and the shell start-up files every ``bash -lc`` hook sources, #137).
+``~/.claude``, #101; the shell start-up files every ``bash -lc`` hook sources, #137; the tool
+config that can name a command, #151; and the steering keys inside ``gh``'s ``hosts.yml``, the
+one file that is edited rather than removed because it is also credential state, #190).
 """
 
 import argparse
@@ -189,13 +191,25 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # (``egress_denied``, ``Forbidden`` at the client) while an on-list name completes. So what
 # survives is availability, not confidentiality: a plant needing no network at all that breaks
 # every core ``gh`` command of the next session bound to that account.
-# A key-level edit rather than a path-level entry, because the file has to keep working. That is
-# a different shape from the denylists above, and what makes it a bounded one is that the keys
-# ``-h`` can write are a closed set: asked for each of the thirteen keys ``gh config --help``
-# lists, exactly these five landed in ``hosts.yml`` and every other went to ``config.yml``.
-# Every one of them is a steering key and none is credential state -- ``oauth_token``, ``user``
-# and the ``users:`` subtree are not among what ``-h`` can write -- so removing all five cannot
-# touch what the file is kept for.
+# A key-level edit rather than a path-level entry, because the file has to keep working. What
+# makes it a bounded one is that the keys this position carries are enumerable, and they were
+# enumerated two ways, because one route does not find them all.
+#   ``gh config set -h <host> <key>``, asked for each of the thirteen keys ``gh config --help``
+#   lists: five land in ``hosts.yml`` and every other goes to ``config.yml`` -- ``api_host``,
+#   ``http_unix_socket``, ``pager``, ``editor`` and ``browser``.
+#   ``git_protocol`` is the sixth, and no ``gh config set -h`` probe finds it: that route writes
+#   it to ``config.yml``, while ``gh auth login --git-protocol ssh`` writes it *here* and ``gh``
+#   honours it from here. Measured: with ``git_protocol: ssh`` under the host and no
+#   ``config.yml`` anywhere, ``gh config get -h github.com git_protocol`` reads ``ssh`` where the
+#   hostname-less lookup still reads ``https``, ``gh auth status`` reports ``Git operations
+#   protocol: ssh``, and ``gh repo clone`` -- issuebot's own -- fails outright with ``error:
+#   cannot run ssh: No such file or directory``, since the image installs no ssh client. So it is
+#   the same availability channel as ``api_host``, reached through a different key, and a list
+#   built from the ``config set`` probe alone would have missed it.
+# None of the six is credential state: ``oauth_token``, ``user`` and the ``users:`` subtree are
+# untouched, and dropping ``git_protocol`` restores ``gh``'s own ``https`` default, which is what
+# issuebot clones and pushes over anyway (the post-clone setup's credential helper is a token,
+# not a key). So removing all six cannot touch what the file is kept for.
 #   ``api_host`` is the live one. ``http_unix_socket``, ``pager``, ``editor`` and ``browser``
 #   are written here by ``gh config set -h`` and then *not honoured* in this position: measured
 #   inert, against the same values at top level, which do fire. They are on the list anyway
@@ -207,13 +221,16 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # future ``gh`` adds and this list misses costs the bounded channel above, where a keep-list
 # that stripped a credential key a future ``gh`` adds would break authentication for every
 # session in the deployment. The asymmetry is covered by proving the set instead of asserting
-# it -- the CI ``docker`` job asks the image's own ``gh`` which keys ``-h`` accepts and fails
-# when the answer is not these five, so a release that adds a sixth fails a pull request rather
-# than a session.
+# it -- the CI ``docker`` job asks the image's own ``gh`` which keys ``gh config set -h`` writes
+# and fails on any this list does not name, so a release that starts writing a new one host-level
+# fails a pull request rather than a session. A *subset* check rather than an equality one,
+# because ``git_protocol`` above is on this list precisely because that probe does not reach it;
+# the job pins that key by its own behaviour instead.
 GH_HOSTS_FILE: tuple[str, ...] = (".config", "gh", "hosts.yml")
 GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
     {
         "api_host",
+        "git_protocol",
         "http_unix_socket",
         "pager",
         "editor",
@@ -429,7 +446,9 @@ class RunAs:
     def sweep_home(self, home: Path | None = None) -> bool:
         """Clear what a prior session could steer the next one with from the account's home:
         the loadable config under ``~/.claude`` (#101), the shell start-up files a login
-        shell reads (#137) and the tool config files that can name a command (#151).
+        shell reads (#137), the tool config files that can name a command (#151), and the
+        steering keys inside the one file that has to survive rather than go, ``gh``'s
+        ``hosts.yml`` (#190).
 
         Delegated, since the home is the account's and closed to the worker's uid; never raises,
         like ``kill_group`` and ``remove_tree``, but unlike them reports whether the helper ran
@@ -683,6 +702,23 @@ def _entries(path: Path) -> list[Path]:
     return []
 
 
+class _HostsLoader(yaml.SafeLoader):
+    """``SafeLoader`` with the implicit scalar resolvers removed, so every plain scalar loads as
+    the text ``gh`` wrote (#190).
+
+    The sweep parses ``hosts.yml`` only to drop keys from it, and then writes the rest back, so
+    the round trip has to be value-faithful for a credential file. PyYAML resolves YAML 1.1
+    scalars, where ``go-yaml`` -- which is what reads this file -- does not: a ``user: no`` would
+    come back ``user: false``, and the same for ``on``, ``off``, ``y``, ``n`` and the sexagesimal
+    forms. Loading every plain scalar as a string and letting the dumper quote what needs quoting
+    keeps what was there, and costs nothing, since nothing here is compared as a number or a
+    boolean -- only key names are looked at.
+    """
+
+
+_HostsLoader.yaml_implicit_resolvers = {}
+
+
 def _sweep_gh_hosts(home: Path) -> None:
     """Remove the steering keys (``GH_HOSTS_STEERING_KEYS``) from ``~/.config/gh/hosts.yml``,
     keeping everything else in it (#190).
@@ -692,6 +728,11 @@ def _sweep_gh_hosts(home: Path) -> None:
     every deployment more than the channel in it does. The keys it removes are the closed set
     ``gh config set -h <host>`` can write, none of which is credential state, so ``oauth_token``,
     ``user`` and the ``users:`` subtree come through untouched.
+
+    Only the keys directly under a host, never deeper: a steering key inside the ``users:``
+    subtree is measured *not* honoured -- ``users.<name>.api_host`` left the request on the real
+    ``api.github.com`` where the same key one level up re-pointed it -- so the subtree that holds
+    the per-account tokens can be preserved whole without leaving the channel open under it.
 
     Best-effort and fail-safe, in that order: anything this cannot read, parse or understand as
     the small mapping-of-hosts ``gh`` writes keeps its contents exactly as they are, since
@@ -712,9 +753,10 @@ def _sweep_gh_hosts(home: Path) -> None:
     if target.is_symlink():
         _remove_swept(target)
         return
-    parsed = _read_gh_hosts(target)
-    if parsed is None:
+    document = _read_gh_hosts(target)
+    if document is None:
         return
+    parsed, seen = document
     stripped = {
         host: {key: value for key, value in entry.items() if key not in GH_HOSTS_STEERING_KEYS}
         if isinstance(entry, dict)
@@ -723,11 +765,11 @@ def _sweep_gh_hosts(home: Path) -> None:
     }
     if stripped == parsed:
         return
-    _replace_gh_hosts(target, stripped)
+    _replace_gh_hosts(target, stripped, seen)
 
 
-def _read_gh_hosts(target: Path) -> dict | None:
-    """The mapping ``hosts.yml`` parses to, or ``None`` to leave the file alone.
+def _read_gh_hosts(target: Path) -> tuple[dict, os.stat_result] | None:
+    """The mapping ``hosts.yml`` parses to and the file it was read from, or ``None``.
 
     ``None`` covers every way this can decline: a file that will not open even with the modes
     put back, one over ``GH_HOSTS_LIMIT``, bytes that are not UTF-8 or not YAML, and a document
@@ -735,24 +777,26 @@ def _read_gh_hosts(target: Path) -> dict | None:
     of the sweep does, since a session that drops read on its own ``hosts.yml`` would otherwise
     keep a plant at no cost to itself -- ``gh`` opens the path it already knows.
     """
-    text = _read_capped(target)
-    if text is None:
+    seen = _read_capped(target)
+    if seen is None:
         _relax(target.parent)
         _relax_file(target)
-        text = _read_capped(target)
-    if text is None:
+        seen = _read_capped(target)
+    if seen is None:
         return None
+    text, st = seen
     try:
-        parsed = yaml.safe_load(text)
+        # `_HostsLoader` is a `SafeLoader`; only its scalar resolvers differ.
+        parsed = yaml.load(text, Loader=_HostsLoader)
     except yaml.YAMLError:
         return None
     if not isinstance(parsed, dict):
         return None
-    return parsed
+    return parsed, st
 
 
-def _read_capped(target: Path) -> str | None:
-    """At most ``GH_HOSTS_LIMIT`` bytes of ``target`` as text, or ``None``.
+def _read_capped(target: Path) -> tuple[str, os.stat_result] | None:
+    """At most ``GH_HOSTS_LIMIT`` bytes of ``target`` as text, with what it was read from.
 
     ``O_NOFOLLOW`` because the caller's symlink check and this open are two steps, and the
     session owns the directory between them. ``O_NONBLOCK`` and the ``fstat`` for the reason
@@ -766,7 +810,8 @@ def _read_capped(target: Path) -> str | None:
     fd = None
     try:
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return None
         raw = os.read(fd, GH_HOSTS_LIMIT + 1)
     except OSError:
@@ -778,45 +823,70 @@ def _read_capped(target: Path) -> str | None:
     if len(raw) > GH_HOSTS_LIMIT:
         return None
     try:
-        return raw.decode()
+        return raw.decode(), st
     except UnicodeDecodeError:
         return None
 
 
-def _replace_gh_hosts(target: Path, stripped: dict) -> None:
+def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> None:
     """Write ``stripped`` over ``target`` atomically, or leave the file as it was.
 
     Through a temporary file in the same directory and ``os.replace``, so a session's ``gh``
     running beside this sweep reads either the old document or the new one and never a partial
     write of its own credentials. The mode is the original's rather than the umask's: ``gh``
     writes ``hosts.yml`` ``0600`` and complains about a wider one.
+
+    ``seen`` is the file the document was parsed from, and the write is declined unless the name
+    still resolves to it. Reading and writing are two steps, the session owns the directory
+    between them, and ``gh`` rewrites this file on ordinary commands of its own -- it normalises
+    the document and it refreshes an OAuth token in place -- so a rename over a file that moved
+    in that window would discard a credential ``gh`` had just written. Declining costs the plant
+    one more turn, where the sweep runs again; the other order costs a login.
+
+    The file also has to be this account's own, the rule ``_relax`` and ``_relax_file`` keep: a
+    ``hosts.yml`` an operator seeded as root is not a session's plant, and replacing it with an
+    account-owned copy would hand the next session a file it can rewrite freely.
     """
     with contextlib.suppress(OSError, yaml.YAMLError):
         # The temporary file is created in this directory and renamed over the target, so the
         # replace needs write and search on it -- the same bits `_sweep`'s retry puts back for
         # a removal, and the account's own to set either way.
         _relax(target.parent)
-        # ``lstat``, and a regular file or nothing: the read above and this write are two steps,
-        # and the session owns the directory between them. A name that has become a link since
-        # is one this function declines rather than one it takes the mode of -- ``os.replace``
-        # would unlink the link rather than follow it, so nothing outside the home could be
-        # written either way, but a file whose shape changed under the sweep is not one to
-        # rewrite from a document read before it did.
+        # ``lstat``, so a name that has become a link is declined rather than measured through.
+        # ``os.replace`` would unlink such a link rather than follow it, so nothing outside the
+        # home could be written either way; what this refuses is rewriting a file whose identity
+        # is no longer the one the document came from.
         st = os.lstat(target)
-        if not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return
+        if (st.st_ino, st.st_dev, st.st_mtime_ns, st.st_size) != (
+            seen.st_ino,
+            seen.st_dev,
+            seen.st_mtime_ns,
+            seen.st_size,
+        ):
             return
         mode = stat.S_IMODE(st.st_mode)
         handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".hosts-", suffix=".yml")
+        replaced = False
         try:
             with os.fdopen(handle, "w") as stream:
                 yaml.safe_dump(stripped, stream, default_flow_style=False, sort_keys=False)
+                # Flushed and synced before the rename: the rename is what makes the new file
+                # the credential, and a rename that reached the disk ahead of the bytes would
+                # leave a truncated `hosts.yml` -- the credential loss this whole function is
+                # shaped to avoid -- across an unclean shutdown.
+                stream.flush()
+                os.fsync(stream.fileno())
             os.chmod(temporary, mode)
             os.replace(temporary, target)
-            return
-        except OSError, yaml.YAMLError:
-            with contextlib.suppress(OSError):
-                os.unlink(temporary)
-            raise
+            replaced = True
+        finally:
+            # A `finally` rather than an `except` clause, so the temporary file is cleaned up
+            # whichever of the steps above raised and without naming their exception types.
+            if not replaced:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)
     # Suppressed rather than reported: the replace is atomic, so a failure leaves the original
     # file intact and still carrying the plant, and the next turn sweeps again. This helper's
     # exit status is what ``sweep_home`` reports, and a sweep that cleared every other surface
