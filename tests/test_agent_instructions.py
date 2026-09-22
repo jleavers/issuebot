@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+import structlog
 
 from issuebot.agent.boundary import INSTRUCTION_FILE, Boundary
 from issuebot.agent.instructions import (
@@ -82,6 +83,29 @@ def test_a_large_file_is_cut_and_says_so(tmp_path: Path) -> None:
     (file,) = read_repository_instructions(tmp_path, limit=104)
     assert file.truncated is False
     assert file.carried == 104
+
+
+def test_a_cut_is_reported_where_a_human_can_see_it(tmp_path: Path) -> None:
+    """#211: the cut is not a failure, so without this line nobody but the session knows.
+
+    The file renders whole on GitHub and in an editor; a maintainer watching their repository
+    has no other signal that the end of their instructions reaches no session at all.
+    """
+    (tmp_path / "CLAUDE.md").write_bytes(b"x" * 100 + b"tail")
+    with structlog.testing.capture_logs() as logs:
+        read_repository_instructions(tmp_path, limit=100)
+    (cut,) = [entry for entry in logs if entry["event"] == "repository_instructions_truncated"]
+    assert cut["log_level"] == "warning"
+    assert (cut["size"], cut["carried"], cut["limit"]) == (104, 100, 100)
+    assert cut["path"].endswith("CLAUDE.md")
+
+
+def test_a_file_that_fits_is_reported_nowhere(tmp_path: Path) -> None:
+    """One line per cut file, and none at all for the ordinary case (#211)."""
+    (tmp_path / "CLAUDE.md").write_bytes(b"x" * 100)
+    with structlog.testing.capture_logs() as logs:
+        read_repository_instructions(tmp_path, limit=100)
+    assert [entry for entry in logs if "truncated" in entry["event"]] == []
 
 
 def test_a_cut_through_a_multibyte_character_reports_the_bytes_carried(tmp_path: Path) -> None:

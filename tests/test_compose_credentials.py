@@ -51,6 +51,11 @@ OPERATOR_FACING = [
     # handling the store's one credential.
     "docs/operations.md",
     "CLAUDE.md",
+    # #211 moved the package layout out of `CLAUDE.md`, and with it the prose spelling what a
+    # DSN looks like (`issuebot.dsn`, `describe`, the store's connection). This list covered
+    # that prose while it sat in a file named here; the file it moved to has to be named too,
+    # or the rule quietly stopped applying to the text it was written for.
+    "docs/package-layout.md",
     "Dockerfile",
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / ".github" / "workflows").glob("*.yml")),
 ]
