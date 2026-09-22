@@ -359,8 +359,9 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 # #190: what `gh config set -h github.com <key>` can write, beside the credential state the
 # same file holds. The five steering keys were measured against `gh version 2.100.0`: asked for
-# each of the thirteen keys `gh config --help` lists, exactly these landed in `hosts.yml` and
-# every other went to `config.yml`.
+# each of the thirteen keys `gh config --help` listed at the time -- fourteen since 2.101.0 added
+# `clipboard` (#231), which is the one key `-h` refuses -- exactly these landed in `hosts.yml`
+# and every other went to `config.yml`.
 GH_HOSTS_PLANT = """github.com:
     oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345
     user: nobody
@@ -601,7 +602,7 @@ def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Pa
     # Both levels gh writes them. `gh config set -h <host> <key>` mirrors into `users.<name>`
     # once the file names a user, creating the subtree if it has to, so a host-level-only sweep
     # would leave a complete second copy of every planted key. Those copies are measured inert
-    # on this gh -- but so are eleven of the thirteen at host level, and they go for the same
+    # on this gh -- but so are twelve of the fourteen at host level, and they go for the same
     # reason. `oauth_token` is what the subtree is for and stays.
     document["github.com"]["users"]["nobody"]["api_host"] = "127.0.0.1"
     document["github.com"]["users"]["nobody"]["git_protocol"] = "ssh"
@@ -905,17 +906,27 @@ def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None
     """Pinned like the three sweep lists, and for a sharper reason: this one is a denylist over
     a file that must keep working, so a key missing here is the channel back.
 
-    It is `gh`'s own configuration surface -- every key `gh config` manages -- because
-    `gh config set -h <host> <key> <value>` writes *all thirteen* into `hosts.yml` rather than
-    into `config.yml`. Measured against `gh version 2.100.0` with a value each key accepts,
-    which is the whole of the measurement and the easy thing to get wrong: `gh config set`
-    validates the enum-valued keys, so a probe passing a placeholder is refused for eight of the
-    thirteen, and a probe that swallows the refusal reports only the five free-form ones and
-    calls that the closed set. So what survives the sweep is what `gh config` does not manage:
-    `oauth_token`, `user` and the `users:` subtree. The `docker` CI job re-takes the
-    measurement off the image's own `gh config --help` on every pull request, so a release that
-    adds a fourteenth key fails there. Dropping one here has to be a deliberate edit in both
-    places."""
+    It is `gh`'s own configuration surface -- every key `gh config` manages -- because that set
+    is what `hosts.yml` can carry and what `gh` resolves out of it host-level. Measured against
+    `gh version 2.101.0` two ways, because 2.101.0 is where the two came apart. Thirteen of the
+    fourteen by `gh config set -h <host> <key> <value>`, which writes them into `hosts.yml`
+    rather than into `config.yml`, with a value each key accepts -- the easy thing to get wrong,
+    since `gh config set` validates the enum-valued keys, so a probe passing a placeholder is
+    refused for nine of the fourteen, and a probe that swallows the refusal reports only the five
+    free-form ones and calls that the closed set.
+
+    `clipboard` is the fourteenth and is named on the other measurement (#231): `gh config set
+    -h` refuses it (`--host cannot be used when setting clipboard`), so `gh`'s own writer will
+    not put it here, but a value planted by hand under `github.com` -- which is how a session
+    leaves residue -- reads back from `gh config get -h github.com clipboard` while
+    `gh config get clipboard` reads the default. The host entry out-ranks the hostname-less
+    lookup, exactly as `git_protocol`'s does, and resolution rather than authorship is what makes
+    a key steer `gh`. `runas.py`'s comment carries that decision in full.
+
+    So what survives the sweep is what `gh config` does not manage: `oauth_token`, `user` and
+    the `users:` subtree. The `docker` CI job re-takes both measurements off the image's own
+    `gh` on every pull request, so a release that adds a fifteenth key fails there -- which is
+    how `clipboard` was found. Dropping one here has to be a deliberate edit in both places."""
     advertised = {
         "api_host",
         "git_protocol",
@@ -925,6 +936,7 @@ def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None
         "pager",
         "http_unix_socket",
         "browser",
+        "clipboard",
         "color_labels",
         "accessible_colors",
         "accessible_prompter",
@@ -932,6 +944,10 @@ def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None
         "telemetry",
     }
     assert advertised == GH_HOSTS_STEERING_KEYS
+    # The one `gh config set -h` refuses, pinned by name rather than left in the set above: it
+    # is named for what `gh` reads back out of a planted `hosts.yml`, not for what `gh` writes,
+    # and the `docker` step measures those two halves separately for that reason.
+    assert "clipboard" in GH_HOSTS_STEERING_KEYS
     # Never the credential keys: they are what the file is kept for, and `-h` cannot write them.
     assert GH_HOSTS_STEERING_KEYS.isdisjoint({"oauth_token", "user", "users"})
     # The file is edited, never listed for removal: #151 pinned it and #173 kept it.

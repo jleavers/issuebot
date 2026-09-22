@@ -609,19 +609,29 @@ jobs:
       # The other half of #190, and the reason the key-level edit above can be a denylist at
       # all: the keys hosts.yml can carry are gh own configuration surface, which gh advertises,
       # so this asks the image its own gh rather than trusting the measurement that produced the
-      # list. Two things are checked, and the first is the one that matters.
+      # list. Three things are checked, and the first is the one that matters.
       #   Every key `gh config --help` advertises has to be named by GH_HOSTS_STEERING_KEYS. A
-      #   release that adds a fourteenth fails here rather than quietly handing the next session
-      #   a key the sweep leaves in a credential file.
+      #   release that adds a fifteenth fails here rather than quietly handing the next session
+      #   a key the sweep leaves in a credential file. Not hypothetical: that is how `clipboard`
+      #   arrived in gh 2.101.0, on the first execution this step ever had (#231).
       #   And that `gh config set -h <host>` really does route them here rather than to
-      #   config.yml -- with a value each key accepts, which is the whole of that measurement and
+      #   config.yml -- with a value each key accepts, which is most of that measurement and
       #   the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
-      #   passing a placeholder is refused for eight of the thirteen and a `|| true` would report
-      #   only the five free-form ones. So no `|| true`: a refused set fails the step.
+      #   passing a placeholder is refused for nine of the fourteen and a `|| true` would report
+      #   only the five free-form ones. So no `|| true`: a set refused for anything but the one
+      #   reason below fails the step.
+      #   And that every key gh declines to write host-level is named for the other reason,
+      #   which is the one the list is really over: hosts.yml can carry it anyway, and gh
+      #   resolves a planted value ahead of the hostname-less lookup. `clipboard` is the only
+      #   such key so far -- `--host cannot be used when setting clipboard` -- and without this
+      #   half it would sit in the denylist with nothing saying why the sweep removes it, while
+      #   the `written != named` equality below would have to slacken to a subset to admit it.
+      #   Collected from gh own refusal rather than named here, so the next such key is measured
+      #   the same way instead of being special-cased.
       # No account or sudo needed: the question is about gh, not about the uid split the step
       # above proves.
       # Nothing inside the outer script may carry an apostrophe or a single quote.
-      - name: every gh config key is named by the hosts.yml sweep, and gh writes them there
+      - name: every gh config key is named by the hosts.yml sweep, and gh resolves them there
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -629,8 +639,9 @@ jobs:
             mkdir -p $HOME
             keys=$(gh config --help | sed -n "s/^- .\([a-z_]*\).:.*/\1/p")
             # Not just non-empty: a help line this `sed` stops matching would shrink the list
-            # silently, and the key it dropped is exactly the channel back.
-            test "$(printf "%s\n" "$keys" | wc -l)" -ge 13
+            # silently, and the key it dropped is exactly the channel back. The floor moves with
+            # the count it guards, so it still means what it meant: fourteen since 2.101.0.
+            test "$(printf "%s\n" "$keys" | wc -l)" -ge 14
             /app/.venv/bin/python -c "
             import os, sys
             from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
@@ -644,7 +655,11 @@ jobs:
             print(\"gh config keys, all named by the sweep:\", sorted(advertised))
             " "$keys"
             # A value each key takes, so a refusal is a real answer and not a validation error
-            # swallowed by the probe. Free-form keys take anything; the rest are enums.
+            # swallowed by the probe. Free-form keys take anything; the rest are enums. The one
+            # refusal that is an answer rather than a failure is gh declining --host for a key
+            # at all, and it is collected rather than ignored: those keys are proved below by
+            # what gh reads back, and the comparison after this loop accounts for them exactly.
+            refused=
             for key in $keys; do
               case $key in
                 api_host) value=api.example.com ;;
@@ -656,8 +671,16 @@ jobs:
                 telemetry) value=disabled ;;
                 *) value=enabled ;;
               esac
-              gh config set -h github.com $key $value
+              if ! answer=$(gh config set -h github.com $key $value 2>&1); then
+                case $answer in
+                  *"cannot be used when setting"*) refused="$refused $key" ;;
+                  *) printf "%s\n" "$answer"
+                     echo "gh config set -h github.com $key $value failed, and not over --host"
+                     exit 1 ;;
+                esac
+              fi
             done
+            echo "declined host-level by gh:$refused"
             /app/.venv/bin/python -c "
             import os, pathlib, sys, yaml
             from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
@@ -665,20 +688,52 @@ jobs:
             written = set(yaml.safe_load(path.read_text())[\"github.com\"])
             named = set(GH_HOSTS_STEERING_KEYS)
             advertised = set(sys.argv[1].split())
-            if written != named:
+            refused = set(sys.argv[2].split())
+            if written != named - refused:
                 raise SystemExit(
-                    f\"gh config set -h writes {sorted(written)} into hosts.yml, the sweep names \"
-                    f\"{sorted(named)}; a key that moved to config.yml or arrived here is the \"
-                    f\"measurement this list is built on -- update runas.py and its test\"
+                    f\"gh config set -h writes {sorted(written)} into hosts.yml and declines \"
+                    f\"{sorted(refused)}, the sweep names {sorted(named)}; a key that moved to \"
+                    f\"config.yml or arrived here is the measurement this list is built on -- \"
+                    f\"update runas.py and its test\"
                 )
-            if advertised - written:
-                raise SystemExit(f\"gh routes {sorted(advertised - written)} elsewhere now\")
+            if advertised - written - refused:
+                raise SystemExit(
+                    f\"gh routes {sorted(advertised - written - refused)} elsewhere now\"
+                )
             print(\"written host-level by gh config set -h:\", sorted(written))
-            " "$keys"
-            # And git_protocol by what gh resolves rather than by what it writes: a host entry
-            # has to out-rank the hostname-less lookup, which is what makes it steer the clone.
+            " "$keys" "$refused"
+            # The rest is what gh *resolves* rather than what it writes, from a hosts.yml
+            # planted by hand -- which is how a session leaves residue, and the only route for
+            # a key gh declines to write. A host entry has to out-rank the hostname-less lookup;
+            # that is what makes a planted key steer gh at all. From the post-#173 state, with
+            # the config.yml the loop above created removed, so the second test of each pair is
+            # against gh own default and not against a value left lying in the other file.
             rm -rf $HOME/.config/gh
             mkdir -p $HOME/.config/gh
+            # Every key gh declined: named for what gh reads back, since nothing writes it here.
+            # The two lookups are compared against each other rather than against a literal, so
+            # this generalises to the next declined key whatever gh defaults it to -- four of
+            # the fourteen already default to `disabled`, and a literal would fail on those for
+            # a reason that is not the sweep being wrong. So: read the hostname-less answer
+            # first, plant something else, and require exactly one of the two to move.
+            for key in $refused; do
+              before=$(gh config get $key)
+              if [ "$before" = disabled ]; then planted=enabled; else planted=disabled; fi
+              printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    $key: $planted\n" > $HOME/.config/gh/hosts.yml
+              if [ "$(gh config get -h github.com $key)" != "$planted" ]; then
+                echo "hosts.yml carries $key and gh no longer resolves it host-level, so the"
+                echo "sweep names $key for a channel that has closed; re-take the measurement"
+                exit 1
+              fi
+              if [ "$(gh config get $key)" != "$before" ]; then
+                echo "a host-level $key changed the hostname-less lookup too; that is not the"
+                echo "shape this proof assumes -- re-take the measurement"
+                exit 1
+              fi
+              echo "resolved host-level from a planted hosts.yml: $key=$planted"
+            done
+            # And git_protocol, which gh does write here, by the same resolution: it is the one
+            # whose planted value is measured to steer gh repo clone.
             printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    git_protocol: ssh\n" > $HOME/.config/gh/hosts.yml
             test "$(gh config get -h github.com git_protocol)" = ssh
             test "$(gh config get git_protocol)" = https

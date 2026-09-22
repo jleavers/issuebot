@@ -164,7 +164,7 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   a plant fires only if a later session happens to invoke the invented subcommand name it
 #   chose -- narrower than git's ``core.pager``, which fires on an ordinary command. That
 #   reasoning held for ``aliases:`` and does not hold for the file. ``http_unix_socket``, one
-#   of the thirteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
+#   of the fourteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
 #   unix socket the planting session names, and it *does* fire on an ordinary core command:
 #   measured, ``gh api user`` handed the socket ``Authorization: token <GH_TOKEN>`` and took a
 #   forged ``{"login": "forged"}`` back, and so did ``gh repo clone`` -- which is the worker's
@@ -243,18 +243,18 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # every core ``gh`` command of the next session bound to that account.
 # A key-level edit rather than a path-level entry, because the file has to keep working. What
 # makes it bounded is that the keys this position carries are enumerable: ``gh config`` manages
-# a fixed set, ``gh config --help`` advertises it, and ``gh config set -h <host> <key> <value>``
-# writes *every one of them* into ``hosts.yml`` rather than into ``config.yml``. Measured by
-# asking for each of the thirteen with a value that key accepts -- which is the whole of the
-# measurement, and the easy thing to get wrong: ``gh config set`` validates the enum-valued keys,
-# so a probe that passes a placeholder is refused for eight of the thirteen and reports only the
-# five free-form ones. All thirteen land here.
+# a fixed set and ``gh config --help`` advertises it, and what ``hosts.yml`` can carry is that
+# set. Measured by asking ``gh config set -h <host> <key> <value>`` for each of the fourteen with
+# a value that key accepts -- which is most of the measurement, and the easy thing to get wrong:
+# ``gh config set`` validates the enum-valued keys, so a probe that passes a placeholder is
+# refused for nine of the fourteen and reports only the five free-form ones. Thirteen of the
+# fourteen land here, and the fourteenth is the one that says what the list is really over.
 # So the list is ``gh``'s own configuration surface, removed whole from a file that also holds
 # credentials, and what survives is what ``gh config`` does not manage: ``oauth_token``, ``user``
 # and the ``users:`` subtree. That is the shape of the decision -- the sweep does not judge which
 # keys are dangerous, it declines to let a session leave *configuration* in a credential file --
 # and it is why the list can be a denylist without being a guess.
-#   ``api_host`` is what #190 was opened about, and the only one of the thirteen that is *only*
+#   ``api_host`` is what #190 was opened about, and the only one of the fourteen that is *only*
 #   reachable from here: at top level it is inert. A planted value sends ``gh api``,
 #   ``gh issue list``, ``gh pr list`` and ``gh repo clone`` -- issuebot's own, for the next
 #   session's workspace -- to the host the planting session named.
@@ -265,16 +265,37 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 #   directory``, since the image installs no ssh client.
 #   ``http_unix_socket``, ``pager``, ``editor`` and ``browser`` are measured *inert* in this
 #   position -- the same values at top level do fire, so it is where the key sits and not the
-#   test -- and the remaining seven are cosmetic or, like ``prompt``, documented as global. They
+#   test -- and the remaining eight are cosmetic or, like ``prompt``, documented as global. They
 #   are removed all the same: naming a key that does nothing costs nothing, where leaving one out
 #   costs the channel back if a later ``gh`` starts honouring it from here.
+#   ``clipboard`` is the fourteenth, added by ``gh`` 2.101.0 (2026-09-15) and found by the CI
+#   step below on its first execution (#231). It is the one key whose arrival separates the two
+#   halves of the sentence above, so what it is doing in a list defined by ``gh config set -h``
+#   is worth stating rather than assuming: **``gh config set -h github.com clipboard <value>`` is
+#   refused outright** -- ``--host cannot be used when setting clipboard`` -- and it is the only
+#   one of the fourteen ``gh``'s own writer declines to put here. It is named all the same,
+#   because the list is over what this file can *carry* and ``gh`` resolves out of it, not over
+#   what ``gh config set`` is willing to write into it. Measured on 2.101.0, planted by hand
+#   under ``github.com`` as a session leaving residue writes it anyway -- the sweep exists for
+#   the session that writes YAML, not for the one that politely asks ``gh`` -- ``gh config get -h
+#   github.com clipboard`` reads the planted value back where ``gh config get clipboard`` reads
+#   the default. The host entry out-ranks the hostname-less lookup, which is ``git_protocol``'s
+#   shape exactly, and it is that resolution and not the writer that makes a key steer ``gh``.
+#   (``gh config list -h github.com`` reports the default for it instead, so ``gh``'s own two
+#   read paths disagree here; the resolving one is the one a planted value reaches.) What it
+#   steers is small -- a ``{enabled | disabled}`` toggle over copying one-time OAuth device codes
+#   to the clipboard, not a program name like ``editor``, ``pager`` or ``browser``, and the image
+#   carries no clipboard utility for it to reach -- so this is the "naming a key that does
+#   nothing costs nothing" case above rather than a second ``api_host``. It is named for the
+#   second half of that clause: a key ``gh`` already resolves host-level, left out because its
+#   current effect is small, is the channel back the moment that effect is not.
 # What the live channel cannot do bounds how much of this is urgent, and all of it was measured:
 # ``gh`` sends no ``Authorization`` header to a substituted host (from ``GH_TOKEN`` or from the
 # file's own ``oauth_token``; ``gh help config`` says so outright), a self-signed certificate is
 # refused so forging an answer needs a CA in root's trust store, and #126's proxy refuses a name
 # off its allow-list while an on-list one completes. So what survives is availability, not
 # confidentiality, and it needs no network at all.
-# None of the thirteen is credential state, so removing them cannot touch what the file is kept
+# None of the fourteen is credential state, so removing them cannot touch what the file is kept
 # for; dropping ``git_protocol`` leaves ``gh``'s own ``https`` default, which is what issuebot
 # clones and pushes over (the post-clone setup's credential helper is a token, not a key).
 # A denylist rather than a keep-list of the credential keys, unlike ``--strict-mcp-config``'s
@@ -283,8 +304,9 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
 # credential key a future ``gh`` adds would break authentication for every session in the
 # deployment. The asymmetry is covered by proving the set rather than asserting it -- the CI
 # ``docker`` job reads the image's own ``gh config --help`` and fails when it advertises a key
-# this list does not name, so a release that adds a fourteenth fails a pull request rather than a
-# session.
+# this list does not name, so a release that adds one fails a pull request rather than a session.
+# That is not hypothetical any more: it is exactly how ``clipboard`` arrived (#231), on the first
+# execution the step ever had, and the job names the key and the two files to change.
 GH_HOSTS_FILE: tuple[str, ...] = (".config", "gh", "hosts.yml")
 GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
     {
@@ -296,6 +318,7 @@ GH_HOSTS_STEERING_KEYS: frozenset[str] = frozenset(
         "pager",
         "http_unix_socket",
         "browser",
+        "clipboard",
         "color_labels",
         "accessible_colors",
         "accessible_prompter",
@@ -907,7 +930,7 @@ def _stripped_host(entry: object) -> object:
     Host level is where ``gh`` reads them. The ``users.<name>`` subtree is where it *mirrors*
     them: ``gh config set -h <host> <key>`` writes the key twice once the file names a user, and
     creates the subtree if it has to. Those copies are measured inert on this ``gh`` -- after a
-    host-level sweep the value no longer resolves -- but so are eleven of the thirteen at host
+    host-level sweep the value no longer resolves -- but so are twelve of the fourteen at host
     level, and they are removed for the same reason: a key that does nothing costs nothing to
     remove, where leaving a complete second copy of every planted key in the file costs the
     channel back the day a release starts reading it. ``oauth_token`` is what the subtree is for

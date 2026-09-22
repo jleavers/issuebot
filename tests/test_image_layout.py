@@ -376,17 +376,27 @@ def test_ci_plants_the_hosts_yml_exactly_once() -> None:
 def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     """The other half of #190, and what lets the edit be a denylist at all.
     `GH_HOSTS_STEERING_KEYS` is `gh`'s own configuration surface -- every key `gh config`
-    manages, all of which `gh config set -h <host>` writes into `hosts.yml` -- and that is a
-    measurement of somebody else's tool, which goes stale on their release schedule rather than
-    ours. So CI re-takes it on every pull request, off gh's own advertised key list rather than
-    a list hard-coded here, and fails when gh advertises a key the sweep does not name.
+    manages, which is what `hosts.yml` can carry and what `gh` resolves out of it host-level --
+    and that is a measurement of somebody else's tool, which goes stale on their release
+    schedule rather than ours. So CI re-takes it on every pull request, off gh's own advertised
+    key list rather than a list hard-coded here, and fails when gh advertises a key the sweep
+    does not name.
 
-    The `set` half carries a value each key accepts, which is the whole of that measurement and
+    The `set` half carries a value each key accepts, which is most of that measurement and
     the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
-    passing a placeholder is refused for eight of the thirteen -- and a `|| true` would report
-    only the five free-form ones and call that the closed set. No `|| true`, so a refused set
-    fails the step."""
-    assert "every gh config key is named by the hosts.yml sweep, and gh writes them there" in CI
+    passing a placeholder is refused for nine of the fourteen -- and a `|| true` would report
+    only the five free-form ones and call that the closed set. No `|| true`, so a set refused
+    for anything but the one reason below fails the step.
+
+    That reason is the rest of the measurement, and #231 is why it exists: `clipboard`, added
+    by gh 2.101.0, is the first key gh declines to write host-level at all (`--host cannot be
+    used when setting clipboard`), and it is in the sweep list anyway because `hosts.yml` can
+    carry it and gh resolves a planted value from it ahead of the hostname-less lookup. So the
+    step collects the keys gh declines -- from gh own refusal, not from a name hard-coded here
+    -- subtracts exactly those from the `written` comparison, and then proves each one by
+    planting it and reading it back. Without that last half the equality below would have had
+    to slacken to a subset, which is the check that notices a key moving to config.yml."""
+    assert "every gh config key is named by the hosts.yml sweep, and gh resolves them there" in CI
     assert 'keys=$(gh config --help | sed -n "s/^- .\\([a-z_]*\\).:.*/\\1/p")' in CI
     assert "from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS" in CI
     assert "advertised = set(sys.argv[1].split())" in CI
@@ -394,12 +404,34 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     # The `set` half, with a value per key and no `|| true` to swallow a refusal.
     assert "gh config set -h github.com $key $value" in CI
     assert "gh config set -h github.com $key $value || true" not in CI
+    # The one refusal that is an answer: recognised by what gh says, and re-raised otherwise.
+    # The default branch is pinned by its own message rather than by `exit 1`, which three
+    # unrelated steps in this file already contain -- pinning that would let the branch be
+    # deleted whole, which is exactly the `|| true` the line above forbids, with this test
+    # still green.
+    assert '*"cannot be used when setting"*) refused="$refused $key" ;;' in CI
+    assert 'echo "gh config set -h github.com $key $value failed, and not over --host"' in CI
     # Equality, not a subset: a subset check cannot notice a key gh moved back to config.yml,
-    # which is half of what the list claims.
-    assert "if written != named:" in CI
-    assert "if advertised - written:" in CI
-    # And the extraction must not shrink silently when a help line is reformatted.
-    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 13' in CI
+    # which is half of what the list claims. `refused` is collected at runtime from gh's own
+    # refusals, so a gh that starts writing `clipboard` host-level again leaves it empty and
+    # the equality then holds over all fourteen -- which is the right answer, the list being
+    # unchanged. What lapses in that world is the read-back proof below, since it iterates
+    # `refused`: the key would be back to being justified by what gh writes, which is what the
+    # comparison on this line measures.
+    assert "if written != named - refused:" in CI
+    assert "if advertised - written - refused:" in CI
+    # And each declined key proved by what gh reads back, which is why it is in the list. The
+    # two lookups are compared against each other and not against a literal, so this holds for
+    # the next declined key whatever gh defaults it to: four of the fourteen already default to
+    # `disabled`, and a literal would fail on those without the sweep being wrong at all.
+    assert "for key in $refused; do" in CI
+    assert "before=$(gh config get $key)" in CI
+    assert 'if [ "$(gh config get -h github.com $key)" != "$planted" ]; then' in CI
+    assert 'if [ "$(gh config get $key)" != "$before" ]; then' in CI
+    assert 'test "$(gh config get $key)" != disabled' not in CI
+    # And the extraction must not shrink silently when a help line is reformatted. The floor
+    # tracks the count it guards: thirteen keys until 2.101.0 added `clipboard`, fourteen since.
+    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 14' in CI
     # And git_protocol by what gh resolves rather than by what it writes.
     assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
     assert 'test "$(gh config get git_protocol)" = https' in CI

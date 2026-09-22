@@ -60,28 +60,36 @@ hooks:
   before_run: |
     set -e
     PG="$PWD/.issuebot/pg"
+    DB=acme_test
     mkdir -p "$PG/sock"
     [ -d "$PG/data" ] || initdb -D "$PG/data" -U issuebot --auth=trust \
       --encoding=UTF8 --locale=C.UTF-8 >/dev/null
     pg_ctl -D "$PG/data" status >/dev/null 2>&1 \
       || pg_ctl -D "$PG/data" -w -l "$PG/log" \
            -o "-c listen_addresses='' -k '$PG/sock' -c fsync=off" start
-    psql -h "$PG/sock" -d postgres -tAc \
-      "select 1 from pg_database where datname='acme_test'" | grep -q 1 \
-      || createdb -h "$PG/sock" acme_test
-    printf 'export ACME_DATABASE_URL=postgresql://issuebot@/acme_test?host=%s\n' \
-      "$PG/sock" > .issuebot/env
+    psql -h "$PG/sock" -U issuebot -d postgres -tAc \
+      "select 1 from pg_database where datname='$DB'" | grep -q 1 \
+      || createdb -h "$PG/sock" -U issuebot "$DB"
+    printf 'export ACME_DATABASE_URL=postgresql://issuebot@/%s?host=%s\n' \
+      "$DB" "$PG/sock" > .issuebot/env
   after_run: |
     pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
   before_remove: |
     pg_ctl -D "$PWD/.issuebot/pg/data" -m fast stop || true
 ```
 
-Rename `ACME_DATABASE_URL` to whatever the target repository reads, and `acme_test` to
-whatever database it expects — in both the `createdb` line and the DSN. `initdb` makes only
-`postgres` and the two templates, so without that line the very first connection dies with
-`FATAL: database "acme_test" does not exist`, and `.issuebot/pg/log` shows a perfectly
-healthy server. Drop the line only if the suite creates its own database.
+Rename `ACME_DATABASE_URL` to whatever the target repository reads, and set `DB` to whatever
+database it expects. `DB` is a variable rather than the name written out three times because
+the three have to agree: the existence check, the `createdb` it guards and the DSN. A rename
+that reached the last two and not the check would work on a fresh workspace and then fail every
+session that reuses one — `createdb` would run again and exit non-zero on
+`database "…" already exists`, taking `before_run` down with it under `set -e` — which is
+exactly the reuse the third bullet below promises. `initdb` makes only `postgres` and the two
+templates, so without the `createdb` the very first connection dies with
+`FATAL: database "acme_test" does not exist` from a server that started perfectly cleanly;
+`.issuebot/pg/log` is where to read that, since the refusal is logged there as the only
+`FATAL` under an otherwise ordinary startup. Drop the line only if the suite creates its own
+database.
 
 That is the whole recipe: there is no prompt to change and nothing for the agent to remember
 to source, because `.issuebot/env` is the seam described below.
@@ -101,6 +109,15 @@ Why it is shaped this way:
   `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
 - **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
   nobody else is in.
+- **`-U issuebot` on the `psql` and `createdb` lines too, not on `initdb` alone.** The cluster's
+  only role is the one `initdb` names, and the account the hook runs as is not it: libpq
+  defaults the role to the OS user, which is one of `agent-1` .. `agent-N` on a pool deployment
+  and `agent` otherwise, so a connection that leaves the flag off dies with
+  `FATAL: role "agent-1" does not exist` — logged in `.issuebot/pg/log` as the only `FATAL`
+  under a clean startup, the same shape of failure as the missing database above and one line
+  earlier. Naming the role rather than inheriting it is also what lets the DSN be a constant:
+  the pool hands consecutive sessions different accounts against this same recipe, so a cluster
+  whose superuser followed `whoami` would need a DSN that did too.
 - **`initdb` refuses to run as root**, and the session runs as an unprivileged session account
   (uid 1011 upwards for a pool member, 1001 for `agent`), so that is one problem the image does
   not have.
