@@ -260,6 +260,81 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
   -- and the directories themselves stay, with `gh`'s configuration beside git's and
   `known_hosts` beside ssh's.
+  `GH_HOSTS_STEERING_KEYS` is the one place the sweep looks *inside* a file rather than removing
+  it (#190, spec `2026-09-22-session-gh-hosts-design.md`): `~/.config/gh/hosts.yml` is credential
+  state -- it carries the `oauth_token` a session authenticates `gh` with, which is why #151
+  pinned it a survivor and #173 kept it -- and it is not *only* that. `gh config set -h <host>`
+  writes there rather than into `config.yml`, and `api_host` among the keys it can carry
+  re-points `gh` on an ordinary core command: measured against `gh 2.100.0`, a planted value
+  sends `gh api`, `gh issue list`, `gh pr list` and the `gh repo clone` `WorkspaceManager` runs
+  for the next workspace to the host the planting session named. What the channel cannot do is
+  measured too, and is what keeps it a key-level edit rather than a fifth swept path: `gh` sends
+  no `Authorization` header to a substituted host (from `GH_TOKEN` or from the file's own
+  `oauth_token`; `gh help config` says so outright), a self-signed certificate is refused so a
+  forged answer needs a CA in root's trust store, and #126's proxy refuses a name off its
+  allow-list while an on-list one completes -- so what survives is availability, not
+  confidentiality, and it needs no network at all.
+  The keys removed are `gh`'s whole configuration surface, the thirteen `gh config --help`
+  advertises, because `gh config set -h <host> <key> <value>` writes *every one of them* here
+  rather than into `config.yml`. That measurement has to be taken with a value each key accepts,
+  which is the easy thing to get wrong and was got wrong first time round: `gh config set`
+  validates the enum-valued keys, so a probe passing a placeholder is refused for eight of the
+  thirteen, and one that swallows the refusal reports only the five free-form ones and calls
+  that the closed set. So the rule is not "these keys are dangerous" but "a session does not
+  leave *configuration* in a credential file", and what survives is the credential state:
+  `oauth_token` and `user`, neither of which `-h` can write. The keys come out at *both* levels
+  `gh` writes them -- host level, where it reads them, and the `users.<name>` subtree, which
+  `gh config set -h` mirrors into (creating it if need be) once the file names a user, so a
+  host-level-only sweep would leave a complete second copy of every planted key. Those copies
+  are measured inert on this `gh`, but so are eleven of the thirteen at host level.
+  `GH_HOSTS_MAX_DEPTH` (8) is the other half of being able to write the file back at all: PyYAML
+  recurses per nesting level, `gh` writes this file three levels deep at most, and a key whose
+  value nests past the bound is dropped -- measured, ~900 bytes of brackets beside a plant used
+  to make the *dump* raise, so the keys came out of the document and the write was then
+  abandoned, leaving the plant for the container's lifetime. Nothing credential is that deep.
+  Two of the thirteen are live from this position and they differ in reach. `api_host` is the
+  issue's subject and the only one *only* reachable here, top level being inert for it, so this
+  closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
+  makes `gh auth status` report `Git operations protocol: ssh`, and fails `gh repo clone`
+  outright with `cannot run ssh: No such file or directory`, the image shipping no ssh client --
+  but it is *also* honoured from `config.yml`, which #173 takes and which **PR #189 has not
+  landed**, so that key is closed only in the position this change owns. `http_unix_socket`,
+  `pager`, `editor` and `browser` are measured *inert* here (the same values at top level fire;
+  the hostname-less lookup is what gh's own pager, editor and browser resolution uses) and the
+  remaining seven are cosmetic or documented global; all are removed anyway, since a key that
+  does nothing costs nothing to name where leaving one out costs the channel back.
+  A denylist, unlike `--strict-mcp-config`'s "name what survives", because the failures are not
+  symmetrical: a key a future `gh` adds and this list misses costs the bounded channel above,
+  where a keep-list stripping a credential key a future `gh` adds would break authentication for
+  every session -- so the set is *proved* instead, the `docker` CI job reading the image's own
+  `gh config --help` and failing when it advertises a key this list does not name.
+  Fail-safe in one direction only: a file that will not open even with the modes put back, one
+  over `GH_HOSTS_LIMIT` (256 KiB), one that is not a regular file (`O_NONBLOCK` and an `fstat`,
+  `Boundary.read`'s rule, since a FIFO at that name would hang the open once per turn and once
+  per hook), bytes that are not UTF-8 or not YAML, and a document that is not the mapping of
+  hosts `gh` writes are all left exactly as they are, since rewriting a credential file on a
+  guess is the one outcome worse than the plant -- and every one of those declines is
+  *reported*, which is the one answer this sweep gives. The removals elsewhere are best effort
+  because a target still there is one the next sweep retries, where a document PyYAML cannot
+  scan is one it will never scan: exiting 0 on it would be a silent, permanent bypass of the
+  control, so `_sweep_gh_hosts` returns False, the helper exits non-zero and
+  `claude_home_sweep_failed` is logged every turn. An absent file is not a decline.
+  `RecursionError` is caught beside `YAMLError` at both ends as a backstop -- the depth bound is
+  what actually keeps the write possible -- since a sweep must not raise either way.
+  It is not written at all unless a key came out, so an unplanted home keeps its
+  `hosts.yml` byte for byte across the sweep that runs before every turn and every hook.
+  `_relax_file` is the one new repair beside `_relax`: a removal needs the parent's bits and
+  nothing of the file's own mode, where an edit has to read its target, so a session that plants
+  a key and then `chmod 0000`s the file would otherwise keep it at no cost to itself. Three more
+  rules make the write safe for a credential file rather than merely atomic: `_HostsLoader`
+  strips PyYAML's implicit scalar resolvers so the round trip is value-faithful (`user: no` would
+  otherwise come back `false`, and an all-digit token starting with a zero an octal integer,
+  since PyYAML resolves YAML 1.1 where the `go-yaml` that reads this file does not); the rename
+  is declined unless the name still resolves to the `(ino, dev, mtime_ns, size)` the document was
+  parsed from and to a file this account owns, since `gh` rewrites this file on ordinary commands
+  -- it normalises the document and refreshes an OAuth token in place -- and a rename over one
+  that moved would discard a credential it had just written; and the bytes are `fsync`ed first,
+  the rename being what makes the new file the credential.
   And `TOOL_EXTENSION_SWEEP` (#186, spec `2026-09-22-session-gh-extension-design.md`):
   `.local/share/gh/extensions`, the directory `gh` dispatches `gh <name>` from. Not a config
   file a tool reads but a program the session wrote, which is why it is its own list -- that one
@@ -631,10 +706,10 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`), `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
-  `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`, `LD_AUDIT`,
-  `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary: the file
-  sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), `SHELL_ENV_NAMES`
+  (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`,
+  `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary:
+  the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -691,7 +766,22 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   too, and nothing was shown to work through them: the note's residual). `XDG_` is a specification's namespace
   rather than a tool's, so it is names here and not a prefix: its roots are a short fixed list
   (seven in the current version) and which of them belongs is a measurement, not a manual to
-  keep up with. The deployment's
+  keep up with. The TLS pair is on no chain either and is there under a third rule, since #205
+  (spec `2026-09-22-session-tls-trust-env-design.md`): a name is protected when it decides
+  which certificate authorities a tool issuebot launches will accept -- a *trust* decision
+  rather than a command, the one entry on that list that is neither a command nor a file naming
+  one, and the only spelling that reaches `gh`, which has no `GH_` name for its trust store
+  (`git` reads neither; `GIT_SSL_CAINFO` is its own and already covered). Measured, and not
+  only a widening: each replaces its own half of the default CA file/directory pair, so one
+  alone leaves the other half verifying `api.github.com` -- which is what makes a single line
+  read as additive -- while the two together replace the store outright, and a path that will
+  not load is not ignored, taking `gh` off GitHub entirely and every `curl https://` with it.
+  That half needs no second primitive, where widening needs a redirect (#190's `api_host`) to
+  pay off. The per-tool spellings stay settable, each measured not to reach `gh`
+  (`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `UV_SYSTEM_CERTS`), so a hook keeps a
+  private index authority for the target repository's own tools; `uv`'s own bundle is `--cert`,
+  a flag with no environment spelling, so a deployment-wide authority belongs in the image's
+  root-owned system trust store, the way #191's extension belongs on `PATH`. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since

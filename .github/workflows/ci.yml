@@ -477,6 +477,7 @@ jobs:
               printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
+              printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n    user: nobody\\n    api_host: 127.0.0.1\\n    git_protocol: ssh\\n\" > /home/agent/.config/gh/hosts.yml
               # Well-formed rather than a bare key, and not incidental: the real gh refuses to
               # run at all against a host entry it cannot migrate, and a gh that never reached
               # its dispatch would pass the extension half below for the wrong reason. The
@@ -511,6 +512,18 @@ jobs:
             # the home rather than about whatever repository the working directory sits in.
             test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN
             test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN
+            # And for gh, whose hosts.yml is the one file the sweep edits rather than removes
+            # (#190): it is credential state the next session may authenticate with, so it has
+            # to survive, while the api_host a session can leave in it re-points gh on an
+            # ordinary core command -- gh api here, and gh repo clone, which is how issuebot
+            # builds that accounts next workspace. Two-sided like the two above: the plant is
+            # shown working first, so a gh that stopped reading the key could not pass this as
+            # a no-op.
+            before=$(sudo -n -H -u agent gh api user 2>&1 || true)
+            case "$before" in
+              *127.0.0.1*) ;;
+              *) echo "the planted api_host did not re-point gh: $before" >&2; exit 1 ;;
+            esac
             # And for gh, which runs whatever is under its extension directory, installed or
             # merely written there.
             test "$(sudo -n -H -u agent gh pwn)" = EXTENSION-RAN
@@ -526,6 +539,18 @@ jobs:
             # And the next session git has no alias left to run, by either spelling.
             ! sudo -n -H -u agent git -C / pwn 2>/dev/null
             ! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null
+            # And the next session gh is pointed at GitHub again. Whatever this answers -- Bad
+            # credentials for the sentinel token, or a network complaint -- it must no longer
+            # name the host the previous session chose.
+            after=$(sudo -n -H -u agent gh api user 2>&1 || true)
+            case "$after" in
+              *127.0.0.1*) echo "gh is still re-pointed after the sweep: $after" >&2; exit 1 ;;
+              *) ;;
+            esac
+            test -z "$(sudo -n -H -u agent gh config get -h github.com api_host 2>/dev/null || true)"
+            # And git_protocol with it, which is the other key measured live from this position:
+            # left at ssh it makes the clone above fail outright, the image having no ssh client.
+            test "$(sudo -n -H -u agent gh config get -h github.com git_protocol)" = https
             # And the next session gh has no extension left to dispatch to.
             ! sudo -n -H -u agent gh pwn 2>/dev/null
             # And the account can still do what it is for with its start-up files gone: `claude`
@@ -544,7 +569,12 @@ jobs:
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
               # The directories those files sat in are other tools too, and stay.
+              # gh hosts.yml is kept as well -- and with it the credential the edit above had
+              # to work around, which is what makes it an edit rather than a fifth swept path.
               test -f /home/agent/.config/gh/hosts.yml
+              grep -q gho_KEEPTHISCREDENTIAL0123456789012345 /home/agent/.config/gh/hosts.yml
+              ! grep -q api_host /home/agent/.config/gh/hosts.yml
+              ! grep -q git_protocol /home/agent/.config/gh/hosts.yml
               test -f /home/agent/.ssh/known_hosts
               test ! -e /home/agent/.local/share/gh/extensions
               test -f /home/agent/.local/state/gh/device-id
@@ -556,6 +586,83 @@ jobs:
               test -f .credentials.json
               test -f projects/-workspaces-issuebot-7/keep.jsonl
             "
+          '
+      # The other half of #190, and the reason the key-level edit above can be a denylist at
+      # all: the keys hosts.yml can carry are gh own configuration surface, which gh advertises,
+      # so this asks the image its own gh rather than trusting the measurement that produced the
+      # list. Two things are checked, and the first is the one that matters.
+      #   Every key `gh config --help` advertises has to be named by GH_HOSTS_STEERING_KEYS. A
+      #   release that adds a fourteenth fails here rather than quietly handing the next session
+      #   a key the sweep leaves in a credential file.
+      #   And that `gh config set -h <host>` really does route them here rather than to
+      #   config.yml -- with a value each key accepts, which is the whole of that measurement and
+      #   the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
+      #   passing a placeholder is refused for eight of the thirteen and a `|| true` would report
+      #   only the five free-form ones. So no `|| true`: a refused set fails the step.
+      # No account or sudo needed: the question is about gh, not about the uid split the step
+      # above proves.
+      # Nothing inside the outer script may carry an apostrophe or a single quote.
+      - name: every gh config key is named by the hosts.yml sweep, and gh writes them there
+        run: |
+          docker run --rm --entrypoint bash issuebot:ci -c '
+            set -eu
+            export HOME=/tmp/gh-key-probe
+            mkdir -p $HOME
+            keys=$(gh config --help | sed -n "s/^- .\([a-z_]*\).:.*/\1/p")
+            # Not just non-empty: a help line this `sed` stops matching would shrink the list
+            # silently, and the key it dropped is exactly the channel back.
+            test "$(printf "%s\n" "$keys" | wc -l)" -ge 13
+            /app/.venv/bin/python -c "
+            import os, sys
+            from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
+            advertised = set(sys.argv[1].split())
+            unnamed = advertised - set(GH_HOSTS_STEERING_KEYS)
+            if unnamed:
+                raise SystemExit(
+                    f\"gh config advertises {sorted(unnamed)}, which hosts.yml can carry and \"
+                    f\"GH_HOSTS_STEERING_KEYS does not name; add it in runas.py and in its test\"
+                )
+            print(\"gh config keys, all named by the sweep:\", sorted(advertised))
+            " "$keys"
+            # A value each key takes, so a refusal is a real answer and not a validation error
+            # swallowed by the probe. Free-form keys take anything; the rest are enums.
+            for key in $keys; do
+              case $key in
+                api_host) value=api.example.com ;;
+                editor) value=vi ;;
+                pager) value=cat ;;
+                browser) value=firefox ;;
+                http_unix_socket) value=/tmp/probe.sock ;;
+                git_protocol) value=ssh ;;
+                telemetry) value=disabled ;;
+                *) value=enabled ;;
+              esac
+              gh config set -h github.com $key $value
+            done
+            /app/.venv/bin/python -c "
+            import os, pathlib, sys, yaml
+            from issuebot.agent.runas import GH_HOSTS_STEERING_KEYS
+            path = pathlib.Path(os.environ[\"HOME\"], \".config\", \"gh\", \"hosts.yml\")
+            written = set(yaml.safe_load(path.read_text())[\"github.com\"])
+            named = set(GH_HOSTS_STEERING_KEYS)
+            advertised = set(sys.argv[1].split())
+            if written != named:
+                raise SystemExit(
+                    f\"gh config set -h writes {sorted(written)} into hosts.yml, the sweep names \"
+                    f\"{sorted(named)}; a key that moved to config.yml or arrived here is the \"
+                    f\"measurement this list is built on -- update runas.py and its test\"
+                )
+            if advertised - written:
+                raise SystemExit(f\"gh routes {sorted(advertised - written)} elsewhere now\")
+            print(\"written host-level by gh config set -h:\", sorted(written))
+            " "$keys"
+            # And git_protocol by what gh resolves rather than by what it writes: a host entry
+            # has to out-rank the hostname-less lookup, which is what makes it steer the clone.
+            rm -rf $HOME/.config/gh
+            mkdir -p $HOME/.config/gh
+            printf "github.com:\n    oauth_token: not-a-real-token\n    user: nobody\n    git_protocol: ssh\n" > $HOME/.config/gh/hosts.yml
+            test "$(gh config get -h github.com git_protocol)" = ssh
+            test "$(gh config get git_protocol)" = https
           '
       # The opt-in toolchain (#62, #64) is only ever built with the build arguments set, so
       # nothing else in CI would notice the PGDG stanza, the nodejs.org download or either
