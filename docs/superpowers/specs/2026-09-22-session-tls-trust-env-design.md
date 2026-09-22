@@ -102,16 +102,18 @@ The second arm is two lines naming paths that do not exist, and it is the cheape
 no listener, no second primitive, no certificate. A value that will not load is not ignored.
 
 ```text
-                        gh api user          curl https://api.github.com/
-clean                   jleavers             200
-SSL_CERT_FILE missing   jleavers             curl: (77) error setting certificate file
-SSL_CERT_DIR missing    jleavers             200
-both missing            tls: failed ...      curl: (77) error setting certificate file
+                        gh api user          curl https://api.github.com/     uv pip install
+clean                   jleavers             200                              resolves
+SSL_CERT_FILE missing   jleavers             curl: (77) bad certificate file  UnknownIssuer
+SSL_CERT_DIR missing    jleavers             200                              UnknownIssuer
+both missing            tls: failed ...      curl: (77) bad certificate file  UnknownIssuer
 ```
 
-`uv` is the exception and warns (`warning: Invalid SSL_CERT_FILE. Path does not exist`) before
-falling back. `gh` is not, and `gh` is how a session reads its issue, pushes its branch and
-opens its pull request -- and how the *worker* clones for it, since `_run_argv` runs
+Three different failures, and only `gh` under one name survives. `uv` is the one that says so
+(`warning: Invalid SSL_CERT_FILE. Path does not exist: ... No default certificates will be
+trusted.`) -- and then trusts nothing, rather than falling back. `curl` fails before the
+request. `gh` is the one that matters most: it is how a session reads its issue, pushes its
+branch and opens its pull request, and how the *worker* clones for it, since `_run_argv` runs
 `gh repo clone` under this same environment.
 
 ### `curl` does not "replace the bundle outright"

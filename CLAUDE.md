@@ -744,9 +744,8 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`) and
-  `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`,
-  `BASHOPTS`, `PS4`, `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`) and `SHELL_ENV_NAMES`
+  (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -795,10 +794,10 @@ version, and moves by hand.
   not load is not ignored, taking `gh` off GitHub entirely and every `curl https://` with it.
   That half needs no second primitive, where widening needs a redirect (#190's `api_host`) to
   pay off. The per-tool spellings stay settable, each measured not to reach `gh`
-  (`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `uv --cert`, `UV_SYSTEM_CERTS`), so a
-  hook keeps a private index authority for the target repository's own tools; a
-  deployment-wide one belongs in the image's root-owned system trust store, the way #191's
-  extension belongs on `PATH`. The deployment's
+  (`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `UV_SYSTEM_CERTS`), so a hook keeps a
+  private index authority for the target repository's own tools; `uv`'s own bundle is `--cert`,
+  a flag with no environment spelling, so a deployment-wide authority belongs in the image's
+  root-owned system trust store, the way #191's extension belongs on `PATH`. The deployment's
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are unaffected, reaching the session from `.env` through
   `PASSTHROUGH_PREFIXES` as before. Everything else warns rather
   than fails, a null byte included, since

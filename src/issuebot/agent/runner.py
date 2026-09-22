@@ -142,9 +142,8 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   rule (#205): a name is protected when it decides which certificate authorities a tool
 #   issuebot launches will accept. That is the one thing on this list that is not a command and
 #   does not name one -- it is a *trust* decision, deciding who the tool is talking to rather
-#   than what it runs, which is why neither of the two rules above reaches it and why the
-#   sentence above about "a list of everything that might name a command" needed widening
-#   rather than another entry. Measured on this image (`gh` 2.100.0, `curl` 8.14.1 over
+#   than what it runs, which is why neither of the two rules above reaches it and why this
+#   needed a rule of its own rather than another entry under either. Measured on this image (`gh` 2.100.0, `curl` 8.14.1 over
 #   OpenSSL 3.5.7, CPython 3.14.7 and `pip` 26.2.1, `uv` 0.12.11, `git` 2.47.3):
 #     SSL_CERT_FILE  the default CA *file*, and `SSL_CERT_DIR` the default CA *directory*. Each
 #     SSL_CERT_DIR   replaces its own half of that pair, so one alone leaves the other half
@@ -160,9 +159,11 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   chain at once; `git` reads neither (its spelling is `GIT_SSL_CAINFO` -> `http.sslCAInfo`,
 #   and `GIT_` is already a prefix). Generic names and not a tool's own is also what bounds the
 #   cost: the per-tool spellings stay settable and were each measured *not* to reach `gh` --
-#   `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`/`PIP_CERT`, `uv --cert` and `UV_SYSTEM_CERTS` -- so
-#   a hook can still hand the target repository's own tools a private index CA, which is what
-#   this file is for. A deployment-wide authority belongs in the image's system trust store,
+#   `CURL_CA_BUNDLE` for curl, `REQUESTS_CA_BUNDLE`/`PIP_CERT` for pip, `UV_SYSTEM_CERTS` for a
+#   `uv` reading the image's own store -- so a hook can still hand the target repository's own
+#   tools a private index CA, which is what this file is for. `uv`'s own bundle is the one gap:
+#   it is `--cert`, a flag with no environment spelling, so a `uv` the *session* runs reaches a
+#   private authority through the system store and not through this file. A deployment-wide authority belongs in the image's system trust store,
 #   root-owned and outside the session's privilege domain, as #191's extension does on `PATH`.
 TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
     {

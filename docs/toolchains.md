@@ -609,10 +609,14 @@ hook that would truncate it again or append a duplicate per session.
   | neither | verifies GitHub | verifies GitHub |
   | `SSL_CERT_FILE` naming a private CA | trusts it **and** GitHub | trusts it **and** GitHub |
   | both, naming a private CA | trusts it, and **not** GitHub | trusts it, and **not** GitHub |
-  | either naming a path that does not exist | `SSL_CERT_FILE` alone is survivable; both fail every request | fails every `https://` with exit 77 |
+  | `SSL_CERT_FILE` naming a path that does not exist | still verifies GitHub | fails every `https://` with exit 77 |
+  | `SSL_CERT_DIR` naming a path that does not exist | still verifies GitHub | still verifies GitHub |
+  | both naming paths that do not exist | fails **every** request | fails every `https://` with exit 77 |
 
   `git` reads neither — its spelling is `GIT_SSL_CAINFO` → `http.sslCAInfo`, protected by the
-  `GIT_` prefix above — and `uv` reads both, with either one alone replacing its whole store.
+  `GIT_` prefix above — and `uv` is stricter than the table: either name alone replaces its
+  whole store, and a path that does not exist leaves it trusting nothing at all (it says so,
+  which no other tool here does).
 
   A hook with a real reason for a private authority — a package index inside your network is
   the usual one — keeps every route but this file:

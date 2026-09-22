@@ -956,7 +956,7 @@ class _LoopbackTls:
     only has to be something `gh` will print once the certificate has been accepted."""
 
     def __init__(self, certificate: Path, key: Path, body: str) -> None:
-        self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         self._context.load_cert_chain(certificate, key)
         self._body = body.encode()
         self._socket = socket.socket()
@@ -1022,6 +1022,9 @@ def test_a_planted_authority_is_not_trusted_by_the_next_sessions_gh(
         value = tmp_path / "certs"
         value.mkdir()
         shutil.copy(authority, value / "ca.pem")
+        # Go reads every file in the directory and needs no hash link; OpenSSL finds a
+        # certificate by one and would not. Laid out for both, so the directory is what the
+        # variable means rather than what this one tool happens to accept.
         subprocess.run(["openssl", "rehash", str(value)], check=True, timeout=60)
     (tmp_path / ".issuebot").mkdir()
     (tmp_path / ".issuebot" / "env").write_text(f"{name}={value}\n")
@@ -1038,7 +1041,10 @@ def test_a_planted_authority_is_not_trusted_by_the_next_sessions_gh(
 
         def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
-                ["gh", "api", f"https://localhost:{listener.port}/user"],
+                # The address the listener binds, not `localhost`: the certificate carries
+                # both, and dialling the name would rest the test on Go's dual-stack retry
+                # wherever `localhost` resolves to `::1` first.
+                ["gh", "api", f"https://127.0.0.1:{listener.port}/user"],
                 env=env,
                 capture_output=True,
                 text=True,
