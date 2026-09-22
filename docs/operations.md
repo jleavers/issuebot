@@ -16,7 +16,7 @@ and Claude credential. The checkouts meet on one Docker network.
    `docker network create --internal issuebot-internal`. The second is where the workers reach
    the hub's database; `--internal` is what leaves them no route off the host except the
    allow-listing proxy (see [What a session may
-   reach](../SECURITY.md#what-a-session-may-reach) in the README).
+   reach](security-model.md#what-a-session-may-reach) in the README).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
 3. Every other repository: clone issuebot again, set `github.repo` in its
@@ -202,7 +202,7 @@ in `ISSUEBOT_EGRESS_ALLOW` in the same pass -- a hook's `uv sync` or `npm ci`, a
 `uv run pytest` or `pip install` the session runs in its own shell to validate a change.
 Without amending `ISSUEBOT_EGRESS_ALLOW` the session reaches Anthropic and GitHub and nothing else, so an unlisted
 registry surfaces as a failing hook or a failing test mid-run rather than as a configuration
-error (see [What a session may reach](../SECURITY.md#what-a-session-may-reach)). A setting that a newer
+error (see [What a session may reach](security-model.md#what-a-session-may-reach)). A setting that a newer
 `WORKFLOW.md` introduces fails against a stale image at `validate`, as
 `<key>: Extra inputs are not permitted`.
 
@@ -212,7 +212,7 @@ The enforced boundary is the container, its **network**, and inside it the uid:
 the session (`claude -p`, every hook, the clone) runs as a session account — by default the
 pool the image built, `agent-1` .. `agent-N` — a different account from the worker
 (`issuebot`, uid 1000) that supervises and credentials it, and -- with a pool, see [One
-account per concurrent session](../SECURITY.md#one-account-per-concurrent-session) -- at a different uid from every other session
+account per concurrent session](security-model.md#one-account-per-concurrent-session) -- at a different uid from every other session
 running beside it. So the session runs
 with no permission prompts and may do as it likes at its own uid, but the worker's code
 (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
@@ -229,7 +229,7 @@ describe what the session may do *within* that authority rather than granting it
 fixed outside the prompt too: under Compose the container's every network is `internal`, so
 the session has no route off the host but the allow-listing proxy beside it, and `GH_TOKEN`
 can be carried to Anthropic, to GitHub and to whatever else the deployment named, and to
-nothing else ([What a session may reach](../SECURITY.md#what-a-session-may-reach)). The session's
+nothing else ([What a session may reach](security-model.md#what-a-session-may-reach)). The session's
 home is its own — `/home/<account>/.claude`, `0700` from the image — and holds no credential:
 it authenticates from the environment, which is why nobody logs into it. With a pool
 the sharing is with the next session bound to that same account rather than with the ones

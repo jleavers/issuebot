@@ -28,8 +28,8 @@ Beside this file:
 - [Toolchains for the target repository](docs/toolchains.md) — PostgreSQL, Node, uv, PowerShell
 - [Operating issuebot](docs/operations.md) — more repositories, rotations, and what goes wrong
 - [The dashboard](docs/dashboard.md) — what it serves and who may read it
-- [Security](SECURITY.md) — [how a session is bounded](SECURITY.md#how-a-session-is-bounded)
-  (its network, its account, its credential), and how to report a vulnerability
+- [How a session is bounded](docs/security-model.md) — its network, its account, its credential
+- [Security](SECURITY.md) — what counts as a vulnerability, and how to report one
 - [Contributing](CONTRIBUTING.md) · [Licence](#licence)
 
 ## How it works
@@ -190,14 +190,14 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
    compromise becomes the account's.
    The account needs permission to push branches and open PRs in the target repository.
    Where the token can be *sent* is bounded separately, by the network allow-list under
-   [What a session may reach](SECURITY.md#what-a-session-may-reach): under Compose a session can open a
+   [What a session may reach](docs/security-model.md#what-a-session-may-reach): under Compose a session can open a
    connection to Anthropic,
    to GitHub and to whatever else you have named, and to nothing else.
 2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
    credential comes from the environment (see [Checking that the credential
-   took](SECURITY.md#checking-that-the-credential-took)) -- which means the session holds
+   took](docs/security-model.md#checking-that-the-credential-took)) -- which means the session holds
    this one *directly*. Choose between the two knowing what can bound each. A `setup-token`
    credential carries your subscription's whole reach, with no equivalent of the token's
    "restricted to this repository" to narrow it, and the spend ceilings are no substitute: a
@@ -319,7 +319,7 @@ The labels warning disappears on the next `validate`.
 
 Three of those lines stand for the three things that bound what a session can do — the network
 it may reach, the account it runs as, and the credential it authenticates with. [How a session
-is bounded](SECURITY.md#how-a-session-is-bounded) takes each in turn; they are worth reading before the
+is bounded](docs/security-model.md) takes each in turn; they are worth reading before the
 first unattended run, and none of them is needed to get there.
 
 ### Step 3: start it
