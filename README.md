@@ -777,8 +777,9 @@ that matters on your host.
   directory of scripts, and the venv the session's tests run out of is wider than any of them --
   so the only thing that would close it is not reusing the workspace at all. It crosses no
   privilege boundary either way: one workspace belongs to one issue, it is bound to one session
-  account and sealed back to the worker between runs (the pool, under "One account per
-  concurrent session"), and everything a plant could defer to the
+  account (the pool, under "One account per concurrent session") and sealed back to the worker
+  between runs (`docs/superpowers/specs/2026-09-14-session-account-pool-design.md`), and
+  everything a plant could defer to the
   next session the session holding it can already do itself, with the same token, on the same
   branch and the same pull request. This is recorded in
   `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the
@@ -874,11 +875,8 @@ that matters on your host.
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
   entry is the image's system-wide one, the clone's credential helper is written into the clone,
   and global git or ssh config for every session belongs in `/etc/gitconfig` or
-  `/etc/ssh/ssh_config`, which are root's and which no session can write. The clone's *own*
-  `.git/config` is the other side of that line and is not swept: it is the session's file in the
-  session's workspace, it belongs to one issue, and the next session on that issue inherits it
-  along with the rest of the clone ("How long a workspace lives" above). It leaves the rest of the
-  home alone: the credential (`.credentials.json`, which rotates its refresh token), the
+  `/etc/ssh/ssh_config`, which are root's and which no session can write. The sweep leaves the
+  rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
   tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
   sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
@@ -901,6 +899,11 @@ that matters on your host.
   runs with `--settings claudeMdExcludes`, an allow-list of the workspace and the account's own
   user memory, so that approval reaches nothing outside them -- except through a symlink in the
   clone, which claude resolves after matching the exclusion, and which is the recorded residual.
+  And the clone's *own* `.git/config` and `.git/hooks/`, which are the other side of the tool
+  config line above and are not swept: they are the session's files in the session's workspace,
+  they belong to one issue, and the next session on *that* issue inherits them along with the
+  rest of the clone ("How long a workspace lives, and what a reused one hands the next session"
+  above, which says why).
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches

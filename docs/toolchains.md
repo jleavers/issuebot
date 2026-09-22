@@ -596,8 +596,8 @@ hook that would truncate it again or append a duplicate per session.
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
   `git config --local` inside the clone, which is what the post-clone setup does.
 - **What the clone itself does carry over.** `git config --local` is the route that stays open,
-  and it stays open in both directions: a workspace outlives its run, so what a hook -- or the
-  session -- writes into the clone's `.git/config` is there for the next session on that issue.
+  and it stays open in both directions: a workspace outlives its run, so what a hook — or the
+  session — writes into the clone's `.git/config` is there for the next session on that issue.
   That is a decision and not an oversight; "How long a workspace lives, and what a reused one
   hands the next session" under [When things go wrong](../README.md#when-things-go-wrong) says
   what it reaches and why issuebot does not reset it.

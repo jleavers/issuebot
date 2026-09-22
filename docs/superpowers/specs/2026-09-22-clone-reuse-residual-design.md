@@ -26,6 +26,8 @@ it, and `create_or_reuse` is asked a second time, as a retry or a rework would a
 session 1 workspace: created=True
 [debug] workspace_reused workspace=/tmp/repro-.../workspaces/example-180
 session 2 workspace: created=False same_path=True
+  session 1's .git/config:  alias.st, core.fsmonitor, core.hooksPath=.planted-hooks
+  session 1's .planted-hooks/pre-commit: still there, untracked, unchanged
   $ git -C <workspace> st                       -> PLANTED-ALIAS-RAN
   $ git -C <workspace> status --porcelain       -> PLANTED-FSMONITOR-RAN (see below)
   $ git -C <workspace> commit --allow-empty     -> PLANTED-HOOKSPATH-RAN
@@ -148,13 +150,39 @@ hooks:
     for k in core.pager core.editor core.fsmonitor core.hooksPath include.path; do
       git config --local --unset-all "$k" 2>/dev/null || true
     done
+    git config --local --name-only --list | grep -i '^includeif\..*\.path$' \
+      | while read -r n; do git config --local --unset-all "$n" 2>/dev/null || true; done
 ```
 
 -- with four caveats stated plainly, because a reader who takes this for "the reset" gets less
 than they think:
 
 1. **It is the enumeration this note declines to ship**, so it is as complete as whoever wrote
-   it and no more. git adds keys.
+   it and no more. git adds keys -- and it already has a second spelling of the one key this
+   note's argument turns on. `includeIf.<condition>.path` is the same include mechanism, works
+   from a repo-local config, and `--unset-all include.path` does not reach it, which is why the
+   recipe carries a second loop. That loop cannot be the obvious one, either: `--remove-section`
+   matches a subsectioned section's name **case-sensitively** while `--list` reports it
+   lower-cased, so it has to unset the key rather than remove the section. Measured on git
+   2.47.3:
+
+   ```text
+   $ git config --local "includeIf.gitdir:/tmp/inc180/.path" planted2
+   $ git st
+   INCLUDEIF-ALIAS-RAN
+   $ git config --local --unset-all include.path        # the first loop
+   $ git st
+   INCLUDEIF-ALIAS-RAN
+   $ git config --local --remove-section 'includeif.gitdir:/tmp/inc180/'
+   fatal: no such section: includeif.gitdir:/tmp/inc180/
+   $ git config --local --unset-all 'includeif.gitdir:/tmp/inc180/.path'
+   $ git st
+   git: 'st' is not a git command.
+   ```
+
+   Two spellings of one mechanism, and a removal whose obvious form does not work, found by one
+   pass of review over a recipe that was already written to be careful. That is the argument of
+   this section, arriving on schedule.
 2. **It narrows the config file only.** `.git/hooks/` is a directory of scripts with no config
    key at all, and this recipe does not touch it -- so a planted `post-checkout` survives it
    intact. A deployment that means to clear that too has to clear the directory itself, and
@@ -192,9 +220,10 @@ described:
 - The session account's home is swept before every turn and every login shell (#101, #137,
   #151), so nothing reaches a session working a *different* issue through `~/.claude`,
   `~/.profile`, `~/.gitconfig` or `~/.ssh/config`.
-- The clone's `CLAUDE.md` and `AGENTS.md` reach the prompt as `<github-text>` data and never as
-  `claude` configuration (#107), and `--strict-mcp-config` holds whatever the clone carries
-  (#119).
+- The clone's `CLAUDE.md` and `AGENTS.md` reach the prompt as `<github-text>` data, and not as
+  `claude` configuration while `claude.setting_sources` is its default `[user]` -- the opt-in to
+  `project` or `local` is the operator's, and `validate` warns about it (#107). And
+  `--strict-mcp-config` holds whatever the clone carries whatever the sources say (#119).
 - The session runs at its own uid, on its own account under a pool, behind the egress proxy
   (#75, #121, #126).
 

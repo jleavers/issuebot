@@ -215,6 +215,7 @@ async def test_reuse_keeps_the_clones_own_git_config(
     hook = first.path / ".git" / "hooks" / "post-checkout"
     hook.write_text("#!/bin/sh\nprintf planted\n")
     hook.chmod(0o755)
+    hook_mode = hook.stat().st_mode & 0o777
 
     second = await manager.create_or_reuse(issue)
 
@@ -234,7 +235,11 @@ async def test_reuse_keeps_the_clones_own_git_config(
     assert config("alias.st") == "!printf planted"
     # Read without `--local`, so this is git resolving the include as it would for any command.
     assert config("alias.inc") == "!printf planted"
-    assert hook.exists()
+    # `.git/hooks/` is the same shape beside the file and has no config key at all, so the
+    # script itself is read back rather than only its path: still there, still executable.
+    second_hook = second.path / ".git" / "hooks" / "post-checkout"
+    assert second_hook.read_text() == "#!/bin/sh\nprintf planted\n"
+    assert second_hook.stat().st_mode & 0o777 == hook_mode
 
 
 @posix
