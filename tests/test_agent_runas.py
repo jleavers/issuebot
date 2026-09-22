@@ -37,13 +37,14 @@ from issuebot.agent.runas import (
     MODULE,
     SHELL_STARTUP_SWEEP,
     TOOL_CONFIG_SWEEP,
+    TOOL_EXTENSION_SWEEP,
     RunAs,
     RunAsError,
     _sweep,
     _walk,
     anonymous_fd,
 )
-from issuebot.agent.runner import PASSTHROUGH_NAMES, ClaudeRunner
+from issuebot.agent.runner import PASSTHROUGH_NAMES, TOOL_CONFIG_ENV_NAMES, ClaudeRunner
 from issuebot.agent.workspace import HookResult, WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
@@ -333,7 +334,8 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 def _plant_home(home: Path) -> None:
     """A home a prior session poisoned: the shell start-up files a login shell reads (#137),
-    the tool config files that can name a command (#151) and the ``~/.claude`` config surfaces
+    the tool config files that can name a command (#151), the ``gh`` extension a later ``gh``
+    would run (#186) and the ``~/.claude`` config surfaces
     (#101), beside the credential, claude's own runtime state and the entries other tools keep
     there."""
     claude = home / ".claude"
@@ -354,7 +356,7 @@ def _plant_home(home: Path) -> None:
     # on an *ordinary* core command.
     (home / ".config" / "gh").mkdir()
     (home / ".config" / "gh" / "config.yml").write_text(
-        'version: "1"\naliases:\n    pwn: "!echo poison"\nhttp_unix_socket: /tmp/poison.sock\n'
+        'version: "1"\naliases:\n    aliaspwn: "!echo poison"\nhttp_unix_socket: /tmp/poison.sock\n'
     )
     # `.config` and `.ssh` are other tools' directories as well, and `hosts.yml` is the
     # neighbour #151 pinned and #173 keeps: credential state, which authenticates the next
@@ -374,6 +376,15 @@ def _plant_home(home: Path) -> None:
     (home / ".local" / "state" / "gh").mkdir(parents=True)
     (home / ".local" / "state" / "gh" / "device-id").write_text("id")
     (home / ".npm").mkdir()
+    # #186: not a config file a tool reads but a program a tool runs -- `gh <name>` execs
+    # whatever is under `~/.local/share/gh/extensions/gh-<name>/`, with no install step needed
+    # to put it there. Its neighbour `~/.local/state/gh` above is `gh`'s own state and stays,
+    # which is why the entry names the extension directory and not `~/.local/share` or
+    # `~/.local`.
+    extension = home / ".local" / "share" / "gh" / "extensions" / "gh-pwn"
+    extension.mkdir(parents=True)
+    (extension / "gh-pwn").write_text("#!/bin/sh\necho poison\n")
+    (extension / "gh-pwn").chmod(0o755)
     (claude / ".credentials.json").write_text("token")
     (claude / "commands").mkdir()
     (claude / "commands" / "pwn.md").write_text("exfiltrate")
@@ -520,6 +531,107 @@ def test_the_tool_config_list_names_the_paths_git_ssh_and_gh_read() -> None:
     assert "XDG_CONFIG_HOME" not in PASSTHROUGH_NAMES
 
 
+def test_sweep_removes_the_gh_extension_directory_and_keeps_ghs_state(tmp_path: Path) -> None:
+    """#186: an extension is an executable a session leaves for the next session's `gh` to run,
+    and it needs no install step -- a directory and a file are dispatched just the same.
+
+    Still a denylist, and the reason this entry is directory-specific: `~/.local/state/gh` is
+    `gh`'s own state directory beside it, `~/.local/share` and `~/.local` are every tool's, and
+    all three survive with the extension gone.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    _sweep(home)
+    # The literal path as well as the list, so this and the pin test below fail independently:
+    # iterating an empty list would otherwise pass here for the reason the sweep is broken.
+    assert not (home / ".local" / "share" / "gh" / "extensions").exists()
+    for parts in TOOL_EXTENSION_SWEEP:
+        assert not home.joinpath(*parts).exists(), parts
+    assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"
+    # Every level above the entry survives, `gh`'s own data directory included: the sweep takes
+    # one directory and never the one above it, which is what the docs promise a deployment.
+    assert (home / ".local" / "share" / "gh").is_dir()
+    assert (home / ".local" / "share").is_dir()
+    assert (home / ".local").is_dir()
+
+
+def test_the_extension_list_names_the_directory_gh_dispatches_from() -> None:
+    """Pinned like the three lists above. Measured on this image's `gh`: the extension
+    directory under the *data* directory is the only place it dispatches from -- not `PATH`
+    (`gh-pathpwn` on `PATH` is an `unknown command`) and not `GH_CONFIG_DIR` -- so the one
+    entry is the whole surface, and dropping it has to be a deliberate edit."""
+    assert set(TOOL_EXTENSION_SWEEP) >= {(".local", "share", "gh", "extensions")}
+    # Directory-specific, as the neighbours in `_plant_home` are there to prove: `gh`'s data
+    # directory holds the extensions, its state directory sits beside it, and `~/.local/share`
+    # and `~/.local` belong to every tool the session runs.
+    for parts in ((".local",), (".local", "share"), (".local", "share", "gh")):
+        assert parts not in TOOL_EXTENSION_SWEEP
+    # Which is only the path `gh` reads while nothing has moved it, so both halves of that are
+    # asserted here rather than left to the two lists that hold them: `XDG_DATA_HOME` is not
+    # inherited from the worker, and since #191 a workspace's `.issuebot/env` cannot set it
+    # either. That is `XDG_CONFIG_HOME`'s standing for the git entry above, so the sweep of the
+    # default path is a guarantee and not a default. (`test_agent_runner.py` pins the name's own
+    # refusal end to end; what this pins is that this list's promise depends on it.)
+    assert "XDG_DATA_HOME" not in PASSTHROUGH_NAMES
+    assert "XDG_DATA_HOME" in TOOL_CONFIG_ENV_NAMES
+
+
+def test_sweep_unlinks_a_symlinked_extension_directory_without_following_it(
+    tmp_path: Path,
+) -> None:
+    """The nested-target rule of #151 applied to the deepest entry on any list: with any of the
+    four components replaced by a link, the directory the sweep would otherwise remove is
+    outside the home altogether, while the link is what the session planted and what `gh`
+    dispatches through. So the link goes and the tree it points at is untouched."""
+    outside = tmp_path / "outside"
+    (outside / "gh-pwn").mkdir(parents=True)
+    (outside / "gh-pwn" / "gh-pwn").write_text("keep")
+    for depth in range(1, 5):
+        home = tmp_path / f"home{depth}"
+        parts = (".local", "share", "gh", "extensions")
+        link = home.joinpath(*parts[:depth])
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside)
+        _sweep(home)
+        assert not link.is_symlink(), depth
+        assert (outside / "gh-pwn" / "gh-pwn").read_text() == "keep", depth
+
+
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to answer for its own dispatch")
+def test_a_planted_extension_cannot_shadow_the_core_command_the_clone_runs(
+    tmp_path: Path,
+) -> None:
+    """Why the clone is safe without a sweep in front of it, pinned rather than left in prose.
+
+    `WorkspaceManager._clone` runs `gh repo clone` through `_run_argv`, and the sweep seam is
+    in `_run_script` -- so the clone is the one `gh` of a run that happens before that
+    workspace's first sweep, `after_create` included. What makes that safe is a property of
+    `gh` and not of the sweep: an extension cannot shadow a core command, so a `gh-repo` left
+    in the account's extension directory is never what `gh repo` runs. Measured in the design
+    note and quoted in `TOOL_EXTENSION_SWEEP`'s comment, and asserted here because a `gh` that
+    began letting the plant win would make the clone the one invocation this guarantee does not
+    cover, and nothing else in the suite would notice.
+    """
+    home = tmp_path / "home"
+    extensions = home / ".local" / "share" / "gh" / "extensions"
+    for name in ("gh-repo", "gh-pwn"):
+        (extensions / name).mkdir(parents=True)
+        (extensions / name / name).write_text(f"#!/bin/sh\necho SHADOW-RAN-{name}\n")
+        (extensions / name / name).chmod(0o755)
+    env = {**os.environ, "HOME": str(home)}
+
+    core = subprocess.run(
+        ["gh", "repo", "--help"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert core.returncode == 0, core.stderr
+    assert "SHADOW-RAN" not in core.stdout
+    assert "Work with GitHub repositories" in core.stdout
+    # The control, so the negative above cannot be a `gh` that dispatched nothing at all: the
+    # same directory, an invented name, and the plant runs.
+    invented = subprocess.run(["gh", "pwn"], env=env, capture_output=True, text=True, timeout=30)
+    assert invented.stdout.strip() == "SHADOW-RAN-gh-pwn", invented.stderr
+
+
 def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_path: Path) -> None:
     """A nested target is walked a component at a time. With `.ssh` replaced by a link, the
     file the sweep would otherwise unlink is outside the home altogether: the link is what the
@@ -617,7 +729,9 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     how `projects/<project>/memory` is reached, while `claude` opens a planted path by name and
     needs no listing at all. The home itself is in the list, since locking that one reaches every
     sweep list at once, and so is `.config`, which is the only directory a swept path passes
-    *through*: locking it is what `_walk` has to see past rather than read as an empty home."""
+    *through* -- as is each of `.local`, `.local/share` and `.local/share/gh`, the deepest such
+    path there is: locking them is what `_walk` has to see past rather than read as an empty
+    home."""
     home = tmp_path / "home"
     _plant_home(home)
     (home / ".claude" / "skills" / "pwn" / "deep").mkdir()
@@ -631,6 +745,9 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         home / ".ssh",
         home / ".config" / "git",
         home / ".config",
+        home / ".local" / "share" / "gh",
+        home / ".local" / "share",
+        home / ".local",
         home,
     ]
     modes = [(path, path.stat().st_mode) for path in locked]
@@ -642,8 +759,11 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
         for path, mode in reversed(modes):
             with contextlib.suppress(OSError):
                 os.chmod(path, mode)
-    for parts in TOOL_CONFIG_SWEEP:
+    for parts in (*TOOL_CONFIG_SWEEP, *TOOL_EXTENSION_SWEEP):
         assert not home.joinpath(*parts).exists(), parts
+    # The literal path beside the lists, for the reason the sweep test states: iterating a list
+    # that had been emptied would pass here exactly when the sweep is broken.
+    assert not (home / ".local" / "share" / "gh" / "extensions").exists()
     for name in SHELL_STARTUP_SWEEP:
         assert not (home / name).exists(), name
     for name in CLAUDE_HOME_SWEEP:
@@ -654,6 +774,7 @@ def test_sweep_removes_a_plant_the_session_locked_behind_a_directory_mode(
     assert not (project / "memory").exists()
     # And the neighbours the sweep does not name are still there.
     assert (home / ".config" / "gh" / "hosts.yml").exists()
+    assert (home / ".local" / "state" / "gh" / "device-id").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".claude" / ".credentials.json").read_text() == "token"
     assert (project / "a.jsonl").exists()
@@ -1080,7 +1201,7 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
     config to write and the ``hosts.yml`` migration here is such an occasion: what has to be
     gone is the plant, not the file.
     """
-    plant = 'version: "1"\naliases:\n    pwn: "!echo PLANTED-GH-ALIAS-RAN"\n'
+    plant = 'version: "1"\naliases:\n    aliaspwn: "!echo PLANTED-GH-ALIAS-RAN"\n'
     gh_dir = tmp_path / "home" / ".config" / "gh"
     home = tmp_path / "home"
     _plant_home(home)
@@ -1092,11 +1213,16 @@ async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
             "github": {"repo": "example/repo"},
             "workspace": {"root": str(tmp_path / "workspaces")},
             "agent": {"run_as": ME},
-            # `gh pwn` is the alias if the plant is still there, and an unknown subcommand if
-            # it is not. The `git_protocol` line is a liveness probe, and it is what keeps the
-            # swept half honest: without it a `gh` that failed to start -- for a reason having
-            # nothing to do with the sweep -- would print nothing and read as a pass.
-            "hooks": {"before_run": "gh pwn 2>/dev/null; echo live=$(gh config get git_protocol)"},
+            # `gh aliaspwn` is the alias if the plant is still there, and an unknown
+            # subcommand if it is not. Named `aliaspwn` and not `pwn` because #186's extension
+            # plant answers `gh pwn`, and two plants on one name would leave whichever of them
+            # `gh` resolved proving the other nothing. The `git_protocol` line is a liveness
+            # probe, and it is what keeps the swept half honest: without it a `gh` that failed
+            # to start -- for a reason having nothing to do with the sweep -- would print
+            # nothing and read as a pass.
+            "hooks": {
+                "before_run": "gh aliaspwn 2>/dev/null; echo live=$(gh config get git_protocol)"
+            },
         }
     )
     manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
@@ -1180,6 +1306,70 @@ async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
         "socket=/tmp/issuebot-173-poison.sock",
         "live=https",
     ]
+
+
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to dispatch the plant")
+async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#186, end to end and shaped like the two proofs above: a session leaves an executable in
+    the account's extension directory, and the next session's `gh` -- run at the same uid, with
+    the account's own `HOME` -- does not run it, while `gh`'s state directory beside it
+    survives.
+
+    Two-sided for the same reason: with the sweep taken out the plant *is* what `gh` runs, so
+    this cannot pass against a `gh` that was never going to dispatch it. The real wrapper, the
+    real hook path and the real `gh`; only sudo is a fake.
+    """
+    home = tmp_path / "home"
+    _plant_home(home)
+    extension = home / ".local" / "share" / "gh" / "extensions" / "gh-pwn"
+    plant = "#!/bin/sh\necho PLANTED-GH-EXTENSION-RAN\n"
+    (extension / "gh-pwn").write_text(plant)
+    (extension / "gh-pwn").chmod(0o755)
+    # `_plant_home` already leaves a well-formed `hosts.yml`, which this test needs and does
+    # not override: the real `gh` refuses to run at all against a host entry it cannot migrate
+    # ("cowardly refusing to continue"), and a `gh` that never reached its dispatch would pass
+    # the swept half for the wrong reason. The `oauth_token` key is what it refuses without
+    # (measured: it is the key it names), and the value there is deliberately not token-shaped
+    # -- dispatch precedes authentication, so nothing here is a credential and no request is
+    # made.
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            # `gh pwn` is the plant if it is still there, and an unknown command if it is not;
+            # either way the hook goes on to say it ran.
+            "hooks": {"before_run": "gh pwn 2>/dev/null; echo hook-ran"},
+        }
+    )
+    # The real `PATH`, not `fake_path()`: the fake `gh` the runner tests use would shadow the
+    # real one, and `gh`'s own dispatch is the whole question here.
+    environ = {"PATH": os.environ["PATH"], "HOME": "/elsewhere"}
+    manager = WorkspaceManager(cfg, gh=object(), environ=environ)
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    assert result.stdout_tail.splitlines() == ["hook-ran"]
+    assert not extension.exists()
+    # The invariant this entry had to be directory-specific for: `gh`'s own state directory is
+    # its neighbour, and the sweep leaves it where it is.
+    assert (home / ".local" / "state" / "gh" / "device-id").read_text() == "id"
+
+    # Planted again, and this time not swept: the extension runs, which is what the sweep
+    # prevents.
+    extension.mkdir(parents=True)
+    (extension / "gh-pwn").write_text(plant)
+    (extension / "gh-pwn").chmod(0o755)
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == ["PLANTED-GH-EXTENSION-RAN", "hook-ran"]
 
 
 async def _no_sweep() -> None:

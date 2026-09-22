@@ -45,7 +45,11 @@ OPERATOR_FACING = [
     "compose.yaml",
     ".env.example",
     "README.md",
+    "CONTRIBUTING.md",
     "docs/toolchains.md",
+    # The rotation procedure lives here, so this is the file an operator has open while
+    # handling the store's one credential.
+    "docs/operations.md",
     "CLAUDE.md",
     "Dockerfile",
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / ".github" / "workflows").glob("*.yml")),

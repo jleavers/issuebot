@@ -265,8 +265,8 @@ open for the convenience of pointing `ruff`'s config somewhere. If a deployment 
 need the general case, the answer is a narrower variable for the tool that needs it, not this
 one back.
 
-The README's `.issuebot/env` section says all of this where a hook author will be reading it,
-beside `PATH` and the proxy names.
+The `.issuebot/env` section says all of this where a hook author will be reading it, beside
+`PATH` and the proxy names -- in `docs/toolchains.md` since the README's split moved it there.
 
 ## Residuals
 
@@ -278,7 +278,14 @@ beside `PATH` and the proxy names.
   base-directory specification that a target repository's hooks reach for. Named because
   "protected" must not be read as "the next session on this issue inherits nothing"; filed as
   #180 rather than folded in, since the answer is about workspace reuse and not about this
-  file.
+  file. **#180 decided it, and decided not to bound it**
+  (`2026-09-22-clone-reuse-residual-design.md`): the unit of that channel is the clone rather
+  than the file -- `include.path` and `core.hooksPath` put the same keys outside `.git/config`,
+  and the working tree and `<workspace>/.venv` the reuse also keeps are wider than any of them
+  -- so the only thing that would close it is not reusing the workspace, which is what
+  `_is_complete` exists to avoid. `docs/operations.md` says so under "How long a workspace
+  lives, and what a reused one hands the next session", which is where a deployment sees a
+  workspace outlive its run; read that rather than this bullet for the current answer.
 
 - **`BASH_ENV`.** Measured firing under `bash -lc`, which is `WorkspaceManager.hook_shell`:
   `BASH_ENV=/tmp/gitprobe/bashenv.sh bash -lc 'echo hook-ran'` printed `BASH_ENV-RAN` first. That
@@ -297,7 +304,13 @@ beside `PATH` and the proxy names.
   gap is real rather than theoretical. `NODE_OPTIONS` and `LD_PRELOAD` are the shape of what is
   left out: variables of *other* tooling, not rungs of git's or gh's own chains. (`PAGER` was
   on this list in an earlier draft and should not have been: `GIT_PAGER` is protected, so
-  `PAGER` is a chain tail. It is now a protected name.) Fails safe: a gap is a name that still
+  `PAGER` is a chain tail. It is now a protected name. *And `LD_PRELOAD` should not have been
+  either: #187 (`2026-09-22-session-loader-env-design.md`) took that filing on its own terms
+  and overturned it. The loader's names are not another tool's -- `ld.so` reads them out of
+  whatever environment a process is handed and acts on them before `main`, so they reach the
+  same set this change drew its bound around, `bash` and `git` and `claude` alike. All three
+  of them are now protected, in `LOADER_ENV_NAMES`, with `LD_TRACE_LOADED_OBJECTS` and
+  `LD_DEBUG` beside them.* `NODE_OPTIONS` is still the shape of what is left out.) Fails safe: a gap is a name that still
   gets through, never a broken session. The two prefixes are the part of this that is *not* a
   denylist, which is exactly why they are prefixes.
 

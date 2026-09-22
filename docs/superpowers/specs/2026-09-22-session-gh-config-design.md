@@ -258,7 +258,11 @@ legitimately sets is in the table above, already answered by the protected envir
   looked at here, and not this list's to close: the sweep names config files a tool *reads*,
   and an extension directory is a different question with a different answer -- and one where
   "what a deployment legitimately puts there" has a real answer, unlike `config.yml`. Filed as
-  #186 rather than folded in.
+  #186 rather than folded in, and closed by it: `TOOL_EXTENSION_SWEEP`
+  (`2026-09-22-session-gh-extension-design.md`) is a list of its own beside this one, and #191
+  protected `XDG_DATA_HOME` in `.issuebot/env` as #171 protected `GH_CONFIG_DIR` for this file.
+  It weighed the deployment's answer the way this note asked and landed on the `PATH` route,
+  `gh` having no system-wide extension location.
 
 - **Concurrency**, as in #101, #137 and #151: with one account for the deployment a session
   running beside this one can plant between a sweep and the command it protects. A pool closes

@@ -245,7 +245,7 @@ than a restart. The pin moves by hand: a tarball fetched by URL is invisible to 
 — that one builds issuebot, this one runs the target repository's suite, and they are entitled
 to differ.)
 
-**2. Let the session reach PyPI.** The [shipped allow-list](../README.md#what-a-session-may-reach) carries
+**2. Let the session reach PyPI.** The [shipped allow-list](security-model.md#what-a-session-may-reach) carries
 the hosts the workflow itself needs and no registry, so `uv sync` is refused with a `403` until
 this checkout's `.env` says otherwise:
 
@@ -300,7 +300,7 @@ session after every worker recreation.
 **One directory per account, and that is the point of the shape.** A cache is a directory one
 process writes and the next installs *from*, so a cache shared between session accounts would
 be a surface one session could write for another to execute — exactly what the [account
-pool](../README.md#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
+pool](security-model.md#one-account-per-concurrent-session) exists to prevent. Each directory is `1770`, owner
 the worker and group that account's own, inside a `0755` root: an account reaches its own and
 is refused at every sibling's door. Per account it is the boundary that account's own home
 already draws, and the next session bound to it is the one the cache is kept for.
@@ -317,8 +317,36 @@ default location had too, and what the hardlink adds is that a poisoning takes e
 waiting for the honest workspace to sync again. The clone is untouched, so nothing reaches what
 that session commits and pushes; only what its tests import. And the alternative gives up the
 venv sharing this was measured for: a per-workspace cache would close it, and the second
-workspace's venv is free only because it is the first one's files. Whether the residual is
-worth closing is [#176](https://github.com/jleavers/issuebot/issues/176).
+workspace's venv is free only because it is the first one's files.
+
+**[#176](https://github.com/jleavers/issuebot/issues/176) weighed that residual and accepted
+it.** Nothing was landed to close it, and the bounds in the paragraph above are the whole of
+what holds it. The alternatives each pay for the fix with what this shape was built for. A
+cache per *workspace* (or per account and workspace) closes the channel outright, but it
+roughly doubles the disk — today's two hardlinked venvs *are* the one cache's inodes, so two
+workspaces at an account are about 78 MB between them where a cache each is about 156 MB, and
+it grows per workspace rather than per account — and, the costlier half, it gives up the
+sharing itself, so every new workspace syncs from PyPI where an account's cache syncs once per
+account and not at all for a reworked issue. A cache the worker populates and hands over
+read-only needs uv never to write to its own cache, which uv does not promise, and fails the
+hook outright when a package is missing rather than falling back. Sweeping the account's cache
+between sessions — the only option needing nothing new from uv, and one that does close the
+channel — gives up both halves of the change, since a session is dispatched to one workspace
+at a time and a cache shared with nothing is a PyPI sync per session. And `UV_LINK_MODE=copy`
+over the cache as it stands restores the seal's cover of `.venv`, for the measured 152 MB of
+copied venvs and no warning (declaring `copy` is what silenced uv's fallback warning below,
+never what caused it), while leaving the cache itself shared — the pre-#164 level.
+
+What was chosen instead is to say plainly what the residual is: the same account at the same
+uid already shares a home that nothing sweeps a cache out of, so this is not a new channel,
+and what it reaches is what an honest session's tests import and never the clone it commits
+and pushes, in front of the human review every issuebot pull request ends at. The consequence
+a reader of the [account pool](../README.md#one-account-per-concurrent-session) has to carry
+is that the seal covers the clone and, under a hardlinking uv, not `.venv`; `accounts.py`'s
+own docstring says so, and `uvcache.py` holds the reasoning. A deployment whose threat model
+differs — a pool handed issues from genuinely untrusted authors — has `UV_LINK_MODE=copy` for
+the seal alone, from the hook line or [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent)
+below and with no change to issuebot, and the per-workspace cache for the channel entire.
 
 Nothing prunes the cache, and it shares the volume with the clones — once the venvs are
 hardlinks into it, removing a workspace frees very little that the cache still holds, and a
@@ -382,7 +410,7 @@ runtime that starts and then quietly disagrees with the developer's machine is w
 that does not start, so CI asserts the formatting rather than the version.
 
 **2. There is no step 2.** Unlike node and uv, PowerShell needs nothing added to
-[the allow-list](../README.md#what-a-session-may-reach): the runtime ships in the image, and a repository
+[the allow-list](security-model.md#what-a-session-may-reach): the runtime ships in the image, and a repository
 of plain `.ps1` deliverables installs nothing to run its tests. The exception is a suite that
 pulls modules from the PowerShell Gallery — `Install-Module`, or a `#Requires -Modules` that
 is not already vendored — which needs
@@ -501,12 +529,13 @@ hook that would truncate it again or append a duplicate per session.
 
   `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
   leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
-  for `gh`'s aliases. These are names and not prefixes on purpose: `SSH_AUTH_SOCK` is a
-  legitimate route for a forwarded deploy key, `XDG_DATA_HOME`/`XDG_CACHE_HOME` are untouched,
-  and the `GITHUB_` namespace holds plenty a hook may hand over. The workspace outlives the
-  session, so what such a line would re-point is the *next* session on that issue — and it is
-  the environment spelling of what the home sweep removes from the account's
-  `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and `~/.config/gh/config.yml`.
+  for `gh`'s aliases; `XDG_DATA_HOME` is protected for `gh`'s extensions (#191). These are names
+  and not prefixes on purpose: `SSH_AUTH_SOCK` is a legitimate route for a forwarded deploy key,
+  `XDG_CACHE_HOME` is untouched, and the `GITHUB_` namespace holds plenty a hook may hand over.
+  The workspace outlives the session, so what such a line would re-point is the *next* session
+  on that issue — and it is the environment spelling of what the home sweep removes from the
+  account's `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and
+  `~/.config/gh/config.yml`.
 
   **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
   are unaffected: set in `.env`, they reach the worker's environment and the session inherits
@@ -535,13 +564,41 @@ hook that would truncate it again or append a duplicate per session.
   - **Behaviour-only `GIT_*` switches with no config equivalent** — `GIT_TERMINAL_PROMPT=0`,
     `GIT_TRACE*`, `GIT_CURL_VERBOSE`, `GIT_LFS_SKIP_SMUDGE`. Set them in the hook's own shell
     around the git it runs, or system-wide in a derived image.
-  - **`XDG_CONFIG_HOME` for tools that are not `git` or `gh`** — `uv`, `ruff`, `npm` or anything
-    else following the specification. With `HOME` protected too, a hook can no longer hand the
-    session a relocated config root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
+  - **`XDG_CONFIG_HOME` and `XDG_DATA_HOME` for tools that are not `git` or `gh`** — `uv`,
+    `ruff`, `npm` or anything else following the specification (`uv`'s tool and python
+    directories are the measured case). With `HOME` protected too, a hook can no longer hand
+    the session a relocated config or data root; what it keeps is per-command (`XDG_CONFIG_HOME=... tool ...`
     in the hook's own shell) and per-repository (config written into the clone, which every later
-    turn sees). `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not protected, which covers the cache
-    and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
-    for the convenience of pointing another tool's config somewhere.
+    turn sees), plus the per-tool variables, which are not protected and are the better
+    spelling anyway: `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR`
+    and their equivalents elsewhere. `XDG_CACHE_HOME` and `XDG_STATE_HOME` are not protected,
+    which covers the cache and state cases. The trade is deliberate: a route to `gh`'s aliases,
+    or to the directory it dispatches a subcommand from, is not one to leave open for the
+    convenience of pointing another tool's config or data somewhere.
+
+- **So are two of the base directories**, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, which are on
+  no chain and are not `git` or `gh` variables at all. The rule is what a tool issuebot
+  launches resolves *through* one of them:
+
+  | root | what `git` or `gh` reads there |
+  |---|---|
+  | `XDG_CONFIG_HOME` | `$XDG_CONFIG_HOME/git/config` and `$XDG_CONFIG_HOME/gh/config.yml`, both of which name commands |
+  | `XDG_DATA_HOME` | `$XDG_DATA_HOME/gh/extensions`, the directory `gh <name>` dispatches a program from — a *program* `gh` runs, one step past a setting naming one |
+
+  The other five — `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_DIRS`,
+  `XDG_DATA_DIRS` — are **not** protected: each was measured with an extension, a `gh` alias
+  and a git alias planted under it, and neither tool read any of them. A hook pointing a cache
+  or a state directory somewhere is exactly what this file is for.
+
+  `XDG_DATA_HOME` is the one there is no `GH_` spelling of: `gh` dispatches extensions from the
+  data directory alone, not from `PATH` and not from `GH_CONFIG_DIR`. That cuts both ways, and
+  the second way is a real cost: it was also the only way a deployment could give every session
+  a `gh` extension, since `gh` has no system-wide extension location. Install the same program
+  root-owned on the session's `PATH` instead — `/usr/local/bin/<name>` in an image built `FROM`
+  this one — and invoke it under its own name. An extension is an ordinary executable that `gh`
+  hands its argv and its own environment to; it is given no credential, and the only thing
+  `gh` adds is a `GH_EXTENSION=1` marker, so what you lose is the `gh ` prefix on the command. That route is also the one the
+  session cannot reach, where a variable in a file the session can rewrite never was.
 
 - **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
@@ -569,6 +626,55 @@ hook that would truncate it again or append a duplicate per session.
   *interactive* shell, and nothing issuebot runs is interactive: it was measured unread by
   `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
   `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
+
+- **So are the five names the dynamic loader reads** (#187): `LD_PRELOAD`, `LD_AUDIT`,
+  `LD_LIBRARY_PATH`, `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG`. This is the same rule one layer
+  *under* all of the above rather than one tool further out: `ld.so` reads these out of
+  whatever environment a process was handed, and acts on them before that process reaches
+  `main`. In this image `bash` (so every hook and the post-clone setup), `git` and `claude`
+  are all dynamically linked; `gh` is a static Go binary and is the one tool not reached.
+
+  - `LD_PRELOAD` maps objects ahead of all others, running their constructors before `main`, and
+    `LD_AUDIT` does it earlier still — measured running the named object's constructors *even
+    when it is not a valid audit module*.
+  - `LD_LIBRARY_PATH` names no object, but it is `PATH`'s rule one layer down: a file planted at
+    a soname the target needs, in a directory of the line's choosing, is what the loader maps,
+    and its constructor was measured running inside `git` with no `LD_PRELOAD` anywhere.
+  - `LD_TRACE_LOADED_OBJECTS` and `LD_DEBUG` are the odd ones out, and the only protected
+    names that fail *silently*: the loader prints — to **stdout** — and **exits 0 without
+    entering `main`**, the dependency list for the first, the option list for `LD_DEBUG` set to
+    any value containing `help` (`LD_DEBUG=help`, `LD_DEBUG=libs,help`). One line of either
+    makes every hook "pass" without running its commands, displaces whatever that hook's stdout
+    was being read for, and stops the turn's `claude` starting. Every *other* `LD_DEBUG` value
+    is inert, which is exactly what makes this one easy to miss.
+
+  **If you need `LD_LIBRARY_PATH` for a build, this is the one with a real cost**, so here is
+  what to do instead. The other four have no hand-over use and nothing is lost by refusing
+  them.
+
+  - **Bake a `RUNPATH` in at link time** — `-Wl,-rpath`, or `LD_RUN_PATH`, which is binutils
+    `ld`'s link-time default and is **not protected**. This is the correct fix rather than a
+    workaround: an artefact that needs a library at run time has `RUNPATH` for exactly that, and
+    `LD_LIBRARY_PATH` is the override you reach for while testing one. It is also why the
+    usual `after_create` never needs the variable: Python wheels and node native modules already
+    carry theirs.
+  - **`/etc/ld.so.conf.d/*.conf` plus `ldconfig`, in an image built `FROM` this one**, for a
+    deployment-wide library path — root's, outside the session's reach, the same route offered
+    above for `/etc/gitconfig`.
+  - **The hook's own shell**: `LD_LIBRARY_PATH=/opt/vendor/lib make check` inside the script the
+    hook already writes is unchanged. What is refused is handing the variable to the *session* —
+    and so to the next session on that issue, since the workspace outlives the run.
+
+  `LD_RUN_PATH` is not protected, and neither are `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`,
+  `LD_PROFILE` or `GLIBC_TUNABLES`: none of them names an object the loader would not otherwise
+  have loaded, and each was measured leaving `git --version` working. `LD_SHOW_AUXV` is not
+  protected either, and it is the one worth a sentence, because it does print: it puts the
+  auxiliary vector on **stdout** and then runs your command anyway, at exit 0. It loads nothing
+  and denies nothing, so it is out by the same rule the two silent names are *in* by — what it
+  costs is noise ahead of a hook's output, which that hook's own `echo` could add too. `LD_DEBUG_OUTPUT` is not
+  protected either, though `LD_DEBUG` is: it only redirects what `LD_DEBUG` asks for and is
+  inert on its own. That is also why this is five names and not an `LD_` prefix — a prefix
+  would refuse `LD_RUN_PATH`, which is the route recommended just above.
 
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
@@ -604,3 +710,19 @@ hook that would truncate it again or append a duplicate per session.
   or held off it (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes
   one when it next has config of its own to write, so a hook's `gh config set` still configures
   the `gh` in its own shell.
+- **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
+  schedule (#186), so an extension a hook installs is gone before the next login shell and
+  before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is
+  written there. `XDG_DATA_HOME`, the one variable besides `HOME` that moves that
+  lookup, is a protected name above (#191), and `HOME` is protected too, so the sweep's
+  guarantee does not rest on a name a hook could rewrite. A
+  deployment that wants a `gh` extension for every session takes the `PATH` route that bullet
+  describes; a hook that needs one for its own commands can install it into the workspace and
+  run it by path.
+- **What the clone itself does carry over.** `git config --local` is the route that stays open,
+  and it stays open in both directions: a workspace outlives its run, so what a hook — or the
+  session — writes into the clone's `.git/config` is there for the next session on that issue.
+  That is a decision and not an oversight; [How long a workspace lives, and what a reused one
+  hands the next
+  session](operations.md#how-long-a-workspace-lives-and-what-a-reused-one-hands-the-next-session)
+  says what it reaches and why issuebot does not reset it.

@@ -89,7 +89,9 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # The tool-config entries below are the same rule one step in (#171): `PATH` decides *which*
 # binary `git` and `gh` are, and these decide what that binary does and which further commands
 # it runs; the shell entries beside them are the same rule again for `bash`, which is the
-# process every hook and the post-clone setup *is* (#179). The file outlives the session -- a
+# process every hook and the post-clone setup *is* (#179); and the loader entries below them are
+# the same rule one layer under all of those (#187), since `ld.so` reads its own names out of the
+# same environment before any of those binaries reaches `main`. The file outlives the session -- a
 # workspace belongs to one issue -- so what such a line re-points is the next session on that
 # issue. It is also the environment spelling of what `TOOL_CONFIG_SWEEP` (`runas.py`, #151 and
 # #173) and `SHELL_STARTUP_SWEEP` (#137) remove from the account's home: a sweep of
@@ -121,9 +123,34 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #   legitimate route for exactly the deploy-key case this bound has to leave a hook author, and
 #   `GITHUB_`/generic namespaces hold plenty a hook may hand over. A chain has an end, so this
 #   list has one too.
+#   The two XDG roots are on no chain, and they are here under a rule of their own (#171,
+#   #191): a base directory is protected when a tool issuebot launches resolves through it
+#   something it will execute or read as configuration. Measured against the two tools this
+#   list is drawn for -- `gh` 2.100.0 and git 2.47.3; `claude` reads XDG names too and is the
+#   note's residual -- two of the specification's roots are:
+#     XDG_CONFIG_HOME  the config directory of everything following the specification,
+#                      `$XDG_CONFIG_HOME/gh/config.yml` among them, whose aliases may be shell
+#                      commands, and `$XDG_CONFIG_HOME/git/config`, which names commands too.
+#     XDG_DATA_HOME    `$XDG_DATA_HOME/gh/extensions`, the directory `gh` dispatches
+#                      `gh <name>` from -- a program it *runs*, one step past a setting that
+#                      names one, and the environment spelling of the same directory in the
+#                      account's home, which is #186's question. It moves that lookup
+#                      wholesale and hides the home's own extensions with it, so leaving it
+#                      would make any sweep there conditional on a variable nothing checked,
+#                      the way #171 stood to #151. No `GH_` name
+#                      reaches it -- `GH_CONFIG_DIR` moves the config directory alone, and
+#                      `gh` dispatches from no `PATH` -- so the prefix below does not cover it.
+#   `XDG_` is not a prefix here either, and for a reason of its own: `GIT_` and `GH_` are
+#   prefixes because they are those tools' own namespaces and the tools add to them, where
+#   `XDG_` is a specification's -- its roots are a short fixed list, seven in the current
+#   version, and what changes is which of them a tool reads: a measurement, rather than a
+#   manual to keep up with. `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
+#   `XDG_CONFIG_DIRS` and `XDG_DATA_DIRS` were each measured unread by those two and stay
+#   out: a hook pointing a cache or a state directory somewhere is what this file is for.
 TOOL_CONFIG_ENV_NAMES: frozenset[str] = frozenset(
     {
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
         "EDITOR",
@@ -199,6 +226,85 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
         "CDPATH",
     }
 )
+# The same rule one layer *below* every tool rather than one tool further out (#187). `PATH`
+# decides which binary `git` is, `CDPATH` which directory a hook's `cd` finds, and these decide
+# which shared objects the dynamic loader maps into that binary before its `main` runs -- and
+# into `bash`, `git` and the `claude` child alike, since the loader reads them out of whatever
+# environment the process was handed. (`gh` is the exception and was checked rather than
+# assumed: it is a static Go binary in this image, so no loader runs for it. `bash`, `git` and
+# `claude` are all ELF-dynamic here, which is enough to make the reach argument carry.)
+#   This is the decision #171 and #179 both deferred. Each of those notes filed `LD_PRELOAD`
+#   under "variables of *other* tooling", beside `NODE_OPTIONS` and `PYTHONSTARTUP` -- and that
+#   filing was wrong, because those are variables of a tool a hook *chooses* to run, while the
+#   loader's names reach every dynamically linked program the merged environment is handed to.
+#   Measured, each of them, against the image's own glibc 2.41 -- with `libmemusage.so`, which
+#   ships with glibc and prints at exit, standing in for the prebuilt object the issue
+#   describes, since the default image carries no compiler:
+#   LD_PRELOAD  objects mapped ahead of all others into every dynamically linked program, their
+#               ELF constructors run before `main`. `LD_PRELOAD=...libmemusage.so bash -lc 'echo
+#               hook-ran'` printed the object's output before the hook's own.
+#   LD_AUDIT    the rtld-audit interface, loaded earlier still. Measured running the named
+#               object's constructors *even when it is not a valid audit module* -- so "it must
+#               implement `la_version`" is no kind of bound on what it may run.
+#   LD_LIBRARY_PATH
+#               the directories a `DT_NEEDED` soname is resolved through, ahead of the system
+#               ones. It names no object, which is the whole of the case for treating it
+#               differently -- and that case does not survive the measurement: a file planted at
+#               `libpcre2-8.so.0` in a directory of the line's choosing was what `git` loaded,
+#               and its constructor ran inside `git`, with no `LD_PRELOAD` anywhere. It is
+#               `PATH`'s rule one layer down, which is exactly why `PATH` and `CDPATH` are here.
+#   LD_DEBUG    the same, by a second spelling, and the one that is easiest to miss: *any* value
+#               containing `help` (`LD_DEBUG=help`, `LD_DEBUG=libs,help`) makes the loader print
+#               its option list and exit 0 without entering `main`, to *stdout* -- so it
+#               displaces whatever a hook's stdout was being read for as well. Measured voiding
+#               `bash -lc 'echo hook-ran'`, `git rev-parse` and `claude --version`. Every other
+#               value is inert (`libs`, `all` and `unused` were measured leaving `git --version`
+#               working), which is exactly why this one is easy to certify as safe by measuring
+#               the wrong value -- the first draft of this list did.
+#   LD_TRACE_LOADED_OBJECTS
+#               not a way to run code but a way to run *none*: the loader prints the object's
+#               dependencies and exits 0 without entering `main`. Measured voiding
+#               `git rev-parse` (exit 0, a library list instead of an answer), `claude
+#               --version`, and `bash -lc 'echo hook-ran'`, whose `echo` never ran while the
+#               shell still reported success. That is the half of this list's rule that `PATH`,
+#               `HOME` and the fixed entries already serve -- a line here must not take the
+#               tooling down in the middle of a run -- and it fails *silently*, which is one of
+#               only two ways a protected name in `.issuebot/env` can: `LD_DEBUG` below is the
+#               other, and nothing else in the file is either.
+# The rule is *what makes the dynamic loader load an object of the value's choosing into every
+# dynamically linked program, or not run one at all*, checkable against `ld.so(8)`'s ENVIRONMENT
+# section and finite. Names and not an `LD_` prefix, and the counter-example is decisive:
+# `LD_RUN_PATH` is binutils `ld`'s link-time default for `-rpath`, so it is the very route a
+# hook is told to use instead of `LD_LIBRARY_PATH` below, and a prefix would refuse the
+# recommended workaround. `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_PROFILE` and `GLIBC_TUNABLES`
+# stay out too: each was measured leaving `git --version` working, and none of them names an
+# object the loader would not otherwise have loaded. So does `LD_SHOW_AUXV`, which is the one
+# exclusion that touches a stream issuebot reads: it prints the auxiliary vector to stdout and
+# *then* runs the command, at exit 0, so it loads nothing and denies nothing -- which is the
+# whole difference from the two above -- and the noise it leaves ahead of a hook's output is
+# something that hook's own `echo` could add, while `StreamParser` counts a non-JSON line and
+# carries on.
+# `LD_DEBUG_OUTPUT` stays out as well, for a reason worth stating since `LD_DEBUG` is in: it
+# only redirects what `LD_DEBUG` asks for and is inert on its own, measured leaving
+# `git --version` working with no `LD_DEBUG` set.
+# The cost is not zero, and it is `LD_LIBRARY_PATH`'s alone: a target repository's
+# `after_create` may legitimately build against a library in a private prefix whose tests the
+# *agent's* turn then runs, which is a hand-over and so exactly what this refuses. The routes
+# that remain are in `docs/toolchains.md`: a `RUNPATH` baked at link time (`-Wl,-rpath`, or
+# `LD_RUN_PATH`, which is unprotected), an `/etc/ld.so.conf.d` entry with `ldconfig` in an image
+# built `FROM` this one -- root's, outside the session's reach, the route already given for
+# `/etc/gitconfig` -- and the variable in the hook's own shell around the command the hook
+# itself runs, which is unchanged. A built artefact that needs a library at run time has
+# `RUNPATH` for exactly that; `LD_LIBRARY_PATH` is the override you reach for while testing one.
+LOADER_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_TRACE_LOADED_OBJECTS",
+        "LD_DEBUG",
+    }
+)
 PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
     {
         "GH_TOKEN",
@@ -208,6 +314,7 @@ PROTECTED_ENV_NAMES: frozenset[str] = frozenset(
         *PROXY_ENV_NAMES,
         *TOOL_CONFIG_ENV_NAMES,
         *SHELL_ENV_NAMES,
+        *LOADER_ENV_NAMES,
     }
 )
 PROTECTED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", *TOOL_CONFIG_ENV_PREFIXES)

@@ -4,7 +4,9 @@ import asyncio
 import io
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime
@@ -16,6 +18,7 @@ from pydantic import SecretStr
 from issuebot.agent import runner as runner_module
 from issuebot.agent.runner import (
     FIXED_ENVIRONMENT,
+    LOADER_ENV_NAMES,
     MIN_CLAUDE_VERSION,
     PROTECTED_ENV_NAMES,
     PROTECTED_ENV_PREFIXES,
@@ -565,10 +568,14 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         "GH_EDITOR",
         "GH_BROWSER",
         "GH_HOST",
-        # Not a git or gh variable at all: it moves the config directory of everything
-        # following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml`
-        # among them.
+        # Not git or gh variables at all: the two base directories those tools resolve
+        # something they execute or read as configuration through. `XDG_CONFIG_HOME` moves the
+        # config directory of everything following the specification,
+        # `$XDG_CONFIG_HOME/gh/config.yml` among them; `XDG_DATA_HOME` moves
+        # `$XDG_DATA_HOME/gh/extensions`, the directory `gh` dispatches `gh <name>` from,
+        # which is a program rather than a setting naming one (#191, #186).
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
         # The tails of git's and gh's own precedence chains, whose heads are covered by the
         # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` removes from the home --
         # git's and ssh's since #151, gh's `config.yml` since #173 -- so these are the whole of
@@ -602,9 +609,14 @@ def test_the_tool_config_protections_are_pinned() -> None:
     this list missed some of them. The names are then the rungs of git's and gh's documented
     precedence chains that fall outside those prefixes -- checkable against `git-var(1)`,
     `git-commit(1)` and `gh environment`, and finite because a chain has an end -- plus
-    `XDG_CONFIG_HOME`, which is on no chain and moves the directory `gh` reads its aliases
-    from. Names and not prefixes, because `SSH_AUTH_SOCK` is a legitimate route for the
-    deploy-key case this bound has to leave a hook author."""
+    the two XDG roots, which are on no chain: a base directory is protected when a tool
+    issuebot launches resolves through it something it will execute or read as configuration --
+    `$XDG_CONFIG_HOME/gh/config.yml` for the aliases, `$XDG_DATA_HOME/gh/extensions` for the
+    program `gh <name>` runs (#191). Names and not prefixes, because `SSH_AUTH_SOCK` is a
+    legitimate route for the deploy-key case this bound has to leave a hook author -- and
+    `XDG_` is a specification's namespace rather than a tool's, so which of its seven roots
+    belongs here is a measurement, against `git` and `gh`, and not a manual to keep up
+    with."""
     assert sorted(TOOL_CONFIG_ENV_NAMES) == [
         "BROWSER",
         "EDITOR",
@@ -616,6 +628,7 @@ def test_the_tool_config_protections_are_pinned() -> None:
         "SSH_ASKPASS_REQUIRE",
         "VISUAL",
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
     ]
     assert list(TOOL_CONFIG_ENV_PREFIXES) == ["GIT_", "GH_"]
     assert TOOL_CONFIG_ENV_NAMES <= PROTECTED_ENV_NAMES
@@ -628,11 +641,19 @@ def test_the_tool_config_protections_are_pinned() -> None:
         # No underscore, so not the `GIT_`/`GH_` prefixes however much it looks like one.
         "GITHUB_WORKSPACE",
         "GHOSTSCRIPT_HOME",
-        # The base-directory specification's other roots: neither `git` nor `gh` reads them,
-        # and a hook pointing a cache somewhere is exactly what this file is for.
-        "XDG_DATA_HOME",
+        # The base-directory specification's other roots. Each was measured against `gh`
+        # 2.100.0 and git 2.47.3 -- the two tools the list is drawn for, `claude`'s own use of
+        # these names being the note's residual -- with an extension, a `gh` alias and a git
+        # alias planted under it, and none of the three ran: a hook pointing a cache or a
+        # state directory somewhere is exactly what this file is for. (`XDG_DATA_HOME` was on
+        # this list until #191, on the strength of the same measurement made for `git` and
+        # `gh`'s *config* alone -- it is protected now, and the pinned list above is the other
+        # half of this.)
+        "XDG_STATE_HOME",
         "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
         "XDG_CONFIG_DIRS",
+        "XDG_DATA_DIRS",
         # The legitimate route for a forwarded deploy key, which is why `SSH_ASKPASS` is a
         # name here and `SSH_` is not a prefix.
         "SSH_AUTH_SOCK",
@@ -711,6 +732,92 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
         "EDITOR is protected",
         "EMAIL is protected",
     ]
+
+
+def _plant_gh_extension(root: Path, name: str, marker: str) -> None:
+    """A `gh` extension as `gh` itself lays one out: `<data>/gh/extensions/gh-<name>/gh-<name>`.
+
+    Written by hand, because the install step is not part of the channel (#186 measured that a
+    directory and an executable file are dispatched exactly as an installed extension is -- no
+    manifest, no registry entry and no network)."""
+    directory = root / "gh" / "extensions" / f"gh-{name}"
+    directory.mkdir(parents=True)
+    executable = directory / f"gh-{name}"
+    executable.write_text(f"#!/bin/sh\nprintf '{marker}\\n'\n")
+    executable.chmod(0o755)
+
+
+def test_a_workspace_env_line_re_pointing_gh_extensions_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#191): `$XDG_DATA_HOME/gh/extensions` is the directory `gh`
+    dispatches `gh <name>` from, so a line naming it hands the next session on this issue a
+    program of the last one's choosing under an ordinary command. The cache and state roots
+    beside it are untouched, which is the half a hook is entitled to."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "XDG_DATA_HOME=/tmp/theirs/xdg\n"
+        "XDG_CACHE_HOME=/tmp/theirs/cache\n"
+        "XDG_STATE_HOME=/tmp/theirs/state\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["XDG_CACHE_HOME", "XDG_STATE_HOME", "DATABASE_URL"]
+    assert "XDG_DATA_HOME" not in merged
+    assert merged["XDG_CACHE_HOME"] == "/tmp/theirs/cache"
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    # The key, and never the path it named.
+    assert ignored == ["XDG_DATA_HOME is protected"]
+
+
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to dispatch the plant")
+def test_a_planted_gh_extension_is_not_dispatched_for_the_next_session(tmp_path: Path) -> None:
+    """The same channel against the real `gh`, shaped like #151's `git` proof in
+    `tests/test_agent_runas.py` and two-sided, so it fails if the protection is taken out
+    rather than only asserting a key is absent: the mapping the file itself carries dispatches
+    the plant, and the environment `workspace_environment` builds from that same file does not.
+
+    `gh` dispatches from the data directory alone -- measured, not from `PATH` and not from
+    `GH_CONFIG_DIR` -- so `XDG_DATA_HOME` is the only spelling of this and the `GH_` prefix
+    (#171) never reached it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    planted = tmp_path / "xdg"
+    _plant_gh_extension(planted, "issuebotpwn", "PLANTED-XDG-DATA-HOME-RAN")
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(f"XDG_DATA_HOME={planted}\n")
+    base = agent_environment({"PATH": os.environ["PATH"], "HOME": str(home)}, token=None)
+    merged, applied = workspace_environment(base, tmp_path)
+    assert applied == []
+
+    def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["gh", "issuebotpwn"],
+            # Hermeticity only, and in both arms so the arms differ by the protection alone:
+            # `gh` checks an executed extension for updates once a day, which is the one thing
+            # here that would reach the network.
+            env={**env, "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    # What the file asked for: `gh <name>` runs the plant.
+    raw, _ = parse_workspace_env((tmp_path / ".issuebot" / "env").read_text())
+    before = run({**base, **raw})
+    assert "PLANTED-XDG-DATA-HOME-RAN" in before.stdout
+    # What the next session is handed: `gh` has no such command.
+    after = run(merged)
+    assert "PLANTED-XDG-DATA-HOME-RAN" not in after.stdout
+    assert after.returncode != 0
+    assert "issuebotpwn" in after.stderr
 
 
 @pytest.mark.parametrize(
@@ -815,6 +922,149 @@ def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environmen
         "PS4 is protected",
         "CDPATH is protected",
     ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # Objects mapped ahead of all others into every dynamically linked program, their ELF
+        # constructors run before `main`. Measured printing `libmemusage.so`'s output ahead of
+        # the hook's own under `bash -lc 'echo hook-ran'`, and inside `git`.
+        "LD_PRELOAD",
+        # The rtld-audit interface, loaded earlier still -- and measured running the named
+        # object's constructors even when it is not a valid audit module at all, so
+        # "it has to implement `la_version`" bounds nothing.
+        "LD_AUDIT",
+        # `PATH`'s rule one layer down: the directories a `DT_NEEDED` soname resolves through.
+        # It names no object, which is the whole case for treating it differently -- and a file
+        # planted at `libpcre2-8.so.0` in a directory of the line's choosing was what `git`
+        # loaded, its constructor running inside `git` with no `LD_PRELOAD` anywhere.
+        "LD_LIBRARY_PATH",
+        # Not a way to run code but a way to run none: the loader prints the dependency list
+        # and exits 0 without entering `main`. Measured voiding `git rev-parse`, `claude
+        # --version` and `bash -lc 'echo hook-ran'`, whose `echo` never ran while the shell
+        # still reported success -- the `PATH`/`HOME` half of this list's rule, failing
+        # silently, which only `LD_DEBUG` below also does and nothing else in `.issuebot/env`
+        # does at all.
+        "LD_TRACE_LOADED_OBJECTS",
+        # The same denial by a second spelling, and the one easiest to certify as safe by
+        # measuring the wrong value: `libs`, `all` and `unused` are inert, but *any* value
+        # containing `help` makes the loader print its option list to stdout and exit 0
+        # without entering `main`. Measured voiding `bash -lc 'echo hook-ran'`, `git rev-parse`
+        # and `claude --version`.
+        "LD_DEBUG",
+    ],
+)
+def test_merge_workspace_env_refuses_the_dynamic_loaders_own_names(key: str) -> None:
+    """#187: the same rule one layer under every tool rather than one tool further out. These
+    are read by `ld.so` out of whatever environment the process was handed, before `bash`,
+    `git` or the `claude` child reaches `main` -- the same set #171 and #179 drew their bound
+    around, which is why the "variables of *other* tooling" filing those notes gave
+    `LD_PRELOAD` does not hold."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_loader_protections_are_pinned() -> None:
+    """A deliberate edit here as well as in `runner.py`, as the sweep lists, the tool-config
+    entries and the shell entries are. The rule is what makes the dynamic loader load an object
+    of the value's choosing into every dynamically linked program, or run none at all --
+    checkable against `ld.so(8)`'s ENVIRONMENT section, and finite. Each was measured under the
+    image's own glibc 2.41, with `libmemusage.so` standing in for the prebuilt shared object
+    the issue describes, since the default image carries no compiler."""
+    assert sorted(LOADER_ENV_NAMES) == [
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LD_TRACE_LOADED_OBJECTS",
+    ]
+    assert LOADER_ENV_NAMES <= PROTECTED_ENV_NAMES
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # binutils `ld`'s link-time default for `-rpath`, not the runtime loader's at all --
+        # and the very route a hook is pointed at instead of `LD_LIBRARY_PATH`. Protecting it
+        # would refuse the recommended workaround, which is the decisive reason this is five
+        # names and not an `LD_` prefix.
+        "LD_RUN_PATH",
+        # Behaviour and diagnostics. Each was measured leaving `git --version` working, and
+        # none names an object the loader would not otherwise have loaded.
+        "LD_BIND_NOW",
+        "LD_DYNAMIC_WEAK",
+        "LD_PROFILE",
+        # Out even though `LD_DEBUG` is in, and the reason is worth stating: it only redirects
+        # what `LD_DEBUG` asks for and is inert on its own, measured leaving `git --version`
+        # working with no `LD_DEBUG` set.
+        "LD_DEBUG_OUTPUT",
+        # The other name that touches a stream this deployment reads, and still out by the
+        # rule: `LD_SHOW_AUXV=1 bash -lc 'echo hook-ran'` prints 22 lines of the auxiliary
+        # vector to stdout and *then* runs the hook's `echo`, at exit 0, inherited by the
+        # `git` inside it. No object of the value's choosing is loaded and the command still
+        # runs, which is the whole difference from `LD_TRACE_LOADED_OBJECTS`; what is left is
+        # noise ahead of a stream a hook's own `echo` can add to anyway, and `StreamParser`
+        # counts a non-JSON line rather than failing the turn.
+        "LD_SHOW_AUXV",
+        # glibc's tunables namespace: allocator and hwcap parameters, no object.
+        "GLIBC_TUNABLES",
+        # No underscore, so not that it would have matched a prefix -- but a linker flag a
+        # build hands over is exactly what this file is for.
+        "LDFLAGS",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_loader_entries(key: str) -> None:
+    """The bound is on what the loader *loads*, or refuses to run, and a list of names is only
+    worth stating if it stops where it says it does."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
+
+
+def test_a_workspace_env_line_re_pointing_the_loader_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#187): what a session leaves in `.issuebot/env` is what the
+    *next* session on that issue is handed, and the complaint names the key that was dropped.
+    Before this change the same file was measured handing all five straight through, and each
+    was measured acting on the image's own `bash`, `git` and `claude`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "LD_PRELOAD=/tmp/theirs/plant.so\n"
+        "LD_AUDIT=/tmp/theirs/plant.so\n"
+        "LD_LIBRARY_PATH=/tmp/theirs/libs\n"
+        "LD_TRACE_LOADED_OBJECTS=1\n"
+        # The value matters here: `libs` would be inert, `help` exits 0 before `main`.
+        "LD_DEBUG=help\n"
+        # Not the loader's, and the route a hook is told to use instead: it stays.
+        "LD_RUN_PATH=/opt/vendor/lib\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["LD_RUN_PATH", "DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert merged["LD_RUN_PATH"] == "/opt/vendor/lib"
+    assert not [name for name in merged if name in LOADER_ENV_NAMES]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "LD_PRELOAD is protected",
+        "LD_AUDIT is protected",
+        "LD_LIBRARY_PATH is protected",
+        "LD_TRACE_LOADED_OBJECTS is protected",
+        "LD_DEBUG is protected",
+    ]
+    # The complaint names the key and never the value, as it does for every protected name.
+    assert "plant.so" not in stream.getvalue()
 
 
 def test_a_workspace_env_line_cannot_export_a_shell_function(tmp_path: Path) -> None:

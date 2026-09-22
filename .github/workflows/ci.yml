@@ -440,14 +440,18 @@ jobs:
       # The same goes for the config a *tool* the session runs reads out of that home (#151,
       # #173): `~/.gitconfig` and `~/.config/git/config` name commands to `git`, which every
       # session runs, `~/.ssh/config` names one to `ssh`, and `~/.config/gh/config.yml` names
-      # one to `gh` -- the fourth entry, whose neighbour `hosts.yml` must survive it. The
-      # profile, gitconfig and gh halves are two-sided for the reason the MCP proof above is:
-      # the same login shell, the same `git` and the same `gh` are run before the sweep, where
-      # the plant must *run*, so a `bash -lc` that stopped sourcing anything, or a `git` or
-      # `gh` that stopped reading the home, could not pass this as a no-op.
+      # one to `gh` -- the fourth entry, whose neighbour `hosts.yml` must survive it. And for
+      # the one surface in that home that is a program rather than a setting (#186): `gh`
+      # dispatches `gh <name>` to an executable under
+      # `~/.local/share/gh/extensions/gh-<name>/`, and no install step is needed to put one
+      # there. The profile, gitconfig, gh-config and extension arms are two-sided for the
+      # reason the MCP proof above is: the same login shell, the same `git` and the same `gh`
+      # are run before the sweep, where the plant must *run*, so a `bash -lc` that stopped
+      # sourcing anything, or a `git` or `gh` that stopped reading the home, could not pass
+      # this as a no-op.
       # Nothing inside the outer script may carry an apostrophe or a single quote: it is one
       # `bash -c '...'` argument, and either would end that quoting and split the command.
-      - name: a session's config, shell profile and tool config do not survive
+      - name: a session's config, shell profile, tool config and gh extensions do not survive
         run: |
           docker run --rm --entrypoint bash issuebot:ci -c '
             set -eu
@@ -475,14 +479,32 @@ jobs:
               printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
-              printf \"aliases:\\n    pwn: \\047!echo GH-ALIAS-RAN\\047\\n\" > /home/agent/.config/gh/config.yml
-              # With a token and a user: a hosts.yml missing either makes every gh in this
-              # home fail its multi-account migration -- on the user it even asks GitHub --
-              # and the alias below would never get the chance to run, so the step would pass
-              # or fail for a reason that is not the sweep. Obviously not a credential, and gh
-              # needs none to expand an alias.
-              printf \"github.com:\\n    oauth_token: not-a-real-token\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
+              # The alias is named aliaspwn and not pwn, because the extension plant below
+              # answers gh pwn: two plants on one name would leave whichever of them ran
+              # proving the other nothing.
+              printf \"aliases:\\n    aliaspwn: \\047!echo GH-ALIAS-RAN\\047\\n\" > /home/agent/.config/gh/config.yml
+              # Well-formed rather than a bare key, and not incidental: the real gh refuses to
+              # run at all against a host entry it cannot migrate, so a gh that never reached
+              # its alias expansion or its extension dispatch would pass both halves below for
+              # the wrong reason. Both keys are present so that the migration completes without
+              # gh asking GitHub for the user, and the value is deliberately not token-shaped
+              # -- neither expanding an alias nor dispatching an extension authenticates, so
+              # nothing here is a credential and no request is made.
+              printf \"github.com:\\n    oauth_token: placeholder-not-a-token\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
+              # The gh extension, and the neighbour the sweep is not aimed at: gh keeps its own
+              # state one directory over from the one it runs extensions out of.
+              mkdir -p /home/agent/.local/share/gh/extensions/gh-pwn /home/agent/.local/state/gh
+              printf \"#!/bin/sh\\necho EXTENSION-RAN\\n\" > /home/agent/.local/share/gh/extensions/gh-pwn/gh-pwn
+              chmod +x /home/agent/.local/share/gh/extensions/gh-pwn/gh-pwn
+              echo id > /home/agent/.local/state/gh/device-id
+              # And a plant on a core command name, which is what the clone depends on gh
+              # refusing: the clone creates the workspace, so it is the one gh of a run that
+              # precedes every sweep, and it is safe because an extension cannot win against a
+              # built-in rather than because anything swept before it.
+              mkdir -p /home/agent/.local/share/gh/extensions/gh-repo
+              printf \"#!/bin/sh\\necho SHADOW-RAN\\n\" > /home/agent/.local/share/gh/extensions/gh-repo/gh-repo
+              chmod +x /home/agent/.local/share/gh/extensions/gh-repo/gh-repo
             "
             # Before the sweep the plant runs, which is what the sweep is for: a hook is
             # `bash -lc`, a login shell, and the home it reads belongs to the account.
@@ -497,7 +519,15 @@ jobs:
             test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN
             test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN
             # And for gh (#173), whose config.yml this used to pin as a survivor.
-            test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn)" = GH-ALIAS-RAN
+            test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN
+            # And for gh again, which runs whatever is under its extension directory (#186),
+            # installed or merely written there.
+            test "$(sudo -n -H -u agent gh pwn)" = EXTENSION-RAN
+            # While the same directory does not reach a core command. That is no longer what
+            # the clone rests on -- #173 sweeps before it too -- but it is still true, and it
+            # is asserted here, before the sweep, where the plant is still in place and a gh
+            # that had started dispatching it would say so.
+            sudo -n -H -u agent gh repo --help | grep -q \"Work with GitHub repositories\"
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"
@@ -506,8 +536,11 @@ jobs:
             # And the next session git has no alias left to run, by either spelling.
             ! sudo -n -H -u agent git -C / pwn 2>/dev/null
             ! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null
-            # Nor the next session gh -- while its credential state survives, below (#173).
-            ! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh pwn 2>/dev/null
+            # Nor the next session gh an alias -- while its credential state survives, below
+            # (#173).
+            ! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn 2>/dev/null
+            # And the next session gh has no extension left to dispatch to either (#186).
+            ! sudo -n -H -u agent gh pwn 2>/dev/null
             # And the account can still do what it is for with its start-up files gone: `claude`
             # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
             # from /etc/profile and /etc/profile.d, which belong to root and are not swept.
@@ -521,9 +554,9 @@ jobs:
               test ! -e /home/agent/.gitconfig
               test ! -e /home/agent/.config/git/config
               test ! -e /home/agent/.ssh/config
-              # gh writes itself a fresh default config.yml on the next invocation, and the
-              # two gh pwn runs above are invocations, so what must be gone is the plant
-              # rather than the file.
+              # gh writes itself a config.yml when it next has config of its own to write,
+              # and the hosts.yml migration in this home is one such occasion, so what must be
+              # gone is the plant rather than the file.
               ! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
@@ -532,6 +565,8 @@ jobs:
               # that #151 pinned and #173 keeps.
               test -f /home/agent/.config/gh/hosts.yml
               test -f /home/agent/.ssh/known_hosts
+              test ! -e /home/agent/.local/share/gh/extensions
+              test -f /home/agent/.local/state/gh/device-id
               cd /home/agent/.claude
               test ! -e commands
               test ! -e skills

@@ -184,6 +184,65 @@ async def test_reuse_skips_clone_and_hooks(
 
 
 @posix
+async def test_reuse_keeps_the_clones_own_git_config(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """The decided behaviour of #180: the reused clone is handed over whole, `.git` included.
+
+    A workspace outlives its run and the clone inside it is the session's to write (#75), so a
+    `--local` key or a `.git/hooks/` script one session leaves is there for the next session on
+    that issue -- and both name commands git runs. That is a channel, it is inside the session's
+    own privilege domain rather than across it, and
+    `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md` records the decision not
+    to bound it: the unit is the clone and not the file, and not reusing the workspace is the
+    only thing that would close it. Pinned here so that bounding it later fails this test and
+    has to edit the note with it.
+    """
+    manager, gh = make_manager(tmp_path)
+    issue = make_issue(identifier="example-42")
+    first = await manager.create_or_reuse(issue)
+    subprocess.run(
+        ["git", "-C", str(first.path), "config", "--local", "alias.st", "!printf planted"],
+        check=True,
+    )
+    # `include.path` is the one the note's argument turns on: it puts the same keys in a second
+    # file, so a reset that walked `.git/config` alone would leave this one whole.
+    (first.path / ".git" / "planted-include").write_text('[alias]\n\tinc = "!printf planted"\n')
+    subprocess.run(
+        ["git", "-C", str(first.path), "config", "--local", "include.path", "planted-include"],
+        check=True,
+    )
+    hook = first.path / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\nprintf planted\n")
+    hook.chmod(0o755)
+    hook_mode = hook.stat().st_mode & 0o777
+
+    second = await manager.create_or_reuse(issue)
+
+    assert not second.created
+    assert second.path == first.path
+    assert len(gh.calls) == 1
+
+    def config(key: str) -> str:
+        done = subprocess.run(
+            ["git", "-C", str(second.path), "config", "--get", key],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return done.stdout.strip()
+
+    assert config("alias.st") == "!printf planted"
+    # Read without `--local`, so this is git resolving the include as it would for any command.
+    assert config("alias.inc") == "!printf planted"
+    # `.git/hooks/` is the same shape beside the file and has no config key at all, so the
+    # script itself is read back rather than only its path: still there, still executable.
+    second_hook = second.path / ".git" / "hooks" / "post-checkout"
+    assert second_hook.read_text() == "#!/bin/sh\nprintf planted\n"
+    assert second_hook.stat().st_mode & 0o777 == hook_mode
+
+
+@posix
 async def test_remnant_without_git_is_recreated(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
@@ -360,6 +419,59 @@ async def test_a_workspace_env_line_does_not_reach_a_hooks_login_shell(
     records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
     ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
     assert ignored == ["BASH_ENV is protected"]
+
+
+@posix
+async def test_a_workspace_env_line_does_not_reach_a_hooks_dynamic_loader(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """#187, end to end through the shell a hook actually gets: `hook_shell` is `bash -lc`, and
+    that `bash` is a dynamically linked binary, so `ld.so` reads its own names out of the
+    environment the hook is handed before the shell reaches `main`. Three of the five are
+    visible without a compiler, which is what this asserts: `LD_TRACE_LOADED_OBJECTS` and
+    `LD_DEBUG=help` each make the loader print to stdout and exit 0 *instead of* running the
+    hook's commands, and `LD_PRELOAD` naming a file that is not an ELF object makes it complain
+    on the hook's stderr. All are refused where the file is merged, the worker's log names each
+    key it dropped, and the DSN beside them on the next line is handed over exactly as before."""
+    plant = tmp_path / "plant.so"
+    plant.write_text("not an ELF object\n")
+    manager, _ = make_manager(
+        tmp_path,
+        hooks={
+            "before_run": (
+                f"printf 'LD_PRELOAD={plant}\\nLD_AUDIT={plant}\\n"
+                f"LD_LIBRARY_PATH={tmp_path}/libs\\nLD_TRACE_LOADED_OBJECTS=1\\n"
+                "LD_DEBUG=help\\nDSN=postgresql://issuebot@/db\\n' > .issuebot/env"
+            ),
+            "after_run": "echo hook-ran; echo ${DSN:-unset}",
+        },
+        hook_shell=("bash", "-lc"),
+    )
+    ws = await manager.create_or_reuse(make_issue(identifier="example-42"))
+    before = await manager.run_hook("before_run", ws.path)
+    assert before is not None and before.ok
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        after = await manager.run_hook("after_run", ws.path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert after is not None and after.ok
+    # Unprotected, `LD_TRACE_LOADED_OBJECTS` would have printed the shell's own libraries here
+    # and `LD_DEBUG=help` the loader's option list, neither running either `echo`, both exiting 0.
+    assert after.stdout_tail.splitlines() == ["hook-ran", "postgresql://issuebot@/db"]
+    # And `LD_PRELOAD` would have put the loader's complaint about the planted file on stderr.
+    assert "ld.so" not in after.stderr_tail
+    assert str(plant) not in after.stderr_tail
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "LD_PRELOAD is protected",
+        "LD_AUDIT is protected",
+        "LD_LIBRARY_PATH is protected",
+        "LD_TRACE_LOADED_OBJECTS is protected",
+        "LD_DEBUG is protected",
+    ]
 
 
 async def test_sweep_agent_home_is_a_no_op_on_the_host_route(tmp_path: Path) -> None:

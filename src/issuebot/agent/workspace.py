@@ -410,12 +410,14 @@ class WorkspaceManager:
 
     async def sweep_agent_home(self) -> None:
         """Clear what a prior or concurrent session may have left in the account's home for
-        this one to load: the config under ``~/.claude`` (#101), the shell start-up files a
-        login shell sources (#137) and the git and ssh config a tool would take a command from
-        (#151) and ``gh``'s own config (#173). Called immediately before each of this session's
-        turns, before every script it runs in a login shell (``_run_script``: the hooks and the
-        post-clone setup) and before the clone (``_clone``), which opens no shell but is ``gh``
-        and runs ``git``, and is earlier than any of them.
+        this one to load or to run: the config under ``~/.claude`` (#101), the shell start-up
+        files a login shell sources (#137), the git and ssh config a tool would take a command
+        from (#151), ``gh``'s own ``config.yml`` beside them (#173) and the directory ``gh``
+        dispatches its extensions from (#186, the one of the five that is a program rather than
+        a setting). Called immediately before each of this session's turns, before every script
+        it runs in a login shell (``_run_script``: the hooks and the post-clone setup) and
+        before the clone (``_clone``), which opens no shell but is ``gh`` and runs ``git``, and
+        is earlier than any of them.
 
         Which session that is depends on the route (#121): one account is shared by everything
         running in the container, while a pool leaves only the next session bound to this
@@ -693,6 +695,15 @@ class WorkspaceManager:
         # hook, because what matters is the login shell and not which hook opened it.
         # ``_run_argv``'s other caller is the clone, which opens no shell -- and which sweeps
         # for itself all the same (#173): see ``_clone``.
+        #   That second call site is what #186's reasoning here used to rest on and no longer
+        #   has to. The clone creates the workspace, so it precedes ``after_create`` and was
+        #   the one ``gh`` of a run with no sweep in front of it; what made it safe was a
+        #   property of ``gh`` rather than of the sweep -- an extension cannot shadow a core
+        #   command, so a ``gh-repo`` left in the account's extension directory is never what
+        #   ``gh repo clone`` runs. Still true, still measured, and still pinned by
+        #   ``test_a_planted_extension_cannot_shadow_the_core_command_the_clone_runs``, which
+        #   is now defence in depth rather than the whole of the argument: #173's sweep in
+        #   ``_clone`` clears every list, this one included, before the clone runs.
         await self.sweep_agent_home()
         return await self._run_argv(name, [*self.hook_shell, script], workspace)
 
