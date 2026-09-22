@@ -675,21 +675,21 @@ jobs:
             test "$(pwsh -NoProfile -File ./smoke.ps1)" = ok
           '
       # initdb --version prints a string constant, so on its own it proves almost nothing. The
-      # hooks the README tells an operator to paste are pulled straight out of README.md and
-      # run in the image inside a login shell, as WorkspaceManager's `bash -lc` runs them --
+      # hooks the docs tell an operator to paste are pulled straight out of docs/toolchains.md
+      # and run in the image inside a login shell, as WorkspaceManager's `bash -lc` runs them --
       # which is also the only check that a login shell keeps the PATH /etc/profile resets.
       # after_run and before_remove both end in `|| true`, so running them proves only that
       # they parse; the postmaster has to be gone between the two for the step to mean
       # anything. An `if`, not `! pg_ctl ...`: a pipeline led by `!` is exempt from errexit.
       # `.issuebot/env` is read by the runner, not by a shell, but the recipe writes `export`
       # lines, so sourcing it here is a fair stand-in and keeps this step free of a venv.
-      - name: the README's cluster recipe runs in the image
+      - name: the documented cluster recipe runs in the image
         run: |
           mkdir -p /tmp/hooks
           python3 - <<'PY'
           import pathlib, re
           block = re.search(r"```yaml\nhooks:\n(.*?)```",
-                            pathlib.Path("README.md").read_text(), re.S).group(1)
+                            pathlib.Path("docs/toolchains.md").read_text(), re.S).group(1)
           hooks, name = {}, None
           for line in block.splitlines():
               header = re.fullmatch(r"  (\w+): \|", line)
@@ -710,7 +710,7 @@ jobs:
             bash /hooks/before_run.sh
             bash /hooks/before_run.sh
             . .issuebot/env
-            test "$(psql "$ARROWBOT_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "select 1")" = 1
+            test "$(psql "$ACME_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "select 1")" = 1
             bash /hooks/after_run.sh
             if pg_ctl -D .issuebot/pg/data status >/dev/null 2>&1; then
               echo "after_run left the postmaster running" >&2
