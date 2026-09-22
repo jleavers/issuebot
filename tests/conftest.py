@@ -64,6 +64,16 @@ def unbuilt_session_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def outside_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The remedies issuebot prints name compose inside the image and ``issuebot`` on a host
+    (#169), and the suite runs in both -- so a test that says nothing about the deployment
+    reads the host wording, whichever one it is running in. A test about the container form
+    points the constant at a directory of its own, as it does for the account list above.
+    """
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", Path("/nonexistent/issuebot"))
+
+
+@pytest.fixture(autouse=True)
 def no_sweep_outside_the_suite(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

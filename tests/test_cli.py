@@ -1466,6 +1466,28 @@ def test_validate_warns_about_missing_labels(
     assert "0 failed, 4 warnings" in out
 
 
+def test_validate_names_the_compose_command_inside_the_image(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """#169: docker is the standard deployment, and there `issuebot` is nobody's command --
+    the operator reached `validate` through compose, so the remedy is in the same idiom.
+    """
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", tmp_path)
+    del fake_github.repo_labels["issuebot/rework"]
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.labels: missing: issuebot/rework; "
+        "docker compose run --rm worker labels ensure" in out
+    )
+    assert "run issuebot labels ensure" not in out
+
+
 def test_validate_warns_about_missing_model_labels(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
