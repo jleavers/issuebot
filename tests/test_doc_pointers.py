@@ -30,11 +30,15 @@ What is excluded, and why each is:
 * this module itself, where a deliberately stale pointer belongs -- its truth table quotes
   ``(README, "Rotating the database password")`` to prove the regex sees it. The file and
   not ``tests/``: no other test carries a pointer, and their docstrings are as prose-heavy
-  as ``invocation.py``'s, so excluding the directory would blank fifty-nine files to
+  as ``invocation.py``'s, so excluding the directory would blank seventy-six files to
   protect one.
 
 Everything else tracked is read, minus the suffixes that are not prose at all, so the rule
 is "the repository, less what is named" rather than a list of documents to keep complete.
+That includes bytes nobody here wrote and nobody here may edit -- the vendored dashboard
+libraries, the recorded ``tests/fixtures/`` payloads and turn files -- swept because none
+of them carries the shape, and not because an artefact could be edited to satisfy the rule.
+If one ever does, the answer is another name in ``EXCLUDED``, never a changed fixture.
 Keeping such a list was the first draft's mistake: it named nine operator-facing files and
 so never looked at ``src/issuebot/invocation.py``, which carries a pointer of exactly this
 shape in its module docstring.
@@ -125,6 +129,7 @@ def _normalise(title: str) -> str:
     return " ".join(title.replace("`", "").replace("*", "").replace("_", "").split()).casefold()
 
 
+@functools.cache
 def _text(path: Path) -> str | None:
     """The file's characters, or ``None`` for a tracked name this checkout cannot read.
 
@@ -179,7 +184,9 @@ def _runs(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
     a line *is* does not matter here: a pointer is judged by the regex, and a line that
     holds none costs a join and nothing else. A fenced block is prose to this function,
     unlike to ``_headings``, and deliberately: an example pointer names a section a reader
-    still has to find, and the one place a stale one belongs is ``tests/``, excluded above.
+    still has to find, so one inside a fence is judged like any other -- in the other tests
+    now swept as much as in the documentation. The one place a stale example belongs is this
+    module, which is excluded by name.
     """
     runs: list[tuple[str, list[tuple[int, int]]]] = []
     current: list[tuple[int, str]] = []
@@ -287,6 +294,7 @@ def test_the_sweep_reads_the_repository_and_not_the_directory_it_sits_in() -> No
     assert swept <= set(_tracked_files())
     assert not any(relative.startswith(".claude/worktrees/") for relative in swept)
     for excluded in EXCLUDED:
+        assert excluded not in swept, excluded
         assert not any(relative.startswith(f"{excluded}/") for relative in swept), excluded
 
 
@@ -299,8 +307,18 @@ def test_the_sweep_reaches_past_the_documentation() -> None:
     the repository rather than about the files somebody remembered.
     """
     swept = set(_swept())
-    for expected in ("compose.yaml", ".env.example", "CLAUDE.md", "src/issuebot/invocation.py"):
-        assert expected in swept, expected
+    expected = (
+        "compose.yaml",
+        ".env.example",
+        "CLAUDE.md",
+        "src/issuebot/invocation.py",
+        # The two the exclusions used to cover wholesale, for one file and for authorship:
+        # every other test is swept, and so are the bytes this repository only carries.
+        "tests/conftest.py",
+        "src/issuebot/web/static/vendor/htmx.min.js",
+    )
+    for relative in expected:
+        assert relative in swept, relative
     assert _pointers("src/issuebot/invocation.py"), "the pointer the allow-list missed"
 
 
@@ -335,11 +353,24 @@ def test_a_byte_order_mark_does_not_hide_the_first_heading(tmp_path: Path) -> No
     assert "first section" in _headings(document)
 
 
-def test_the_swept_list_holds_each_file_once() -> None:
-    """An unmerged index lists a conflicted path once per stage, and would triple its
-    complaints; ``_tracked_files`` de-duplicates, so a merge in progress reads the same."""
-    swept = _swept()
-    assert len(swept) == len(set(swept))
+def test_a_conflicted_path_is_listed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unmerged index lists a path once per stage.
+
+    ``git ls-files`` emits the three stages of a conflicted file, so a merge in progress
+    would have every complaint in it made three times. A clean index cannot show that, so
+    the listing is driven directly here.
+    """
+
+    def listing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        stages = "a.md\0conflicted.md\0conflicted.md\0conflicted.md\0b.md\0"
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stages, stderr="")
+
+    _tracked_files.cache_clear()
+    monkeypatch.setattr(subprocess, "run", listing)
+    try:
+        assert _tracked_files() == ("a.md", "conflicted.md", "b.md")
+    finally:
+        _tracked_files.cache_clear()
 
 
 def test_a_reference_that_quotes_no_section_is_not_a_pointer() -> None:
