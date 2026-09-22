@@ -21,7 +21,8 @@ a restart; and only the `worker` service takes the argument. All four end at the
 [`.issuebot/env`](#issuebotenv-what-a-hook-hands-the-agent), the file a hook writes and issuebot
 merges into the environment of every turn -- which is the last section here.
 
-Everything else an operator needs is in the [README](../README.md).
+Everything else an operator needs is in the [README](../README.md) and the documents listed
+beside it.
 
 ## A PostgreSQL server for the target repository's tests
 
@@ -341,7 +342,7 @@ What was chosen instead is to say plainly what the residual is: the same account
 uid already shares a home that nothing sweeps a cache out of, so this is not a new channel,
 and what it reaches is what an honest session's tests import and never the clone it commits
 and pushes, in front of the human review every issuebot pull request ends at. The consequence
-a reader of the [account pool](../README.md#one-account-per-concurrent-session) has to carry
+a reader of the [account pool](security-model.md#one-account-per-concurrent-session) has to carry
 is that the seal covers the clone and, under a hardlinking uv, not `.venv`; `accounts.py`'s
 own docstring says so, and `uvcache.py` holds the reasoning. A deployment whose threat model
 differs — a pool handed issues from genuinely untrusted authors — has `UV_LINK_MODE=copy` for
