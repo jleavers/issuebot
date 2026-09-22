@@ -583,7 +583,8 @@ def _sweep_targets(home: Path) -> Iterator[Path]:
     creates real directories there, so a symlink at either level is a session's, planted to
     point claude's memory read at a tree the sweep would not visit, and it is yielded as the
     target -- unlinked like a symlinked surface -- rather than stepped through. ``_walk``
-    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP``."""
+    applies the same rule to the nested entries of ``TOOL_CONFIG_SWEEP`` and
+    ``TOOL_EXTENSION_SWEEP``, every component of which is one a session could replace."""
     yield from (home / name for name in SHELL_STARTUP_SWEEP)
     for parts in (*TOOL_CONFIG_SWEEP, *TOOL_EXTENSION_SWEEP):
         target = _walk(home, parts)
