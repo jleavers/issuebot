@@ -58,6 +58,12 @@ SPELLINGS = ("run issuebot ", "docker compose run --rm ")
 def test_no_module_spells_the_remedy_for_itself() -> None:
     """Every site that names `labels ensure` goes through the helper, so one deployment reads
     one wording: `validate`, the worker's startup complaint and both adapters' `not found`.
+
+    The rule is the blunt one -- no module but this helper's names either invocation at all,
+    prose included -- because a comment quoting one wording is how the next hard-coded remedy
+    gets written beside it. `src/**/*.py` is its reach: a template is a page rather than a
+    message an operator reads a remedy off, and `web/templates/no-repos.html` names
+    `docker compose up -d worker` as a getting-started instruction, not as a remedy clause.
     """
     offenders = [
         path.relative_to(SOURCE).as_posix()

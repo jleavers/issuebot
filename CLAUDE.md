@@ -177,8 +177,8 @@ version, and moves by hand.
   standard deployment and inside the image `issuebot` is nobody's command, so there the clause
   is `docker compose run --rm worker labels ensure` (`COMPOSE_SERVICE`, the README's own step
   2) and on a host it stays `run issuebot labels ensure`, since that operator may have built no
-  image at all. `CONTAINER_MARKER` (`/etc/issuebot`, the directory the build creates beside the
-  session-account list it writes there, root's and absent on a host) is what tells them apart,
+  image at all. `CONTAINER_MARKER` (`/etc/issuebot`, the directory the build creates and writes the
+  session-account list inside, root's and absent on a host) is what tells them apart,
   stat'ed at call time so the suite -- which runs in both -- can point it elsewhere; conftest's
   `outside_the_container` pins the host wording for every test that says nothing about it.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports

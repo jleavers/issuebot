@@ -106,6 +106,16 @@ def fake_github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     return fake
 
 
+def _marker(tmp_path: Path) -> Path:
+    """A stand-in for `/etc/issuebot`, the directory that means "a container built from this
+    image" (#169). Its own directory rather than `tmp_path`, which these tests also write the
+    workflow into.
+    """
+    marker = tmp_path / "etc-issuebot"
+    marker.mkdir()
+    return marker
+
+
 class FakeSlackPost:
     """Stands in for urllib_post: records each payload; answers from a script, else 200."""
 
@@ -871,7 +881,7 @@ def test_validate_names_the_compose_command_for_a_migration(
     fake_database: FakeDatabase,
 ) -> None:
     """The line beside the labels one in the same output, so it reads in the same idiom (#169)."""
-    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", tmp_path)
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", _marker(tmp_path))
     fake_database.probe_result = Probe(
         server_version="PostgreSQL 18.1", schema_version=0, latest_version=1
     )
@@ -1495,7 +1505,7 @@ def test_validate_names_the_compose_command_inside_the_image(
     the operator reached `validate` through compose, so the remedy is in the same idiom.
     """
     monkeypatch.setenv("GH_TOKEN", "t")
-    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", tmp_path)
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", _marker(tmp_path))
     del fake_github.repo_labels["issuebot/rework"]
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
