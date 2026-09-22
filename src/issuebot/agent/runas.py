@@ -109,7 +109,10 @@ CLAUDE_HOME_MEMORY_DIR: tuple[str, str] = ("projects", "memory")
 # ``.claude`` inside it is created by the image -- so a session that writes one of these leaves
 # a script the next session's hooks run at the same uid, for the container's lifetime. Swept
 # beside the ``.claude`` surfaces above and on the same schedule, which is what closes it
-# whatever a later ``claude`` or a target repository's hooks read.
+# whatever a later ``claude`` or a target repository's hooks read. Since #179 a workspace's
+# ``.issuebot/env`` cannot name such a file through the environment either (``SHELL_ENV_NAMES``,
+# ``runner.py``): ``BASH_ENV`` is this list's channel in variable form, and sweeping the files
+# while leaving the variable would make the guarantee conditional on a name nothing checked.
 # Removing them costs nothing an account nobody logs into needs: ``PATH`` for a login shell
 # comes from ``/etc/profile`` and ``/etc/profile.d`` (root's, and where the image puts node and
 # the PostgreSQL binaries), and the copies ``useradd`` took from ``/etc/skel`` set a prompt and

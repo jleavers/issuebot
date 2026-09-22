@@ -440,7 +440,10 @@ ENV LANG=C.UTF-8 \
 # --mcp-config is the only route left by which a server reaches a session, so a rename there
 # would break those deployments one session at a time; --setting-sources is what keeps the
 # clone's own CLAUDE.md and .claude/ from being claude's configuration (#107), and it is
-# passed on every turn whatever the front matter says. Then the delegation itself, as the
+# passed on every turn whatever the front matter says; and --settings carries the CLAUDE.md
+# allow-list of #135, which keeps what claude loads as instructions to the workspace and the
+# account's own user memory, is passed on every turn and is not a setting either (a symlink
+# is still followed out of those; the spec records it). Then the delegation itself, as the
 # worker will use it: sudo, the account, and claude under it.
 # The last two lines read the account list back (#142). It is what `agent.run_as` resolves to
 # in every container, so a build that wrote a list naming nothing would ship an image whose
@@ -453,6 +456,7 @@ RUN claude --version \
  && claude --help | grep -q -- '--strict-mcp-config' \
  && claude --help | grep -q -- '--mcp-config <' \
  && claude --help | grep -q -- '--setting-sources' \
+ && claude --help | grep -q -- '--settings <' \
  && test "$(sudo -n -u agent id -u)" = 1001 \
  && sudo -n -H -u agent claude --version \
  && { [ "${ISSUEBOT_AGENT_POOL_SIZE:-0}" -lt 1 ] \

@@ -20,6 +20,7 @@ from issuebot.agent.runner import (
     PROTECTED_ENV_NAMES,
     PROTECTED_ENV_PREFIXES,
     PROXY_ENV_NAMES,
+    SHELL_ENV_NAMES,
     TOOL_CONFIG_ENV_NAMES,
     TOOL_CONFIG_ENV_PREFIXES,
     WORKSPACE_ENV_LIMIT,
@@ -32,6 +33,7 @@ from issuebot.agent.runner import (
     agent_environment,
     classify_result,
     claude_auth_status,
+    claude_md_allowlist,
     describe_claude_auth,
     is_auth_failure,
     merge_workspace_env,
@@ -65,8 +67,8 @@ def settings(root: Path, **claude: object) -> Settings:
 
 
 def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
-    runner = ClaudeRunner(settings(tmp_path), environ={})
-    assert runner.build_argv(session_id=SESSION_ID, resume=False) == [
+    runner = ClaudeRunner(settings(tmp_path), environ={"HOME": "/home/agent"})
+    assert runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws") == [
         str(FAKE_CLAUDE),
         "-p",
         "--output-format",
@@ -82,6 +84,12 @@ def test_build_argv_fresh_session_has_fixed_flags(tmp_path: Path) -> None:
         # Never claude's default (#107): the clone's files are not its configuration.
         "--setting-sources",
         "user",
+        # #135: CLAUDE.md and its `@` includes are kept to this workspace and the two paths
+        # the account's own config directory holds as user memory, so an approval in
+        # `~/.claude.json` names nothing outside them.
+        "--settings",
+        '{"claudeMdExcludes": ["!{%s/**,/home/agent/.claude/rules/**,'
+        '/home/agent/.claude/CLAUDE.md}"]}' % (tmp_path / "ws"),
         "--session-id",
         SESSION_ID,
         "--disallowedTools",
@@ -95,7 +103,7 @@ def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path)
     denies the model's own network tools and loads no MCP server; an operator widens the deny
     list by emptying it, and even then the MCP flag stays."""
     argv = ClaudeRunner(settings(tmp_path, disallowed_tools=[]), environ={}).build_argv(
-        session_id=SESSION_ID, resume=False
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
     )
     assert "--disallowedTools" not in argv
     assert "--strict-mcp-config" in argv
@@ -103,7 +111,7 @@ def test_the_tool_policy_is_a_setting_and_nothing_else_widens_it(tmp_path: Path)
     # The MCP half is widened the same way, by naming the servers in the front matter, and
     # the strict flag stays so nothing else joins them.
     argv = ClaudeRunner(settings(tmp_path, mcp_config=["a.json", "b.json"]), environ={}).build_argv(
-        session_id=SESSION_ID, resume=False
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
     )
     assert argv[-3:] == ["--mcp-config", "a.json", "b.json"]
     assert "--strict-mcp-config" in argv
@@ -124,7 +132,7 @@ def test_build_argv_resume_and_every_optional_flag(tmp_path: Path) -> None:
         ),
         environ={},
     )
-    argv = runner.build_argv(session_id=SESSION_ID, resume=True)
+    argv = runner.build_argv(session_id=SESSION_ID, resume=True, workspace=tmp_path / "ws")
     assert argv[6] == "bypassPermissions"
     assert argv[9] == "--strict-mcp-config"
     assert argv[11] == "2.5"
@@ -173,13 +181,160 @@ def test_build_argv_always_confines_mcp_to_the_command_line(
     and each is named, so a failure says which shape broke rather than which loop iteration.
     """
     runner = ClaudeRunner(settings(tmp_path, **extra), environ={})  # type: ignore[arg-type]
-    argv = runner.build_argv(session_id=SESSION_ID, resume=resume)
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume, workspace=tmp_path / "ws")
     assert "--strict-mcp-config" in argv
     # No `--mcp-config` beside it: the flag keeps only the servers named there, and none of
     # these settings names one, so the loadable set is nothing. The one that does is
     # `claude.mcp_config` (#109), the front matter's, empty by default and pinned in
     # `test_the_tool_policy_is_a_setting_and_nothing_else_widens_it`.
     assert "--mcp-config" not in argv
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resumed"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({}, id="default"),
+        pytest.param({"setting_sources": ["user"]}, id="setting-sources-user"),
+        pytest.param({"setting_sources": ["user", "project"]}, id="setting-sources-user-project"),
+        pytest.param({"setting_sources": ["project", "local"]}, id="setting-sources-project-local"),
+        pytest.param({"permission_mode": "bypassPermissions"}, id="bypass-permissions"),
+    ],
+)
+def test_build_argv_always_confines_claude_md_to_the_workspace_and_the_account(
+    tmp_path: Path, resume: bool, extra: dict[str, object]
+) -> None:
+    """No setting reaches the CLAUDE.md allow-list either (#135), fresh or resumed.
+
+    `hasClaudeMdExternalIncludesApproved`, in the session account's `~/.claude.json` under the
+    git root of the workspace, is what lets a Project or Local `CLAUDE.md` `@`-include a path
+    outside the clone -- measured, and the key is one a `-p` session can write for the next
+    session at that path. `claude.setting_sources` is what decides whether such a CLAUDE.md is
+    loaded at all, so it might look as though `[user]` already covers this; it does not, since
+    the *user* CLAUDE.md's own external includes are on whatever the key says. So the flag is
+    unconditional, like `--strict-mcp-config`, and these are the settings that might look as
+    though they cover it, each named so a failure says which shape broke.
+    """
+    runner = ClaudeRunner(settings(tmp_path, **extra), environ={"HOME": "/home/agent"})  # type: ignore[arg-type]
+    argv = runner.build_argv(session_id=SESSION_ID, resume=resume, workspace=tmp_path / "ws")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "claudeMdExcludes": [
+            f"!{{{tmp_path / 'ws'}/**,/home/agent/.claude/rules/**,/home/agent/.claude/CLAUDE.md}}"
+        ]
+    }
+
+
+def test_the_claude_md_allow_list_is_one_negated_pattern_over_every_arm() -> None:
+    """One brace, not one pattern per arm (#135).
+
+    picomatch matches a list when *any* pattern matches, so a negation per arm would have each
+    one match everything outside its own arm, and they would OR together to "exclude
+    everything" -- which is not a weaker allow-list but a session with no instructions at all.
+    """
+    allowlist = claude_md_allowlist(
+        trees=[Path("/ws/a"), Path("/home/agent/.claude/rules")],
+        files=[Path("/home/agent/.claude/CLAUDE.md")],
+    )
+    assert json.loads(allowlist) == {
+        "claudeMdExcludes": [
+            "!{/ws/a/**,/home/agent/.claude/rules/**,/home/agent/.claude/CLAUDE.md}"
+        ]
+    }
+    # One arm needs no brace: `{a}` is not reliably one arm to picomatch.
+    assert json.loads(claude_md_allowlist(trees=[Path("/ws/a")])) == {
+        "claudeMdExcludes": ["!/ws/a/**"]
+    }
+    assert claude_md_allowlist() is None
+
+
+def test_the_claude_md_allow_list_keeps_the_account_home_out_of_the_tree(tmp_path: Path) -> None:
+    """The config directory is allowed by its two memory paths and never wholesale (#135).
+
+    `claude` reads exactly `CLAUDE.md` and `rules/` from it as user memory. The rest is
+    `.credentials.json`, the transcripts of other sessions at the same uid that
+    `CLAUDE_HOME_SWEEP` deliberately keeps, and the caches -- none of it instructions, and all
+    of it inside the one directory a clone's CLAUDE.md would most want to `@` include.
+    """
+    runner = ClaudeRunner(settings(tmp_path), environ={"HOME": "/home/agent"})
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    (pattern,) = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
+    assert "/home/agent/.claude/CLAUDE.md" in pattern
+    assert "/home/agent/.claude/rules/**" in pattern
+    assert "/home/agent/.claude/**" not in pattern
+
+
+def test_the_claude_md_allow_list_follows_claude_config_dir(tmp_path: Path) -> None:
+    """User memory moves with `$CLAUDE_CONFIG_DIR`, so the allow-list has to (#135).
+
+    `claude` resolves `CLAUDE.md` and `rules/` against `$CLAUDE_CONFIG_DIR` when one is set,
+    and `CLAUDE_` is a `PASSTHROUGH_PREFIXES` entry, so a deployment that sets one in `.env`
+    gets it in the child. Naming `~/.claude` regardless would leave the operator's own user
+    memory excluded by the very flag meant to preserve it -- and silently.
+    """
+    runner = ClaudeRunner(
+        settings(tmp_path), environ={"HOME": "/home/agent", "CLAUDE_CONFIG_DIR": "/etc/cfg"}
+    )
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "claudeMdExcludes": [f"!{{{tmp_path / 'ws'}/**,/etc/cfg/rules/**,/etc/cfg/CLAUDE.md}}"]
+    }
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        pytest.param("/ws/a,b", id="comma-splits-the-arms"),
+        pytest.param("/ws/{a}", id="brace-nests-the-arms"),
+        pytest.param("/ws/a*", id="star"),
+        pytest.param("/ws/a?", id="question-mark"),
+        pytest.param("/ws/[a]", id="character-class"),
+        pytest.param("/ws/!a", id="negation"),
+        # Relative is the dangerous one: `claudeMdExcludes` is matched against absolute paths,
+        # so a relative arm matches nothing and the negation then matches everything.
+        pytest.param("ws/a", id="relative"),
+    ],
+)
+def test_the_claude_md_allow_list_refuses_a_root_it_cannot_spell(root: str) -> None:
+    """A path a glob would re-read is no flag at all, rather than a pattern meaning something
+    else (#135). The failure that matters is not "too little is excluded" but "everything is":
+    a mis-parsed arm excludes every CLAUDE.md, the clone's and the user's alike, and a session
+    that silently lost its instructions looks like a session that ignored them."""
+    assert claude_md_allowlist(trees=[Path(root)], files=[Path("/a/CLAUDE.md")]) is None
+    assert claude_md_allowlist(trees=[Path("/a")], files=[Path(root)]) is None
+
+
+def test_an_unspellable_workspace_leaves_no_confinement_and_says_so(tmp_path: Path) -> None:
+    """The fail-open branch through the public surface, and the warning that marks it (#135).
+
+    `claude_md_allowlist` declines a path it cannot spell rather than emitting a pattern that
+    means something else, so a deployment whose `workspace.root` carries a glob metacharacter
+    runs with no confinement at all. That is the safer of the two failures -- the other loses
+    every instruction file -- but it is not one to make silently, since nothing downstream
+    would show it.
+    """
+    stream = io.StringIO()
+    configure_logging(level="WARNING", fmt="json", stream=stream)
+    try:
+        root = tmp_path / "work[1]"
+        runner = ClaudeRunner(settings(root), environ={"HOME": "/home/agent"})
+        argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=root / "ws")
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert "--settings" not in argv
+    lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    [warning] = [line for line in lines if line["event"] == "claude_md_allowlist_unavailable"]
+    assert warning["level"] == "warning"
+    assert warning["reason"] == "path not expressible"
+
+
+def test_no_claude_md_allow_list_without_a_home(tmp_path: Path) -> None:
+    """A workspace-only allow-list would stop the user memory loading, so an unresolved config
+    directory omits the argument instead (#135): the residual it would buy against is bounded
+    and recorded, where dropping instructions a deployment means to load shows up nowhere."""
+    runner = ClaudeRunner(settings(tmp_path), environ={})
+    assert "--settings" not in runner.build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
 
 
 # --- per-issue model override ----------------------------------------------------------
@@ -216,7 +371,9 @@ def test_settings_for_labels_keeps_the_default_when_labels_disagree(tmp_path: Pa
 def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
     base = settings(tmp_path, model="opus", model_labels=MODEL_LABELS)
     resolved = settings_for_labels(base, ("issuebot/model/fable",))
-    argv = ClaudeRunner(resolved, environ={}).build_argv(session_id=SESSION_ID, resume=False)
+    argv = ClaudeRunner(resolved, environ={}).build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
     assert argv[argv.index("--model") + 1] == "fable"
 
 
@@ -554,6 +711,133 @@ def test_a_workspace_env_line_re_pointing_git_never_reaches_the_environment(
         "EDITOR is protected",
         "EMAIL is protected",
     ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # The file `bash` sources before the command it was given. #137's `~/.profile` channel
+        # in one line of a file the session can write.
+        "BASH_ENV",
+        # No command of their own: the `set -o` and `shopt` options `bash` enables from the
+        # environment before any start-up file is read, `xtrace` among them.
+        "SHELLOPTS",
+        "BASHOPTS",
+        # Which `xtrace` makes live: `PS4` is expanded before every traced command, command
+        # substitution and all, the first of them inside `/etc/profile`.
+        "PS4",
+        # `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so the relative
+        # command after the `cd` is a file in a tree the line chose.
+        "CDPATH",
+    ],
+)
+def test_merge_workspace_env_refuses_the_shells_own_start_up(key: str) -> None:
+    """#179: the same rule again for the one tool every script issuebot runs goes through.
+    `WorkspaceManager.hook_shell` is `bash -lc`, so these decide what the post-clone setup and
+    all four hooks run before -- or instead of -- what the hook actually wrote."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs", "FOO": "1"})
+    assert refused == [key]
+    assert key not in merged
+    assert merged["FOO"] == "1"
+
+
+def test_the_shell_protections_are_pinned() -> None:
+    """A deliberate edit here as well as in `runner.py`, as the sweep lists and the tool-config
+    entries are. The rule is what `bash` itself reads out of the environment it is handed and
+    acts on before, or around, the commands the hook wrote: the file it sources (`BASH_ENV`),
+    the options it enables and the prompt one of them expands (`SHELLOPTS`/`BASHOPTS`, `PS4`)
+    and the directories `cd` resolves through (`CDPATH`, which is `PATH`'s rule for the one
+    lookup `PATH` does not cover). Each was measured firing under the image's own bash 5.2."""
+    assert sorted(SHELL_ENV_NAMES) == [
+        "BASHOPTS",
+        "BASH_ENV",
+        "CDPATH",
+        "PS4",
+        "SHELLOPTS",
+    ]
+    assert SHELL_ENV_NAMES <= PROTECTED_ENV_NAMES
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # POSIX's start-up file for an *interactive* shell, and nothing issuebot runs is one.
+        # Measured unread by `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh` and by
+        # `sh -c` (dash), so protecting it would close nothing: the list states what was shown
+        # to work, as #171's does.
+        "ENV",
+        # The descriptor `xtrace` writes to, and the prompts an interactive shell draws. None
+        # of them runs anything, and a hook that wants its own output shaped is welcome to.
+        "BASH_XTRACEFD",
+        "PS1",
+        "PS2",
+    ],
+)
+def test_merge_workspace_env_does_not_over_reach_past_the_shell_entries(key: str) -> None:
+    """The bound is on what makes the shell run something the hook did not write."""
+    merged, refused = merge_workspace_env({"PATH": "/usr/bin"}, {key: "/tmp/theirs"})
+    assert refused == []
+    assert merged[key] == "/tmp/theirs"
+
+
+def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environment(
+    tmp_path: Path,
+) -> None:
+    """The channel end to end (#179): what a session leaves in `.issuebot/env` is what the
+    *next* session's hooks are run with, and the complaint names the key that was dropped.
+    Before this change the same file was measured sourcing the planted script under
+    `bash -lc 'echo hook-ran'` and running the substitution in `PS4` during `/etc/profile`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "BASH_ENV=/tmp/theirs/plant.sh\n"
+        "SHELLOPTS=xtrace\n"
+        "BASHOPTS=xpg_echo\n"
+        "PS4=$(/tmp/theirs/plant.sh)+ \n"
+        "CDPATH=/tmp/theirs\n"
+        "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
+    )
+    base = agent_environment({"PATH": "/usr/bin", "HOME": "/home/agent-1"}, token=None)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment(base, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["DATABASE_URL"]
+    assert merged["DATABASE_URL"] == "postgresql://issuebot@127.0.0.1/issuebot"
+    assert not [name for name in merged if name in SHELL_ENV_NAMES]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == [
+        "BASH_ENV is protected",
+        "SHELLOPTS is protected",
+        "BASHOPTS is protected",
+        "PS4 is protected",
+        "CDPATH is protected",
+    ]
+
+
+def test_a_workspace_env_line_cannot_export_a_shell_function(tmp_path: Path) -> None:
+    """`bash` imports a function from an environment entry named `BASH_FUNC_<name>%%`, which was
+    measured defining a command in the shell it starts. The key pattern is what refuses it, so
+    the refusal is a parse complaint naming the line and not the value -- recorded here because
+    it is the reason that spelling is not in `SHELL_ENV_NAMES`."""
+    (tmp_path / ".issuebot").mkdir()
+    (tmp_path / ".issuebot" / "env").write_text(
+        "BASH_FUNC_git%%=() { /tmp/theirs/plant.sh; }\nDATABASE_URL=postgresql://issuebot@/db\n"
+    )
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment({"PATH": "/usr/bin"}, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
+    assert applied == ["DATABASE_URL"]
+    assert not [name for name in merged if name.startswith("BASH_FUNC")]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == ["line 1: not a variable name"]
+    assert "plant.sh" not in stream.getvalue()
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:

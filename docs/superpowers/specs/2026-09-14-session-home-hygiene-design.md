@@ -111,8 +111,12 @@ and auto memory is switched off in the session's environment so nothing writes i
   its lifetime. Its one executable surface is closed by #119: every turn runs with
   `--strict-mcp-config`, so no server named in the file, or in a repository's `.mcp.json`,
   reaches a session (`2026-09-14-mcp-config-confinement-design.md`). The rest of the file --
-  account metadata, trust state, the `projects` map -- persists for the container's lifetime
-  and is not instructions.
+  account metadata, trust state, the `projects` map -- persists for the container's lifetime.
+  "And is not instructions", as this said when it was written, turned out to be an assumption
+  rather than a measurement: #135 measured `projects.<git root>.hasClaudeMdExternalIncludesApproved`
+  and `claude` does honour it, so under a `setting_sources` naming `project` or `local` that
+  key lets a CLAUDE.md read outside the clone. Every turn now carries a CLAUDE.md allow-list on
+  the command line for it, with its own residual; the same document has the measurement.
 
 - **The account's shell profile** (#137). `/home/agent` is the account's and writable, only
   `.claude` in it is the volume, and hooks run under `bash -lc`, so a `~/.profile` one session

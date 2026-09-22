@@ -875,6 +875,36 @@ async def test_a_turn_runs_through_the_wrapper(tmp_path: Path) -> None:
     assert call["command"][call["command"].index("--") + 1] == str(FAKES / "claude")
 
 
+def test_the_claude_md_allow_list_names_the_session_accounts_home(tmp_path: Path) -> None:
+    """#135: the second and third arms come from the *account the turn runs as*, not from the
+    worker's own `HOME`.
+
+    This is the one place the two routes differ, and `agent.run_as` is the production one. The
+    environment here deliberately carries a different `HOME` from the account's, so a
+    regression to `self._environ["HOME"]` -- which would exclude the session account's own user
+    memory on every turn, silently -- fails here rather than nowhere.
+    """
+    root = tmp_path / "workspaces"
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(root)},
+            "agent": {"run_as": ME},
+            "claude": {"command": str(FAKES / "claude")},
+        }
+    )
+    runner = ClaudeRunner(cfg, environ=base_env(HOME=str(tmp_path)))
+    argv = runner.build_argv(
+        session_id="11111111-2222-4333-8444-555555555555", resume=False, workspace=root / "ws"
+    )
+    account_home = Path(pwd.getpwnam(ME).pw_dir)
+    (pattern,) = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
+    assert pattern == (
+        f"!{{{root / 'ws'}/**,{account_home}/.claude/rules/**,{account_home}/.claude/CLAUDE.md}}"
+    )
+    assert str(tmp_path / ".claude") not in pattern
+
+
 async def test_sweep_agent_home_delegates_under_run_as(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

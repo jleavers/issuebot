@@ -747,10 +747,18 @@ version, and moves by hand.
   `PROTECTED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_`, `GIT_`, `GH_`) with
   `TOOL_CONFIG_ENV_NAMES` (`EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
-  `XDG_CONFIG_HOME`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `XDG_CONFIG_HOME`) and `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+  `CDPATH`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
-  issue* runs, which is the environment spelling of what #151 sweeps from the home. Whole
+  issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
+  #179 (spec `2026-09-22-session-shell-env-design.md`), the `bash -lc` that every hook and the
+  post-clone setup *is*, which is the environment spelling of what #137 sweeps -- `BASH_ENV`
+  names a file the shell sources before the hook's own commands, `SHELLOPTS`/`BASHOPTS` turn on
+  `xtrace` and `PS4` is then expanded, substitutions and all, before every traced command, and
+  `CDPATH` is `PATH`'s rule for the one lookup `PATH` does not cover. `ENV` is deliberately
+  *not* there: it is the interactive shell's start-up file, measured unread by `bash -lc`,
+  `bash --posix -c`, `bash` as `sh` and `sh -c` (dash), so it would close nothing. Whole
   prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain
   `git commit` as surely as `GIT_SSH_COMMAND` does and `GH_CONFIG_DIR` outranks
   `XDG_CONFIG_HOME` for `gh`'s shell aliases -- a list is one somebody has to keep complete,

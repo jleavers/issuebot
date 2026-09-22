@@ -223,7 +223,7 @@ ignored.
 | `claude.permission_mode` | how Claude Code decides what it may do; nobody can answer a prompt, so `auto` | `auto` |
 | `claude.max_budget_usd` | spend cap per turn, so a run can spend it up to `agent.max_turns` times; what it should be depends on your plan (see "Cost" below) | `5.0` |
 | `claude.turn_timeout_ms`, `claude.stall_timeout_ms` | both bound *silence*, not time: a turn is killed after this long without a line of output on its stream, or after this long without a turn event reaching the worker. A session that keeps printing resets both, so a run's length is `agent.run_timeout_ms`'s to bound | 1 hour; 5 minutes |
-| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way) | `[user]` |
+| `claude.setting_sources` | which Claude Code settings sources the agent loads (`user`, `project`, `local`); `project` or `local` makes the clone's `CLAUDE.md` and `.claude/` its configuration, which `validate` warns about (`.mcp.json` stays out under `--strict-mcp-config` either way, and `--settings claudeMdExcludes` keeps what `claude` loads as instructions to the workspace and the account's own user memory, whatever a previous session approved in `~/.claude.json` -- a symlink inside the clone is still followed out of it, which #135 measured and recorded) | `[user]` |
 | `claude.allowed_tools` | the tools the session may use, passed to `claude` as `--allowedTools`; empty leaves Claude Code's own set, narrowed by the deny list below | `[]` |
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it (#109); `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
@@ -1127,6 +1127,33 @@ hook that would truncate it again or append a duplicate per session.
     and state cases. The trade is deliberate: a route to `gh`'s aliases is not one to leave open
     for the convenience of pointing another tool's config somewhere.
 
+- **So are the five names that decide what the hook's own shell runs** (#179): `BASH_ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
+  post-clone setup and all four hooks — goes through `bash -lc`, and `bash` reads these out of
+  the environment it is handed, before or around the commands the hook actually wrote:
+
+  - `BASH_ENV` names a file a non-interactive `bash` **sources before** the command it was
+    given. That is the `~/.profile` channel below in variable form, reaching every hook of the
+    next session on that issue.
+  - `SHELLOPTS` and `BASHOPTS` enable `set -o` and `shopt` options from the environment before
+    any start-up file is read, `xtrace` among them — and with `xtrace` on, `PS4` is expanded
+    before every traced command, command substitution and all, the first of them inside
+    `/etc/profile`. It takes the pair: `PS4` is inert without `xtrace`, and `xtrace` with the
+    default `PS4` only prints. So both are protected, `BASHOPTS` with them as the `shopt` half
+    of the same switch.
+  - `CDPATH` is `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so a line
+    here sends the hook into a tree of the last session's choosing and the relative command
+    after the `cd` is that tree's file.
+
+  The cost is about as small as a protection gets: a hook that wants a file sourced before its
+  own commands has `source` in the script it already owns, `set -x` for a trace, and an absolute
+  path for a `cd`. What it may not do is hand the variable to the *next* session's shell.
+
+  **`ENV` is not protected, and does not need to be.** It is POSIX's start-up file for an
+  *interactive* shell, and nothing issuebot runs is interactive: it was measured unread by
+  `bash -lc`, by `bash --posix -c`, by `bash` invoked as `sh`, and by `sh -c` (dash). `PS1`,
+  `PS2` and `BASH_XTRACEFD` are not protected either — none of them runs anything.
+
 - **Nothing here ever fails a turn.** No file is the normal case; an unreadable one, a line that
   does not parse, a value with a null byte in it, and anything past 64 KiB are all warnings and
   the turn runs. A warning about a line names its number and nothing else, and the log records
@@ -1142,7 +1169,9 @@ hook that would truncate it again or append a duplicate per session.
   installer (`rustup`, `nvm`, `pyenv`) appends its `PATH` line to. The worker sweeps the session
   account's shell start-up files before every hook and every turn (#137), so an installer's line
   is gone before the next login shell would read it — between two sessions, which is the point,
-  and within one. `PATH` itself is a protected name here too, so the routes for a tool the image
+  and within one. Nor through `BASH_ENV`, which names such a file without writing one: it is a
+  protected name above (#179), so the sweep's guarantee does not rest on a variable nothing
+  checked. `PATH` itself is a protected name here too, so the routes for a tool the image
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
@@ -1410,7 +1439,12 @@ that matters on your host.
   it at the same uid can still plant -- which a pool closes, since no two concurrent sessions
   share a home; and the account's `~/.claude.json`, which sits beside the swept directory rather
   than in it, whose `mcpServers` no session loads (`--strict-mcp-config`, #119) while its trust
-  state persists for the container's lifetime.
+  state persists for the container's lifetime. Its
+  `hasClaudeMdExternalIncludesApproved` persists too, and #135 measured that `claude` honours
+  it: a Project or Local `CLAUDE.md` may then read outside the clone. Every turn therefore also
+  runs with `--settings claudeMdExcludes`, an allow-list of the workspace and the account's own
+  user memory, so that approval reaches nothing outside them -- except through a symlink in the
+  clone, which claude resolves after matching the exclusion, and which is the recorded residual.
   The agent's environment is otherwise minimal —
   `PATH`, the `ANTHROPIC_*`, `CLAUDE_*` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables and
   `GH_TOKEN`, with `HOME`/`USER`/`LOGNAME` the account's own; nothing else from `.env` reaches

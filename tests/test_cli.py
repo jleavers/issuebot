@@ -723,7 +723,14 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
     executables: object,
 ) -> None:
     """#107: naming `project` or `local` hands the clone's files to every session as
-    configuration, which anyone who can merge to the repository can change."""
+    configuration, which anyone who can merge to the repository can change.
+
+    #135 adds the other argv-shaped exclusion beside `.mcp.json`: what the opt-in hands over
+    stops at the workspace, because a `CLAUDE.md` or a `.claude/rules` file in the clone would
+    otherwise be able to `@`-include a path outside it whenever
+    `projects.<git root>.hasClaudeMdExternalIncludesApproved` is true in the session account's
+    `~/.claude.json`. Named here because an operator reading this line is deciding how much of
+    the clone to trust, and the answer is now bounded in two directions rather than one."""
     monkeypatch.setenv("GH_TOKEN", "t")
     path = _write(
         tmp_path,
@@ -736,9 +743,44 @@ def test_validate_warns_when_the_clones_files_are_claudes_configuration(
         "[WARN] claude.setting_sources: user, project; the clone's CLAUDE.md and .claude/ "
         "(settings, hooks, skills) are claude's own configuration for every "
         "session, and anyone who can merge to o/r can change them (.mcp.json stays out under "
-        "--strict-mcp-config either way); omit the setting to load "
-        "only the user's" in out
+        "--strict-mcp-config either way, and --settings claudeMdExcludes keeps what claude "
+        "loads as instructions to the workspace and the account's own user memory, though a "
+        "symlink in the clone is still followed out of it); omit the setting to load only "
+        "the user's" in out
     )
+
+
+def test_validate_setting_sources_ok_line_says_nothing_about_the_clones_includes(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#135: at the shipped `[user]` there is no clone CLAUDE.md to bound, so the line is
+    about the files being data and stops there.
+
+    The confinement itself is unconditional -- `ClaudeRunner.build_argv` passes it whatever the
+    sources say, since the *user* CLAUDE.md's external includes are on whatever
+    `hasClaudeMdExternalIncludesApproved` says. What is conditional is the sentence: naming the
+    clone's `@` includes on a line whose whole point is that the clone is not configuration
+    would describe a reach that does not exist here. Asserted against this check's own line
+    rather than the whole report, so a later check that legitimately mentions either phrase
+    does not fail this test.
+    """
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\nnotifications:\n  slack:\n    events: []\n---\nBody",
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "claude.setting_sources:" in ln)
+    assert line == (
+        "[ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json "
+        "are data, not configuration"
+    )
+    assert "@ includes" not in line
+    assert "claudeMdExcludes" not in line
 
 
 def _validate_with_database(
