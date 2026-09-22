@@ -23,8 +23,9 @@ whatever headings the tree happens to carry today.
 Where the slug rule is *wrong* it fails loudly rather than quietly: an unhandled inline
 construct in a heading gives a slug no pointer matches, so the sweep reports a pointer that
 is in fact fine. That is the safe direction for a guard whose subject is other people's
-markdown, and it is why the inline handling below covers what this tree's headings use --
-code spans -- plus the neighbours a heading could grow, rather than all of CommonMark.
+markdown, and it is why the inline handling below covers what a heading here plausibly
+carries -- code spans, which fall out of the slug rule itself, and the image and link syntax
+that does not -- rather than all of CommonMark.
 
 `docs/superpowers/` is outside the sweep. Those are dated design records: a pointer in one is
 a statement about where the content was when the document was written, and holding it to
@@ -94,17 +95,28 @@ _LINK = re.compile(r"\]\(\s*([^)\s]+?)\s*\)")
 # A link that goes off this repository is nobody here's to check.
 _EXTERNAL = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)")
 
+# An inline code span: backticks, and what they wrap. Literal text, so the two shapes read it
+# in opposite directions -- a link written inside one is text rather than a pointer, and is
+# dropped before `_links` looks, while in a heading the *content* is what GitHub slugs.
+_CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+
 # What a heading's *text content* is, which is what GitHub slugs -- the heading is rendered to
 # HTML first, so the markup around the words is not in the anchor. An image contributes no text
-# at all (its alt lands in an attribute), a link contributes its text, a code span its content,
-# and emphasis its own. Images before links, since ``![alt](src)`` contains ``[alt](src)``.
+# at all (its alt lands in an attribute) and a link contributes its text. Images before links,
+# since ``![alt](src)`` contains ``[alt](src)``.
+#
+# Code spans and emphasis need no pass of their own: a backtick and an asterisk are dropped by
+# the slug rule below as punctuation, and what they wrap is kept, which is the whole of why
+# `` `.issuebot/env` `` becomes ``issuebotenv``. Underscore emphasis could not have one
+# anyway -- ``_`` is a slug character, so ``snake_case`` survives into the anchor whole and
+# stripping it would corrupt every identifier a heading names.
+#
+# Two constructs are deliberately not handled: raw HTML in a heading (``<br>`` slugs as ``br``
+# where GitHub drops it) and a link written inside a code span (`` `[a](b)` ``, which GitHub
+# renders as the literal ``[a](b)``). Neither appears in this tree, and both fail in the safe
+# direction -- a slug no pointer matches is a reported pointer that is in fact fine.
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _INLINE_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-_CODE_SPAN = re.compile(r"(`+)(.+?)\1")
-# ``*`` and ``**`` only. ``_`` is a slug character -- ``snake_case`` survives into the anchor
-# whole -- so stripping it would corrupt every identifier a heading names, and underscore
-# emphasis appears in no heading here.
-_EMPHASIS = re.compile(r"\*{1,2}")
 
 # GitHub's slug rule, the half that removes: everything that is not a word character, a hyphen
 # or a space goes, and what is left keeps its underscores. ``\w`` is Unicode here, so an
@@ -154,10 +166,7 @@ def _headings(text: str) -> list[str]:
 
 def _heading_text(heading: str) -> str:
     """A heading's rendered text content: the words, without the markup around them."""
-    text = _IMAGE.sub("", heading)
-    text = _INLINE_LINK.sub(r"\1", text)
-    text = _CODE_SPAN.sub(r"\2", text)
-    return _EMPHASIS.sub("", text)
+    return _INLINE_LINK.sub(r"\1", _IMAGE.sub("", heading))
 
 
 def github_slug(heading: str) -> str:
@@ -166,8 +175,13 @@ def github_slug(heading: str) -> str:
     Lower-case the text content, drop everything that is not a word character, a hyphen or a
     space, then turn each remaining space into a hyphen -- in that order, so two spaces give
     two hyphens and a dropped comma does not join the words either side of it.
+
+    The trim is of the *source*, which `_ATX` has already done for a real heading, and not of
+    the text content: GitHub slugs what the rendered ``<h2>`` contains, and an image contributes
+    no text while the space beside it survives. So a heading opening with one -- a badge, say --
+    has an anchor opening with a hyphen, as a heading opening with an emoji does.
     """
-    return _NOT_SLUG.sub("", _heading_text(heading).strip().lower()).replace(" ", "-")
+    return _NOT_SLUG.sub("", _heading_text(heading.strip()).lower()).replace(" ", "-")
 
 
 def _anchors(headings: list[str]) -> list[str]:
@@ -176,7 +190,8 @@ def _anchors(headings: list[str]) -> list[str]:
     A heading whose slug is already taken gets ``-1``, then ``-2``, and so on -- and the
     candidate is re-checked each time round, so a document carrying both ``Safety`` twice and a
     literal ``Safety 1`` hands out three distinct anchors rather than two and a collision. That
-    is `github-slugger`'s own loop, which is what GitHub renders with.
+    re-check is `github-slugger`'s own loop, ported from it; the repeat itself is the part every
+    renderer of GitHub markdown agrees on, and no document in this tree has one.
     """
     occurrences: dict[str, int] = {}
     anchors: list[str] = []
@@ -198,11 +213,16 @@ def _anchors_of(path: Path) -> tuple[str, ...]:
 
 
 def _links(text: str) -> list[tuple[int, str]]:
-    """Every inline link target in the prose, with the line it sits on."""
+    """Every inline link target in the prose, with the line it sits on.
+
+    Code spans go the way fenced blocks do, and for the same reason: a link written inside one
+    is a sentence *about* a pointer rather than a pointer, and GitHub renders it as the literal
+    characters. This repository's own prose contains that sentence.
+    """
     return [
         (number, match.group(1))
         for number, line in _body_lines(text)
-        for match in _LINK.finditer(line)
+        for match in _LINK.finditer(_CODE_SPAN.sub(" ", line))
     ]
 
 
@@ -220,7 +240,9 @@ def _pointer_complaints(name: str, text: str) -> list[str]:
         if _EXTERNAL.match(target):
             continue
         path, _, anchor = target.partition("#")
-        anchor = unquote(anchor)
+        # Both halves may be percent-encoded: a space in a file name, and the form GitHub puts
+        # in the address bar for an anchor whose heading is not ASCII.
+        path, anchor = unquote(path), unquote(anchor)
         # A link with no path is a pointer into the document it is written in, which is the
         # same drift one file nearer home: `README.md`'s own table of contents is built of
         # them, and a rename breaks those exactly as silently.
@@ -299,7 +321,11 @@ SLUG_CASES = [
     # Markup around the words is not in the anchor.
     ("**Never** push to `main`", "never-push-to-main"),
     ("[Safety](#safety) and scope", "safety-and-scope"),
-    ("![shield](docs/images/x.png) Licence", "licence"),
+    # An image contributes no text, but the space beside it does, so the anchor opens with a
+    # hyphen -- which is also what a heading opening with an emoji gets, the character being
+    # dropped where the space it left is not.
+    ("![shield](docs/images/x.png) Licence", "-licence"),
+    ("🚀 Getting started", "-getting-started"),
     # `\w` is Unicode, so a letter that is not ASCII is a letter.
     ("Café", "café"),
     # A hyphen is a slug character, so a heading of them is its own anchor; a heading of
@@ -376,11 +402,65 @@ def test_links_skips_fenced_blocks() -> None:
     assert _links(document) == [(1, "docs/operations.md#safety"), (7, "#top")]
 
 
+def test_links_skips_inline_code_spans() -> None:
+    """A link inside a code span is a sentence about a pointer, not a pointer -- and this
+    repository's prose contains that sentence, `CLAUDE.md` naming the very anchor below to
+    explain the drift this module exists to catch."""
+    document = "`[an example](docs/nowhere.md#gone)` beside [a pointer](docs/operations.md)\n"
+    assert _links(document) == [(1, "docs/operations.md")]
+
+
+# Today's tree, so a parser regression cannot make the sweep pass by seeing nothing. The floor
+# is well under the real figure (96 links, 81 of them inside the repository, 50 carrying an
+# anchor) because the prose is edited constantly; what it catches is an order-of-magnitude
+# collapse -- an unbalanced fence swallowing the tail of a document, a tightened `_LINK` -- not
+# a paragraph rewritten.
+MINIMUM_LINKS = 60
+MINIMUM_ANCHORED = 35
+
+
+def test_the_sweep_still_sees_the_trees_pointers() -> None:
+    """The guard against a vacuous sweep. Five of the swept files carry no link at all, so
+    every per-file assertion above passes for a document the parser has stopped reading, and
+    the one failure this whole test module exists to catch is a silent one."""
+    targets = [
+        target
+        for name in SWEPT_FILES
+        for _, target in _links((ROOT / name).read_text(encoding="utf-8"))
+        if not _EXTERNAL.match(target)
+    ]
+    anchored = [target for target in targets if "#" in target]
+    assert len(targets) >= MINIMUM_LINKS, f"the sweep now sees only {len(targets)} pointers"
+    assert len(anchored) >= MINIMUM_ANCHORED, f"only {len(anchored)} of them carry an anchor"
+
+
+def test_every_link_in_the_prose_is_a_link_the_sweep_parses() -> None:
+    """`_LINK` reads one link shape -- an inline destination with no title. The others (a
+    title, a reference definition, an angle-bracket or wrapped destination) are absent from
+    this tree, and a title in particular would match nothing and be skipped unchecked rather
+    than reported. So the count is pinned instead of the syntax: every ``](`` in the prose,
+    outside a fence and outside a code span, is a target the sweep resolved."""
+    unparsed = [
+        f"{name}:{number}: {line.strip()[:80]}"
+        for name in SWEPT_FILES
+        for number, line in _body_lines((ROOT / name).read_text(encoding="utf-8"))
+        if (bare := _CODE_SPAN.sub(" ", line)).count("](") != len(_LINK.findall(bare))
+    ]
+    assert not unparsed, (
+        "a markdown link shape `_LINK` does not parse, so its pointer is unchecked:\n"
+        + "\n".join(unparsed)
+    )
+
+
 def test_the_sweep_reports_a_pointer_that_does_not_land() -> None:
     """The negative proof: a document of this test's own, carrying one pointer of each kind
     that fails and one that still lands. Without this the sweep could be vacuous -- every
     pointer in the tree resolves today, so a check that reported nothing whatever it was given
-    would pass the file above just as well."""
+    would pass the file above just as well.
+
+    The one that lands names a real heading, which is what makes it a proof rather than a
+    tautology; renaming `docs/operations.md`'s "Safety" therefore fails this test alongside
+    the two files that point at it."""
     document = "\n".join(
         (
             "[lands](docs/operations.md#safety)",
