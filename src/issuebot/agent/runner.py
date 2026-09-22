@@ -637,6 +637,61 @@ def parse_rate_limits(message: dict[str, Any], *, at: datetime) -> RateLimits | 
     return RateLimits(five_hour=five_hour, seven_day=seven_day, observed_at=at)
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class UsageLimit:
+    """A ``rate_limit_event`` that *refused* the request, and when the window reopens.
+
+    Distinct from ``RateLimits``, which is a reading about the account that every turn may
+    carry: this is the line saying claude declined to serve this turn at all. It is the one
+    structured signal for the condition -- the result line that follows says only
+    ``subtype: "success"``, ``is_error: true`` and claude's own sentence -- and the reset it
+    carries is what lets the worker wait exactly as long as the limit lasts instead of
+    guessing (#173's incident, 2026-09-22).
+    """
+
+    window: str
+    resets_at: datetime
+
+
+def parse_usage_limit(message: dict[str, Any], *, at: datetime) -> UsageLimit | None:
+    """Read a refusal out of a ``rate_limit_event`` line, or return None.
+
+    Total for the reason ``parse_rate_limits`` is: the shape is claude's and undocumented, and
+    a worker must not fall over because a field moved. Read separately from the windows, and
+    not as a branch of that parser, because the two answer different questions -- a rejection
+    with no ``unifiedWindows`` is still a rejection, and a reading with ``utilization: 1`` is
+    not one until claude says ``status: "rejected"``.
+
+    ``at`` is the fallback reset for a line that refuses without saying when it reopens: the
+    caller has to wait for *something*, and waiting no time at all is what burns an issue's
+    whole attempt chain in ninety seconds.
+    """
+    info = message.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    if _string(info.get("status")) != "rejected":
+        return None
+    window = _string(info.get("rateLimitType")) or "unknown"
+    resets_at = _epoch(info.get("resetsAt"))
+    if resets_at is None:
+        windows = info.get("unifiedWindows")
+        if isinstance(windows, dict):
+            entry = windows.get(window)
+            if isinstance(entry, dict):
+                resets_at = _epoch(entry.get("resetsAt"))
+    return UsageLimit(window=window, resets_at=resets_at or at)
+
+
+def _epoch(value: object) -> datetime | None:
+    seconds = _number(value)
+    if seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except OSError, OverflowError, ValueError:
+        return None
+
+
 def _rate_limit_window(value: object) -> RateLimitWindow | None:
     if not isinstance(value, dict):
         return None
@@ -644,9 +699,8 @@ def _rate_limit_window(value: object) -> RateLimitWindow | None:
     resets = _number(value.get("resetsAt"))
     if utilization is None or resets is None:
         return None
-    try:
-        resets_at = datetime.fromtimestamp(resets, tz=UTC)
-    except OSError, OverflowError, ValueError:
+    resets_at = _epoch(resets)
+    if resets_at is None:
         return None
     # A share of a window cannot be outside 0..1, and the tile renders it as a bar's width.
     return RateLimitWindow(utilization=min(max(utilization, 0.0), 1.0), resets_at=resets_at)
@@ -696,6 +750,8 @@ class TurnResult:
     error: str | None
     stdout_path: Path
     stderr_path: Path
+    # When the refused window reopens, for a ``usage_limited`` turn; None for every other.
+    usage_reset_at: datetime | None = None
 
     @property
     def ok(self) -> bool:
@@ -735,6 +791,7 @@ class StreamParser:
         self.api_key_source: str | None = None
         self.result: dict[str, Any] | None = None
         self.rate_limits: RateLimits | None = None
+        self.usage_limit: UsageLimit | None = None
         self.unparseable = 0
         self._log = get_logger(__name__)
 
@@ -800,7 +857,13 @@ class StreamParser:
         return [self._activity("assistant", tool_name=name) for name in tools]
 
     def _rate_limits(self, message: dict[str, Any]) -> TurnEvent:
-        limits = parse_rate_limits(message, at=_utcnow())
+        at = _utcnow()
+        # Asked first and kept whatever the windows do: a refusal is why the turn is about to
+        # fail, and `classify_result` reads it to tell a limit apart from a failed task.
+        refusal = parse_usage_limit(message, at=at)
+        if refusal is not None:
+            self.usage_limit = refusal
+        limits = parse_rate_limits(message, at=at)
         if limits is None:
             return self._activity("rate_limit_event")
         self.rate_limits = limits
@@ -848,6 +911,30 @@ AUTH_TOKEN_WORDS: tuple[str, ...] = (
 AUTH_VERDICT_WORDS: tuple[str, ...] = ("expire", "invalid", "revoke", "unauthorized")
 
 
+# claude's own sentence when a window is spent, for the case where the structured
+# `rate_limit_event` line did not arrive (a turn killed before it, an older claude). The
+# refusal above is the signal; this is the backstop, and it is deliberately narrow -- an agent
+# discussing rate limits in its final message is the status-0 case `classify_result` never
+# mines for markers at all.
+USAGE_LIMIT_MARKERS: tuple[str, ...] = (
+    "session limit",
+    "usage limit",
+    "rate limit exceeded",
+    "rate_limit_error",
+)
+
+
+def is_usage_limit(*texts: str | None) -> bool:
+    """True when any text carries claude's own words for a spent usage window."""
+    for text in texts:
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(marker in lowered for marker in USAGE_LIMIT_MARKERS):
+            return True
+    return False
+
+
 def is_auth_failure(*texts: str | None) -> bool:
     """True when any text carries a marker of a credential claude could not authenticate with."""
     for text in texts:
@@ -869,6 +956,7 @@ def classify_result(
     stderr_tail: str,
     *,
     scrubber: Scrubber = DEFAULT_SCRUBBER,
+    usage_limit: UsageLimit | None = None,
 ) -> tuple[AgentErrorCategory | None, str | None]:
     """Map the final result (or its absence) and the exit code to a failure category.
 
@@ -884,6 +972,14 @@ def classify_result(
     commonest lapse there is, so every issue on the board burned ``max_attempts`` and the
     dispatch hold that should have parked it never engaged. The agent's own final message is
     still never mined for markers: that is the status-0 case, and it stays ``turn_failed``.
+
+    ``usage_limit`` is the turn's ``rate_limit_event`` refusal, if one arrived. It is asked
+    before the credential, because it is the one signal here that is structured rather than
+    read out of prose, and because the two want opposite things from the worker: a credential
+    that will not authenticate needs a human, while a spent window needs only the wait it
+    names. Without that distinction the account's own limit reads as ``turn_failed`` -- the
+    agent failing its task -- and an issue burns its whole ``agent.max_attempts`` chain against
+    a 20 s and a 40 s backoff, which is what happened to three issues on 2026-09-22.
 
     The message is built from claude's own words, and it leaves the workspace without passing
     ``capture_turns`` (#91): it becomes the run's ``error``, which reaches the ``events`` and
@@ -903,6 +999,8 @@ def classify_result(
     if subtype == "error_max_budget_usd":
         return "budget_exceeded", text or "claude stopped at the --max-budget-usd cap"
     if is_error or subtype != "success":
+        if usage_limit is not None or is_usage_limit(text):
+            return "usage_limited", _with_tail(subtype or "unknown subtype", text)
         if (subtype != "success" or exit_code != 0) and is_auth_failure(text):
             auth = True
         return (
@@ -1273,6 +1371,9 @@ class ClaudeRunner:
                 error=error,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
+                usage_reset_at=(
+                    parser.usage_limit.resets_at if parser.usage_limit is not None else None
+                ),
             )
             self._log.info(
                 "claude_turn_finished",
@@ -1393,6 +1494,7 @@ class ClaudeRunner:
                 exit_code,
                 _stderr_tail(self._boundary, stderr_path),
                 scrubber=self._scrubber,
+                usage_limit=parser.usage_limit,
             )
         if category is None:
             emit(_event("turn_completed", parser, detail=parser.model))

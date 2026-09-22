@@ -121,6 +121,9 @@ GITHUB_HOLD_KEY = "github"
 # And the same for the account registry (#121): one unreadable record, however the
 # complaint is worded from tick to tick.
 ACCOUNTS_HOLD_KEY = "accounts"
+# And the same for the usage hold: one spent window, however the sessions refused against it
+# word themselves, so `since` reports how long the board has really been stopped.
+USAGE_HOLD_KEY = "usage"
 # The least time between the end of one tick and the start of the next when a refresh asks
 # for it (#110). A NOTIFY is one row on the store away from any client with its DSN, and
 # every tick polls GitHub with this worker's token, so the NOTIFY rate must not set the tick
@@ -370,6 +373,10 @@ class Orchestrator:
         self._auth_reason: str | None = None
         self._auth_key: str | None = None
         self._reported_auth_block: str | None = None
+        # The usage hold: claude refused a turn because the account's window is spent. Unlike
+        # every other hold here, it names the moment it lifts, so nothing has to probe for it.
+        self._usage_reason: str | None = None
+        self._usage_reset_at: datetime | None = None
         self._credential: Credential = "unknown"
         # Seeded from the last stored snapshot by the caller that has a database, so a restart
         # keeps the last reading instead of blanking the limits tile until the next dispatch.
@@ -701,6 +708,45 @@ class Orchestrator:
         self._reported_auth_block = None
         self._unreadable_auth_probes = 0
 
+    def _hold_usage(self, error: str, reset_at: datetime | None) -> None:
+        """Stop claiming issues until the account's refused window reopens (#173's incident).
+
+        The only hold here that needs no probe to lift: claude says when the window reopens,
+        so the worker waits exactly that long. A refusal that did not say falls back to one
+        poll interval, which is a wait rather than the 20 s and 40 s a failure chain would
+        spend before escalating.
+
+        The reason is re-worded whenever a later run hits the same wall, and the reset is
+        moved *out* only, never in: two sessions can be refused against the same window and
+        report it seconds apart, and the later reading is the one to wait for.
+        """
+        fallback = self._now() + timedelta(milliseconds=self._workflow.config.polling.interval_ms)
+        due = reset_at or fallback
+        if self._usage_reset_at is None or due > self._usage_reset_at:
+            self._usage_reset_at = due
+        self._usage_reason = f"claude usage limit reached: {error}"
+
+    def _release_usage_hold(self) -> None:
+        self._usage_reason = None
+        self._usage_reset_at = None
+
+    def _settle_usage_hold(self) -> None:
+        """Lift the usage hold once the window it named has reopened.
+
+        Called from ``tick`` before the hold is composed, so the tick that reaches the reset
+        claims again rather than waiting a further interval to notice.
+        """
+        if self._usage_reset_at is None:
+            return
+        if self._now() < self._usage_reset_at:
+            return
+        self._log.info(
+            "dispatch_usage_recovered",
+            reset_at=self._usage_reset_at.isoformat(),
+            error=self._usage_reason,
+        )
+        self._release_usage_hold()
+
     def _current_hold(self) -> Hold | None:
         """This worker's one live reason not to claim anything, whoever is asking (#112).
 
@@ -716,6 +762,12 @@ class Orchestrator:
             return Hold("preflight", self._preflight_block)
         if self._auth_reason is not None:
             return Hold("auth", self._auth_reason, key=self._auth_key)
+        if self._usage_reason is not None:
+            # Below `auth` and above `accounts` deliberately: a credential that will not
+            # authenticate is a fault an operator fixes, where this one lifts on its own and
+            # says when. It is keyed on the constant so that a second session reporting the
+            # same wall in different words keeps the hold's `since`.
+            return Hold("usage", self._usage_reason, key=USAGE_HOLD_KEY)
         accounts = self._accounts_hold()
         if accounts is not None:
             # Keyed on *which* fault, not on the constant: an unusable setting and an unreadable
@@ -767,6 +819,9 @@ class Orchestrator:
         # Before any hold is decided, and not inside `_dispatch_candidates`, which a preflight
         # or auth hold skips: a reason `fire_due_retries` quotes has to be about this tick.
         self._read_accounts()
+        # Before the hold is composed, so the tick that reaches the reset claims on that tick
+        # rather than waiting a further interval to notice the window reopened.
+        self._settle_usage_hold()
         dispatched = 0
         problems = preflight(self._workflow.config, which=self._which)
         if problems:
@@ -783,8 +838,11 @@ class Orchestrator:
                 await self._poll_issues()
         else:
             self._preflight_block = None
-            if await self._refresh_auth_hold():
-                # The fetch still works, so the board stays fresh while nothing is claimed (#29).
+            if await self._refresh_auth_hold() or self._usage_reason is not None:
+                # The fetch still works, so the board stays fresh while nothing is claimed
+                # (#29). The usage hold skips dispatch for the auth hold's reason rather than
+                # the GitHub hold's: the board can be read perfectly well, and it is the
+                # claiming that has nowhere to go until the window reopens.
                 await self._poll_issues()
             else:
                 dispatched = await self._dispatch_candidates()
@@ -932,6 +990,14 @@ class Orchestrator:
             if not conflict_candidate(issue):
                 continue
             if issue.id in self._running or issue.id in self._retries:
+                continue
+            if self._ledger.get(issue.identifier).escaped:
+                # An escape put this issue in `review` and nothing has run since, so a bounce
+                # would undo the one decision the escape made -- and spend a bounce that is
+                # meant for "issuebot resolved the conflict and the branch moved again". On
+                # 2026-09-22 this fired eight seconds after a blocked escape and took #173's
+                # last bounce for a run that never started. Cleared when the issue is next
+                # dispatched, which is what a human relabelling it produces.
                 continue
             if self._conflict_limit_noted.get(issue.id) == limit:
                 continue
@@ -1701,6 +1767,9 @@ class Orchestrator:
         if result.error_category == "auth_failed":
             await self._auth_failed(entry, result)
             return
+        if result.error_category == "usage_limited":
+            self._usage_limited(entry, result)
+            return
         if result.error_category == "run_timeout" and result.final_state is StateLabel.IN_PROGRESS:
             # The run's wall clock is spent (#110). A retry never resumes the session, so it
             # would re-read the repository from cold and spend the same clock again, up to
@@ -1737,6 +1806,55 @@ class Orchestrator:
             "every poll; it resumes on its own once `claude auth status` reports a login."
         )
         await self._escape(entry, reason, result)
+
+    def _usage_limited(self, entry: RunningEntry, result: RunResult) -> None:
+        """The account's window is spent: hold dispatch until it reopens and requeue the issue.
+
+        Deliberately none of the three things a failure does. It does not escalate, because
+        nothing about this issue is wrong and a human has nothing to fix. It does not count
+        against ``agent.max_attempts``, because the chain is meant to bound an issue that
+        keeps failing, and a limit is an account-wide condition every issue on the board meets
+        at the same moment. And it does not back off on the failure curve, because that curve
+        is 20 s and then 40 s -- so on 2026-09-22 three issues each burned their whole chain
+        inside ninety seconds against a window that reopened nineteen minutes later, and each
+        was escalated to a human for it.
+
+        The hold is what keeps that from being per-issue at all: no issue is claimed while it
+        lasts, so the board stops instead of grinding every candidate through the same wall.
+        """
+        error = result.error or "claude refused the turn: usage limit reached"
+        self._hold_usage(error, result.usage_reset_at)
+        self._log.warning(
+            "dispatch_usage_held",
+            issue_number=entry.issue.number,
+            issue_identifier=entry.identifier,
+            run_id=entry.run_id,
+            attempt=entry.attempt,
+            reset_at=self._usage_reset_at.isoformat() if self._usage_reset_at else None,
+            error=error,
+        )
+        # Requeued on the entry's own attempt, not the next one: the chain is untouched, so
+        # the run that follows the window is this attempt over again.
+        self._schedule(
+            entry.issue,
+            attempt=entry.attempt,
+            kind="usage",
+            delay_ms=self._usage_delay_ms(),
+            error=error,
+        )
+
+    def _usage_delay_ms(self) -> int:
+        """How long until the refused window reopens, floored at one poll interval.
+
+        Floored because a reset already in the past -- a clock that disagrees, or a reading
+        that arrived late -- would otherwise requeue the issue into the same wall at once,
+        which is the behaviour this whole function exists to stop.
+        """
+        floor_ms = self._workflow.config.polling.interval_ms
+        if self._usage_reset_at is None:
+            return floor_ms
+        remaining = (self._usage_reset_at - self._now()).total_seconds()
+        return max(int(remaining * 1000), floor_ms)
 
     def _publish_final_transition(self, entry: RunningEntry, result: RunResult) -> None:
         """What changed between the entry's snapshot and the session's last refresh (§4.2).
@@ -1816,6 +1934,10 @@ class Orchestrator:
         """
         if outcome in ("applied", "skipped"):
             self._ledger.cleared(identifier)
+            # And the issue is now a human's. The conflict bounce reads this so it cannot
+            # move it straight back to `rework`, which would re-dispatch what the escape has
+            # just stopped and spend one of `agent.max_conflict_reworks` on it.
+            self._ledger.mark_escaped(identifier)
 
     def _schedule(
         self,

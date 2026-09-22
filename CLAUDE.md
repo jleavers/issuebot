@@ -943,12 +943,16 @@ version, and moves by hand.
   `parse_rate_limits` reads a `rate_limit_event` line into `RateLimits(five_hour, seven_day,
   observed_at)` of `RateLimitWindow(utilization, resets_at)`, total like `turnlog` because the
   line's shape is claude's and undocumented, and `StreamParser` reports it as a `rate_limits`
-  turn event carrying the reading; `run_session` (turns, refresh between turns, `RunResult`,
+  turn event carrying the reading; `parse_usage_limit` reads the *refusal* out of the same
+  line into `UsageLimit(window, resets_at)` -- a separate question with a separate answer, and
+  the one structured signal that a turn failed because the account's window is spent; `run_session` (turns, refresh between turns, `RunResult`,
   publishes `RunStarted`/`RunEnded`; a turn whose final message begins `BLOCKED:` stops the run
   with `stop_reason` `blocked` and the line in `RunResult.blocker`, read by `blocker_from` off
   the first non-empty line, checked after `issue_moved` and before `max_turns`);
   `classify_result` maps a turn's last result (or its absence) to an `AgentErrorCategory`,
-  `auth_failed` among them (see `issuebot.orchestrator`), and builds the turn's message from
+  `auth_failed` and `usage_limited` among them (see `issuebot.orchestrator`; the second takes
+  `usage_limit=`, the turn's `rate_limit_event` refusal, and is asked ahead of the credential
+  markers), and builds the turn's message from
   claude's own words: the result text, or the last line of stderr. That message is the run's
   `error`, which leaves the workspace without passing `capture_turns` -- to `events`,
   `runs.error`, Slack and the blocked-escape workpad block -- so it is scrubbed at the source
@@ -1047,10 +1051,14 @@ version, and moves by hand.
   independent of `announce=` below, which is about a second *report* of one escalation rather
   than about whether the block landed, so the note is reported on both of this function's exits.
   The escape also stops the refusal repeating -- the issue lands in `review`, where the gate
-  refuses it as `inactive` instead -- unless the conflict bounce moves it back to `rework` for
-  the gate to refuse again, which `agent.max_conflict_reworks` bounds. Only the *spend*
-  ceiling reaches that loop: the escape clears the chain on its way out, so an `attempts`
-  refusal readmits the issue on the next bounce rather than refusing it again. Two separate
+  refuses it as `inactive` instead. The conflict bounce used to undo that by moving it back to
+  `rework` for the gate to refuse again, bounded only by `agent.max_conflict_reworks`; since
+  the escape marks `IssueLedger.escaped` the bounce leaves it alone, so the round trip ends
+  one leg earlier and no second note is written about the same conflict. The ceiling still
+  bounds the case the mark does not cover, a bounce before any escape. Only the *spend*
+  ceiling ever reached that loop in the first place: the escape clears the chain on its way
+  out, so an `attempts` refusal readmits the issue on the next bounce rather than refusing it
+  again. Two separate
   things keep the round trip from reporting one escalation over and over, and they are
   separate because the block and the event are two writes with a failure point between them.
   The block is matched by its *reason*, on a line of its own, and not by `BUDGET_HEADING`,
@@ -1135,7 +1143,13 @@ version, and moves by hand.
   a note the session strips is rewritten once per process, not per tick. `_finish` drops both
   memos with the issue, so neither grows with the worker's uptime. `_bounce_conflicts`
   runs after every fetch, observer or not (`fetch_states`), skipping issues in `_running` or
-  `_retries`.
+  `_retries` -- and issues the ledger marks `escaped`. That last one is the line between the
+  two escalations: an escape puts the issue in `review` precisely to stop it, and a bounce is
+  a re-dispatch of it, so without the mark a failure that had nothing to do with the conflict
+  spent a bounce. On 2026-09-22 that fired eight seconds after a blocked escape and took
+  #173's third and last one, for a session that then failed instantly on a spent usage window.
+  `Ledger.dispatched` clears the mark, which is what the documented recovery -- fix the cause,
+  then relabel -- produces, so a conflict after that is issuebot's again.
   `orchestrator.py`: `Orchestrator.run()` = `startup()` (preflight, `auth_status`,
   `missing_labels`, then the Claude login through the `claude_auth` seam, a callable like
   `which` defaulting to `claude_auth_status`, run in a thread; every probe reports so one
@@ -1260,15 +1274,45 @@ version, and moves by hand.
   escalation, one issue per hold rather than one per attempt. The hold logs
   `dispatch_auth_held` every tick (ERROR on the first and on a changed error, WARNING after:
   an idle worker says nothing else) and `dispatch_auth_recovered` when it lifts.
-  All four holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
-  `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()` composes the one
-  live hold from them, preflight > auth > accounts > github, for the snapshot and the gate alike -- so the reason an operator reads and
+  A *usage* limit is the same shape of fault one step along, and used to be read as the agent
+  failing its task. `claude` refuses a turn when the account's window is spent, as
+  `subtype: "success"` with `is_error` and a `rate_limit_event` line carrying
+  `status: "rejected"` and the epoch the window reopens; `parse_usage_limit` reads that
+  refusal (total, like `parse_rate_limits`, and separate from it, since a rejection with no
+  `unifiedWindows` is still a rejection, and `utilization: 1` is not one until claude says
+  `rejected`), `StreamParser` keeps it beside the windows, and `classify_result` asks it
+  *before* the credential markers -- structured evidence outranking prose, and the two wanting
+  opposite things from the worker. `USAGE_LIMIT_MARKERS` is the backstop for a turn killed
+  before that line arrived, and the status-0 case is still never mined, exactly as for
+  `auth_failed`. The category is `usage_limited`, and `_usage_limited` does none of the three
+  things a failure does: no escalation, since nothing about the issue is wrong and a human has
+  nothing to fix; no `ledger.failed`, since `agent.max_attempts` bounds an issue that keeps
+  failing and a limit is an account-wide condition every candidate meets at once; and no
+  failure backoff, since that curve is 20 s then 40 s. The issue is requeued on its own
+  attempt (retry kind `usage`) at the reset, and dispatch is held meanwhile -- the one hold
+  that needs no probe to lift, because claude said when it reopens, so `_settle_usage_hold`
+  runs at the top of `tick` and the tick that reaches the reset claims on that tick rather
+  than a poll interval later. `_hold_usage` moves the reset *out* only, since two sessions
+  refused against one window report it seconds apart and the later reading is the one to wait
+  for, and `USAGE_HOLD_KEY` keys them as one hold however differently each worded itself, so
+  `since` reports how long the board has really been stopped. Dispatch is skipped for the auth
+  hold's reason rather than the GitHub hold's: the board reads perfectly well and it is the
+  claiming that has nowhere to go. What this replaced, measured on 2026-09-22: three issues
+  burned twelve runs between them in nineteen minutes, each chain spent inside ninety seconds
+  against a window that reopened at 12:30, and each issue escalated to a human with a blocker
+  naming a limit they could not lift.
+
+  All five holds are state on the orchestrator (`_preflight_block`, `_auth_reason`,
+  `_usage_reason`, `_run_as_block`/`_accounts_block` and `_github_block`) and `_current_hold()`
+  composes the one live hold from them, preflight > auth > usage > accounts > github, for the
+  snapshot and the gate alike -- so the reason an operator reads and
   the reason a caller refuses on can no longer be two different claims. The preflight one used
   to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
   not it: there was nothing to consult (#112).
   Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
   reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
-  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `accounts`
+  builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `usage`
+  (`claude usage limit reached: <claude's own sentence>`, the spent-window hold above), `accounts`
   (#121: the account registry will not read, so no workspace can be bound to a session
   account) or `github` (#88, below), and `since`
   is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
@@ -1300,7 +1344,7 @@ version, and moves by hand.
   an incident and it fails safe. A due retry waits with it (kind `github`, one poll interval),
   because claiming is a write to a board the worker has just failed to read; `escape` still
   goes first, as under an auth hold. `tick` settles its one hold in `_settle_dispatch_hold`
-  (preflight > auth > accounts > github) *after* the fetch, from `_current_hold()` rather than
+  (preflight > auth > usage > accounts > github) *after* the fetch, from `_current_hold()` rather than
   by recording as it goes: releasing and re-holding within a tick would restart `since` on a
   hold that never lifted, and `GITHUB_HOLD_KEY` keys one outage however it rewords itself.
   That one function is also what the admission gate asks (#112), so the account hold (#121)

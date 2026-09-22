@@ -65,6 +65,15 @@ class IssueLedger:
     triggers, and not a label move, which is what the conflict bounce performs when it returns
     an over-budget issue to ``rework`` for the gate to refuse again.
 
+    ``escaped`` is the neighbouring fact for *any* escape, this one or the run-based
+    ``blocked_escape``: the issue has been handed to a human and nothing has run since. The
+    conflict bounce reads it, because an escape puts the issue in ``review`` and a bounce moves
+    a conflicting ``review`` issue back to ``rework`` -- which re-dispatches the very issue the
+    escape has just stopped, and spends one of ``agent.max_conflict_reworks`` doing it. Kept
+    separate from ``escalated`` rather than folded into it: that one gates whether a budget
+    escalation *announces*, and a run-based escape setting it would silence a later budget
+    escalation's first Slack line.
+
     Like ``reported_refusal``, and unlike every cumulative figure here, it is *not* seeded from
     the store: a restart inside a bounce sequence can therefore announce one escalation a
     second time. That is on purpose. The only durable signal is a ``blocked`` event, which the
@@ -81,6 +90,7 @@ class IssueLedger:
     last_run_at: datetime | None = None
     reported_refusal: str | None = None
     escalated: bool = False
+    escaped: bool = False
 
     @property
     def attempt(self) -> int:
@@ -164,6 +174,7 @@ class Ledger:
                 last_run_at=at,
                 reported_refusal=None,
                 escalated=False,
+                escaped=False,
             ),
         )
 
@@ -222,6 +233,24 @@ class Ledger:
             return False
         self._entries[identifier] = replace(current, reported_refusal=reason)
         return True
+
+    def mark_escaped(self, identifier: str) -> None:
+        """This issue was handed to a human, and nothing has run for it since.
+
+        Read by the conflict bounce, which must not undo an escape by moving the issue
+        straight back to ``rework``: the escape has just decided this issue should stop, and
+        a bounce is a re-dispatch of it. Cleared only by ``dispatched``, like ``escalated`` --
+        a label move on its own is not a new fact about the issue, which is the same rule
+        ``cleared`` follows for the failure chain.
+
+        Written in place rather than through ``_put`` for ``escalate``'s reason: an escape is
+        not a run, so it must not move the entry down an eviction queue ordered by least
+        recently *run*. An issue with no entry has had no run to escape from, so there is
+        nothing to remember.
+        """
+        current = self._entries.get(identifier)
+        if current is not None and not current.escaped:
+            self._entries[identifier] = replace(current, escaped=True)
 
     def escalate(self, identifier: str) -> bool:
         """Mark this issue's budget escalation as announced; True when it had not been.
