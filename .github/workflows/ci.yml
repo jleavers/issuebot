@@ -437,16 +437,18 @@ jobs:
       # because it is the real uid split, the real sudo rule and the real home, and through the
       # worker's own code path (`RunAs.sweep_home`, the default target) rather than the helper
       # verb by hand, so a wrong default path or an argv the sudoers rule rejects fails here.
-      # The same goes for the config a *tool* the session runs reads out of that home (#151):
-      # `~/.gitconfig` and `~/.config/git/config` name commands to `git`, which every session
-      # runs, and `~/.ssh/config` names one to `ssh`. And for the one surface in that home that
-      # is a program rather than a setting (#186): `gh` dispatches `gh <name>` to an executable
-      # under `~/.local/share/gh/extensions/gh-<name>/`, and no install step is needed to put
-      # one there. The profile, gitconfig and extension arms are
-      # two-sided for the reason the MCP proof above is: the same login shell and the same
-      # `git` and `gh` are run before the sweep, where the plant must *run*, so a `bash -lc` that
-      # stopped sourcing anything, or a `git` or `gh` that stopped reading the home, could not
-      # pass this as a no-op.
+      # The same goes for the config a *tool* the session runs reads out of that home (#151,
+      # #173): `~/.gitconfig` and `~/.config/git/config` name commands to `git`, which every
+      # session runs, `~/.ssh/config` names one to `ssh`, and `~/.config/gh/config.yml` names
+      # one to `gh` -- the fourth entry, whose neighbour `hosts.yml` must survive it. And for
+      # the one surface in that home that is a program rather than a setting (#186): `gh`
+      # dispatches `gh <name>` to an executable under
+      # `~/.local/share/gh/extensions/gh-<name>/`, and no install step is needed to put one
+      # there. The profile, gitconfig, gh-config and extension arms are two-sided for the
+      # reason the MCP proof above is: the same login shell, the same `git` and the same `gh`
+      # are run before the sweep, where the plant must *run*, so a `bash -lc` that stopped
+      # sourcing anything, or a `git` or `gh` that stopped reading the home, could not pass
+      # this as a no-op.
       # Nothing inside the outer script may carry an apostrophe or a single quote: it is one
       # `bash -c '...'` argument, and either would end that quoting and split the command.
       - name: a session's config, shell profile, tool config and gh extensions do not survive
@@ -471,20 +473,25 @@ jobs:
               echo \"{}\" > /home/agent/.claude.json
               mkdir -p /home/agent/.npm
               # The tool config, and the neighbours in those directories that the sweep is not
-              # aimed at: gh keeps its configuration beside the one git reads, and known_hosts
-              # sits beside the one ssh reads.
+              # aimed at: gh keeps its credential state (hosts.yml) beside the config of its
+              # own that goes, and known_hosts sits beside the one ssh reads.
               mkdir -p /home/agent/.config/git /home/agent/.config/gh /home/agent/.ssh
               printf \"[alias]\\npwn = !echo GITCONFIG-RAN\\n\" > /home/agent/.gitconfig
               printf \"[alias]\\npwnxdg = !echo XDG-RAN\\n\" > /home/agent/.config/git/config
               echo ProxyCommand false > /home/agent/.ssh/config
+              # The alias is named aliaspwn and not pwn, because the extension plant below
+              # answers gh pwn: two plants on one name would leave whichever of them ran
+              # proving the other nothing.
+              printf \"aliases:\\n    aliaspwn: \\047!echo GH-ALIAS-RAN\\047\\n\" > /home/agent/.config/gh/config.yml
+              # One hosts.yml, carrying what all three gh arms need. The oauth_token and user
+              # keys are well-formed and not incidental: the real gh refuses to run at all
+              # against a host entry it cannot migrate, so a gh that never reached its alias
+              # expansion or its extension dispatch would pass those halves below for the wrong
+              # reason, and both keys present means the migration completes without gh asking
+              # GitHub for the user. The token value is a keep-marker rather than a credential
+              # -- it is the thing the key-level edit below has to preserve -- and api_host and
+              # git_protocol are the steering keys that edit has to take.
               printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n    user: nobody\\n    api_host: 127.0.0.1\\n    git_protocol: ssh\\n\" > /home/agent/.config/gh/hosts.yml
-              # Well-formed rather than a bare key, and not incidental: the real gh refuses to
-              # run at all against a host entry it cannot migrate, and a gh that never reached
-              # its dispatch would pass the extension half below for the wrong reason. The
-              # oauth_token key is what it refuses without, and the value is deliberately not
-              # token-shaped -- dispatch precedes authentication, so nothing here is a
-              # credential and no request is made.
-              printf \"github.com:\\n    oauth_token: placeholder-not-a-token\\n    user: nobody\\n\" > /home/agent/.config/gh/hosts.yml
               echo github.com ssh-ed25519 AAAA > /home/agent/.ssh/known_hosts
               # The gh extension, and the neighbour the sweep is not aimed at: gh keeps its own
               # state one directory over from the one it runs extensions out of.
@@ -512,6 +519,8 @@ jobs:
             # the home rather than about whatever repository the working directory sits in.
             test "$(sudo -n -H -u agent git -C / pwn)" = GITCONFIG-RAN
             test "$(sudo -n -H -u agent git -C / pwnxdg)" = XDG-RAN
+            # And for gh (#173), whose config.yml this used to pin as a survivor.
+            test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN
             # And for gh, whose hosts.yml is the one file the sweep edits rather than removes
             # (#190): it is credential state the next session may authenticate with, so it has
             # to survive, while the api_host a session can leave in it re-points gh on an
@@ -524,12 +533,13 @@ jobs:
               *127.0.0.1*) ;;
               *) echo "the planted api_host did not re-point gh: $before" >&2; exit 1 ;;
             esac
-            # And for gh, which runs whatever is under its extension directory, installed or
-            # merely written there.
+            # And for gh again (#186), which runs whatever is under its extension directory,
+            # installed or merely written there.
             test "$(sudo -n -H -u agent gh pwn)" = EXTENSION-RAN
-            # While the same directory does not reach a core command, which is the property
-            # the unswept clone rests on. Asserted here, before the sweep, where the plant is
-            # still in place and a gh that had started dispatching it would say so.
+            # While the same directory does not reach a core command. That is no longer what
+            # the clone rests on -- #173 sweeps before it too -- but it is still true, and it
+            # is asserted here, before the sweep, where the plant is still in place and a gh
+            # that had started dispatching it would say so.
             sudo -n -H -u agent gh repo --help | grep -q \"Work with GitHub repositories\"
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
@@ -539,6 +549,9 @@ jobs:
             # And the next session git has no alias left to run, by either spelling.
             ! sudo -n -H -u agent git -C / pwn 2>/dev/null
             ! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null
+            # Nor the next session gh an alias -- while its credential state survives, below
+            # (#173).
+            ! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn 2>/dev/null
             # And the next session gh is pointed at GitHub again. Whatever this answers -- Bad
             # credentials for the sentinel token, or a network complaint -- it must no longer
             # name the host the previous session chose.
@@ -551,7 +564,7 @@ jobs:
             # And git_protocol with it, which is the other key measured live from this position:
             # left at ssh it makes the clone above fail outright, the image having no ssh client.
             test "$(sudo -n -H -u agent gh config get -h github.com git_protocol)" = https
-            # And the next session gh has no extension left to dispatch to.
+            # And the next session gh has no extension left to dispatch to either (#186).
             ! sudo -n -H -u agent gh pwn 2>/dev/null
             # And the account can still do what it is for with its start-up files gone: `claude`
             # runs for it directly -- the login recipe -- and in a login shell, whose PATH comes
@@ -566,11 +579,17 @@ jobs:
               test ! -e /home/agent/.gitconfig
               test ! -e /home/agent/.config/git/config
               test ! -e /home/agent/.ssh/config
+              # gh writes itself a config.yml when it next has config of its own to write,
+              # and the hosts.yml migration in this home is one such occasion, so what must be
+              # gone is the plant rather than the file.
+              ! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null
               test -f /home/agent/.claude.json
               test -d /home/agent/.npm
-              # The directories those files sat in are other tools too, and stay.
-              # gh hosts.yml is kept as well -- and with it the credential the edit above had
-              # to work around, which is what makes it an edit rather than a fifth swept path.
+              # The directories those files sat in are other tools too, and stay -- and the
+              # gh credential state beside the config the sweep now takes is the invariant
+              # that #151 pinned and #173 keeps. hosts.yml is kept with the credential the
+              # key-level edit above had to work around, which is what makes it an edit rather
+              # than a fifth swept path.
               test -f /home/agent/.config/gh/hosts.yml
               grep -q gho_KEEPTHISCREDENTIAL0123456789012345 /home/agent/.config/gh/hosts.yml
               ! grep -q api_host /home/agent/.config/gh/hosts.yml

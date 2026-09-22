@@ -506,14 +506,18 @@ hook that would truncate it again or append a duplicate per session.
   `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` name one outright; `GIT_EXEC_PATH` and
   `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
   repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
-  name the directory holding `config.yml`, whose aliases may be shell commands, and `GH_EDITOR`
-  and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
-  holding `GH_TOKEN`.
+  name the directory holding `config.yml`, whose aliases may be shell commands and whose
+  `http_unix_socket` re-points where `gh` sends every request, and `GH_EDITOR` and `GH_BROWSER`
+  name commands — so between them they re-point the one tool in the session holding `GH_TOKEN`.
+  (The file itself is swept from the account's home on the same schedule, #173; these are the
+  variables that would move it somewhere the sweep does not look.)
 
   Whole prefixes rather than a list of those names, because a list is one somebody has to keep
   complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
   chain those tools resolve a setting through, and the config rung in the middle is swept out
-  of the home by #151 — so the environment tails are protected too, by name:
+  of the home — git's and ssh's by #151, and `gh`'s `config.yml`, which carries the `editor`,
+  `pager` and `browser` rungs of the `gh` chains, by #173 — so the environment tails are
+  protected too, by name:
 
   | chain | head (prefixed) | tail (protected by name) |
   |---|---|---|
@@ -525,11 +529,14 @@ hook that would truncate it again or append a duplicate per session.
   | token | `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` | `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
 
   `EDITOR` runs on a plain `git commit` with no terminal at all, so protecting `GIT_EDITOR` and
-  leaving it would close nothing. These are names and not prefixes on purpose: `SSH_AUTH_SOCK`
-  is a legitimate route for a forwarded deploy key, and the `GITHUB_` namespace holds plenty a
-  hook may hand over. The workspace outlives the session, so what such a line would re-point is
-  the *next* session on that issue — and it is the environment spelling of what the home sweep
-  removes from the account's `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`.
+  leaving it would close nothing. `XDG_CONFIG_HOME` is on no chain and is protected separately,
+  for `gh`'s aliases; `XDG_DATA_HOME` is protected for `gh`'s extensions (#191). These are names
+  and not prefixes on purpose: `SSH_AUTH_SOCK` is a legitimate route for a forwarded deploy key,
+  `XDG_CACHE_HOME` is untouched, and the `GITHUB_` namespace holds plenty a hook may hand over.
+  The workspace outlives the session, so what such a line would re-point is the *next* session
+  on that issue — and it is the environment spelling of what the home sweep removes from the
+  account's `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and
+  `~/.config/gh/config.yml`.
 
   **This is not the channel your `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values travel on**, and they
   are unaffected: set in `.env`, they reach the worker's environment and the session inherits
@@ -731,14 +738,22 @@ hook that would truncate it again or append a duplicate per session.
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
-- **Nor through `git config --global`.** The session account's `~/.gitconfig`,
-  `~/.config/git/config` and `~/.ssh/config` are swept on the same schedule, so a hook
-  that writes user-level git or ssh config finds it gone before the next login shell — again
-  between two sessions and within one. Commit identity is already handled: set the
-  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
-  the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
-  `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
-  `git config --local` inside the clone, which is what the post-clone setup does.
+- **Nor through `git config --global` or `gh config set`.** The session account's
+  `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and `~/.config/gh/config.yml` are
+  swept on the same schedule, so a hook that writes user-level git, ssh or `gh` config finds it
+  gone before the next login shell — again between two sessions and within one. Commit identity
+  is already handled: set the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach
+  every session's `git` through the environment. Anything else that has to be global belongs
+  in `/etc/gitconfig` or `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can
+  always use `git config --local` inside the clone, which is what the post-clone setup does.
+  `gh` has no system-wide file and needs none: every key it respects that names a command or a
+  transport is already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`)
+  or held off it (the `GH_` prefix above), and `gh` runs with no `config.yml` at all and writes
+  one when it next has config of its own to write, so a hook's `gh config set` still configures
+  the `gh` in its own shell. `gh config set -h <host>` is the same answer by a different route:
+  it writes into `~/.config/gh/hosts.yml`, which is credential state and so is *kept* — but the
+  configuration in it is stripped key by key on the same schedule (#190), so what a hook sets
+  there lasts exactly as long, and for the same reason.
 - **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
   schedule (#186), so an extension a hook installs is gone before the next login shell and
   before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is

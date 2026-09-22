@@ -143,7 +143,15 @@ they are what the older lists were resting on without saying so.
   names a *driver*, and the driver's command comes from the config this does sweep, so without it
   there is no command to run.
 
-- **`~/.config/gh/config.yml`**, which this change pins as a survivor for its neighbour
+- **`~/.config/gh/config.yml`** -- **superseded by #173**, which swept it after all; the
+  decision and what changed it are in `2026-09-22-session-gh-config-design.md`, and the
+  paragraph below is kept as the reasoning that stood at the time. In short: this measurement
+  was of `aliases:` rather than of the file, and `http_unix_socket`, on the same respected-key
+  list, re-points `gh`'s transport on an *ordinary* core command -- which is the property this
+  paragraph rests on the alias channel lacking. `hosts.yml` survives there too, so the
+  invariant this change pinned is unchanged.
+
+  It pins `~/.config/gh` as a survivor for its neighbour
   `hosts.yml`'s sake, is the nearest thing to a fourth entry and is left off deliberately, with
   the reasoning recorded because the file is *named* in the tests. Measured against the `gh` on
   this host: an `aliases:` entry written into it directly does run a shell command

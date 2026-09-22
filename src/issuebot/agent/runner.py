@@ -93,9 +93,10 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 # the same rule one layer under all of those (#187), since `ld.so` reads its own names out of the
 # same environment before any of those binaries reaches `main`. The file outlives the session -- a
 # workspace belongs to one issue -- so what such a line re-points is the next session on that
-# issue. It is also the environment spelling of what `TOOL_CONFIG_SWEEP` (`runas.py`, #151) and
-# `SHELL_STARTUP_SWEEP` (#137) remove from the account's home: a sweep of `~/.gitconfig` or of
-# `~/.profile` would leave a guarantee conditional on a variable nothing checked.
+# issue. It is also the environment spelling of what `TOOL_CONFIG_SWEEP` (`runas.py`, #151 and
+# #173) and `SHELL_STARTUP_SWEEP` (#137) remove from the account's home: a sweep of
+# `~/.gitconfig`, of `~/.config/gh/config.yml` or of `~/.profile` would leave a guarantee
+# conditional on a variable nothing checked.
 #   The names are the rungs of git's and gh's own documented precedence chains that fall
 #   outside the two prefixes below. That is the rule, and it is checkable against
 #   `git-var(1)`, `git-commit(1)` and `gh environment` rather than being a list of everything
@@ -108,10 +109,16 @@ WORKSPACE_ENV_LIMIT = ENV_FILE.limit
 #     identity  GIT_AUTHOR_EMAIL       -> user.email  -> EMAIL
 #     token     GH_TOKEN               -> GITHUB_TOKEN; GH_ENTERPRISE_TOKEN ->
 #               GITHUB_ENTERPRISE_TOKEN
-#   The config rung of each is swept out of the home by `TOOL_CONFIG_SWEEP` (#151), so the
-#   environment rungs are the whole of what is left. `EDITOR` was measured firing on a plain
-#   `git commit` with no `TERM` set at all, and `EMAIL` setting the author of a commit; `PAGER`
-#   needs a terminal, which a hook may well have.
+#   The config rung of each is swept out of the home by `TOOL_CONFIG_SWEEP` -- git's and
+#   ssh's by #151, and gh's `config.yml`, which carries the `editor`, `pager` and `browser`
+#   rungs of the gh chains above, by #173 -- so the environment rungs are the whole of what is
+#   left. `EDITOR` was measured firing on a plain `git commit` with no `TERM` set at all, and
+#   `EMAIL` setting the author of a commit; `PAGER` needs a terminal, which a hook may well
+#   have.
+#   `XDG_CONFIG_HOME` is not on any chain: it moves the config directory of everything
+#   following the base-directory specification, `$XDG_CONFIG_HOME/gh/config.yml` among them,
+#   whose aliases may be shell commands -- and which, at the path the sweep names, #173 now
+#   removes, so this name is what keeps it from being read somewhere else instead.
 #   Names and not prefixes (`SSH_`, `GITHUB_`, `EDITOR`...), because `SSH_AUTH_SOCK` is a
 #   legitimate route for exactly the deploy-key case this bound has to leave a hook author, and
 #   `GITHUB_`/generic namespaces hold plenty a hook may hand over. A chain has an end, so this

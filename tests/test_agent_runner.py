@@ -589,8 +589,9 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         # The tails of git's and gh's own precedence chains, whose heads are covered by the
-        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` (#151) removes from the
-        # home -- so these are the whole of what is left of each chain. Protecting a head and
+        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` removes from the home --
+        # git's and ssh's since #151, gh's `config.yml` since #173 -- so these are the whole of
+        # what is left of each chain. Protecting a head and
         # leaving its tail closes nothing.
         "SSH_ASKPASS",  # GIT_ASKPASS -> core.askPass -> this
         "SSH_ASKPASS_REQUIRE",
