@@ -593,6 +593,42 @@ hook that would truncate it again or append a duplicate per session.
   `gh` adds is a `GH_EXTENSION=1` marker, so what you lose is the `gh ` prefix on the command. That route is also the one the
   session cannot reach, where a variable in a file the session can rewrite never was.
 
+- **So are the two names that decide which certificate authorities the session's tools
+  accept**: `SSL_CERT_FILE` and `SSL_CERT_DIR`. These are on no chain either, and they are the
+  one pair here that does not name a command or a file naming one — what they decide is *who*
+  the tool is talking to. They are also the only spelling that reaches `gh`, which has no `GH_`
+  name for its trust store, so no protected prefix covered them.
+
+  They are not one variable and not only a widening. Each replaces its own half of the default
+  CA *file*/CA *directory* pair, so one alone leaves the other half still verifying
+  `api.github.com` — which is what makes a single line look harmless — while the two together
+  replace the store outright, and a value that will not load is not ignored:
+
+  | in `.issuebot/env` | the next session's `gh` | its `curl` |
+  |---|---|---|
+  | neither | verifies GitHub | verifies GitHub |
+  | `SSL_CERT_FILE` naming a private CA | trusts it **and** GitHub | trusts it **and** GitHub |
+  | both, naming a private CA | trusts it, and **not** GitHub | trusts it, and **not** GitHub |
+  | either naming a path that does not exist | `SSL_CERT_FILE` alone is survivable; both fail every request | fails every `https://` with exit 77 |
+
+  `git` reads neither — its spelling is `GIT_SSL_CAINFO` → `http.sslCAInfo`, protected by the
+  `GIT_` prefix above — and `uv` reads both, with either one alone replacing its whole store.
+
+  A hook with a real reason for a private authority — a package index inside your network is
+  the usual one — keeps every route but this file:
+
+  - **The per-tool variables**, which are not protected and are the better spelling anyway:
+    `CURL_CA_BUNDLE` for curl, `REQUESTS_CA_BUNDLE` or `PIP_CERT` for pip, `uv --cert` for a
+    `uv` the hook runs. Each was measured reaching the tool it names and *not* `gh`, which is
+    the whole difference between them and the two generic names.
+  - **Per-command**, in the hook's own shell, exactly as for the git variables above.
+  - **The image's system trust store**, for an authority every session needs:
+    `/usr/local/share/ca-certificates/<name>.crt` and `update-ca-certificates` in an image built
+    `FROM` this one. `gh`, `git`, `curl` and `python` then read it with no variable at all, and
+    `uv` reads it with `UV_SYSTEM_CERTS=1`, which this file may still set because it is a switch
+    and not a path. That route is the one the session cannot take back, where a variable in a
+    file the session can rewrite never was.
+
 - **So are the five names that decide what the hook's own shell runs**: `BASH_ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4` and `CDPATH`. Every script issuebot runs for a session — the
   post-clone setup and all four hooks — goes through `bash -lc`, and `bash` reads these out of
