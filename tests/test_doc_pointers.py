@@ -27,9 +27,11 @@ What is excluded, and why each is:
 
 * ``docs/superpowers/`` holds dated design records, and a pointer in one is a statement
   about where the content was when the document was written, not a claim about today.
-* ``tests/`` is where a deliberately stale pointer belongs -- this module's own truth
-  table quotes ``(README, "Rotating the database password")`` to prove the regex sees it.
-* the vendored dashboard material is somebody else's bytes, kept here byte for byte.
+* this module itself, where a deliberately stale pointer belongs -- its truth table quotes
+  ``(README, "Rotating the database password")`` to prove the regex sees it. The file and
+  not ``tests/``: no other test carries a pointer, and their docstrings are as prose-heavy
+  as ``invocation.py``'s, so excluding the directory would blank fifty-nine files to
+  protect one.
 
 Everything else tracked is read, minus the suffixes that are not prose at all, so the rule
 is "the repository, less what is named" rather than a list of documents to keep complete.
@@ -50,11 +52,29 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 # Not prose: binary assets and lock files, where this shape could only match by accident.
+# Compared case-folded, since a suffix is the author's to capitalise.
 NOT_PROSE = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".lock", ".jsonl"}
+    {
+        ".gif",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".jsonl",
+        ".lock",
+        ".otf",
+        ".pdf",
+        ".png",
+        ".svg",
+        ".ttf",
+        ".webp",
+        ".whl",
+        ".woff",
+        ".woff2",
+        ".zip",
+    }
 )
-# The three exclusions the module docstring explains, as paths relative to the root.
-EXCLUDED = ("docs/superpowers", "tests", "src/issuebot/web/static/vendor")
+# The two exclusions the module docstring explains, as paths relative to the root.
+EXCLUDED = ("docs/superpowers", "tests/test_doc_pointers.py")
 
 # ``<document>, "<section title>"``: the document named, then the title in quotes beside it.
 # The backtick is optional because a markdown file spells the name as code
@@ -74,15 +94,25 @@ FENCE = re.compile(r"^\s*(?:```|~~~)")
 MARKER = re.compile(r"^[ \t]*#*[ \t]*")
 
 
-def _tracked_files() -> list[str]:
-    """Every file the repository tracks, the idiom ``test_compose_credentials.py`` uses."""
+@functools.cache
+def _tracked_files() -> tuple[str, ...]:
+    """Every file the repository tracks, the idiom ``test_compose_credentials.py`` uses.
+
+    De-duplicated, because an unmerged index lists a conflicted path once per stage and
+    every complaint in it would otherwise be made three times. The skip carries git's own
+    stderr: exit 128 is most often ``detected dubious ownership``, on a repository
+    bind-mounted from another uid, and "returned non-zero exit status 128" names nothing.
+    """
     try:
         listed = subprocess.run(
             ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
         )
     except (OSError, subprocess.CalledProcessError) as error:  # pragma: no cover - needs no git
-        pytest.skip(f"not a git checkout, or no git: {error}")
-    return [name for name in listed.stdout.split("\0") if name]
+        detail = getattr(error, "stderr", "") or ""
+        pytest.skip(
+            f"not a git checkout, or no git: {error}{': ' + detail.strip() if detail else ''}"
+        )
+    return tuple(dict.fromkeys(name for name in listed.stdout.split("\0") if name))
 
 
 def _normalise(title: str) -> str:
@@ -98,12 +128,15 @@ def _normalise(title: str) -> str:
 def _text(path: Path) -> str | None:
     """The file's characters, or ``None`` for a tracked name this checkout cannot read.
 
-    Undecodable bytes are replaced rather than raised on, and an unreadable name costs its
-    own file and nothing else: a documentation guard that aborted collection would take
-    the whole suite down with it, and a pointer is ASCII either way.
+    Undecodable bytes are replaced rather than raised on, and an unreadable name costs one
+    complaint rather than the suite: a documentation guard that aborted collection would
+    take the database and orchestrator tests down with it, and a pointer is ASCII either
+    way -- U+FFFD is not a word character, so a replacement can neither make a document
+    name nor extend one. ``utf-8-sig`` because a byte order mark is not whitespace, so a
+    file carrying one would hide its own first heading from ``HEADING``.
     """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
 
@@ -199,7 +232,7 @@ def _swept() -> list[str]:
     return [
         relative
         for relative in _tracked_files()
-        if Path(relative).suffix not in NOT_PROSE
+        if Path(relative).suffix.lower() not in NOT_PROSE
         and not any(relative == e or relative.startswith(f"{e}/") for e in EXCLUDED)
     ]
 
@@ -218,7 +251,14 @@ def _pointers(relative: str) -> tuple[tuple[int, str, str], ...]:
 
 
 def _stale(relative: str) -> list[str]:
-    """Every pointer in the file that names no heading of the document it names."""
+    """Every pointer in the file that names no heading of the document it names.
+
+    A file this checkout cannot read is one complaint of its own rather than silence: its
+    pointers are unchecked either way, and a sweep that says nothing about them is a sweep
+    whose green is worth less than it looks.
+    """
+    if _text(ROOT / relative) is None:
+        return [f"{relative}: unreadable, so its pointers were not checked"]
     complaints = []
     for number, document, title in _pointers(relative):
         target = _resolve(relative, document)
@@ -259,7 +299,7 @@ def test_the_sweep_reaches_past_the_documentation() -> None:
     the repository rather than about the files somebody remembered.
     """
     swept = set(_swept())
-    for expected in ("compose.yaml", ".env.example", "src/issuebot/invocation.py"):
+    for expected in ("compose.yaml", ".env.example", "CLAUDE.md", "src/issuebot/invocation.py"):
         assert expected in swept, expected
     assert _pointers("src/issuebot/invocation.py"), "the pointer the allow-list missed"
 
@@ -277,12 +317,29 @@ def test_the_sweep_reads_the_pointers_it_is_there_for() -> None:
         assert len(found) >= expected, f"{relative}: {found}"
 
 
-def test_an_unreadable_file_costs_its_own_file_and_not_the_suite(tmp_path: Path) -> None:
+def test_an_unreadable_file_costs_one_complaint_and_not_the_suite(tmp_path: Path) -> None:
     """Every file is read, so one bad byte must not be able to abort collection."""
     undecodable = tmp_path / "undecodable.md"
     undecodable.write_bytes(b'x (README, "Prerequisites") \xff\xfe y')
     assert "Prerequisites" in (_text(undecodable) or "")
     assert _text(tmp_path / "absent.md") is None
+    assert _stale("no/such/file.md") == [
+        "no/such/file.md: unreadable, so its pointers were not checked"
+    ]
+
+
+def test_a_byte_order_mark_does_not_hide_the_first_heading(tmp_path: Path) -> None:
+    """U+FEFF is not whitespace, so ``HEADING`` would miss a BOM'd file's own first section."""
+    document = tmp_path / "bom.md"
+    document.write_bytes(b"\xef\xbb\xbf# First Section\n\ntext\n")
+    assert "first section" in _headings(document)
+
+
+def test_the_swept_list_holds_each_file_once() -> None:
+    """An unmerged index lists a conflicted path once per stage, and would triple its
+    complaints; ``_tracked_files`` de-duplicates, so a merge in progress reads the same."""
+    swept = _swept()
+    assert len(swept) == len(set(swept))
 
 
 def test_a_reference_that_quotes_no_section_is_not_a_pointer() -> None:
