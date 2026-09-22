@@ -1635,13 +1635,16 @@ second copy of a section that has already moved, and the two then drift.
 A pointer *between* these files is checked rather than trusted, because the failure is silent:
 a link carrying an anchor -- `[Safety](docs/operations.md#safety)` -- still renders and still
 loads the file after the heading it names has been renamed, and the browser simply lands at the
-top. `tests/test_doc_pointers.py` resolves every markdown link in these files against the tree
-and every anchor against the slugged headings of the file it lands in, so a rename that moves a
-section out from under a pointer fails a test rather than a reader (#218). It is recorded here
-for the reason `test_readme_bounds.py` below is: an edit to a heading in this set can fail it,
-and the failure names a slug rather than a rule. `docs/superpowers/` is outside the sweep --
-a pointer in a dated design record is a statement about where the content was when it was
-written.
+top. `tests/test_doc_pointers.py` resolves every markdown link in this tree's operator-facing
+markdown against the tree, and every anchor against the slugged headings of the file it lands
+in, so a rename that moves a section out from under a pointer fails a test rather than a reader
+(#218). The swept set is `SWEPT_FILES` in that module, and it is not quite the list below: it
+takes `AGENTS.md`, `configs/WORKFLOW.md` and the two directory-local `README.md`s as well,
+while `LICENSE` and `.github/ISSUE_TEMPLATE/` are outside it, being no markdown prose. It is
+recorded here for the reason `test_readme_bounds.py` below is: an edit to a heading in that set
+can fail it, and the failure names a slug rather than a rule. `docs/superpowers/` is outside
+the sweep -- a pointer in a dated design record is a statement about where the content was
+when it was written.
 
 - `README.md`: the front door -- what issuebot is, the label state machine, the quick start,
   the five-step setting-up guide, the configuration reference (every setting, the prompt and

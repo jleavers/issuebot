@@ -95,10 +95,16 @@ _LINK = re.compile(r"\]\(\s*([^)\s]+?)\s*\)")
 # A link that goes off this repository is nobody here's to check.
 _EXTERNAL = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)")
 
-# An inline code span: backticks, and what they wrap. Literal text, so the two shapes read it
-# in opposite directions -- a link written inside one is text rather than a pointer, and is
-# dropped before `_links` looks, while in a heading the *content* is what GitHub slugs.
-_CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+# An inline code span: backticks, and what they wrap. Literal text, so a link written inside
+# one is text rather than a pointer and is dropped before `_links` looks.
+#
+# ``[\s\S]`` rather than ``.``, because a code span wraps: this repository's prose opens one at
+# the end of a line and closes it on the next constantly, and pairing line by line would take a
+# stray closing backtick for an *opening* one and blank from there to the next backtick on that
+# line -- swallowing any link between them, silently, which is this module's own failure mode.
+# The pairing is bounded to a paragraph by `_blank_code_spans` rather than by the pattern, a
+# code span being unable to hold a blank line.
+_CODE_SPAN = re.compile(r"(`+)([\s\S]+?)\1")
 
 # What a heading's *text content* is, which is what GitHub slugs -- the heading is rendered to
 # HTML first, so the markup around the words is not in the anchor. An image contributes no text
@@ -212,6 +218,34 @@ def _anchors_of(path: Path) -> tuple[str, ...]:
     return tuple(_anchors(_headings(path.read_text(encoding="utf-8"))))
 
 
+def _blank_code_spans(lines: list[str]) -> list[str]:
+    """The same lines with every code span replaced by spaces, one for one.
+
+    Paragraph by paragraph, since a code span cannot hold a blank line: that is what pairs a
+    span across the line break it wraps at, and equally what keeps a single unpaired backtick
+    -- prose about backticks, in a file like this one -- from blanking the rest of a document.
+    The replacement keeps each line's length and the line breaks inside a span, so a line number
+    is still a line number afterwards.
+    """
+    blanked: list[str] = []
+    paragraph: list[str] = []
+
+    def flush() -> None:
+        if paragraph:
+            text = _CODE_SPAN.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), "\n".join(paragraph))
+            blanked.extend(text.split("\n"))
+            paragraph.clear()
+
+    for line in lines:
+        if line.strip():
+            paragraph.append(line)
+        else:
+            flush()
+            blanked.append(line)
+    flush()
+    return blanked
+
+
 def _links(text: str) -> list[tuple[int, str]]:
     """Every inline link target in the prose, with the line it sits on.
 
@@ -219,10 +253,15 @@ def _links(text: str) -> list[tuple[int, str]]:
     is a sentence *about* a pointer rather than a pointer, and GitHub renders it as the literal
     characters. This repository's own prose contains that sentence.
     """
+    body = _body_lines(text)
     return [
         (number, match.group(1))
-        for number, line in _body_lines(text)
-        for match in _LINK.finditer(_CODE_SPAN.sub(" ", line))
+        # `strict`: `_blank_code_spans` preserves the line breaks inside a span, so losing one
+        # would shift every line number after it. Better an error than a wrong citation.
+        for (number, _), line in zip(
+            body, _blank_code_spans([line for _, line in body]), strict=True
+        )
+        for match in _LINK.finditer(line)
     ]
 
 
@@ -411,12 +450,26 @@ def test_links_skips_inline_code_spans() -> None:
 
 
 # Today's tree, so a parser regression cannot make the sweep pass by seeing nothing. The floor
-# is well under the real figure (96 links, 81 of them inside the repository, 50 carrying an
+# is well under the real figure (96 links, 80 of them inside the repository, 49 carrying an
 # anchor) because the prose is edited constantly; what it catches is an order-of-magnitude
 # collapse -- an unbalanced fence swallowing the tail of a document, a tightened `_LINK` -- not
 # a paragraph rewritten.
 MINIMUM_LINKS = 60
 MINIMUM_ANCHORED = 35
+
+# Every link this repository's prose writes inside a code span, and so quotes rather than
+# points with. Declared rather than counted, because "a link the sweep does not check" is the
+# one thing it cannot be allowed to acquire silently: a new one has to be written down here,
+# where the next reader can ask whether it was meant.
+CODE_QUOTED_POINTERS: tuple[tuple[str, str], ...] = (
+    # The paragraph explaining this very drift has to spell a pointer to explain it.
+    ("CLAUDE.md", "`[Safety](docs/operations.md#safety)`"),
+)
+
+# A reference-style link and its definition. Neither contains ``](`` at all, so neither is
+# caught by counting; both would be swept by nothing at all if the prose grew one.
+_REFERENCE_LINK = re.compile(r"\]\[")
+_REFERENCE_DEFINITION = re.compile(r"^ {0,3}\[[^\]]+\]:\s")
 
 
 def test_the_sweep_still_sees_the_trees_pointers() -> None:
@@ -435,21 +488,48 @@ def test_the_sweep_still_sees_the_trees_pointers() -> None:
 
 
 def test_every_link_in_the_prose_is_a_link_the_sweep_parses() -> None:
-    """`_LINK` reads one link shape -- an inline destination with no title. The others (a
-    title, a reference definition, an angle-bracket or wrapped destination) are absent from
-    this tree, and a title in particular would match nothing and be skipped unchecked rather
-    than reported. So the count is pinned instead of the syntax: every ``](`` in the prose,
-    outside a fence and outside a code span, is a target the sweep resolved."""
-    unparsed = [
-        f"{name}:{number}: {line.strip()[:80]}"
-        for name in SWEPT_FILES
-        for number, line in _body_lines((ROOT / name).read_text(encoding="utf-8"))
-        if (bare := _CODE_SPAN.sub(" ", line)).count("](") != len(_LINK.findall(bare))
-    ]
+    """`_LINK` reads one link shape: an inline destination, no title. A link written any other
+    way is not *reported* by the sweep, it is invisible to it -- so the count is pinned rather
+    than the syntax, and the raw line is what it is counted against.
+
+    Raw, not blanked, because the blanking is itself something that can go wrong: a code span
+    mispaired across a line break would take a live link out of both sides of a comparison made
+    on blanked text, and the check would pass by having stopped looking. Every ``](`` a line
+    carries is therefore either a target the sweep resolved or a link this repository quotes on
+    purpose, in `CODE_QUOTED_POINTERS`. A destination carrying a title and a wrapped one both
+    fail here; a reference link and its definition carry no ``](`` at all, so they are matched
+    for separately."""
+    unparsed: list[str] = []
+    for name in SWEPT_FILES:
+        quoted = sum(1 for file, _ in CODE_QUOTED_POINTERS if file == name)
+        body = _body_lines((ROOT / name).read_text(encoding="utf-8"))
+        parsed = 0
+        blanked = _blank_code_spans([line for _, line in body])
+        for (number, raw), bare in zip(body, blanked, strict=True):
+            parsed += len(_LINK.findall(bare))
+            if _REFERENCE_LINK.search(bare) or _REFERENCE_DEFINITION.match(bare):
+                unparsed.append(f"{name}:{number}: reference-style link: {raw.strip()[:80]}")
+        written = sum(raw.count("](") for _, raw in body)
+        if written != parsed + quoted:
+            unparsed.append(
+                f"{name}: the prose writes {written} inline links and the sweep resolved "
+                f"{parsed}, with {quoted} declared in CODE_QUOTED_POINTERS"
+            )
     assert not unparsed, (
-        "a markdown link shape `_LINK` does not parse, so its pointer is unchecked:\n"
+        "a markdown link the sweep does not parse, so its pointer is unchecked:\n"
         + "\n".join(unparsed)
     )
+
+
+def test_the_code_quoted_pointers_are_still_written_that_way() -> None:
+    """The other half of `CODE_QUOTED_POINTERS`: an allowance nothing checks is an allowance
+    that outlives what it was for, and the count above would then hide a real link."""
+    missing = [
+        f"{name}: no longer carries {quoted}"
+        for name, quoted in CODE_QUOTED_POINTERS
+        if quoted not in (ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not missing, "CODE_QUOTED_POINTERS is stale:\n" + "\n".join(missing)
 
 
 def test_the_sweep_reports_a_pointer_that_does_not_land() -> None:
