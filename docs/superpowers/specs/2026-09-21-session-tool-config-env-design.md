@@ -304,7 +304,13 @@ The `.issuebot/env` section says all of this where a hook author will be reading
   gap is real rather than theoretical. `NODE_OPTIONS` and `LD_PRELOAD` are the shape of what is
   left out: variables of *other* tooling, not rungs of git's or gh's own chains. (`PAGER` was
   on this list in an earlier draft and should not have been: `GIT_PAGER` is protected, so
-  `PAGER` is a chain tail. It is now a protected name.) Fails safe: a gap is a name that still
+  `PAGER` is a chain tail. It is now a protected name. *And `LD_PRELOAD` should not have been
+  either: #187 (`2026-09-22-session-loader-env-design.md`) took that filing on its own terms
+  and overturned it. The loader's names are not another tool's -- `ld.so` reads them out of
+  whatever environment a process is handed and acts on them before `main`, so they reach the
+  same set this change drew its bound around, `bash` and `git` and `claude` alike. All three
+  of them are now protected, in `LOADER_ENV_NAMES`, with `LD_TRACE_LOADED_OBJECTS` and
+  `LD_DEBUG` beside them.* `NODE_OPTIONS` is still the shape of what is left out.) Fails safe: a gap is a name that still
   gets through, never a broken session. The two prefixes are the part of this that is *not* a
   denylist, which is exactly why they are prefixes.
 
