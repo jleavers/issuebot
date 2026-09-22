@@ -24,10 +24,23 @@ search: whatever else the tree holds is data the session reads itself."""
 INSTRUCTION_FILE_LIMIT = INSTRUCTION_FILE.limit
 """Bytes of each file the prompt carries; the rest is cut and the envelope's source says so.
 
-Twice what this repository's own ``CLAUDE.md`` weighs: a cut loses the file's end, which is
-where a "how to open pull requests" section tends to sit. Two files at the cap are the whole
-of the turn log's 256 KiB prompt head on their own, so a capture of such a prompt is itself
-cut; one whole file and most of another still fit beside the template.
+A cut loses the file's *end*, which is where a "how to open pull requests" section tends to
+sit, so the size is chosen against the prompt rather than against any one repository's file:
+two files at the cap are the whole of the turn log's 256 KiB prompt head on their own, so a
+capture of such a prompt is itself cut, while one whole file and most of another still fit
+beside the template.
+
+#211 is the case for leaving it there. This repository's own ``CLAUDE.md`` had grown 12 KB
+past it, and raising the cap was the cheapest of the ways out and the wrong one: what this
+bounds is text the *clone* supplies to a prompt, and under ``agent.run_as`` the clone is the
+session's own to write, so the number is a boundary every deployment inherits and not a
+budget for one repository's prose. A target repository's ``CLAUDE.md`` is not this one's.
+The file was split instead (``docs/package-layout.md``), and ``tests/test_instruction_bounds``
+holds this repository to the cap with headroom to spare. What the cap still lacked was a
+*voice*: the cut is not an error, so nothing said it had happened to anyone but the session
+reading a file that stopped mid-word. ``read_repository_instructions`` now logs one warning
+per cut file, which is as far as this module can reach -- for a deployment's own repository
+the test in CI is the report a maintainer actually reads.
 """
 
 
@@ -79,6 +92,19 @@ def read_repository_instructions(
         except OSError as exc:
             log.warning("repository_instructions_skipped", path=str(path), reason=str(exc))
             continue
+        if read.truncated:
+            # Not a failure -- the prompt carries what fits and the envelope's source says it
+            # was cut -- but silent everywhere else: the file renders whole on GitHub and in
+            # an editor, and only the session sees the end missing (#211). One line per file
+            # per run, at WARNING, so the deployment's operator can tell the repository's
+            # maintainer what their sessions are not being told.
+            log.warning(
+                "repository_instructions_truncated",
+                path=str(path),
+                size=read.size,
+                carried=len(read.data),
+                limit=limit,
+            )
         found.append(
             RepositoryFile(
                 path=name,
