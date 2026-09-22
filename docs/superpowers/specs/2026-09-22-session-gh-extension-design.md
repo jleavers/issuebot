@@ -187,4 +187,15 @@ the tree it points at is neither removed nor walked. And, end to end beside #137
 and #151's gitconfig one, a planted extension does not run for the next session's `gh` — the
 real wrapper, the real hook path, the real `bash -lc` and the real `gh`, only sudo a fake —
 two-sided, so with the sweep removed the plant *is* what `gh` runs, while `~/.local/state/gh`
-survives both halves.
+survives both halves. That end-to-end test needs two things the earlier ones did not, both
+commented where they are: the real `PATH` rather than the suite's `fake_path()`, since
+`tests/fakes/gh` would shadow the `gh` whose dispatch is the question; and a well-formed
+`~/.config/gh/hosts.yml` over the marker `_plant_home` leaves, since the real `gh` refuses to
+run at all against a host entry it cannot migrate, and a `gh` that never reached its dispatch
+would pass the swept half for the wrong reason.
+
+The CI `docker` job's home-sweep step gains the same arm against the image's own `gh`, beside
+#137's profile and #151's gitconfig: the plant runs before the sweep and is an `unknown command`
+after it, the extension directory is gone and `~/.local/state/gh` is still there. That is the
+real uid split, the real sudo rule and the real home, through the worker's own
+`RunAs.sweep_home`.
