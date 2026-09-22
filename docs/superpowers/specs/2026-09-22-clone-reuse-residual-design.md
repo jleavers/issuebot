@@ -27,10 +27,14 @@ session 1 workspace: created=True
 [debug] workspace_reused workspace=/tmp/repro-.../workspaces/example-180
 session 2 workspace: created=False same_path=True
   $ git -C <workspace> st                       -> PLANTED-ALIAS-RAN
-  $ git -C <workspace> status --porcelain       -> PLANTED-FSMONITOR-RAN
+  $ git -C <workspace> status --porcelain       -> PLANTED-FSMONITOR-RAN (see below)
   $ git -C <workspace> commit --allow-empty     -> PLANTED-HOOKSPATH-RAN
 ```
 
+The `core.fsmonitor` line is the one to read carefully: git consumes that hook's *stdout* as
+the changed-file list, so a plant there cannot print to the terminal. What the marker above
+shows is the hook running and its output being read as data; it was separately confirmed to
+execute on a plain `git status --porcelain` by having it append to a file of its own.
 `credential.helper` fires the same way -- on any authenticated fetch, and directly under
 `git credential fill` -- and `.git/hooks/post-checkout` is the same shape beside the file rather
 than in it. `core.pager` is the weakest of the set and worth saying so: it needs stdout to be a
@@ -140,16 +144,34 @@ there --
 hooks:
   before_run: |
     git config --local --remove-section alias 2>/dev/null || true
-    for k in core.pager core.editor core.sshCommand core.fsmonitor core.hooksPath include.path; do
+    for k in core.pager core.editor core.fsmonitor core.hooksPath include.path; do
       git config --local --unset-all "$k" 2>/dev/null || true
     done
 ```
 
--- with both caveats stated plainly: it is the enumeration this note declines to ship, so it is
-as complete as whoever wrote it, and the hook's own `git` invocations run under whatever the last
-session left (`git config` itself takes no pager for a write, which is what makes the recipe work
-at all). It is not shipped in `configs/WORKFLOW.md`, because shipping it would be bounding the
-channel by default, which is the decision this note declines to make.
+-- with four caveats stated plainly, because a reader who takes this for "the reset" gets less
+than they think:
+
+1. **It is the enumeration this note declines to ship**, so it is as complete as whoever wrote
+   it and no more. git adds keys.
+2. **It narrows the config file only.** `.git/hooks/` is a directory of scripts with no config
+   key at all, and this recipe does not touch it -- so a planted `post-checkout` survives it
+   intact. A deployment that means to clear that too has to clear the directory itself, and
+   `.git/config.worktree` and `.git/modules/*/config` are the same shape again.
+3. **It must not unset what the deployment's own setup wrote.** `credential.helper` is out of
+   the list for that reason, and so is `core.sshCommand`: that is the key #171 tells a
+   deploy-key deployment to write with `git config --local` from `after_create`, `after_create`
+   runs on *creation* only, and unsetting it each run would take the deploy key away on the
+   first reuse and fail every `git fetch` and `push` after it. The file records no difference
+   between a key the deployment wrote and a key the session wrote, which is the same objection
+   this note makes to a shipped reset two paragraphs above -- it does not stop applying because
+   the reset is a deployment's rather than issuebot's.
+4. **The hook's own `git` invocations run under whatever the last session left.** `git config`
+   takes no pager for a write, which is what makes the recipe work at all, but the reset is not
+   running on a clean slate.
+
+It is not shipped in `configs/WORKFLOW.md`, because shipping it would be bounding the channel by
+default, which is the decision this note declines to make.
 
 The blunt instrument is the workspace directory itself: remove it and the next session re-clones
 (`create_or_reuse` finds nothing complete and creates), and `finish_terminal` removes it on its
@@ -197,7 +219,11 @@ and the README says so where each is described:
 ## Tests
 
 `tests/test_agent_workspace.py::test_reuse_keeps_the_clones_own_git_config` creates a workspace,
-writes a `--local` key and a `.git/hooks/` script into the clone as a session would, asks
-`create_or_reuse` again, and asserts both are still there and that git reads the key back -- the
-decided behaviour, stated as a test so that bounding the channel later fails it and forces the
-edit here as well. It names this note and the issue, as the sweep lists do.
+writes into the clone as a session would -- a `--local` alias, an `include.path` pointing at a
+second file inside `.git` with another alias in it, and a `.git/hooks/post-checkout` script --
+asks `create_or_reuse` again, and asserts all three are still there. The two aliases are read
+back without `--local`, so what is asserted is git *resolving* them as it would for any command,
+the included one included: that is the part of the decision most open to being misread later,
+since it is what makes "the unit is the clone and not the file" true rather than rhetorical. The
+decided behaviour, stated as a test so that bounding the channel fails it and forces the edit
+here as well. It names this note and the issue, as the sweep lists do.

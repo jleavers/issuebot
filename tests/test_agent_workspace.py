@@ -205,6 +205,13 @@ async def test_reuse_keeps_the_clones_own_git_config(
         ["git", "-C", str(first.path), "config", "--local", "alias.st", "!printf planted"],
         check=True,
     )
+    # `include.path` is the one the note's argument turns on: it puts the same keys in a second
+    # file, so a reset that walked `.git/config` alone would leave this one whole.
+    (first.path / ".git" / "planted-include").write_text('[alias]\n\tinc = "!printf planted"\n')
+    subprocess.run(
+        ["git", "-C", str(first.path), "config", "--local", "include.path", "planted-include"],
+        check=True,
+    )
     hook = first.path / ".git" / "hooks" / "post-checkout"
     hook.write_text("#!/bin/sh\nprintf planted\n")
     hook.chmod(0o755)
@@ -214,13 +221,19 @@ async def test_reuse_keeps_the_clones_own_git_config(
     assert not second.created
     assert second.path == first.path
     assert len(gh.calls) == 1
-    read_back = subprocess.run(
-        ["git", "-C", str(second.path), "config", "--local", "--get", "alias.st"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert read_back.stdout.strip() == "!printf planted"
+
+    def config(key: str) -> str:
+        done = subprocess.run(
+            ["git", "-C", str(second.path), "config", "--get", key],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return done.stdout.strip()
+
+    assert config("alias.st") == "!printf planted"
+    # Read without `--local`, so this is git resolving the include as it would for any command.
+    assert config("alias.inc") == "!printf planted"
     assert hook.exists()
 
 
