@@ -230,8 +230,9 @@ itself, with the same token, on the same branch and the same pull request. This 
 `docs/superpowers/specs/2026-09-22-clone-reuse-residual-design.md`, which also has the
 `hooks.before_run` recipe for a deployment that wants the clone's config narrowed each run,
 and the four caveats that come with it. What is *not* inherited is the worker's own state in
-the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh` or the
-hook shell, and anything at all by a session working a **different** issue — see
+the workspace, anything in `.issuebot/env` that would re-point `claude`, `git`, `gh`, the
+hook shell or the dynamic loader under all but `gh`, and anything at all by a session working
+a **different** issue — see
 [Safety](#safety) below for that boundary and the sweeps that hold it.
 
 ### Configuration changes
