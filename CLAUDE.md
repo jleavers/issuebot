@@ -360,10 +360,28 @@ version, and moves by hand.
   logs into nothing: a login shell's `PATH` comes from `/etc/profile` and `/etc/profile.d`,
   which are root's and where the image puts node and the PostgreSQL binaries.
   And `TOOL_CONFIG_SWEEP`, the same home one tool further out (#151, spec
-  `2026-09-18-session-tool-config-design.md`): `.gitconfig`, `.config/git/config` and
-  `.ssh/config`, the config a *tool* the session runs reads there and can take a command from --
+  `2026-09-18-session-tool-config-design.md`; #173, spec
+  `2026-09-22-session-gh-config-design.md`): `.gitconfig`, `.config/git/config`,
+  `.ssh/config` and `.config/gh/config.yml`, the config a *tool* the session runs reads there
+  and can take a command from --
   git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ssh's
-  `ProxyCommand`. Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
+  `ProxyCommand`, `gh`'s `aliases`. The `gh` entry is #173, which reversed #151's decision to
+  leave it: #151 measured `aliases:`, which runs a shell command but cannot shadow a core one,
+  and judged the channel too narrow to spend an entry on; `http_unix_socket`, on the same
+  respected-key list, re-points `gh`'s HTTP transport at a unix socket the session names and
+  *does* fire on an ordinary core command -- measured, `gh api user` handed a listener
+  `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, which is
+  `own_login()` and so #77's whole provenance rule, and the worker's own `gh repo clone` went
+  the same way. A unix socket is not a network route, so #126's `internal` networks and the
+  egress allow-list never see it. Its other command-bearing keys are already answered by the
+  protected environment (`GH_PAGER=cat`, `GH_PROMPT_DISABLED=1`, and `editor`/`browser` under
+  `TOOL_CONFIG_ENV_PREFIXES`' `GH_`), and `gh` writes itself a fresh default `config.yml` on
+  the next invocation, so the sweep costs a hook's `gh config set` nothing but the reach into
+  the *next* session -- the same line #171 drew for those tools' environment variables.
+  `hosts.yml` beside it survives, the invariant #151 pinned: a credential authenticates the
+  next session rather than steering it, the line `.claude/.credentials.json` sits on, which is
+  what makes this a file-level entry and not a directory-level one.
+  Both git spellings, because git reads `$XDG_CONFIG_HOME/git/config`
   (`~/.config/git/config` here, since `XDG_CONFIG_HOME` is not in `PASSTHROUGH_NAMES` and so is
   not inherited from the worker) *before* `~/.gitconfig`, so sweeping the second alone would leave the
   name git looks at first. That no deployment has a reason to leave one of these in a session
@@ -375,8 +393,8 @@ version, and moves by hand.
   are path components rather than names, since each is nested: `_walk` resolves one component at a
   time and yields the first symlink it meets instead of descending through it, so a `.ssh`
   replaced by a link is unlinked as the plant it is -- the rule `projects/<project>` already had
-  -- and the directories themselves stay, with `gh`'s configuration beside git's and
-  `known_hosts` beside ssh's.
+  -- and the directories themselves stay, with `gh`'s `hosts.yml` beside the config of its
+  own that goes and `known_hosts` beside ssh's.
   A mode is not a defence against the owner: the sweep runs as the account whose home it is
   clearing, so a target still there after the first attempt is tried again with the modes put
   back (`_relax`/`_relax_tree`, the repair `_remove` already made for a workspace tree), `_walk`
@@ -677,8 +695,8 @@ version, and moves by hand.
   `--strict-mcp-config` is unconditional for the reason
   `--permission-prompts none` is (#119): `claude` loads `mcpServers` from the session
   account's `~/.claude.json`, which sits in `$HOME` beside `.claude/`: outside the directory
-  the config sweep walks, and not one of the names the home sweep removes beside it (#137) --
-  claude's own file, and a denylist keeps what it does not name. So it is recreated with each
+  the config sweep walks, and not one of the names the home sweep removes beside it (#137,
+  #151, #173) -- claude's own file, and a denylist keeps what it does not name. So it is recreated with each
   container but shared by every session
   in one -- a server a session plants there is offered to whichever issue runs next. The flag
   names what survives rather than what is removed (only `--mcp-config` servers, which is

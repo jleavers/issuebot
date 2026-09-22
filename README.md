@@ -1063,9 +1063,11 @@ hook that would truncate it again or append a duplicate per session.
   `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` name one outright; `GIT_EXEC_PATH` and
   `GIT_TEMPLATE_DIR` name a directory of them; and `GIT_DIR`/`GIT_WORK_TREE` re-point which
   repository is being operated on. On the `gh` side, `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` both
-  name the directory holding `config.yml`, whose aliases may be shell commands, and `GH_EDITOR`
+  name the directory holding `config.yml`, whose aliases may be shell commands and whose
+  `http_unix_socket` re-points where `gh` sends every request, and `GH_EDITOR`
   and `GH_BROWSER` name commands — so between them they re-point the one tool in the session
-  holding `GH_TOKEN`.
+  holding `GH_TOKEN`. (The file itself is swept from the account's home on the same schedule,
+  #173; these are the variables that would move it somewhere the sweep does not look.)
 
   Whole prefixes rather than a list of those names, because a list is one somebody has to keep
   complete against git's and `gh`'s own manuals. But a prefix covers only the *head* of each
@@ -1144,14 +1146,19 @@ hook that would truncate it again or append a duplicate per session.
   does not carry are the ones the requirements list gives: build an image `FROM` this one, or
   have the hooks and the session call the tool by its full path (a hook can export the
   directory's *name* through this file and the agent can use it).
-- **Nor through `git config --global`.** The session account's `~/.gitconfig`,
-  `~/.config/git/config` and `~/.ssh/config` are swept on the same schedule (#151), so a hook
-  that writes user-level git or ssh config finds it gone before the next login shell — again
+- **Nor through `git config --global` or `gh config set`.** The session account's
+  `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and `~/.config/gh/config.yml` are
+  swept on the same schedule (#151, #173), so a hook
+  that writes user-level git, ssh or `gh` config finds it gone before the next login shell — again
   between two sessions and within one. Commit identity is already handled: set the
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values in `.env` and they reach every session's `git` through
   the environment. Anything else that has to be global belongs in `/etc/gitconfig` or
   `/etc/ssh/ssh_config` in an image built `FROM` this one; a hook can always use
-  `git config --local` inside the clone, which is what the post-clone setup does.
+  `git config --local` inside the clone, which is what the post-clone setup does. `gh` has no
+  system-wide file and needs none: every key it respects that names a command or a transport is
+  already fixed in the session's environment (`GH_PAGER`, `GH_PROMPT_DISABLED`) or held off it
+  (the `GH_` prefix above), and `gh` writes itself a fresh default `config.yml` whenever it
+  finds none, so a hook's `gh config set` still configures the `gh` in its own shell.
 
 ### More than one repository
 
@@ -1372,10 +1379,13 @@ that matters on your host.
   runs at that uid. That is why the sweep runs before each of those scripts as well as before
   each turn — `before_run` would otherwise be the next session's first login shell, and it runs
   before turn 1. The same home holds the config a *tool* the session runs reads, and that is
-  swept with it (#151): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
-  second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
+  swept with it (#151, #173): `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
+  second of them first — `~/.ssh/config`, each of which can name a command (`core.pager`,
   `credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
-  to run. Nothing a deployment needs goes there: the bot's identity is the
+  to run, and `~/.config/gh/config.yml`, which can name one for `gh` (`[aliases]`) and can also
+  re-point where `gh` sends its requests and its `GH_TOKEN` with them (`http_unix_socket`, a
+  unix socket rather than a network route, so the egress proxy never sees it) on an ordinary
+  `gh api` or `gh repo clone`. Nothing a deployment needs goes there: the bot's identity is the
   `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
   entry is the image's system-wide one, the clone's credential helper is written into the clone,
   and global git or ssh config for every session belongs in `/etc/gitconfig` or
@@ -1383,8 +1393,10 @@ that matters on your host.
   home alone: the credential (`.credentials.json`, which rotates its refresh token), the
   transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
   tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-  sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
-  `known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
+  sat in stay too, with whatever else is in them — `gh`'s credential state (`hosts.yml`) beside
+  the config of its own that goes, `known_hosts` beside ssh's — since the sweep names files and
+  never empties a directory; a credential authenticates the next session rather than steering
+  it, which is the line `.credentials.json` sits on too. It is a
   denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
   new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
