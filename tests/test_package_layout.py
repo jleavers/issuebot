@@ -11,11 +11,11 @@ with it. The same failure #211 was about -- reference a session cannot reach -- 
 down, costing budget where #211 cost truncation.
 
 So the structure is pinned here rather than left to hold by habit, and it is pinned as the
-property itself: every module of the package has a section of its own, and the pointer names
-the anchor form so a session knows the sections are there. This is the step before the split
-`LAYOUT_BUDGET` prescribes when it fails -- one document per module under
-`docs/package-layout/` behind an index -- and it is what makes that split mechanical when the
-day comes.
+property itself: every module of the package has a section of its own, the sections are
+spelled the way the anchor rule assumes, and the pointer names that anchor form so a session
+knows the sections are there. This is the step before the split `LAYOUT_BUDGET` prescribes
+when it fails -- one document per module under `docs/package-layout/` behind an index -- and
+it is what makes that split mechanical when the day comes.
 
 Structure, not size: `tests/test_instruction_bounds.py` beside it holds the budget, and says
 in as many words that it pins a size and not this.
@@ -33,6 +33,11 @@ PACKAGE = ROOT / "src" / "issuebot"
 # its backticks and its dot and comes out `issuebotegress`.
 _NOT_SLUG = re.compile(r"[^\w\- ]")
 _CODE_SPAN = re.compile(r"`([^`]+)`")
+# Anchored, because `CLAUDE.md` also says `## Package layout` in prose, in the doc-map entry
+# for this very file. The heading comes first today; a reorder must fail rather than slice.
+_POINTER_HEADING = re.compile(r"^## Package layout$", re.M)
+# The spelling the anchor rule in `CLAUDE.md` assumes of every one of them.
+_HEADING_FORM = re.compile(r"^`issuebot\.[a-z]+`$")
 
 
 def _slug(heading: str) -> str:
@@ -54,22 +59,30 @@ def _sections() -> list[str]:
 
 
 def _modules() -> set[str]:
-    """Every top-level module of the package, as `issuebot.X` spells X."""
+    """Every top-level module of the package, as `issuebot.X` spells X.
+
+    A walk of one directory rather than `git ls-files`, which is the idiom
+    `tests/test_doc_pointers.py` uses beside it: that test reads a whole tree, where this
+    reads a single level, so the nested-worktree hazard its docstring describes cannot arise
+    -- and an untracked `src/issuebot/foo.py` is a module a session can import, so it is one
+    this file should have an entry for. Any directory that is not private counts, whether or
+    not it carries an `__init__.py`, so a namespace subpackage is not quietly exempted from
+    needing a section.
+    """
     return {
         entry.stem if entry.is_file() else entry.name
         for entry in PACKAGE.iterdir()
-        if (entry.is_dir() and (entry / "__init__.py").is_file())
-        or (entry.is_file() and entry.suffix == ".py")
-        if not entry.name.startswith("_")
+        if entry.is_dir() or (entry.is_file() and entry.suffix == ".py")
+        if not entry.name.startswith((".", "_"))
     }
 
 
 def _pointer() -> str:
     """`CLAUDE.md`'s `## Package layout` section, which is the only route to the file."""
-    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    start = text.index("## Package layout")
-    end = text.index("\n## ", start + 1)
-    return text[start:end]
+    heading = _POINTER_HEADING.search((ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+    assert heading, "CLAUDE.md has no `## Package layout` heading; re-anchor this test"
+    text = heading.string
+    return text[heading.start() : text.index("\n## ", heading.end())]
 
 
 def test_every_module_has_a_section_of_its_own() -> None:
@@ -81,23 +94,44 @@ def test_every_module_has_a_section_of_its_own() -> None:
         f"undocumented {sorted(_modules() - set(sections))}, "
         f"documented but gone {sorted(set(sections) - _modules())}. The file opens by "
         "promising every module of issuebot, and a session reads one section rather than the "
-        "whole file, so a module with no `## `issuebot.X`` heading has no entry it can reach "
-        "(#221)"
+        "whole file, so a module with no heading of its own has no entry it can reach (#221)"
+    )
+
+
+def test_every_heading_is_spelled_the_way_the_anchor_rule_assumes() -> None:
+    """`CLAUDE.md` tells every session an anchor is the dotted name with the dot dropped.
+
+    A bare ``## db`` names the same module and satisfies the test above, but GitHub anchors it
+    ``#db``, and the rule the pointer states -- which is all a session has to go on -- would
+    send it to ``#issuebotdb`` and nothing.
+    """
+    wrong = [heading for heading in _headings() if not _HEADING_FORM.match(heading)]
+    assert not wrong, (
+        f"docs/package-layout.md headings {wrong} are not spelled `issuebot.<module>` in "
+        "backticks, so the anchor rule CLAUDE.md gives a session does not reach them (#221)"
     )
 
 
 def test_the_sections_run_in_the_order_the_pointer_lists() -> None:
     """The pointer is read first and the file second; they must not disagree about order."""
-    opening = _pointer().split("\n\n")[1]  # [0] is the heading line itself
-    spans = _CODE_SPAN.findall(opening)
+    spans = _CODE_SPAN.findall(_pointer().split("\n\n")[1])  # [0] is the heading line itself
     assert "issuebot.config" in spans, (
         "CLAUDE.md's package-layout pointer no longer opens its list with `issuebot.config`; "
         "re-anchor this test"
     )
-    listed = [s.removeprefix("issuebot.") for s in spans[spans.index("issuebot.config") :]]
+    modules = _modules()
+    # Only the spans that name a module: the paragraph opens with `src` and `issuebot` and may
+    # end on anything, and a code span added to its closing clause is not a reordering.
+    listed = [
+        name
+        for span in spans[spans.index("issuebot.config") :]
+        if (name := span.removeprefix("issuebot.")) in modules
+    ]
     assert listed == _sections(), (
-        f"CLAUDE.md lists the modules as {listed}, docs/package-layout.md sections them as "
-        f"{_sections()} (#221)"
+        f"CLAUDE.md's pointer lists {listed}; docs/package-layout.md sections them as "
+        f"{_sections()}. The same modules in a different order means one of the two was "
+        "reordered and the other was not; a different set means they disagree about which "
+        "modules there are (#221)"
     )
 
 

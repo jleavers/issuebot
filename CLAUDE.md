@@ -159,10 +159,11 @@ that shape, is [`docs/package-layout.md`](docs/package-layout.md) -- `issuebot.c
 `log`, `pipes`, `invocation`, `dsn`, `egress`, `events`, `github`, `agent`, `orchestrator`,
 `notifications`, `db`, `web` and `cli`, in that order, with the design documents it draws on.
 
-Each module is a `##` heading of its own, so read *one* rather than the file: ~134 KB is
-roughly 33k tokens, and one entry is a fraction of that (#221). The heading is the module's
-dotted name in backticks under a `##`, which is what you search the file for from the working
-tree, and the anchor is that name with the dot dropped, as GitHub slugs it:
+Each module is a `##` heading of its own, so read *one* rather than the file: the whole of it
+is six figures of bytes and tens of thousands of tokens, where one entry is a fraction of
+that (#221). The heading is the module's dotted name in backticks, which is what you search
+the file for from the working tree, and the anchor is that name with the dot dropped, as
+GitHub slugs it --
 [`docs/package-layout.md#issuebotegress`](docs/package-layout.md#issuebotegress),
 `#issuebotorchestrator`, and so on for all fourteen.
 
