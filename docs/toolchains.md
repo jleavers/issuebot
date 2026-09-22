@@ -66,9 +66,9 @@ hooks:
     pg_ctl -D "$PG/data" status >/dev/null 2>&1 \
       || pg_ctl -D "$PG/data" -w -l "$PG/log" \
            -o "-c listen_addresses='' -k '$PG/sock' -c fsync=off" start
-    psql -h "$PG/sock" -d postgres -tAc \
+    psql -h "$PG/sock" -U issuebot -d postgres -tAc \
       "select 1 from pg_database where datname='acme_test'" | grep -q 1 \
-      || createdb -h "$PG/sock" acme_test
+      || createdb -h "$PG/sock" -U issuebot acme_test
     printf 'export ACME_DATABASE_URL=postgresql://issuebot@/acme_test?host=%s\n' \
       "$PG/sock" > .issuebot/env
   after_run: |
@@ -101,6 +101,15 @@ Why it is shaped this way:
   `/workspaces/<repo>-<number>/.issuebot/pg/sock` is comfortably inside.
 - **`--auth=trust`** is fine here: the only way to the server is a socket inside a container
   nobody else is in.
+- **`-U issuebot` on the `psql` and `createdb` lines too, not on `initdb` alone.** The cluster's
+  only role is the one `initdb` names, and the account the hook runs as is not it: libpq
+  defaults the role to the OS user, which is `agent-1` on a pool deployment and `agent`
+  otherwise, so a connection that leaves the flag off dies with `FATAL: role "agent-1" does not
+  exist` while `.issuebot/pg/log` shows a perfectly healthy server — the same shape of failure
+  as the missing database above, one line earlier. Naming the role rather than inheriting it is
+  also what lets the DSN below be a constant: the pool hands consecutive sessions different
+  accounts against this same recipe, so a cluster whose superuser followed `whoami` would need
+  a DSN that did too.
 - **`initdb` refuses to run as root**, and the session runs as an unprivileged session account
   (uid 1011 upwards for a pool member, 1001 for `agent`), so that is one problem the image does
   not have.
