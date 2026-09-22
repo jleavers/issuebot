@@ -442,7 +442,7 @@ jobs:
       # runs, and `~/.ssh/config` names one to `ssh`. And for the one surface in that home that
       # is a program rather than a setting (#186): `gh` dispatches `gh <name>` to an executable
       # under `~/.local/share/gh/extensions/gh-<name>/`, and no install step is needed to put
-      # one there. The profile, gitconfig and extension halves are
+      # one there. The profile, gitconfig and extension arms are
       # two-sided for the reason the MCP proof above is: the same login shell and the same
       # `git` and `gh` are run before the sweep, where the plant must *run*, so a `bash -lc` that
       # stopped sourcing anything, or a `git` or `gh` that stopped reading the home, could not
@@ -491,6 +491,13 @@ jobs:
               printf \"#!/bin/sh\\necho EXTENSION-RAN\\n\" > /home/agent/.local/share/gh/extensions/gh-pwn/gh-pwn
               chmod +x /home/agent/.local/share/gh/extensions/gh-pwn/gh-pwn
               echo id > /home/agent/.local/state/gh/device-id
+              # And a plant on a core command name, which is what the clone depends on gh
+              # refusing: the clone creates the workspace, so it is the one gh of a run that
+              # precedes every sweep, and it is safe because an extension cannot win against a
+              # built-in rather than because anything swept before it.
+              mkdir -p /home/agent/.local/share/gh/extensions/gh-repo
+              printf \"#!/bin/sh\\necho SHADOW-RAN\\n\" > /home/agent/.local/share/gh/extensions/gh-repo/gh-repo
+              chmod +x /home/agent/.local/share/gh/extensions/gh-repo/gh-repo
             "
             # Before the sweep the plant runs, which is what the sweep is for: a hook is
             # `bash -lc`, a login shell, and the home it reads belongs to the account.
@@ -507,6 +514,10 @@ jobs:
             # And for gh, which runs whatever is under its extension directory, installed or
             # merely written there.
             test "$(sudo -n -H -u agent gh pwn)" = EXTENSION-RAN
+            # While the same directory does not reach a core command, which is the property
+            # the unswept clone rests on. Asserted here, before the sweep, where the plant is
+            # still in place and a gh that had started dispatching it would say so.
+            sudo -n -H -u agent gh repo --help | grep -q \"Work with GitHub repositories\"
             # The worker (issuebot, uid 1000) sweeps the account home the way a turn start does.
             test "$(id -u)" = 1000
             /app/.venv/bin/python -c "from issuebot.agent.runas import RunAs; RunAs(\"agent\").sweep_home()"

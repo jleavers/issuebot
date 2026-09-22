@@ -570,6 +570,41 @@ def test_sweep_unlinks_a_symlinked_extension_directory_without_following_it(
         assert (outside / "gh-pwn" / "gh-pwn").read_text() == "keep", depth
 
 
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to answer for its own dispatch")
+def test_a_planted_extension_cannot_shadow_the_core_command_the_clone_runs(
+    tmp_path: Path,
+) -> None:
+    """Why the clone is safe without a sweep in front of it, pinned rather than left in prose.
+
+    `WorkspaceManager._clone` runs `gh repo clone` through `_run_argv`, and the sweep seam is
+    in `_run_script` -- so the clone is the one `gh` of a run that happens before that
+    workspace's first sweep, `after_create` included. What makes that safe is a property of
+    `gh` and not of the sweep: an extension cannot shadow a core command, so a `gh-repo` left
+    in the account's extension directory is never what `gh repo` runs. Measured in the design
+    note and quoted in `TOOL_EXTENSION_SWEEP`'s comment, and asserted here because a `gh` that
+    began letting the plant win would make the clone the one invocation this guarantee does not
+    cover, and nothing else in the suite would notice.
+    """
+    home = tmp_path / "home"
+    extensions = home / ".local" / "share" / "gh" / "extensions"
+    for name in ("gh-repo", "gh-pwn"):
+        (extensions / name).mkdir(parents=True)
+        (extensions / name / name).write_text(f"#!/bin/sh\necho SHADOW-RAN-{name}\n")
+        (extensions / name / name).chmod(0o755)
+    env = {**os.environ, "HOME": str(home)}
+
+    core = subprocess.run(
+        ["gh", "repo", "--help"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert core.returncode == 0, core.stderr
+    assert "SHADOW-RAN" not in core.stdout
+    assert "Work with GitHub repositories" in core.stdout
+    # The control, so the negative above cannot be a `gh` that dispatched nothing at all: the
+    # same directory, an invented name, and the plant runs.
+    invented = subprocess.run(["gh", "pwn"], env=env, capture_output=True, text=True, timeout=30)
+    assert invented.stdout.strip() == "SHADOW-RAN-gh-pwn", invented.stderr
+
+
 def test_sweep_unlinks_a_symlinked_config_directory_without_following_it(tmp_path: Path) -> None:
     """A nested target is walked a component at a time. With `.ssh` replaced by a link, the
     file the sweep would otherwise unlink is outside the home altogether: the link is what the

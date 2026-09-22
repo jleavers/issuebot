@@ -42,8 +42,8 @@ gh pwn
 exits 4 with `gh auth login` advice without one -- where the dispatch itself does not, which is
 the next measurement but one.)
 
-**It has #151's narrow property for `aliases:`, not the `http_unix_socket` one that settled
-#173.** An extension cannot shadow a core command, and no ordinary `gh` command touches the
+**It has #151's narrow property for `aliases:`, not the `http_unix_socket` one #173 is
+weighing.** An extension cannot shadow a core command, and no ordinary `gh` command touches the
 directory at all:
 
 ```text
@@ -84,10 +84,11 @@ SESSION-REPLACED-IT
 ```
 
 **`gh` injects no credential into an extension.** With `GH_TOKEN` unset in the caller and a
-`hosts.yml` in place, the child saw the caller's own environment plus `GH_EXTENSION`,
-`GH_NO_UPDATE_NOTIFIER`, `GH_PAGER` and `GH_PROMPT_DISABLED` — and no `GH_TOKEN`. What the
-measurement is for is the absence rather than the list, which is `gh`'s to grow: an extension
-is a program `gh` hands its argv and its own environment to, and nothing else.
+`hosts.yml` in place, the child saw the caller's own environment — `GH_NO_UPDATE_NOTIFIER`,
+`GH_PAGER` and `GH_PROMPT_DISABLED` among it, which are issuebot's `FIXED_ENVIRONMENT` and not
+`gh`'s doing — plus `GH_EXTENSION`, and no `GH_TOKEN`. What the measurement is for is the
+absence rather than the list, which is `gh`'s to grow: an extension is a program `gh` hands its
+argv and its own environment to, and nothing else.
 
 And the issue's framing holds: this is `gh`'s own lookup and not the shell's. A login shell's
 `PATH` is root's, with no directory of the account's on it.
@@ -176,7 +177,7 @@ the home for somebody else.
   halves of that schedule are what a `gh` invoked by a hook, by the post-clone setup or by the
   session itself sits behind.
 
-## Residuals
+## Residuals, and what has closed since
 
 - **`XDG_DATA_HOME`, through `.issuebot/env` — recorded here, filed as #191, and closed by
   it.** It moves the extension lookup wholesale (measured above) and is not inherited from the
@@ -189,7 +190,7 @@ the home for somebody else.
   weighed against `XDG_DATA_HOME` being the only escape hatch a deployment has for a `gh`
   extension, since `gh` has no system-wide location for one. #191 weighed it that way and
   protected the name (`2026-09-22-session-gh-extension-env-design.md`); the answer for such a
-  deployment is the `PATH` route below, which is the one this note already gives and the one a
+  deployment is the `PATH` route above, which is the one this note already gives and the one a
   session cannot reach. The pin here (`tests/test_agent_runas.py`) asserts both halves, so
   this list's promise fails if either moves.
 

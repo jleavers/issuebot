@@ -624,8 +624,9 @@ hook that would truncate it again or append a duplicate per session.
 - **Nor through `gh extension install`.** `~/.local/share/gh/extensions` is swept on the same
   schedule (#186), so an extension a hook installs is gone before the next login shell and
   before turn 1 — and it needs no install step to be a plant, since `gh` dispatches whatever is
-  written there. `XDG_DATA_HOME`, the one variable that moves that lookup, is a protected name
-  above (#191), so the sweep's guarantee does not rest on a name a hook could rewrite. A
+  written there. `XDG_DATA_HOME`, the one variable besides `HOME` that moves that
+  lookup, is a protected name above (#191), and `HOME` is protected too, so the sweep's
+  guarantee does not rest on a name a hook could rewrite. A
   deployment that wants a `gh` extension for every session takes the `PATH` route that bullet
   describes; a hook that needs one for its own commands can install it into the workspace and
   run it by path.
