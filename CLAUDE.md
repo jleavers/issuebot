@@ -180,6 +180,16 @@ version, and moves by hand.
   keep the child from exiting. The read that crosses the cap is dropped whole, so what comes
   back is at most the limit rather than exactly it. `GhRunner.run` and
   `WorkspaceManager._run_argv` are its two callers.
+- `issuebot.invocation`: `run_hint(subcommand)`, the clause a message names to say how to run
+  `issuebot <subcommand>` *here* (#169), and a leaf module for the reason `issuebot.pipes` is
+  one: `cli`, `orchestrator` and both GitHub adapters print the same remedy. Docker is the
+  standard deployment and inside the image `issuebot` is nobody's command, so there the clause
+  is `docker compose run --rm worker labels ensure` (`COMPOSE_SERVICE`, the README's own step
+  2) and on a host it stays `run issuebot labels ensure`, since that operator may have built no
+  image at all. `CONTAINER_MARKER` (`/etc/issuebot`, the directory the build creates and writes the
+  session-account list inside, root's and absent on a host) is what tells them apart,
+  stat'ed at call time so the suite -- which runs in both -- can point it elsewhere; conftest's
+  `outside_the_container` pins the host wording for every test that says nothing about it.
 - `issuebot.dsn`: the shape of `database.url`, a leaf module because `issuebot.db` imports
   `issuebot.agent` and `agent.scrub` needs the same parser (#105): `parse_url` (a
   `postgresql://`/`postgres://` URL, meaning `urlsplit` takes it, the scheme is PostgreSQL's

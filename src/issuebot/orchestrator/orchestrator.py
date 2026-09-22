@@ -56,6 +56,7 @@ from issuebot.github import (
     fetch_status_summary,
     parse_status_summary,
 )
+from issuebot.invocation import run_hint
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions
 from issuebot.orchestrator.admission import (
@@ -475,7 +476,7 @@ class Orchestrator:
         else:
             if missing:
                 names = ", ".join(missing)
-                problems.append(f"labels missing: {names}; run issuebot labels ensure")
+                problems.append(f"labels missing: {names}; {run_hint('labels ensure')}")
         # The boundary the deployment asked for has to exist before an issue is claimed
         # (#75): a delegation that does not work would fail every run instead.
         if settings.agent.run_as:

@@ -659,6 +659,20 @@ async def test_set_state_with_missing_label_hints_at_labels_ensure() -> None:
     assert "run issuebot labels ensure" in exc.value.message
 
 
+async def test_set_state_hints_at_the_compose_command_inside_the_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The adapter is the worker's, and the worker runs in the image (#169)."""
+    marker = tmp_path / "etc-issuebot"
+    marker.mkdir()
+    monkeypatch.setattr("issuebot.invocation.CONTAINER_MARKER", marker)
+    runner = StubRunner()
+    runner.on(has("issue", "edit"), stderr="'issuebot/in-progress' not found", returncode=1)
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS)
+    assert "docker compose run --rm worker labels ensure" in exc.value.message
+
+
 async def test_set_state_on_missing_issue_does_not_hint_at_labels_ensure() -> None:
     runner = StubRunner()
     runner.on(
