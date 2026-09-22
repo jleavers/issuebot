@@ -330,14 +330,32 @@ to run. Nothing a deployment needs goes there: the bot's identity is the
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
-`/etc/ssh/ssh_config`, which are root's and which no session can write. The sweep leaves the
-rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
-the transcripts beside the memory it removes, `~/.claude.json`, and whatever else claude or a
-tool the session ran keeps there (`gh`'s state, npm's cache). The directories the tool config
-sat in stay too, with whatever else is in them — `gh`'s configuration beside git's,
-`known_hosts` beside ssh's — since the sweep names files and never empties a directory. It is a
-denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
-new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
+`/etc/ssh/ssh_config`, which are root's and which no session can write.
+`gh`'s extension directory is swept on the same schedule (#186), and is the one thing swept
+that is a program rather than a setting: `~/.local/share/gh/extensions` is where
+`gh extension install` puts a program that `gh <name>` runs, and it needs no install step to
+be a plant — a directory and an executable file are dispatched just the same. Here a
+deployment *may* have a use for the directory, which is the one thing that made this a
+question: where no extension is installed the entry costs nothing, but where one is, the
+directory is still the account's to write, so a session can replace the program that
+deployment's own sessions run — the plant then fires on an ordinary command rather than an
+invented one, and swept the deployment gets `gh`'s own `unknown command` instead. So a
+deployment that wants a `gh` extension available to every session installs the program
+root-owned on the session's `PATH` — `/usr/local/bin/<name>` in an image built `FROM` this
+one — and invokes it under its own name: `gh` hands an extension its argv and its own
+environment and no credential of its own, so that is the same program doing the same work,
+from a place no session can write. `gh` has no system-wide extension directory, which is why
+the answer is `PATH` here and `/etc` for git and ssh.
+
+The sweep leaves the rest of the home alone: the credential (`.credentials.json`, which
+rotates its refresh token), the transcripts beside the memory it removes, `~/.claude.json`,
+and whatever else claude or a tool the session ran keeps there (`gh`'s state, npm's cache).
+The directories the tool config sat in stay too, with whatever else is in them — `gh`'s
+configuration beside git's, `known_hosts` beside ssh's, `~/.local/state/gh` beside the
+extension directory — since the sweep names a file or one directory and never empties the one
+above it. It is a denylist of what is loaded or run, not an allowlist of what is kept, so a
+new claude location, a new tool config file or another tool's plug-in directory has to be
+added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
 home is your own. Auto memory is also switched off for the session
 (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
 `setting_sources` says and keyed by repository, so one issue's notes would be the next
