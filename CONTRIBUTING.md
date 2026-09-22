@@ -28,8 +28,10 @@ DATABASE_URL="postgresql://issuebot@$(docker compose port test-db 5432)/issuebot
 docker compose rm -sf test-db        # not `compose down`, which is project-wide
 ```
 
-More on the layout and the day-to-day commands is in [`CLAUDE.md`](CLAUDE.md), which is written
-for an agent working in this repository and is the closest thing to an architecture guide.
+The day-to-day commands are in [`CLAUDE.md`](CLAUDE.md), which is written for an agent working
+in this repository; the architecture guide it points at is
+[`docs/package-layout.md`](docs/package-layout.md), every module and the reasoning behind the
+shape it has.
 
 ## Pull requests
 

@@ -884,7 +884,7 @@ phase), `docs/superpowers/plans/` (one implementation plan per phase).
   Only a run that succeeded, or the blocked escape that ends a chain by handing the issue to a
   human (`_record_escape`, on `applied` or `skipped`), clears it; that second one is what makes
   the documented recovery -- fix the cause, then relabel -- still work
-  ([`docs/operations.md`, "Blocked"](docs/operations.md#blocked)).
+  ([`docs/operations.md`, "Blocked"](operations.md#blocked)).
   `agent.max_issue_cost_usd` (default `0`, off) is the gate's cumulative spend ceiling, the
   bound on an issue relabelled again and again. A budget refusal is never silent, because a
   board that stops moving for an issue with nothing said about it anywhere a human looks is
