@@ -5,7 +5,7 @@ repository registered in one store. It reads `DATABASE_URL` and `ISSUEBOT_WEB_PA
 nothing else -- no workflow file, no GitHub token -- so it can run somewhere the worker does
 not.
 
-![The issuebot dashboard: a worker status line, six hero tiles, a table of running agents, the Kanban board of the five label columns, and thirty-day charts. The data shown is fabricated.](images/dashboard.png)
+![The issuebot dashboard: a worker status line, six hero tiles, a table of running agents, the Kanban board of the five label columns, and thirty-day charts, in the dark theme. The data shown is fabricated.](images/dashboard.png)
 
 The dashboard (`issuebot web`; the compose `web` service publishes it on the host's loopback
 at `ISSUEBOT_WEB_PORT`, default 8080) serves every registered repository under
