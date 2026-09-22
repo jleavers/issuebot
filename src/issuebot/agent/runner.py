@@ -172,7 +172,8 @@ TOOL_CONFIG_ENV_PREFIXES: tuple[str, ...] = ("GIT_", "GH_")
 #   PS4         expanded before every traced command once `xtrace` is on, command substitution
 #               and all -- the first of them inside `/etc/profile`, long before the hook's own
 #               script. `SHELLOPTS=xtrace` with `PS4='$(...)'` was measured running the
-#               substitution; neither name alone does anything, which is why both are here.
+#               substitution. It takes the pair to run anything -- `PS4` is inert without
+#               `xtrace`, and `xtrace` with the default `PS4` only prints -- so both are here.
 #   CDPATH      `PATH`'s rule for directories: `cd sub` in a hook resolves through it, so a
 #               line here sends the hook into a tree of the last session's choosing and the
 #               relative command after the `cd` is that tree's file. `PATH` is protected for

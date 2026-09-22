@@ -54,10 +54,14 @@ workspace belongs to one issue and is bound to one account and sealed `0700` bet
 later session at that uid. Persistence inside the session's privilege domain, as in #101, #137
 and #151 — not an escalation across it, which #75 closed.
 
-**Invariant.** A line in `.issuebot/env` cannot decide what the next session's shell runs. It
-cannot name a file that shell sources, make it evaluate text of the line's choosing around the
-hook's commands, or send the hook's own relative paths into a tree the line chose. What the hook
-wrote is what runs, after `/etc/profile` and the image's `profile.d` entries, which are root's.
+**Invariant.** A line in `.issuebot/env` cannot reach the next session's shell *through the
+variables that shell itself reads*: it cannot name a file `bash` sources, make it evaluate text
+of the line's choosing around the hook's commands, or send the hook's own relative paths into a
+tree the line chose. What the hook wrote is what `bash` runs, after `/etc/profile` and the
+image's `profile.d` entries, which are root's. Stated with that qualifier on purpose: this is a
+bound on `bash`'s own start-up variables and not on everything that can influence a process the
+session's environment reaches -- the dynamic loader's names are the residual below, and the file
+is a denylist throughout.
 
 ## Decision
 
@@ -168,10 +172,26 @@ the spelling that does not touch the home.
   `parse_workspace_env` accepts `[A-Za-z_][A-Za-z0-9_]*` as a key, so the `%%` is a
   `line N: not a variable name` complaint. Recorded — with its own test — so that a later change
   to the key pattern has this consequence written down beside it rather than re-derived.
+- **`PROMPT_COMMAND`.** The best-known "variable that makes `bash` run a command", and out on
+  the measurement rather than by oversight: it is run before each *interactive* prompt, and
+  nothing issuebot runs draws one. Named here so the next reader does not have to re-derive it.
+  `POSIXLY_CORRECT` was measured too, since it is the one name that could have changed which
+  start-up file is read: it makes `bash` skip `BASH_ENV` and does not make it read `ENV`.
 - **`BASH_XTRACEFD`, `PS1`, `PS2`, `IFS`, `GLOBIGNORE`.** Measured or read as behaviour-only:
   they shape output, prompts and word splitting, and none of them names or produces a command.
   Out, by the rule.
-- **Other tooling's variables** — `NODE_OPTIONS`, `LD_PRELOAD` and their kind. `.issuebot/env`
+- **The dynamic loader: `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`.** Named separately from
+  the bullet below rather than folded into it, because the usual reason for excluding another
+  tool's variables does not apply: these reach *every* dynamically linked program the session's
+  environment is handed to, `bash`, `git`, `gh` and the `claude` child included, which is the
+  same set this change is about. They are out because the rule here is about what `bash`
+  reads at start-up, and a loader that runs code out of a `.so` is a different question with a
+  different answer — `LD_LIBRARY_PATH` in particular is something a target repository's build
+  legitimately sets, which `BASH_ENV` never is. Lower reach in practice, since the default
+  image carries no compiler and a session would need a prebuilt object, but not zero. #171 had
+  `LD_PRELOAD` in the bullet below and this note inherited it; separating it is the honest
+  filing, and the decision itself is #187 rather than something settled here.
+- **Other tooling's variables** — `NODE_OPTIONS`, `PYTHONSTARTUP` and their kind. `.issuebot/env`
   is a denylist and has to be: its purpose is handing over what a target repository's tests
   need, which cannot be enumerated in advance. So this bounds the tooling *issuebot itself*
   launches — `bash`, `git`, `gh`, `claude` — and is never a claim that the next session's

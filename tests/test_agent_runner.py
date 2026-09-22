@@ -669,9 +669,18 @@ def test_a_workspace_env_line_cannot_export_a_shell_function(tmp_path: Path) -> 
     (tmp_path / ".issuebot" / "env").write_text(
         "BASH_FUNC_git%%=() { /tmp/theirs/plant.sh; }\nDATABASE_URL=postgresql://issuebot@/db\n"
     )
-    merged, applied = workspace_environment({"PATH": "/usr/bin"}, tmp_path)
+    stream = io.StringIO()
+    configure_logging(level="DEBUG", fmt="json", stream=stream)
+    try:
+        merged, applied = workspace_environment({"PATH": "/usr/bin"}, tmp_path)
+    finally:
+        configure_logging(stream=io.StringIO())
     assert applied == ["DATABASE_URL"]
     assert not [name for name in merged if name.startswith("BASH_FUNC")]
+    records = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    ignored = [r["reason"] for r in records if r["event"] == "workspace_env_ignored"]
+    assert ignored == ["line 1: not a variable name"]
+    assert "plant.sh" not in stream.getvalue()
 
 
 def test_merge_workspace_env_overrides_an_unprotected_name() -> None:

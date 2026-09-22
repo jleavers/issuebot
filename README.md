@@ -1136,8 +1136,9 @@ hook that would truncate it again or append a duplicate per session.
   - `SHELLOPTS` and `BASHOPTS` enable `set -o` and `shopt` options from the environment before
     any start-up file is read, `xtrace` among them — and with `xtrace` on, `PS4` is expanded
     before every traced command, command substitution and all, the first of them inside
-    `/etc/profile`. Neither name does anything without the other, which is why both are
-    protected.
+    `/etc/profile`. It takes the pair: `PS4` is inert without `xtrace`, and `xtrace` with the
+    default `PS4` only prints. So both are protected, `BASHOPTS` with them as the `shopt` half
+    of the same switch.
   - `CDPATH` is `PATH`'s rule for directories: a hook's `cd sub` resolves through it, so a line
     here sends the hook into a tree of the last session's choosing and the relative command
     after the `cd` is that tree's file.
