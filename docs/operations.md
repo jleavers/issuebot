@@ -362,11 +362,12 @@ character-for-character, which is what `gh` itself does to this file on an ordin
 channel is bounded and documented in
 `docs/superpowers/specs/2026-09-22-session-gh-hosts-design.md`: `gh` sends no credential to a
 substituted host, a forged answer needs a certificate authority in the system trust store, which
-is root's, and the egress proxy refuses any host off its allow-list. One thing that note is
-explicit about and this list should be too: `~/.config/gh/config.yml` beside it is **not** swept,
-so the same `git_protocol` written there with a plain `gh config set` still steers the next
-session's clone. `api_host` has no such second position and is closed outright; closing the rest
-of `config.yml` is its own piece of work.
+is root's, and the egress proxy refuses any host off its allow-list. That note was written while
+`~/.config/gh/config.yml` beside it was still a survivor, so it is explicit that the same
+`git_protocol` written there with a plain `gh config set` steered the next session's clone
+whatever this edit did. #173 closed that position too — the file is swept, above — so both are
+shut now. `api_host` never had a second position: top level is inert for it, and this edit
+closes it outright.
 
 The sweep leaves the
 rest of the home alone: the credential (`.credentials.json`, which rotates its refresh token),
@@ -400,15 +401,14 @@ credential state (`hosts.yml`) beside the config of its own that goes, `known_ho
 ssh's, `~/.local/state/gh` beside the extension directory — since the sweep names a file or one
 directory and never empties the one above it; a credential authenticates the next session
 rather than steering it, which is the line `.credentials.json` sits on too. `hosts.yml` is not
-purely credential, though: `gh config set -h <host>` writes there too, and an `api_host` left
-in it re-points `gh`'s API host on an ordinary command. That one is bounded by the egress proxy
-rather than by the sweep — it is a real HTTPS request to a name, so the allow-list sees it,
-where a unix socket would be no route at all — and it is a recorded residual
-(`docs/superpowers/specs/2026-09-22-session-gh-config-design.md`), not something this sweep
-closes. It is a denylist of what is loaded or run, not an allowlist of what is kept, so a
-new claude location, a new tool config file or another tool's plug-in directory has to be
-added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
-home is your own. Auto memory is also switched off for the session
+purely credential, though — `gh config set -h <host>` writes configuration there as well — which
+is why it is the one file the sweep edits rather than keeps whole, above. What survives that
+edit is bounded by the egress proxy rather than by the sweep: a substituted host is a real
+HTTPS request to a name, so the allow-list sees it, where the `http_unix_socket` in the
+`config.yml` beside it would be no route at all. It is a denylist of what is loaded or run, not
+an allowlist of what is kept, so a new claude location, a new tool config file or another
+tool's plug-in directory has to be added to it by hand. Nothing is swept on the host route
+(`agent.run_as` unset), where the home is your own. Auto memory is also switched off for the session
 (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, a fixed entry the workspace env file cannot override), since it is read whatever
 `setting_sources` says and keyed by repository, so one issue's notes would be the next
 session's prompt on the same repository. So a slash command, skill, memory or profile script a
