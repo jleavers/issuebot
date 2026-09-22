@@ -14,9 +14,17 @@ from issuebot.events import Event, PrOpened, StateChanged
 from issuebot.github import Issue, StateLabel
 
 RetryKind = Literal[
-    "continuation", "failure", "escape", "slots", "auth", "github", "preflight", "accounts"
+    "continuation",
+    "failure",
+    "escape",
+    "slots",
+    "auth",
+    "usage",
+    "github",
+    "preflight",
+    "accounts",
 ]
-DispatchHoldKind = Literal["preflight", "auth", "github", "accounts"]
+DispatchHoldKind = Literal["preflight", "auth", "usage", "github", "accounts"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]
 
 CONTINUATION_DELAY_MS = 1_000

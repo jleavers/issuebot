@@ -135,11 +135,12 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
     ".bash_logout",
 )
 
-# The same class again, one tool further out (#151): the config files a *tool* the session runs
-# reads out of the account's home, each of which can name a command to execute. Not shell
-# start-up files, which is why they are a list of their own rather than entries in the one
-# above, but the same residual -- a file the account may write, in a home the container keeps
-# for its lifetime, read by the next session at that uid -- and so the same sweep.
+# The same class again, one tool further out (#151, #173): the config files a *tool* the session
+# runs reads out of the account's home, each of which can name a command to execute -- or, in
+# ``gh``'s case, re-point where the tool sends its credentials. Not shell start-up files, which
+# is why they are a list of their own rather than entries in the one above, but the same
+# residual -- a file the account may write, in a home the container keeps for its lifetime,
+# read by the next session at that uid -- and so the same sweep.
 #   ``.gitconfig`` and ``.config/git/config``: every session runs ``git`` as the account, and
 #   user-level git config names commands (``core.pager``, ``core.editor``, ``core.fsmonitor``,
 #   ``credential.helper``, ``[alias] x = !sh -c ...``, ``diff.<driver>.textconv``). Both
@@ -154,6 +155,28 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 #   installs no ssh client, so nothing issuebot does reads it today; a target repository's hook
 #   or a submodule URL in an image built ``FROM`` this one can, and a name on this list costs
 #   nothing where the file does not exist.
+#   ``.config/gh/config.yml``: ``gh``'s own configuration, added by #173 (spec
+#   ``2026-09-22-session-gh-config-design.md``; the decision it reverses is under Residuals in
+#   #151's own, ``2026-09-18-session-tool-config-design.md``, marked superseded there). #151
+#   left it off on the ground that its command-bearing key is
+#   ``aliases:``, which runs a shell command (``gh pwn`` -> ``GH-ALIAS-RAN``) but cannot shadow
+#   a core command (``gh issue`` still runs the built-in with an ``issue:`` alias in place), so
+#   a plant fires only if a later session happens to invoke the invented subcommand name it
+#   chose -- narrower than git's ``core.pager``, which fires on an ordinary command. That
+#   reasoning held for ``aliases:`` and does not hold for the file. ``http_unix_socket``, one
+#   of the thirteen keys ``gh config list`` prints, re-points ``gh``'s HTTP transport at a
+#   unix socket the planting session names, and it *does* fire on an ordinary core command:
+#   measured, ``gh api user`` handed the socket ``Authorization: token <GH_TOKEN>`` and took a
+#   forged ``{"login": "forged"}`` back, and so did ``gh repo clone`` -- which is the worker's
+#   own clone of the target repository, run at the session's uid under ``agent.run_as``, so the
+#   plant reaches issuebot's own work and not only a later session's. (Not the adapter's
+#   ``own_login()`` and so not #77's provenance rule: ``GhRunner`` spawns ``gh`` from the worker
+#   process with the worker's own ``HOME``, which no session can write.) A unix socket is not a
+#   network route, so #126's ``internal`` networks and the egress allow-list never see it.
+#   Its other command-bearing keys are answered by the environment, which ``.issuebot/env``
+#   cannot override: ``pager`` by ``GH_PAGER=cat`` and ``prompt`` by ``GH_PROMPT_DISABLED=1``
+#   (``FIXED_ENVIRONMENT``, protected), ``editor`` and ``browser`` by the ``GH_`` prefix of
+#   ``TOOL_CONFIG_ENV_PREFIXES`` (#171).
 # No deployment has a reason to leave any of them in a session account's home, which is what
 # makes this a sweep rather than a residual: the session's commit identity comes from the
 # ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` variables (``PASSTHROUGH_PREFIXES``), the workspace's
@@ -161,10 +184,30 @@ SHELL_STARTUP_SWEEP: tuple[str, ...] = (
 # credential helper is ``git config --local`` inside the clone. A deployment that does want
 # global git config for its sessions has ``/etc/gitconfig``, which is root's and outside the
 # session's privilege domain, in the image or in one built ``FROM`` it.
+# ``gh`` has no system-wide file to answer with, and needs none: it runs perfectly well with
+# no ``config.yml`` at all -- measured, an empty home gets none from ``gh --version``,
+# ``gh config get`` or ``gh api``, though each does leave a ``~/.local/state/gh/device-id``,
+# which is state rather than config and which the sweep names nowhere -- and it writes one when
+# it next has config of its own to write, which its ``hosts.yml`` migration is one occasion of.
+# So a hook's ``gh config set`` reaches the rest of its own shell and the sweep costs the
+# account nothing it cannot ask for again. What a hook may hand the *session* is the question
+# #171 settled for the same tools' environment variables, and the answer is the same here: not
+# through a surface the session can write.
 # A denylist like the two above: named paths, and everything else in the home is left alone.
+# ``hosts.yml`` beside this list's fourth entry is the invariant #151 pinned and this change
+# keeps -- it is credential state, which authenticates the next session rather than steering
+# it, the same line ``.claude/.credentials.json`` sits on. It is not inert, and #173's spec
+# named the residual rather than leaving it to be found: ``gh config set -h <host>`` writes
+# there, and the ``api_host`` it can carry re-points ``gh api`` on an ordinary command with no
+# ``config.yml`` in sight (measured; filed as #190). What keeps it off *this* list is that the
+# acceptance bar for this change is precisely that ``hosts.yml`` survives -- so it is kept as a
+# file and edited key-wise instead, which is ``GH_HOSTS_STEERING_KEYS`` below. That the channel
+# was also the weaker of the two is why it could wait for its own change: it is an ordinary
+# HTTPS request to a name, so #126's ``internal`` networks and the allow-listing proxy do see
+# it, where a unix socket is not a route at all.
 # Each is the sequence of its path components, because every one of them is nested and the
-# sweep walks rather than follows -- ``.ssh`` or ``.config`` replaced with a symlink is
-# unlinked as the plant it is, not stepped through to whatever it points at.
+# sweep walks rather than follows -- ``.ssh``, ``.config`` or ``.config/gh`` replaced with a
+# symlink is unlinked as the plant it is, not stepped through to whatever it points at.
 # The clone's *own* ``.git/config`` is the other side of that same line and is deliberately not
 # swept (#180, spec ``2026-09-22-clone-reuse-residual-design.md``): it is the session's file in
 # a workspace that belongs to one issue, the unit of that channel is the clone rather than the
@@ -174,6 +217,7 @@ TOOL_CONFIG_SWEEP: tuple[tuple[str, ...], ...] = (
     (".gitconfig",),
     (".config", "git", "config"),
     (".ssh", "config"),
+    (".config", "gh", "config.yml"),
 )
 
 # The one file the sweep *edits* instead of removing, and the one place it looks inside a file
@@ -280,7 +324,7 @@ GH_HOSTS_MAX_DEPTH = 8
 # puts a program under ``~/.local/share/gh/extensions/gh-<name>/`` and ``gh <name>`` runs it --
 # and, measured on this image's ``gh`` (2.100.0), the install step is not part of the channel:
 # a directory and an executable file written by hand are dispatched just the same, with no
-# manifest, no registry entry and no network. A list of its own rather than a fourth entry in
+# manifest, no registry entry and no network. A list of its own rather than a fifth entry in
 # ``TOOL_CONFIG_SWEEP`` because the two are checked against different things and answer
 # differently: that one names config a tool *reads*, checkable against ``git-config(1)`` and
 # ``ssh_config(5)``, where this is a program the session *wrote*, checkable against
@@ -1061,8 +1105,9 @@ def _replace_gh_hosts(target: Path, stripped: dict, seen: os.stat_result) -> boo
 def _sweep(home: Path) -> bool:
     """Remove, from the account's ``home``, what a prior session could steer the next one with:
     its shell start-up files (``SHELL_STARTUP_SWEEP``), the tool config files that can name a
-    command (``TOOL_CONFIG_SWEEP``), the directory ``gh`` dispatches its extensions from
-    (``TOOL_EXTENSION_SWEEP``) and the loadable config surfaces under ``.claude``
+    command or re-point a tool's transport (``TOOL_CONFIG_SWEEP``), the directory ``gh``
+    dispatches its extensions from (``TOOL_EXTENSION_SWEEP``) and the loadable config surfaces
+    under ``.claude``
     (``CLAUDE_HOME_SWEEP`` and each project's ``CLAUDE_HOME_MEMORY_DIR``).
 
     Keeps the credential and claude's own runtime state -- and everything else in the home,

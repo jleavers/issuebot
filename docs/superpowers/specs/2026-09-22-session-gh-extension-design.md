@@ -176,6 +176,13 @@ the home for somebody else.
   runs before every turn and before every script that opens a login shell (#137), and both
   halves of that schedule are what a `gh` invoked by a hook, by the post-clone setup or by the
   session itself sits behind.
+  The one `gh` that sat outside it was the clone, which creates the workspace and so precedes
+  `after_create`; this note rested that case on a property of `gh` rather than of the sweep --
+  an extension cannot shadow a core command, so a planted `gh-repo` is never what
+  `gh repo clone` runs. Still true and still pinned, but no longer the whole of the argument:
+  #173 added a third call site in `_clone` (`2026-09-22-session-gh-config-design.md`), because
+  `gh repo clone` *does* read `~/.config/gh/config.yml`, and that sweep clears every list, this
+  one included, before the clone runs.
 
 ## Residuals, and what has closed since
 

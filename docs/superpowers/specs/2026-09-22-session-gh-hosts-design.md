@@ -19,11 +19,14 @@ That decision left a residual, and this is it. **`hosts.yml` is not only credent
 and one of the keys it can carry re-points `gh` on an ordinary core command.
 
 **Where #173 stands matters for reading the rest of this, so it is said here rather than in a
-footnote: it has not landed.** PR #189 is open, `~/.config/gh/config.yml` is *not* swept on
-`main` today, and nothing in this change sweeps it. The reproductions below are run in the state
-the issue specifies — a `hosts.yml`, no `config.yml` anywhere — because that isolates what this
-file contributes, which is the question asked. What that state is not is a description of
-`main`, and the section on what this does not close says exactly which half is left over.
+footnote: it had not landed when this was written.** PR #189 was open, `~/.config/gh/config.yml`
+was *not* swept on `main`, and nothing in this change sweeps it. (In the tree this note now
+sits in, #173 sweeps it, so that half is closed too; the two places below that turn on it say
+so.) The reproductions below are run in the state the issue specifies — a `hosts.yml`, no
+`config.yml` anywhere — because that isolates what this file contributes, which is the question
+asked. What
+that state is not is a description of `main`, and the section on what this does not close says
+exactly which half is left over.
 
 ## Reproduction
 
@@ -370,16 +373,17 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   name — but a key `gh` reads from `hosts.yml` without ever advertising it in `gh config --help`
   would be invisible to both. Nothing suggests one exists today; the honest statement is that
   the list is as complete as gh's own documentation of itself.
-- **The top-level half of the same keys, which is #173's and is not on `main`.** `config.yml`
-  is not swept here and PR #189 is still open, so a session can write `gh config set
-  git_protocol ssh` — no `-h` — and the next session's `gh repo clone` fails exactly as it does
-  from `hosts.yml`. Measured: with the key only in `config.yml`, `gh config get -h github.com
-  git_protocol` still reads `ssh`, `gh auth status` reports `Git operations protocol: ssh`, and
-  the clone fails with `cannot run ssh`. **So `git_protocol` is closed by this change only in
-  the position this change owns.** The one key closed outright is `api_host`, the issue's
-  subject, because top level is inert for it — measured, a `config.yml` carrying
-  `api_host: 127.0.0.1` left the request on the real `api.github.com`. Closing the other half is
-  #189's to do and is deliberately not duplicated here.
+- **The top-level half of the same keys, which is #173's and was not on `main` when this was
+  written.** `config.yml` is not swept here and PR #189 was still open, so a session could write
+  `gh config set git_protocol ssh` — no `-h` — and the next session's `gh repo clone` fails
+  exactly as it does from `hosts.yml`. Measured: with the key only in `config.yml`,
+  `gh config get -h github.com git_protocol` still reads `ssh`, `gh auth status` reports
+  `Git operations protocol: ssh`, and the clone fails with `cannot run ssh`. **So
+  `git_protocol` is closed by this change only in the position this change owns.** The one key
+  closed outright is `api_host`, the issue's subject, because top level is inert for it —
+  measured, a `config.yml` carrying `api_host: 127.0.0.1` left the request on the real
+  `api.github.com`. Closing the other half is #189's to do and is deliberately not duplicated
+  here — and in the tree this note now sits in, it is done, so both positions are closed.
 - **A YAML merge key leaves the text in the file, and the sweep reports success.** `<<: *anchor`
   pointing at a mapping of steering keys is not stripped — `_HostsLoader` clears the merge
   resolver with the rest, so the sweep sees a literal `<<` key and nothing to remove. Not a

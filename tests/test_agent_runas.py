@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -50,7 +50,7 @@ from issuebot.agent.runas import (
     anonymous_fd,
 )
 from issuebot.agent.runner import PASSTHROUGH_NAMES, TOOL_CONFIG_ENV_NAMES, ClaudeRunner
-from issuebot.agent.workspace import WorkspaceManager, _top_level_owners
+from issuebot.agent.workspace import HookResult, WorkspaceManager, _top_level_owners
 from issuebot.config import Settings
 from issuebot.config.resolve import resolve_config
 from issuebot.github import Issue
@@ -374,12 +374,24 @@ def _plant_home(home: Path) -> None:
     (home / ".config" / "git" / "config").write_text("[core]\n\tpager = sh -c 'echo poison'\n")
     (home / ".ssh").mkdir()
     (home / ".ssh" / "config").write_text("Host *\n  ProxyCommand sh -c 'echo poison'\n")
-    # `.config` and `.ssh` are other tools' directories as well: `gh`'s config lives beside
-    # git's, and an `.ssh` a deployment gave the account keys in is not the sweep's to empty.
+    # #173: `gh`'s own config, one directory along from git's. Both of the channels that
+    # settle it, since the sweep must take the file whichever key is in it: the `aliases:` entry
+    # #151 measured, and `http_unix_socket`, which re-points `gh`'s transport -- token and all --
+    # on an *ordinary* core command.
     (home / ".config" / "gh").mkdir()
-    # #190: credential state *and* a steering key. The file survives every sweep -- #151 pinned
-    # it and #173 kept it -- while `api_host` in it re-points the next session's `gh` on an
-    # ordinary core command, so this one is edited rather than removed.
+    (home / ".config" / "gh" / "config.yml").write_text(
+        'version: "1"\naliases:\n    aliaspwn: "!echo poison"\nhttp_unix_socket: /tmp/poison.sock\n'
+    )
+    # `.config` and `.ssh` are other tools' directories as well, and `hosts.yml` is the
+    # neighbour #151 pinned and #173 keeps: credential state, which authenticates the next
+    # session rather than steering it, on the same line as `.claude/.credentials.json`.
+    # It is not *only* that (#190) -- `gh config set -h <host>` writes the steering keys here,
+    # `api_host` among them re-pointing the next session's `gh` on an ordinary core command --
+    # so this one file is edited rather than removed, and the plant carries both halves.
+    # The credential half is what keeps the end-to-end proofs below honest: a tokenless
+    # `hosts.yml` makes every `gh` run in this home fail the multi-account migration before it
+    # reads anything, which would have them passing because `gh` never started rather than
+    # because the sweep worked.
     (home / ".config" / "gh" / "hosts.yml").write_text(GH_HOSTS_PLANT)
     (home / ".ssh" / "known_hosts").write_text("github.com ssh-ed25519 AAAA\n")
     # What the sweep names nothing of, and must therefore leave: claude's own `.claude.json`
@@ -497,35 +509,49 @@ def test_sweep_unlinks_a_symlinked_start_up_file_without_following_it(tmp_path: 
 
 
 def test_sweep_removes_the_tool_config_files_and_keeps_their_neighbours(tmp_path: Path) -> None:
-    """#151: `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config` each name a command for
-    a tool the session runs, so each is a plant the next session at that uid would execute.
-    Still a denylist: the directories they sit in belong to other tools too, and what the sweep
-    does not name stays."""
+    """#151 and #173: `~/.gitconfig`, `~/.config/git/config`, `~/.ssh/config` and
+    `~/.config/gh/config.yml` each steer a tool the session runs -- a command for the first
+    three, and for `gh` a command or the transport its token goes over -- so each is a plant the
+    next session at that uid would be subject to. Still a denylist: the directories they sit in
+    belong to other tools too, `~/.config/gh` to its own `hosts.yml`, and what the sweep does
+    not name stays."""
     home = tmp_path / "home"
     _plant_home(home)
     _sweep(home)
     for parts in TOOL_CONFIG_SWEEP:
         assert not home.joinpath(*parts).exists(), parts
+    # Named as well as iterated: the loop above is over the list under test, so it would go on
+    # passing if an entry were dropped. The literal is what makes this docstring true; the
+    # pinning test below is what makes dropping one a deliberate edit.
+    assert not (home / ".config" / "gh" / "config.yml").exists()
+    assert not (home / ".gitconfig").exists()
     assert (home / ".config" / "gh" / "hosts.yml").exists()
     assert (home / ".ssh" / "known_hosts").exists()
     assert (home / ".config" / "git").is_dir()
+    assert (home / ".config" / "gh").is_dir()
     assert (home / ".ssh").is_dir()
 
 
-def test_the_tool_config_list_names_both_spellings_git_reads_and_ssh_config() -> None:
+def test_the_tool_config_list_names_the_paths_git_ssh_and_gh_read() -> None:
     """Pinned like the two lists above. `git` reads `$XDG_CONFIG_HOME/git/config` -- which is
     `~/.config/git/config`, since `XDG_CONFIG_HOME` never reaches a session -- *before*
     `~/.gitconfig`, so a sweep naming only the second would leave the channel open at the name
-    git looks at first. Dropping either has to be a deliberate edit."""
+    git looks at first. `gh`'s own `config.yml` is the fourth (#173). Dropping any of them has
+    to be a deliberate edit."""
     assert set(TOOL_CONFIG_SWEEP) >= {
         (".gitconfig",),
         (".config", "git", "config"),
         (".ssh", "config"),
+        (".config", "gh", "config.yml"),
     }
     # The sweep names files, never the directories other tools share with them: `~/.config`
-    # holds `gh`'s configuration and `~/.ssh` may hold keys a deployment put there.
+    # holds `gh`'s state as well as its config and `~/.ssh` may hold keys a deployment put
+    # there. `~/.config/gh` in particular is the directory #151 pinned as a survivor, and #173
+    # takes the file inside it without taking the directory or `hosts.yml` beside it.
     assert (".config",) not in TOOL_CONFIG_SWEEP
     assert (".ssh",) not in TOOL_CONFIG_SWEEP
+    assert (".config", "gh") not in TOOL_CONFIG_SWEEP
+    assert (".config", "gh", "hosts.yml") not in TOOL_CONFIG_SWEEP
     # `XDG_CONFIG_HOME` is not passed through, which is what makes the second entry the path
     # git actually reads; a change there would need a third spelling here.
     assert "XDG_CONFIG_HOME" not in PASSTHROUGH_NAMES
@@ -627,8 +653,9 @@ def test_the_hosts_rewrite_declines_a_file_that_moved_under_it(tmp_path: Path) -
     planted.write_text(written_by_gh)
     _replace_gh_hosts(planted, {"github.com": {"oauth_token": "stale"}}, seen)
     assert planted.read_text() == written_by_gh
-    # And nothing of the abandoned edit is left beside it.
-    assert sorted(entry.name for entry in planted.parent.iterdir()) == ["hosts.yml"]
+    # And nothing of the abandoned edit is left beside it -- only what `_plant_home` put there,
+    # `config.yml` included, since this drives the rewrite at its seam and runs no sweep.
+    assert sorted(entry.name for entry in planted.parent.iterdir()) == ["config.yml", "hosts.yml"]
 
 
 def test_sweep_strips_the_steering_keys_from_every_host_entry(tmp_path: Path) -> None:
@@ -1035,8 +1062,9 @@ def test_sweep_does_not_walk_the_tree_a_symlinked_target_points_at(tmp_path: Pat
 
 
 def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> None:
-    """The ordinary case: nothing under `.config` or `.ssh` at all. Best-effort, as the rest of
-    the sweep is -- a missing component is not a failure, and nothing beside it is touched."""
+    """The ordinary case: a home holding `gh`'s directory and none of the swept files.
+    Best-effort, as the rest of the sweep is -- a missing component is not a failure, and
+    nothing beside it is touched."""
     home = tmp_path / "home"
     (home / ".config" / "gh").mkdir(parents=True)
     _sweep(home)
@@ -1046,6 +1074,12 @@ def test_sweep_leaves_a_home_that_never_held_the_tool_config(tmp_path: Path) -> 
     # component that is not there yields no target at all.
     assert _walk(home, (".ssh", "config")) is None
     assert _walk(home, (".config", "git", "config")) is None
+    # And the entry whose *directory* is right there is the other half of `_walk`'s contract:
+    # it never resolves the final component, so it yields the path whether or not the file is
+    # there and leaves `_sweep` to unlink it -- which is a no-op here, as the `gh` directory
+    # surviving above shows. `None` is reserved for a missing *intermediate*.
+    assert _walk(home, (".config", "gh", "config.yml")) == home / ".config" / "gh" / "config.yml"
+    assert not (home / ".config" / "gh" / "config.yml").exists()
 
 
 def test_walk_stops_at_a_symlink_at_any_depth(tmp_path: Path) -> None:
@@ -1540,6 +1574,128 @@ async def test_a_planted_gitconfig_alias_does_not_run_for_the_next_sessions_git(
     assert unswept.stdout_tail.splitlines() == ["PLANTED-GITCONFIG-ALIAS-RAN", "hook-ran"]
 
 
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to read the planted config")
+async def test_a_planted_gh_alias_does_not_run_while_hosts_yml_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#173, the invariant this issue asks for, and it is two claims in one sentence: a session
+    leaves an ``aliases:`` entry in ``~/.config/gh/config.yml``, the next session's ``gh`` does
+    not run it, **and** ``~/.config/gh/hosts.yml`` beside it is still there -- which is what
+    #151 pinned when it left the directory alone, and what makes this a file-level decision.
+
+    Two-sided like the ``~/.gitconfig`` proof above, so it cannot pass against a ``gh`` that was
+    never going to read the file. The assertion after the sweep is about what the file *says*
+    rather than about whether it exists, because ``gh`` writes one of its own when it next has
+    config to write and the ``hosts.yml`` migration here is such an occasion: what has to be
+    gone is the plant, not the file.
+    """
+    plant = 'version: "1"\naliases:\n    aliaspwn: "!echo PLANTED-GH-ALIAS-RAN"\n'
+    gh_dir = tmp_path / "home" / ".config" / "gh"
+    home = tmp_path / "home"
+    _plant_home(home)
+    (gh_dir / "config.yml").write_text(plant)
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            # `gh aliaspwn` is the alias if the plant is still there, and an unknown
+            # subcommand if it is not. Named `aliaspwn` and not `pwn` because #186's extension
+            # plant answers `gh pwn`, and two plants on one name would leave whichever of them
+            # `gh` resolved proving the other nothing. The `git_protocol` line is a liveness
+            # probe, and it is what keeps the swept half honest: without it a `gh` that failed
+            # to start -- for a reason having nothing to do with the sweep -- would print
+            # nothing and read as a pass.
+            "hooks": {
+                "before_run": "gh aliaspwn 2>/dev/null; echo live=$(gh config get git_protocol)"
+            },
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    # `gh` ran and answered from its own defaults; the alias it would have run is not there.
+    assert result.stdout_tail.splitlines() == ["live=https"]
+    # The plant is gone, whether or not `gh` has since written its own default back.
+    config = gh_dir / "config.yml"
+    assert "PLANTED-GH-ALIAS-RAN" not in (config.read_text() if config.exists() else "")
+    # And the credential state beside it -- the neighbour #151 pinned -- survives. Asked of
+    # the token rather than of the bytes: `gh` rewrote the file on its way past, adding the
+    # `users:` block of its own multi-account format, which is the sweep leaving it to `gh`.
+    assert "gho_KEEPTHISCREDENTIAL0123456789012345" in (gh_dir / "hosts.yml").read_text()
+
+    # Planted again, and this time not swept: the alias runs, which is what the sweep prevents.
+    (gh_dir / "config.yml").write_text(plant)
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == ["PLANTED-GH-ALIAS-RAN", "live=https"]
+
+
+@pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to read the planted config")
+async def test_a_planted_gh_unix_socket_does_not_reach_the_next_sessions_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#173's other half, and the one that settles the decision. ``aliases:`` cannot shadow a
+    core command, so a planted alias waits for a later session to invoke an invented subcommand
+    name; ``http_unix_socket`` re-points ``gh``'s HTTP transport on *every* command, which hands
+    ``GH_TOKEN`` to a listener the session chose and lets it forge the answer. That reaches every
+    ``gh`` the session or a hook runs, and ``gh repo clone`` -- the worker's own clone of the
+    target repository, run at the session's uid. Not the adapter's ``own_login()`` and so not
+    #77's provenance rule: ``GhRunner`` spawns ``gh`` from the worker process with the worker's
+    own ``HOME``. Nor is a unix socket a network route, so #126's allow-listing proxy never
+    sees it.
+
+    Asked hermetically, through ``gh`` itself: ``gh config get`` resolves the key and touches
+    nothing, so this needs no listener and no network. Two-sided like the proofs above.
+    """
+    plant = 'version: "1"\nhttp_unix_socket: /tmp/issuebot-173-poison.sock\n'
+    home = tmp_path / "home"
+    _plant_home(home)
+    config = home / ".config" / "gh" / "config.yml"
+    config.write_text(plant)
+    _account_home(monkeypatch, home)
+    monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+            # Prints the resolved value, or an empty one once there is no plant to resolve --
+            # with the same liveness probe beside it, since an empty value and a `gh` that
+            # never started look identical from here.
+            "hooks": {
+                "before_run": (
+                    "echo socket=$(gh config get http_unix_socket)"
+                    "; echo live=$(gh config get git_protocol)"
+                )
+            },
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    workspace = tmp_path / "workspaces" / "example-42"
+    workspace.mkdir(parents=True)
+
+    result = await manager.run_hook("before_run", workspace)
+    assert result is not None and result.ok, result.summary
+    assert result.stdout_tail.splitlines() == ["socket=", "live=https"]
+
+    # Planted again and not swept: `gh` resolves it, which is the transport the sweep prevents.
+    config.write_text(plant)
+    monkeypatch.setattr(manager, "sweep_agent_home", _no_sweep)
+    unswept = await manager.run_hook("before_run", workspace)
+    assert unswept is not None and unswept.ok, unswept.summary
+    assert unswept.stdout_tail.splitlines() == [
+        "socket=/tmp/issuebot-173-poison.sock",
+        "live=https",
+    ]
+
+
 @pytest.mark.skipif(shutil.which("gh") is None, reason="needs gh to dispatch the plant")
 async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1559,15 +1715,13 @@ async def test_a_planted_gh_extension_does_not_run_for_the_next_sessions_gh(
     plant = "#!/bin/sh\necho PLANTED-GH-EXTENSION-RAN\n"
     (extension / "gh-pwn").write_text(plant)
     (extension / "gh-pwn").chmod(0o755)
-    # A well-formed `hosts.yml` over the marker `_plant_home` leaves: the real `gh` refuses to
-    # run at all against a host entry it cannot migrate ("cowardly refusing to continue"), and
-    # a `gh` that never reached its dispatch would pass the swept half for the wrong reason.
-    # The `oauth_token` key is what it refuses without (measured: it is the key it names), and
-    # the value is deliberately not token-shaped -- dispatch precedes authentication, so nothing
-    # here is a credential and no request is made.
-    (home / ".config" / "gh" / "hosts.yml").write_text(
-        "github.com:\n    oauth_token: placeholder-not-a-token\n    user: nobody\n"
-    )
+    # `_plant_home` already leaves a well-formed `hosts.yml`, which this test needs and does
+    # not override: the real `gh` refuses to run at all against a host entry it cannot migrate
+    # ("cowardly refusing to continue"), and a `gh` that never reached its dispatch would pass
+    # the swept half for the wrong reason. The `oauth_token` key is what it refuses without
+    # (measured: it is the key it names). Its value is token-*shaped* since #190, which needs a
+    # keep-marker its own edit has to carry through, but it is a sentinel and not a credential,
+    # and dispatch precedes authentication either way, so no request is made.
     _account_home(monkeypatch, home)
     monkeypatch.setattr("issuebot.agent.workspace.RunAs", lambda user: RunAs(user, sudo=FAKE_SUDO))
     cfg = Settings.model_validate(
@@ -1629,6 +1783,56 @@ async def test_sweep_agent_home_warns_when_the_delegation_fails(
     assert [(entry["event"], entry["log_level"], entry["user"]) for entry in logs] == [
         ("claude_home_sweep_failed", "warning", ME)
     ]
+
+
+async def test_the_clone_is_swept_before_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clone is the *earliest* thing a run does at the session's uid -- before the
+    post-clone setup, whose sweep CLAUDE.md calls the load-bearing one under a pool -- and
+    until #173 it was the one command that took no sweep at all. The reasoning was #137's:
+    ``_run_argv``'s other caller is ``gh`` as an argv, which sources no shell start-up file.
+    True of that list and not of the other two, because ``gh repo clone`` reads
+    ``~/.config/gh/config.yml`` and shells out to ``git clone``, which reads ``~/.gitconfig``.
+    So a plant the previous session at this account left was live for exactly one command, and
+    it was the one carrying ``GH_TOKEN`` and writing the tree the session then works in.
+
+    Pinned separately from the hook ordering in ``tests/test_agent_session.py`` because the two
+    call sites are two, and the risk this closes is precisely that they drift apart.
+    """
+    order: list[str] = []
+
+    async def record_sweep() -> None:
+        order.append("sweep")
+
+    async def record_spawn(name: str, argv: Sequence[str], workspace: Path) -> HookResult:
+        order.append(f"{name}:{argv[0]}")
+        return HookResult(
+            name=name,
+            returncode=0,
+            timed_out=False,
+            duration_ms=1,
+            stdout_tail="",
+            stderr_tail="",
+        )
+
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path / "workspaces")},
+            "agent": {"run_as": ME},
+        }
+    )
+    manager = WorkspaceManager(cfg, gh=object(), environ=base_env())
+    monkeypatch.setattr(manager, "sweep_agent_home", record_sweep)
+    monkeypatch.setattr(manager, "_run_argv", record_spawn)
+    path = tmp_path / "workspaces" / "example-42"
+    path.mkdir(parents=True)
+    (path / ".git").mkdir()
+
+    await manager._clone(path)
+
+    assert order == ["sweep", "clone:gh"]
 
 
 async def test_workspace_creation_and_removal_run_as_the_account(

@@ -203,9 +203,10 @@ def test_ci_proves_a_planted_shell_profile_does_not_run_for_the_next_sessions_ho
     assert 'sudo -n -H -u agent bash -lc "claude --version"' in CI
 
 
-def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_session() -> None:
-    """#151: the same home again, one tool further out. `git` runs in every session and reads
-    two user-level config files, either of which can name a command; `ssh` reads one. Proved in
+def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() -> None:
+    """#151 and #173: the same home again, one tool further out. `git` runs in every session and
+    reads two user-level config files, either of which can name a command; `ssh` reads one; and
+    `gh`, which every session and issuebot itself run, reads `config.yml`. Proved in
     the image and two-sided like the profile half above -- the same `git` runs before the
     sweep, where the alias has to *run*, so a `git` that stopped reading the account home could
     not pass this as a no-op -- and the neighbours in those directories have to survive it,
@@ -222,9 +223,76 @@ def test_ci_proves_a_planted_git_or_ssh_config_does_not_survive_to_the_next_sess
     assert "! sudo -n -H -u agent git -C / pwnxdg 2>/dev/null" in CI
     for gone in (".gitconfig", ".config/git/config", ".ssh/config"):
         assert f"test ! -e /home/agent/{gone}" in CI, gone
-    # The directories those files sat in are other tools' too.
+    # And `gh`'s own config (#173), which #151 pinned as a survivor. Asked as "the plant is
+    # gone" rather than "the file is gone": `gh` writes itself a `config.yml` when it next has
+    # config of its own to write, and the `hosts.yml` migration in that home is one occasion.
+    # The alias is named `aliaspwn` and not `pwn` because #186's extension plant answers
+    # `gh pwn` in the same step, and two plants on one name would leave whichever of them `gh`
+    # resolved proving the other nothing.
+    assert (
+        r"printf \"aliases:\\n    aliaspwn: \\047!echo GH-ALIAS-RAN\\047\\n\" "
+        "> /home/agent/.config/gh/config.yml"
+    ) in CI
+    # The planted hosts.yml carries a token and a user, and that is load-bearing rather than
+    # decorative: without either, every gh in that home fails its multi-account migration
+    # before reaching the alias or the extension, so the pre-sweep lines below would fail and
+    # the post-sweep ones would pass for a reason that is not the sweep. One file serves all
+    # three gh arms since #190, whose steering keys sit between these two and the redirect --
+    # they are that change's to pin, so this skips over them with `in` on either end rather
+    # than restating them. One literal and not two, so what is pinned is that the keys this
+    # test rests on and the file they are written into are the same `printf`.
+    prefix = (
+        r"printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n"
+        r"    user: nobody\\n"
+    )
+    redirect = r"\" > /home/agent/.config/gh/hosts.yml"
+    line = next((ln for ln in CI.split("\n") if prefix in ln), None)
+    assert line is not None, "the planted hosts.yml printf is not in the CI step"
+    assert line.endswith(redirect), line
+    assert (
+        'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN'
+    ) in CI
+    assert "! sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn 2>/dev/null" in CI
+    assert "! grep -q GH-ALIAS-RAN /home/agent/.config/gh/config.yml 2>/dev/null" in CI
+    # The directories those files sat in are other tools' too -- and `hosts.yml`, `gh`'s
+    # credential state, is the neighbour #151 pinned and #173 keeps.
     assert "test -f /home/agent/.config/gh/hosts.yml" in CI
     assert "test -f /home/agent/.ssh/known_hosts" in CI
+
+
+def test_the_sweep_steps_outer_script_carries_no_single_quote() -> None:
+    """The sweep step is one ``bash -c \'<script>\'`` argument written without the ``\'"\'"\'``
+    idiom other steps use, so a single quote anywhere inside it -- in a command, in a YAML
+    value it writes, or in an English possessive in a comment -- ends that quoting and splits
+    the command, failing the job in a way that reads like a docker error rather than like the
+    typo it is. The file says so in a comment above the step; this is the same rule as a check,
+    because #173 added a line to that step whose whole point was writing a YAML value ``gh``
+    quotes with apostrophes (spelled ``\\047`` for that reason).
+
+    Backticks go with it. They are harmless at the outer level, where the single quotes make
+    them literal, but the step nests a second ``bash -c "<inner>"`` whose double quotes do
+    *not*, so a backtick in a comment inside one would be command-substituted by the
+    container\'s shell before ``sudo`` ever ran.
+    """
+    lines = CI.split("\n")
+    opens = [i for i, line in enumerate(lines) if line.rstrip().endswith("-c '")]
+    scripts = []
+    for index in opens:
+        close = next(i for i in range(index + 1, len(lines)) if lines[i].strip() == "'")
+        scripts.append(lines[index + 1 : close])
+    sweep = next(s for s in scripts if any("sweep_home()" in line for line in s))
+    assert not [line for line in sweep if "'" in line], sweep
+
+    nested, quoted = [], False
+    for line in sweep:
+        if line.rstrip().endswith('bash -c "'):
+            quoted = True
+        elif quoted and line.strip() == '"':
+            quoted = False
+        elif quoted:
+            nested.append(line)
+    assert nested, "the nested bash -c blocks were not found"
+    assert not [line for line in nested if "`" in line], nested
 
 
 def test_ci_proves_a_planted_gh_api_host_does_not_survive_to_the_next_session() -> None:

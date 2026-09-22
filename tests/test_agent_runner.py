@@ -36,14 +36,17 @@ from issuebot.agent.runner import (
     StreamParser,
     TurnEvent,
     TurnResult,
+    UsageLimit,
     agent_environment,
     classify_result,
     claude_auth_status,
     claude_md_allowlist,
     describe_claude_auth,
     is_auth_failure,
+    is_usage_limit,
     merge_workspace_env,
     parse_claude_version,
+    parse_usage_limit,
     parse_workspace_env,
     read_workspace_env,
     settings_for_labels,
@@ -589,8 +592,9 @@ def test_merge_workspace_env_refuses_the_agents_own_configuration(key: str) -> N
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         # The tails of git's and gh's own precedence chains, whose heads are covered by the
-        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` (#151) removes from the
-        # home -- so these are the whole of what is left of each chain. Protecting a head and
+        # prefixes above and whose config rung `TOOL_CONFIG_SWEEP` removes from the home --
+        # git's and ssh's since #151, gh's `config.yml` since #173 -- so these are the whole of
+        # what is left of each chain. Protecting a head and
         # leaving its tail closes nothing.
         "SSH_ASKPASS",  # GIT_ASKPASS -> core.askPass -> this
         "SSH_ASKPASS_REQUIRE",
@@ -1586,6 +1590,119 @@ def test_parser_shrugs_off_a_rate_limit_event_it_cannot_read(info: object) -> No
     assert event.message_type == "rate_limit_event"
     assert event.rate_limits is None
     assert parser.rate_limits is None
+
+
+# --- a spent usage window (#173's incident, 2026-09-22) -----------------------------------
+
+# Copied from a real refused turn: run 20260922T121334Z-881640, issue #173. `resetsAt` is
+# 12:30 UTC that day, which is what claude's own sentence in the result line below says.
+REJECTED_LINE = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "rejected",
+        "resetsAt": 1790080200,
+        "rateLimitType": "five_hour",
+        "unifiedWindows": {
+            "five_hour": {"utilization": 1, "resetsAt": 1790080200},
+            "seven_day": {"utilization": 0.63, "resetsAt": 1790312400},
+        },
+    },
+}
+REFUSED_RESULT = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": True,
+    "result": "You've hit your session limit \u00b7 resets 12:30pm (UTC)",
+    "terminal_reason": "api_error",
+    "num_turns": 1,
+}
+USAGE_RESET = datetime(2026, 9, 22, 12, 30, tzinfo=UTC)
+
+
+def test_parse_usage_limit_reads_a_real_refusal() -> None:
+    limit = parse_usage_limit(REJECTED_LINE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    assert limit == UsageLimit(window="five_hour", resets_at=USAGE_RESET)
+
+
+def test_parse_usage_limit_falls_back_to_the_window_then_to_now() -> None:
+    """A refusal has to produce *some* reset: waiting no time is what burns the chain."""
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    without_top_level = {
+        "rate_limit_info": {
+            "status": "rejected",
+            "rateLimitType": "five_hour",
+            "unifiedWindows": {"five_hour": {"resetsAt": 1790080200}},
+        }
+    }
+    assert parse_usage_limit(without_top_level, at=at) == UsageLimit(
+        window="five_hour", resets_at=USAGE_RESET
+    )
+    bare = {"rate_limit_info": {"status": "rejected"}}
+    assert parse_usage_limit(bare, at=at) == UsageLimit(window="unknown", resets_at=at)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        None,
+        "not a mapping",
+        {},
+        {"status": "allowed", "resetsAt": 1790080200},
+        {"status": None},
+    ],
+)
+def test_parse_usage_limit_reads_no_refusal_from_anything_else(info: object) -> None:
+    """A reading is not a refusal: only `status: rejected` is claude declining to serve."""
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    assert parse_usage_limit({"rate_limit_info": info}, at=at) is None
+
+
+def test_the_parser_keeps_a_refusal_beside_the_windows() -> None:
+    parser = StreamParser(turn_number=1, expected_session_id="x")
+    [event] = parser.feed(json.dumps(REJECTED_LINE))
+    assert event.kind == "rate_limits"
+    assert parser.usage_limit == UsageLimit(window="five_hour", resets_at=USAGE_RESET)
+    assert parser.rate_limits is not None
+    assert parser.rate_limits.five_hour == RateLimitWindow(utilization=1.0, resets_at=USAGE_RESET)
+
+
+def test_a_refused_turn_is_usage_limited_and_not_a_failed_task() -> None:
+    """The whole point: `turn_failed` here spends `agent.max_attempts` on the account's
+    window, escalates the issue to a human and tells them nothing they can act on."""
+    category, error = classify_result(
+        REFUSED_RESULT,
+        1,
+        "",
+        usage_limit=UsageLimit(window="five_hour", resets_at=USAGE_RESET),
+    )
+    assert category == "usage_limited"
+    assert error is not None and "session limit" in error
+
+
+def test_a_refused_turn_is_usage_limited_on_claudes_words_alone() -> None:
+    """The backstop for a turn killed before the `rate_limit_event` line arrived."""
+    category, _ = classify_result(REFUSED_RESULT, 1, "")
+    assert category == "usage_limited"
+
+
+def test_a_usage_limit_outranks_the_credential_markers() -> None:
+    """A refusal is structured; an auth verdict is read out of prose. Reading this one as
+    `auth_failed` would hold dispatch for a probe that will never report the fault."""
+    result = dict(REFUSED_RESULT, result="rate limit exceeded: oauth token is invalid")
+    category, _ = classify_result(result, 1, "")
+    assert category == "usage_limited"
+
+
+def test_the_agents_own_final_message_about_limits_is_not_a_usage_limit() -> None:
+    """The status-0 case is the agent talking, exactly as it is for the credential markers."""
+    ok = {"type": "result", "subtype": "success", "is_error": False, "result": "the usage limit"}
+    assert classify_result(ok, 0, "") == (None, None)
+
+
+def test_is_usage_limit_reads_claudes_spellings() -> None:
+    assert is_usage_limit("You've hit your session limit \u00b7 resets 12:30pm (UTC)")
+    assert is_usage_limit(None, "", "API Error: rate_limit_error")
+    assert not is_usage_limit(None, "", "everything is fine")
 
 
 def test_parser_keeps_the_latest_rate_limit_reading() -> None:
