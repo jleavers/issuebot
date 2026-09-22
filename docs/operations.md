@@ -211,8 +211,8 @@ error (see [What a session may reach](../README.md#what-a-session-may-reach)). A
 The enforced boundary is the container, its **network**, and inside it the uid:
 the session (`claude -p`, every hook, the clone) runs as a session account — by default the
 pool the image built, `agent-1` .. `agent-N` — a different account from the worker
-(`issuebot`, uid 1000) that supervises and credentials it, and -- with a pool, see "One
-account per concurrent session" under step 2 -- at a different uid from every other session
+(`issuebot`, uid 1000) that supervises and credentials it, and -- with a pool, see [One
+account per concurrent session](../README.md#one-account-per-concurrent-session) -- at a different uid from every other session
 running beside it. So the session runs
 with no permission prompts and may do as it likes at its own uid, but the worker's code
 (`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
