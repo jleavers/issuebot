@@ -13,7 +13,7 @@ It is a bespoke version of [openai/symphony](https://github.com/openai/symphony)
 Claude instead of Codex and GitHub instead of Linear, with Slack notifications and a web
 dashboard added.
 
-![The issuebot dashboard: a worker status line, six hero tiles (issues closed, agents run, cost, tokens, usage limits, activity), a table of running agents, the Kanban board of the five label columns, and thirty-day charts of issues closed and agent runs per day. The data shown is fabricated.](docs/images/dashboard.png)
+![The issuebot dashboard: a worker status line, six hero tiles (issues closed, agents run, cost, tokens, usage limits, activity), a table of running agents, the Kanban board of the five label columns, and thirty-day charts of issues closed and agent runs per day, in the dashboard's dark theme. The data shown is fabricated.](docs/images/dashboard.png)
 
 ## Contents
 

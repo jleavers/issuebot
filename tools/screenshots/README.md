@@ -40,6 +40,12 @@ docker compose rm -sf test-db
 `capture.py` drives `seed.py` itself for each of the four journey stages, so step 1 is the only
 seeding you do by hand.
 
+The dashboard has two themes and the committed images are the **dark** one; `--theme light`
+captures the other. The theme is not only the browser's: the caption strip under each GIF frame
+is drawn rather than rendered, so `PALETTES` in `capture.py` carries `app.css`'s own `--bg`,
+`--ink`, `--muted` and `--line` for each. A change to those tokens wants a change here, or the
+strip stops matching the board above it.
+
 ## The size limit is the constraint
 
 `check-added-large-files` runs with its default, so **each file must stay under 500 KB**. The
