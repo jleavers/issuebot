@@ -22,9 +22,9 @@ and one of the keys it can carry re-points `gh` on an ordinary core command.
 footnote: it had not landed when this was written.** PR #189 was open, `~/.config/gh/config.yml`
 was *not* swept on `main`, and nothing in this change sweeps it. (In the tree this note now
 sits in, #173 sweeps it, so that half is closed too; the two places below that turn on it say
-so.) The
-reproductions below are run in the state the issue specifies — a `hosts.yml`, no `config.yml`
-anywhere — because that isolates what this file contributes, which is the question asked. What
+so.) The reproductions below are run in the state the issue specifies — a `hosts.yml`, no
+`config.yml` anywhere — because that isolates what this file contributes, which is the question
+asked. What
 that state is not is a description of `main`, and the section on what this does not close says
 exactly which half is left over.
 

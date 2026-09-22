@@ -237,15 +237,18 @@ def test_ci_proves_a_planted_tool_config_does_not_survive_to_the_next_session() 
     # decorative: without either, every gh in that home fails its multi-account migration
     # before reaching the alias or the extension, so the pre-sweep lines below would fail and
     # the post-sweep ones would pass for a reason that is not the sweep. One file serves all
-    # three gh arms since #190; the steering keys beside these two are that change's to pin,
-    # so only the prefix this test rests on is asserted here.
-    assert (
+    # three gh arms since #190, whose steering keys sit between these two and the redirect --
+    # they are that change's to pin, so this skips over them with `in` on either end rather
+    # than restating them. One literal and not two, so what is pinned is that the keys this
+    # test rests on and the file they are written into are the same `printf`.
+    prefix = (
         r"printf \"github.com:\\n    oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345\\n"
         r"    user: nobody\\n"
-    ) in CI
-    # And that the file it is redirected into is still `hosts.yml`, which the prefix above
-    # stops short of naming.
-    assert r"\" > /home/agent/.config/gh/hosts.yml" in CI
+    )
+    redirect = r"\" > /home/agent/.config/gh/hosts.yml"
+    line = next((ln for ln in CI.split("\n") if prefix in ln), None)
+    assert line is not None, "the planted hosts.yml printf is not in the CI step"
+    assert line.endswith(redirect), line
     assert (
         'test "$(sudo -n -H -u agent env GH_NO_UPDATE_NOTIFIER=1 gh aliaspwn)" = GH-ALIAS-RAN'
     ) in CI
