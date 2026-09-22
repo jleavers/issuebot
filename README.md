@@ -399,7 +399,10 @@ the logs on your terminal.
   the issue); the worker removes the state label and records a cancellation, which the closed
   counts do not include.
 - **Re-queue it.** Moving `issuebot/in-progress` or `issuebot/review` back to `issuebot/todo`
-  is also allowed; the issue is picked up again from its existing workspace.
+  is also allowed; the issue is picked up again from its existing workspace -- clone, working
+  tree, venv and `.git/config` as the last session left them ([How long a workspace lives, and
+  what a reused one hands the next
+  session](docs/operations.md#how-long-a-workspace-lives-and-what-a-reused-one-hands-the-next-session)).
 
 ### Where to go next
 

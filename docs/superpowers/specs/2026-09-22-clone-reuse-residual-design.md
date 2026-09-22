@@ -1,0 +1,271 @@
+# The reused clone is not reset between two sessions on one issue
+
+Date: 2026-09-22
+Status: decided -- documented, not changed
+Issue: #180 (related to #171, #164, #151, #137, #121, #107, #104, #101, #75)
+
+## Problem
+
+A workspace outlives its run. An issue in `review` keeps its clone for days, and a retry, a
+rework or a re-queue reuses it: `create_or_reuse` returns the existing directory whenever
+`_is_complete` holds, which is what keeps a continuation from re-cloning a repository from
+cold. The clone inside that directory is the *session's* to write (#75) -- the worker owns the
+workspace directory and `.issuebot` inside it, and nothing else.
+
+So the clone's own `.git/config` is a channel from one session to the next session on that
+issue, in the same shape `.issuebot/env` was before #171 and for the same reason: same account,
+same uid, same workspace, and a file that names commands. #171 closed the environment-variable
+route and named this as its residual -- the wider blast radius went, and git *run in the clone*
+was unchanged.
+
+Measured on `main`@a336a69, git 2.47.3, end to end through issuebot's own seam: a
+`WorkspaceManager` creates a workspace, "session 1" writes the clone's config and a file beside
+it, and `create_or_reuse` is asked a second time, as a retry or a rework would ask it.
+
+```text
+session 1 workspace: created=True
+[debug] workspace_reused workspace=/tmp/repro-.../workspaces/example-180
+session 2 workspace: created=False same_path=True
+  session 1's .git/config:  alias.st, core.fsmonitor, core.hooksPath=.planted-hooks
+  session 1's .planted-hooks/pre-commit: still there, untracked, unchanged
+  $ git -C <workspace> st                       -> PLANTED-ALIAS-RAN
+  $ git -C <workspace> status --porcelain       -> PLANTED-FSMONITOR-RAN (see below)
+  $ git -C <workspace> commit --allow-empty     -> PLANTED-HOOKSPATH-RAN
+```
+
+The `core.fsmonitor` line is the one to read carefully: git consumes that hook's *stdout* as
+the changed-file list, so a plant there cannot print to the terminal. What the marker above
+shows is the hook running and its output being read as data; it was separately confirmed to
+execute on a plain `git status --porcelain` by having it append to a file of its own.
+`credential.helper` fires the same way -- on any authenticated fetch, and directly under
+`git credential fill` -- and `.git/hooks/post-checkout` is the same shape beside the file rather
+than in it. `core.pager` is the weakest of the set and worth saying so: it needs stdout to be a
+terminal, and a hook's is a pipe (`_run_argv` spawns with `stdout=PIPE`), so it was measured
+under `script` rather than in place. The four above need no terminal at all, which is why the
+argument does not rest on it.
+
+**Reach.** A workspace key is the issue's identifier, so one workspace belongs to one issue. It
+is bound to one session account and opened to that account's group only while a session is
+working in it, sealed `0700` back to the worker between runs (#121, #75), and `_is_complete`
+re-clones rather than reuses when the binding moved. That binding and that seal are what
+`agent.run_as` buys: with one account for the deployment every session is the same uid anyway,
+and on the host route (`agent.run_as` unset, which `validate` warns about) the session is the
+worker, so neither holds -- and on neither route is this the *narrowest* channel between two
+sessions, since the home they share is wider than one workspace. Issuebot itself runs no git in a *reused*
+clone: the post-clone setup and `hooks.after_create` -- which in the shipped `WORKFLOW.md` does
+run git, `rev-parse --is-shallow-repository` and `fetch --unshallow` -- are both on the creation
+path alone, and the only other git-shaped thing the worker spawns is `gh repo clone`, in the
+workspace *root*, before that clone exists. So this is persistence inside the
+session's own privilege domain and reaches the next session on this issue, as #101, #137 and
+#171 did, not an escalation across one -- #75 closed that and nothing here re-opens it.
+
+## Decision
+
+**Not bounded. The clone is the session's, and reuse hands it over whole.**
+
+Neither `.git/config` nor `.git/hooks/` is reset between two sessions on one issue, and
+issuebot ships no setting that resets them. This is recorded here, stated in
+`docs/operations.md` under "How long a workspace lives, and what a reused one hands the next
+session" -- where a deployment sees a workspace outlive its run -- and pinned by a test, so that
+a later change to bound it is a deliberate edit rather than a silent one.
+
+### Why: the unit of this channel is the clone, and `.git/config` is a small part of it
+
+The premise of the other half of the argument -- "reset the named keys instead of re-cloning"
+-- is that the file can be separated from the directory it is in. It cannot, and the same
+measurement says so twice.
+
+**Within `.git/`, a reset of named keys is an enumeration that the file itself defeats.** The
+keys that name a command are already several (`core.pager`, `core.editor`, `core.sshCommand`,
+`core.fsmonitor`, `core.hooksPath`, `credential.helper`, every `alias.*`, `filter.*.clean`,
+`filter.*.smudge`, `diff.*.command`, `diff.*.textconv`, `uploadpack.packObjectsHook` -- all of
+them in `git help -c` on the image's own git) and git adds to them. But
+the decisive one is that `include.path` puts the whole set somewhere a reset over `.git/config`
+does not look:
+
+```text
+$ printf '[alias]\n\tst = "!printf INCLUDED-ALIAS-RAN\\n"\n' > .git/planted-include
+$ git config --local include.path planted-include
+$ git st
+INCLUDED-ALIAS-RAN
+```
+
+So a reset must also unset `include.*` -- and then `core.hooksPath`, measured above, points at a
+directory of scripts, and `.git/hooks/` is a directory of scripts with no config key at all.
+Every one of those lives under `.git/`, which the session owns. #171 argued this class of thing
+from evidence rather than taste: two drafts of its list were enumerations and self-review found
+each of them incomplete. There the answer was a prefix, because the names had a shared head. Here
+there is no prefix short of "the whole of `.git/`", and the whole of `.git/` is the clone.
+
+**Around `.git/`, the working tree is a wider channel of the same shape that no config reset
+touches.** Reuse keeps the entire workspace, not just the repository: the tracked tree as the
+last session left it, its untracked files, and `<workspace>/.venv`, which the shipped
+`after_create` hook builds with `uv sync` and which does not run again on the reuse path
+(`test_reuse_skips_clone_and_hooks` pins that). The next session's ordinary work is to run that
+repository's tests out of that venv. Resetting `core.pager` while `.venv/bin/pytest` and the
+`conftest.py` beside it come through untouched is closing a window in an open wall; the
+reproduction above shows it directly, since the `.planted-hooks/` directory the first session
+wrote is an ordinary untracked directory that survived reuse on its own account.
+
+The only thing that actually closes the channel is not reusing the workspace -- which is exactly
+what `_is_complete` exists to avoid, and what `agent.max_issue_cost_usd` partly pays for. A
+continuation that re-cloned from cold would re-fetch the repository, re-run `after_create` and
+re-derive what the last session had already established, on every rework bounce and every retry.
+That is a real, recurring cost against a channel that crosses no privilege boundary.
+
+### Why: the plant buys its author nothing they did not already have
+
+A session that can write the clone's `.git/config` is a session with the repository checked out,
+`GH_TOKEN` in its environment, and a branch and a pull request of its own. Everything a planted
+`core.pager` could make the *next* session do -- push a commit, alter a file on the way into the
+object store with a clean filter, run a command at that uid -- the session holding the plant can
+do directly, now, with the same credential, on the same issue and the same pull request. The
+channel buys deferral and nothing else, and the deferral is to the next session on *that same
+issue*: the same account, the same token, the same branch, reviewed by the same human reading
+the same pull request.
+
+That is the gradient test #101 and #137 were decided on, and it is why those two were closed and
+this one is not. The session account's *home* was worth sweeping because the surfaces there are
+loaded by `claude` and by every login shell for the container's lifetime, reaching sessions
+working **other issues** -- a hostile issue's plant waiting for an honest one next week. This
+does not: a workspace is one issue's, and the issue whose session wrote the plant is the issue
+whose session reads it.
+
+### Why: the file is one issuebot already depends on
+
+`POST_CLONE_SCRIPT` writes `credential.https://github.com.helper` with `git config --local`, and
+`docs/toolchains.md` tells a hook author with a deploy key to write `core.sshCommand` the same
+way from `after_create` (#171's "what a hook that needs one should do instead"). Both run on
+*creation*, so a per-run reset would have to preserve what they wrote while removing what a
+session wrote,
+in a file that records no difference between the two. It would also have to preserve
+`remote.origin.*` and the `branch.<name>.merge` tracking that `git push -u` wrote, which is the
+state a continuation needs. A reset that keeps all of that is one more enumeration, and this
+time with the deployment's own configuration on the other side of it.
+
+### What a deployment that wants it reset can do
+
+`hooks.before_run` is the per-run seam the issue asks after, and it is already there: it runs on
+every run, inside the workspace, at the session account's uid, before turn 1 and before anything
+the session itself does. A deployment that wants the clone's config narrowed each run can say so
+there --
+
+```yaml
+hooks:
+  before_run: |
+    git config --local --remove-section alias 2>/dev/null || true
+    for k in core.pager core.editor core.fsmonitor core.hooksPath include.path; do
+      git config --local --unset-all "$k" 2>/dev/null || true
+    done
+    git config --local --name-only --list | grep -i '^includeif\..*\.path$' \
+      | while read -r n; do git config --local --unset-all "$n" 2>/dev/null || true; done
+```
+
+-- with four caveats stated plainly, because a reader who takes this for "the reset" gets less
+than they think:
+
+1. **It is the enumeration this note declines to ship**, so it is as complete as whoever wrote
+   it and no more. git adds keys -- and it already has a second spelling of the one key this
+   note's argument turns on. `includeIf.<condition>.path` is the same include mechanism, works
+   from a repo-local config, and `--unset-all include.path` does not reach it, which is why the
+   recipe carries a second loop. That loop cannot be the obvious one, either: `--remove-section`
+   matches a subsectioned section's name **case-sensitively** while `--list` reports it
+   lower-cased, so it has to unset the key rather than remove the section. Measured on git
+   2.47.3:
+
+   ```text
+   $ git config --local "includeIf.gitdir:/tmp/inc180/.path" planted2
+   $ git st
+   INCLUDEIF-ALIAS-RAN
+   $ git config --local --unset-all include.path        # the first loop
+   $ git st
+   INCLUDEIF-ALIAS-RAN
+   $ git config --local --remove-section 'includeif.gitdir:/tmp/inc180/'
+   fatal: no such section: includeif.gitdir:/tmp/inc180/
+   $ git config --local --unset-all 'includeif.gitdir:/tmp/inc180/.path'
+   $ git st
+   git: 'st' is not a git command.
+   ```
+
+   Two spellings of one mechanism, and a removal whose obvious form does not work, found by one
+   pass of review over a recipe that was already written to be careful. That is the argument of
+   this section, arriving on schedule.
+2. **It narrows the config file only.** `.git/hooks/` is a directory of scripts with no config
+   key at all, and this recipe does not touch it -- so a planted `post-checkout` survives it
+   intact. A deployment that means to clear that too has to clear the directory itself, and
+   `.git/config.worktree` and `.git/modules/*/config` are the same shape again.
+3. **It must not unset what the deployment's own setup wrote.** `credential.helper` is out of
+   the list for that reason, and so is `core.sshCommand`: that is the key #171 tells a
+   deploy-key deployment to write with `git config --local` from `after_create`, `after_create`
+   runs on *creation* only, and unsetting it each run would take the deploy key away on the
+   first reuse and fail every `git fetch` and `push` after it. The first line has the same
+   problem in the other direction: `--remove-section alias` takes *every* alias, a convenience
+   a deployment's own `after_create` wrote included, so a deployment that writes aliases must
+   unset them by name instead. The file records no difference
+   between a key the deployment wrote and a key the session wrote, which is the same objection
+   this note makes to a shipped reset two paragraphs above -- it does not stop applying because
+   the reset is a deployment's rather than issuebot's.
+4. **The hook's own `git` invocations run under whatever the last session left.** `git config`
+   takes no pager for a write, which is what makes the recipe work at all, but the reset is not
+   running on a clean slate.
+
+It is not shipped in `configs/WORKFLOW.md`, because shipping it would be bounding the channel by
+default, which is the decision this note declines to make.
+
+The blunt instrument is the workspace directory itself: remove it and the next session re-clones
+(`create_or_reuse` finds nothing complete and creates), and `finish_terminal` removes it on its
+own when the issue closes -- on `complete`, `no_change` and `cancelled` alike.
+
+## What is still bounded, and must not be read as widened
+
+This decision is about one directory and changes nothing else. All of the following still hold,
+and the documentation (`docs/operations.md` for the deployment's view, `docs/security-model.md`
+for the boundary, `docs/toolchains.md` where the hook recipes live) says so where each is
+described:
+
+- The worker's own state in the workspace -- `.issuebot/session.json`, `.issuebot/runs/`, the
+  `created` and `finished` markers -- is the worker's, in a sticky directory, and read back only
+  through `Boundary` (#75, #104, #149).
+- `.issuebot/env` cannot re-point `claude`, `git`, `gh` or the hook shell for the next session
+  (#109, #171, #179).
+- The session account's home is swept before every turn and every login shell (#101, #137,
+  #151), so nothing reaches a session working a *different* issue through `~/.claude`,
+  `~/.profile`, `~/.gitconfig` or `~/.ssh/config`.
+- The clone's `CLAUDE.md` and `AGENTS.md` reach the prompt as `<github-text>` data, and not as
+  `claude` configuration while `claude.setting_sources` is its default `[user]` -- the opt-in to
+  `project` or `local` is the operator's, and `validate` warns about it (#107). And
+  `--strict-mcp-config` holds whatever the clone carries whatever the sources say (#119).
+- The session runs at its own uid, on its own account under a pool, behind the egress proxy
+  (#75, #121, #126).
+
+## Residuals
+
+- **`.git/hooks/` and the rest of `.git/`** are decided with the file, and for the same reason:
+  they are the clone. `.git/config.worktree` (behind `extensions.worktreeConfig`) and
+  `.git/modules/*/config` for a submodule are further spellings of it; neither was reproduced
+  here, and neither changes the answer, since a reset that reached them would still be an
+  enumeration inside a directory the session owns.
+- **`<workspace>/.venv` and the working tree** are the wider channel this note rests its
+  argument on, and they are equally not reset. The per-account uv cache beside them is #164's
+  recorded residual and is a different shape (one account, many workspaces) rather than this
+  one.
+- **The narrow window in which another session could read this workspace at all** is #121's and
+  #164's: an account holds one open workspace at a time, except while the worker runs
+  `before_remove` at that uid for another, idle one. Nothing gives such a session a reason to
+  run git in this clone, and the seal is what keeps it out of an idle workspace otherwise.
+- **If the answer ever changes**, the change is not a reset -- it is not reusing the workspace,
+  either always or under a setting, and that is a decision about what a continuation may cost
+  rather than about this file. `test_reuse_keeps_the_clones_own_git_config` is the test that
+  would have to be edited to make it, which is the point of pinning a decision not to act.
+
+## Tests
+
+`tests/test_agent_workspace.py::test_reuse_keeps_the_clones_own_git_config` creates a workspace,
+writes into the clone as a session would -- a `--local` alias, an `include.path` pointing at a
+second file inside `.git` with another alias in it, and a `.git/hooks/post-checkout` script --
+asks `create_or_reuse` again, and asserts all three are still there. The two aliases are read
+back without `--local`, so what is asserted is git *resolving* them as it would for any command,
+the included one included: that is the part of the decision most open to being misread later,
+since it is what makes "the unit is the clone and not the file" true rather than rhetorical. The
+decided behaviour, stated as a test so that bounding the channel fails it and forces the edit
+here as well. It names this note and the issue, as the sweep lists do.
