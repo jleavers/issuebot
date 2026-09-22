@@ -169,8 +169,8 @@ legitimately sets is in the table above, already answered by the protected envir
   "config.yml")`. Path components like the other three and for the same reason -- `_walk`
   resolves one at a time and yields the first symlink it meets, so a `.config` or a
   `.config/gh` replaced by a link is unlinked as the plant it is rather than stepped through.
-  Nothing else changes: no new setting, no image change, no new call site, since `_sweep`
-  already runs before every turn and before every script that opens a login shell (#137).
+  No new setting and no image change: `_sweep` already runs before every turn and before every
+  script that opens a login shell (#137). One new call site, which is the next bullet.
 
 - **The clone is swept too** (`WorkspaceManager._clone`), which is not a change to the list
   but to when it runs, and without it the entry above would not have delivered. The sweep ran
