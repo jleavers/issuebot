@@ -1426,7 +1426,11 @@ that matters on your host.
   sat in stay too, with whatever else is in them — `gh`'s credential state (`hosts.yml`) beside
   the config of its own that goes, `known_hosts` beside ssh's — since the sweep names files and
   never empties a directory; a credential authenticates the next session rather than steering
-  it, which is the line `.credentials.json` sits on too. It is a
+  it, which is the line `.credentials.json` sits on too. `hosts.yml` is not purely credential,
+  though: `gh config set -h <host>` writes there too, and an `api_host` left in it re-points
+  `gh`'s API host on an ordinary command. That one is bounded by the egress proxy rather than
+  by the sweep — it is a real HTTPS request to a name, so the allow-list sees it, where a unix
+  socket would be no route at all — and it is #190, not something this sweep closes. It is a
   denylist of what is loaded, not an allowlist of what is kept, so a new claude location, or a
   new tool config file, has to be added to it by hand. Nothing is swept on the host route (`agent.run_as` unset), where the
   home is your own. Auto memory is also switched off for the session
