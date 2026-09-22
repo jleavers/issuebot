@@ -33,7 +33,15 @@ for an agent working in this repository and is the closest thing to an architect
 
 ## Pull requests
 
-- **Never push to `main`.** Push a branch and open a pull request.
+Everything reaches `main` through a pull request. Without write access to this repository you
+will be working from a fork, which comes to the same thing: push your branch there and open the
+pull request across. With write access, push a branch here and open one — `main` carries a
+ruleset that refuses a direct push, a force push and a deletion, so there is nothing to
+remember.
+
+Approvals are not required, because a single maintainer cannot approve their own pull request.
+Review is a person reading the diff, not a button.
+
 - Say what changed and why. A reviewer reading the diff alone should not have to guess the
   motivation.
 - Keep the tests green, and add one for behaviour you change. Most of this repository's tests
