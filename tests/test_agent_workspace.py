@@ -368,12 +368,12 @@ async def test_a_workspace_env_line_does_not_reach_a_hooks_dynamic_loader(
 ) -> None:
     """#187, end to end through the shell a hook actually gets: `hook_shell` is `bash -lc`, and
     that `bash` is a dynamically linked binary, so `ld.so` reads its own names out of the
-    environment the hook is handed before the shell reaches `main`. Two of the four are visible
-    without a compiler, which is what this asserts: `LD_TRACE_LOADED_OBJECTS` makes the loader
-    print the dependency list and exit 0 *instead of* running the hook's commands, and
-    `LD_PRELOAD` naming a file that is not an ELF object makes it complain on the hook's stderr.
-    Both are refused where the file is merged, the worker's log names each key it dropped, and
-    the DSN beside them on the next line is handed over exactly as before."""
+    environment the hook is handed before the shell reaches `main`. Three of the five are
+    visible without a compiler, which is what this asserts: `LD_TRACE_LOADED_OBJECTS` and
+    `LD_DEBUG=help` each make the loader print to stdout and exit 0 *instead of* running the
+    hook's commands, and `LD_PRELOAD` naming a file that is not an ELF object makes it complain
+    on the hook's stderr. All are refused where the file is merged, the worker's log names each
+    key it dropped, and the DSN beside them on the next line is handed over exactly as before."""
     plant = tmp_path / "plant.so"
     plant.write_text("not an ELF object\n")
     manager, _ = make_manager(
@@ -382,7 +382,7 @@ async def test_a_workspace_env_line_does_not_reach_a_hooks_dynamic_loader(
             "before_run": (
                 f"printf 'LD_PRELOAD={plant}\\nLD_AUDIT={plant}\\n"
                 f"LD_LIBRARY_PATH={tmp_path}/libs\\nLD_TRACE_LOADED_OBJECTS=1\\n"
-                "DSN=postgresql://issuebot@/db\\n' > .issuebot/env"
+                "LD_DEBUG=help\\nDSN=postgresql://issuebot@/db\\n' > .issuebot/env"
             ),
             "after_run": "echo hook-ran; echo ${DSN:-unset}",
         },
@@ -399,7 +399,7 @@ async def test_a_workspace_env_line_does_not_reach_a_hooks_dynamic_loader(
         configure_logging(stream=io.StringIO())
     assert after is not None and after.ok
     # Unprotected, `LD_TRACE_LOADED_OBJECTS` would have printed the shell's own libraries here
-    # and never run either `echo`, while still exiting 0.
+    # and `LD_DEBUG=help` the loader's option list, neither running either `echo`, both exiting 0.
     assert after.stdout_tail.splitlines() == ["hook-ran", "postgresql://issuebot@/db"]
     # And `LD_PRELOAD` would have put the loader's complaint about the planted file on stderr.
     assert "ld.so" not in after.stderr_tail
@@ -411,6 +411,7 @@ async def test_a_workspace_env_line_does_not_reach_a_hooks_dynamic_loader(
         "LD_AUDIT is protected",
         "LD_LIBRARY_PATH is protected",
         "LD_TRACE_LOADED_OBJECTS is protected",
+        "LD_DEBUG is protected",
     ]
 
 

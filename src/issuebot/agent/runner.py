@@ -224,6 +224,14 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 #               `libpcre2-8.so.0` in a directory of the line's choosing was what `git` loaded,
 #               and its constructor ran inside `git`, with no `LD_PRELOAD` anywhere. It is
 #               `PATH`'s rule one layer down, which is exactly why `PATH` and `CDPATH` are here.
+#   LD_DEBUG    the same, by a second spelling, and the one that is easiest to miss: *any* value
+#               containing `help` (`LD_DEBUG=help`, `LD_DEBUG=libs,help`) makes the loader print
+#               its option list and exit 0 without entering `main`, to *stdout* -- so it
+#               displaces whatever a hook's stdout was being read for as well. Measured voiding
+#               `bash -lc 'echo hook-ran'`, `git rev-parse` and `claude --version`. Every other
+#               value is inert (`libs`, `all` and `unused` were measured leaving `git --version`
+#               working), which is exactly why this one is easy to certify as safe by measuring
+#               the wrong value -- the first draft of this list did.
 #   LD_TRACE_LOADED_OBJECTS
 #               not a way to run code but a way to run *none*: the loader prints the object's
 #               dependencies and exits 0 without entering `main`. Measured voiding
@@ -241,6 +249,9 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 # recommended workaround. `LD_BIND_NOW`, `LD_DYNAMIC_WEAK`, `LD_DEBUG`, `LD_DEBUG_OUTPUT`,
 # `LD_PROFILE` and `GLIBC_TUNABLES` stay out too: each was measured leaving `git --version`
 # working, and none of them names an object the loader would not otherwise have loaded.
+# `LD_DEBUG_OUTPUT` stays out as well, for a reason worth stating since `LD_DEBUG` is in: it
+# only redirects what `LD_DEBUG` asks for and is inert on its own, measured leaving
+# `git --version` working with no `LD_DEBUG` set.
 # The cost is not zero, and it is `LD_LIBRARY_PATH`'s alone: a target repository's
 # `after_create` may legitimately build against a library in a private prefix whose tests the
 # *agent's* turn then runs, which is a hand-over and so exactly what this refuses. The routes
@@ -248,14 +259,15 @@ SHELL_ENV_NAMES: frozenset[str] = frozenset(
 # which is unprotected), an `/etc/ld.so.conf.d` entry with `ldconfig` in an image built `FROM`
 # this one -- root's, outside the session's reach, the route already given for `/etc/gitconfig`
 # -- and the variable in the hook's own shell around the command the hook itself runs, which is
-# unchanged. `ld.so(8)` calls `LD_LIBRARY_PATH` a facility for testing and debugging; a built
-# artefact that needs a library at run time has `RUNPATH` for it.
+# unchanged. A built artefact that needs a library at run time has `RUNPATH` for exactly that;
+# `LD_LIBRARY_PATH` is the override you reach for while testing one.
 LOADER_ENV_NAMES: frozenset[str] = frozenset(
     {
         "LD_PRELOAD",
         "LD_AUDIT",
         "LD_LIBRARY_PATH",
         "LD_TRACE_LOADED_OBJECTS",
+        "LD_DEBUG",
     }
 )
 PROTECTED_ENV_NAMES: frozenset[str] = frozenset(

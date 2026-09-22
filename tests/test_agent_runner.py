@@ -839,6 +839,12 @@ def test_a_workspace_env_line_re_pointing_the_shell_never_reaches_the_environmen
         # still reported success -- the `PATH`/`HOME` half of this list's rule, failing
         # silently as nothing else in the file does.
         "LD_TRACE_LOADED_OBJECTS",
+        # The same denial by a second spelling, and the one easiest to certify as safe by
+        # measuring the wrong value: `libs`, `all` and `unused` are inert, but *any* value
+        # containing `help` makes the loader print its option list to stdout and exit 0
+        # without entering `main`. Measured voiding `bash -lc 'echo hook-ran'`, `git rev-parse`
+        # and `claude --version`.
+        "LD_DEBUG",
     ],
 )
 def test_merge_workspace_env_refuses_the_dynamic_loaders_own_names(key: str) -> None:
@@ -862,6 +868,7 @@ def test_the_loader_protections_are_pinned() -> None:
     the issue describes, since the default image carries no compiler."""
     assert sorted(LOADER_ENV_NAMES) == [
         "LD_AUDIT",
+        "LD_DEBUG",
         "LD_LIBRARY_PATH",
         "LD_PRELOAD",
         "LD_TRACE_LOADED_OBJECTS",
@@ -881,9 +888,11 @@ def test_the_loader_protections_are_pinned() -> None:
         # none names an object the loader would not otherwise have loaded.
         "LD_BIND_NOW",
         "LD_DYNAMIC_WEAK",
-        "LD_DEBUG",
-        "LD_DEBUG_OUTPUT",
         "LD_PROFILE",
+        # Out even though `LD_DEBUG` is in, and the reason is worth stating: it only redirects
+        # what `LD_DEBUG` asks for and is inert on its own, measured leaving `git --version`
+        # working with no `LD_DEBUG` set.
+        "LD_DEBUG_OUTPUT",
         # glibc's tunables namespace: allocator and hwcap parameters, no object.
         "GLIBC_TUNABLES",
         # No underscore, so not that it would have matched a prefix -- but a linker flag a
@@ -912,6 +921,8 @@ def test_a_workspace_env_line_re_pointing_the_loader_never_reaches_the_environme
         "LD_AUDIT=/tmp/theirs/plant.so\n"
         "LD_LIBRARY_PATH=/tmp/theirs/libs\n"
         "LD_TRACE_LOADED_OBJECTS=1\n"
+        # The value matters here: `libs` would be inert, `help` exits 0 before `main`.
+        "LD_DEBUG=help\n"
         # Not the loader's, and the route a hook is told to use instead: it stays.
         "LD_RUN_PATH=/opt/vendor/lib\n"
         "DATABASE_URL=postgresql://issuebot@127.0.0.1/issuebot\n"
@@ -934,6 +945,7 @@ def test_a_workspace_env_line_re_pointing_the_loader_never_reaches_the_environme
         "LD_AUDIT is protected",
         "LD_LIBRARY_PATH is protected",
         "LD_TRACE_LOADED_OBJECTS is protected",
+        "LD_DEBUG is protected",
     ]
     # The complaint names the key and never the value, as it does for every protected name.
     assert "plant.so" not in stream.getvalue()

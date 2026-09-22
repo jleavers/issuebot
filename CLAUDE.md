@@ -720,7 +720,7 @@ version, and moves by hand.
   `SSH_ASKPASS_REQUIRE`, `EMAIL`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
   `XDG_CONFIG_HOME`), `SHELL_ENV_NAMES` (`BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
   `CDPATH`) and `LOADER_ENV_NAMES` (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`,
-  `LD_TRACE_LOADED_OBJECTS`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
+  `LD_TRACE_LOADED_OBJECTS`, `LD_DEBUG`) is the trust boundary: the file sits in the agent's own workspace, so the session can write it, and
   it must not re-point the `claude` issuebot launches next -- nor, since #171 (spec
   `2026-09-21-session-tool-config-env-design.md`), the `git` or `gh` the *next session on that
   issue* runs, which is the environment spelling of what #151 sweeps from the home; nor, since
@@ -737,14 +737,17 @@ version, and moves by hand.
   constructors (`LD_AUDIT` measured doing so even for an object that is not a valid audit
   module); `LD_LIBRARY_PATH` names no object but is `PATH`'s rule one layer down, a file planted
   at a needed soname having been measured loading into `git` with no `LD_PRELOAD` anywhere,
-  which is what settles the split verdict the issue floated; and `LD_TRACE_LOADED_OBJECTS` runs
-  *nothing*, the loader printing the dependency list and exiting 0 without entering `main`, so
-  one line voids every hook and the turn's `claude` while reporting success -- the `PATH`/`HOME`
-  half of the list's rule, and the only entry in the file that fails silently. Four names and
+  which is what settles the split verdict the issue floated; and `LD_TRACE_LOADED_OBJECTS` and
+  `LD_DEBUG` run *nothing*, the loader printing to stdout and exiting 0 without entering `main`
+  -- the dependency list for the first, the option list for any `LD_DEBUG` value containing
+  `help`, every other value being inert, which is what made it nearly certifiable as safe by
+  measuring `libs` -- so one line of either voids every hook and the turn's `claude` while
+  reporting success: the `PATH`/`HOME` half of the list's rule, and the only two entries in the
+  file that fail silently. Five names and
   not an `LD_` prefix, because `LD_RUN_PATH` is binutils `ld`'s link-time `-rpath` default and
   so the very route a hook is pointed at instead of `LD_LIBRARY_PATH`; `LD_BIND_NOW`,
-  `LD_DEBUG`, `LD_PROFILE` and `GLIBC_TUNABLES` stay out too, each measured leaving
-  `git --version` working. `ENV` is deliberately
+  `LD_DEBUG_OUTPUT` (inert without `LD_DEBUG`), `LD_PROFILE` and `GLIBC_TUNABLES` stay out too,
+  each measured leaving `git --version` working. `ENV` is deliberately
   *not* there: it is the interactive shell's start-up file, measured unread by `bash -lc`,
   `bash --posix -c`, `bash` as `sh` and `sh -c` (dash), so it would close nothing. Whole
   prefixes and not a list of names, because `GIT_EDITOR` names a command on a plain
