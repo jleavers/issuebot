@@ -73,14 +73,17 @@ refuses all three, by name, while it is unset or empty; `.env.example` ships the
 whole file before it filters by profile, so even `--profile test` needs the variable *set*,
 though `test-db` never reads it: that cluster is a throwaway on tmpfs behind a loopback port and
 authenticates with `trust` (#62's choice for the workspace cluster), which is why its DSN above
-names no password, as does the CI `test` job's service. Every DSN in the operator-facing prose
-is a placeholder over the variable for the same reason, and that is four files rather than one:
-`README.md`, `CONTRIBUTING.md`, `docs/toolchains.md` and `docs/operations.md`, all four of them
-in `tests/test_compose_credentials.py`'s `OPERATOR_FACING` beside `compose.yaml`,
-`.env.example`, this file, the `Dockerfile` and the workflows. Naming the README alone would be
-a narrower claim than the test enforces, and the narrower claim is the one an editor would act
-on. The image applies the password at initdb only; a cluster that already exists is rotated with
-`ALTER ROLE` ([`docs/operations.md`, "Rotating the database
+names no password, as does the CI `test` job's service. No operator-facing file holds a working
+one either, for the same reason: a DSN in the prose is the `${ISSUEBOT_DB_PASSWORD}`
+placeholder over the variable, as the hub's is in `README.md`, or it carries no password at all,
+as the `trust` throwaway's does in `CONTRIBUTING.md` and `docs/toolchains.md`. That is the rule
+`tests/test_compose_credentials.py` checks, and it checks it over the whole of
+`OPERATOR_FACING` -- those three prose files, `docs/operations.md`, which documents the rotation
+without spelling a DSN, and `compose.yaml`, `.env.example`, this file, the `Dockerfile` and the
+workflows beside them -- so a claim made about the README alone is narrower than what is
+enforced, and it is the narrow claim an editor would act on. The image applies the password at
+initdb only; a cluster that already exists is rotated with `ALTER ROLE`
+([`docs/operations.md`, "Rotating the database
 password"](docs/operations.md#rotating-the-database-password)).
 
 **Do not pass `ISSUEBOT_DB_PORT=...` inline to `docker compose`.** That is the long-lived
@@ -1486,8 +1489,9 @@ second copy of a section that has already moved, and the two then drift.
 - `CONTRIBUTING.md`: how a change gets in -- getting set up, pull requests, the two
   conventions a contributor trips over (digest pins; the README's images are generated), how
   to report a security issue instead, and the licence contributions are accepted under. Since
-  #201 it also says what a contributor without write access does, which is what the ruleset on
-  `main` makes the only route.
+  #201 it also says how each kind of contributor reaches `main`: from a fork without write
+  access, and from a branch here with it, where the ruleset below is what makes the pull
+  request the only route.
 - `SECURITY.md`: the vulnerability policy -- private reporting rather than a public issue,
   particularly because this repository's issues are read by an agent that acts on them, and
   what is in scope and what is not.
@@ -1500,9 +1504,12 @@ second copy of a section that has already moved, and the two then drift.
   file beside it under `src/issuebot/web/static/vendor/`, which that directory's
   `README.md` records and `tests/test_web_vendor.py` checks.
 - `.github/ISSUE_TEMPLATE/`: `bug_report.yml` and `feature_request.yml`, the forms a reporter
-  fills in, part of the community health files #199 added. They are not cosmetic here: the body they produce is the body a session is handed
-  as `issue.body`, so a field added or reworded changes what every prompt carries, and both
-  lead with the note that these issues are public and an agent acts on them.
+  fills in, part of the community health files #199 added. They are not cosmetic here: the
+  body they produce is the body a session is handed as `issue.body`, so a field added or
+  reworded changes what every prompt carries. `bug_report.yml` opens by saying that issues
+  here are public and an agent reads and acts on them, and sending a vulnerability to
+  `SECURITY.md` instead; `feature_request.yml` opens by saying the issue is a brief for
+  whoever picks the work up, which may be issuebot itself.
 - `tools/screenshots/` and `docs/images/`: the README's two images,
   `docs/images/dashboard.png` and `docs/images/issue-journey.gif`, are *generated* --
   `tools/screenshots/capture.py` drives a real dashboard serving the fabricated data
@@ -1510,13 +1517,14 @@ second copy of a section that has already moved, and the two then drift.
   tokens), so nobody's repository names or issue titles reach a public file. They are the one
   artefact here that nothing holds to the code: change the web templates, the board's layout
   or `app.css`'s `--bg`/`--ink`/`--muted`/`--line` tokens, and the images quietly describe a
-  dashboard that is gone while every test still passes. So regenerating them is part of such a
-  change rather than a follow-up: `tools/screenshots/README.md` is the recipe (Playwright's
+  dashboard that is gone while every test still passes. That is why `CONTRIBUTING.md` makes
+  regenerating them part of such a change rather than a follow-up, and
+  `tools/screenshots/README.md` is the recipe (Playwright's
   chromium once per machine; the committed images are the *dark* theme, and `PALETTES` in
   `capture.py` carries those same tokens for the caption strip it draws itself; each file must
   stay under 500 KB, which `check-added-large-files` enforces and the capture checks first so
-  the rejection comes before the commit). `CONTRIBUTING.md` states the rule for a human;
-  #199 and #200 are where the images and their dark theme came in.
+  the rejection comes before the commit). #199 and #200 are where the images and their dark
+  theme came in.
 
 ## What issuebot is
 
