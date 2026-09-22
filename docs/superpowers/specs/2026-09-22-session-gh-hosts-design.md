@@ -380,6 +380,14 @@ three sweep lists, and `_sweep_gh_hosts` called from `_sweep` after the path-lev
   subject, because top level is inert for it — measured, a `config.yml` carrying
   `api_host: 127.0.0.1` left the request on the real `api.github.com`. Closing the other half is
   #189's to do and is deliberately not duplicated here.
+- **A YAML merge key leaves the text in the file, and the sweep reports success.** `<<: *anchor`
+  pointing at a mapping of steering keys is not stripped — `_HostsLoader` clears the merge
+  resolver with the rest, so the sweep sees a literal `<<` key and nothing to remove. Not a
+  channel: `gh` does not resolve merge keys either, and reads the anchor's own top-level name as
+  a *host*, which puts it in the denial case below rather than the steering one (measured:
+  `failed to migrate config: cowardly refusing to continue`). Named because "the sweep reported
+  success and the key is still in the file" is a sentence somebody will otherwise have to
+  re-derive.
 - **A session can still deny the next one its `gh` by leaving the file unparseable.** The
   fail-safe branch deliberately keeps a `hosts.yml` it cannot understand, and `gh` then refuses
   to run at all (`failed to migrate config: cowardly refusing to continue`). That is the same
