@@ -18,6 +18,7 @@ so it is loaded by path rather than imported.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -342,6 +343,67 @@ def test_a_worktree_named_explicitly_is_still_inspected(tmp_path: Path) -> None:
 
     # It fails later, on git itself -- but never for being a worktree.
     assert problem != "not a git checkout"
+
+
+def _clone_of(root: Path, origin: str) -> Path:
+    """A real git repository with `origin` set, which is what `origin_of` asks git for."""
+    root.mkdir()
+    (root / "compose.yaml").write_text("services: {}\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", origin], check=True)
+    return root
+
+
+def test_discovery_finds_a_sibling_cloned_over_https_beside_one_over_ssh(tmp_path: Path) -> None:
+    """The hub was cloned over SSH, the next checkout by the HTTPS line in `docs/operations.md`.
+
+    Both are clones of one repository, and discovery compared the two URLs as strings, so the
+    second was silently left out of every run -- the one failure an upgrade across checkouts
+    exists to prevent, since that checkout then trails the schema the others migrate to.
+    """
+    hub_path = _clone_of(tmp_path / "issuebot", "git@github.com:jleavers/issuebot.git")
+    sibling = _clone_of(tmp_path / "issuebot-myrepo", "https://github.com/jleavers/issuebot.git")
+    stranger = _clone_of(tmp_path / "other", "https://github.com/jleavers/issuebot-fork.git")
+
+    found = upgrade.discover(hub_path)
+
+    assert sibling in found
+    assert stranger not in found
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:jleavers/issuebot.git",
+        "git@github.com:jleavers/issuebot",
+        "ssh://git@github.com/jleavers/issuebot.git",
+        "ssh://git@github.com:22/jleavers/issuebot.git",
+        "https://github.com/jleavers/issuebot.git",
+        "https://github.com/jleavers/issuebot",
+        "https://github.com/jleavers/issuebot/",
+        "https://x-access-token@github.com/jleavers/issuebot.git",
+        "https://github.com/JLeavers/IssueBot.git",
+        "git@GitHub.com:jleavers/issuebot.git",
+    ],
+)
+def test_every_spelling_of_one_repository_is_the_same_repository(url: str) -> None:
+    assert upgrade.repository_of(url) == upgrade.repository_of(
+        "git@github.com:jleavers/issuebot.git"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:jleavers/issuebot-fork.git",
+        "https://github.com/someone-else/issuebot.git",
+        "https://gitlab.com/jleavers/issuebot.git",
+    ],
+)
+def test_a_different_repository_is_not_the_same_repository(url: str) -> None:
+    assert upgrade.repository_of(url) != upgrade.repository_of(
+        "git@github.com:jleavers/issuebot.git"
+    )
 
 
 def test_the_table_sizes_its_columns_to_their_content() -> None:
