@@ -154,10 +154,15 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
    appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
-   personal access token restricted to the target repository with Contents, Issues and
-   Pull requests set to read and write, plus Actions read (so a session can read why a CI run
-   failed) and Commit statuses read (for CI that posts commit statuses rather than Actions
-   check runs); Metadata read is mandatory and the UI adds it for you. Do not go looking for a
+   personal access token restricted to the target repository with:
+   
+   - Contents (read/write)
+   - Issues (read/write)
+   - Pull requests (read/write)
+   - Actions (read - so a session can read why a CI run failed)
+   - Commit statuses (read - for CI that posts commit statuses rather than Actions check runs)
+  
+   Metadata read is mandatory and the UI adds it for you. Do not go looking for a
    Checks permission: fine-grained tokens
    [cannot call the Checks API](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#limitations-of-fine-grained-personal-access-tokens),
    so it is not in the list — and that limit is worth understanding before a session meets it.
@@ -193,7 +198,7 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
    [What a session may reach](docs/security-model.md#what-a-session-may-reach): under Compose a session can open a
    connection to Anthropic,
    to GitHub and to whatever else you have named, and to nothing else.
-2. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
+3. **Claude access** as a value you can put in a file: a long-lived OAuth token minted from a
    Claude subscription with `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), or an Anthropic
    API key (`ANTHROPIC_API_KEY`). The session runs as an account nobody logs into, so its
    credential comes from the environment (see [Checking that the credential
@@ -209,12 +214,12 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
    on an account dedicated to the bot rather than the login you use yourself -- and there
    `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run) and
    `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
-3. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
+4. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
    and Compose brings PostgreSQL for history and the dashboard. The version floor is the
    `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
    uses so that the worker's `depends_on` on it clears in about a second rather than after a
    full health-check interval; an older engine rejects the key rather than ignoring it.
-4. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
+5. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
    things a hook cannot install are a database server and a language runtime, because the
