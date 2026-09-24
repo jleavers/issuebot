@@ -30,6 +30,14 @@ from issuebot.invocation import run_hint
 from issuebot.log import get_logger
 
 PAGE_SIZE = 100
+# The issues a board page asks for, smaller than ``PAGE_SIZE`` because GraphQL charges for
+# what a query *could* return: one for the issues connection, plus one per issue for each
+# connection ``IssueFields`` nests (labels, assignees, linked pull requests), a point per
+# hundred. At ``PAGE_SIZE`` that was 301, three points a role a poll, and four workers on one
+# account at the default interval asked for more than its 5,000 points an hour (2026-09-24).
+# At 33 it is 100, one point whether GitHub rounds to the nearest or up; the ceilings below
+# are in pages of this, and scaled with it so the issues each one admits stayed put.
+ISSUE_PAGE_SIZE = 33
 ID_BATCH_SIZE = 50
 # How many pages of an issue's comments ``find_workpad_comment`` reads before giving up (#110):
 # the workpad is the account's first comment, so it sits among the earliest, and every comment
@@ -50,8 +58,10 @@ MAX_TIMELINE_PAGES = 10
 # tick, and the pages -- and the bodies in them, 64 KiB each -- are grown by anyone who can get
 # issues labelled. A thousand open issues under one state label is a bound no board reaches by
 # working: the three claimable roles hold a working set a human queues and
-# ``agent.max_concurrent_agents`` drains, and ``review`` is a queue a human closes.
-MAX_ISSUE_PAGES = 10
+# ``agent.max_concurrent_agents`` drains, and ``review`` is a queue a human closes. Thirty
+# pages of ``ISSUE_PAGE_SIZE`` is 990 of them, and the same thirty points at worst that ten
+# pages of a hundred cost.
+MAX_ISSUE_PAGES = 30
 
 # The same ceiling for the terminal sweep's read of *closed* issues, and a looser one, because
 # it bounds a different resource (#139). Not a growing one any more: the sweep stopped asking
@@ -63,8 +73,9 @@ MAX_ISSUE_PAGES = 10
 # and it is the sweep that drains it: a ceiling reached here refuses the one thing that would
 # bring the role back under it. And the two reads fail differently -- the poll's is
 # all-or-nothing because four roles are not a board, while this one skips the role and sweeps
-# the rest -- so a number tuned for one is not a number for the other.
-MAX_TERMINAL_PAGES = 50
+# the rest -- so a number tuned for one is not a number for the other. 4,950 issues, in pages
+# of ``ISSUE_PAGE_SIZE``.
+MAX_TERMINAL_PAGES = 150
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body state url createdAt updatedAt closedAt
@@ -81,7 +92,8 @@ def _issues_query(states: str) -> str:
     return (
         "query($owner: String!, $name: String!, $label: String!, $cursor: String) {\n"
         "  repository(owner: $owner, name: $name) {\n"
-        f"    issues(labels: [$label], states: [{states}], first: {PAGE_SIZE}, after: $cursor,\n"
+        f"    issues(labels: [$label], states: [{states}], first: {ISSUE_PAGE_SIZE},"
+        " after: $cursor,\n"
         "           orderBy: {field: CREATED_AT, direction: ASC}) {\n"
         "      nodes { ...IssueFields }\n"
         "      pageInfo { hasNextPage endCursor }\n"
@@ -119,10 +131,11 @@ def by_ids_query(numbers: Sequence[int]) -> str:
     )
 
 
+_RATE_LIMITED = re.compile(r"http 429|rate limit|secondary rate")
 _ERROR_RULES: tuple[tuple[ErrorCategory, re.Pattern[str]], ...] = (
     ("auth", re.compile(r"http 401|bad credentials|authentication|gh auth login")),
     ("not_found", re.compile(r"http 404|could not resolve to|\bnot found\b")),
-    ("rate_limited", re.compile(r"http 429|rate limit|secondary rate")),
+    ("rate_limited", _RATE_LIMITED),
     (
         "transport",
         re.compile(r"http 5\d\d|connection|could not resolve host|timeout|\btls\b|dial tcp"),
@@ -567,7 +580,7 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
-        raise PageCeilingError(f"more than {max_pages * PAGE_SIZE} issues carry {label}")
+        raise PageCeilingError(f"more than {max_pages * ISSUE_PAGE_SIZE} issues carry {label}")
 
     # --- plumbing ----------------------------------------------------------------
 
@@ -611,7 +624,9 @@ class GhCliAdapter:
         )
         if types == {"NOT_FOUND"} and allow_missing_aliases and alias_level:
             return
-        if "RATE_LIMITED" in types:
+        # The message as well as the type: the budget has run out with every poll categorised
+        # `response`, so the type is not the one way GitHub says it (2026-09-24).
+        if "RATE_LIMITED" in types or _RATE_LIMITED.search(messages.lower()):
             raise GitHubError("rate_limited", messages, exit_code=result.returncode, stderr=stderr)
         category: ErrorCategory = "not_found" if types == {"NOT_FOUND"} else "response"
         raise GitHubError(category, messages, exit_code=result.returncode, stderr=stderr)

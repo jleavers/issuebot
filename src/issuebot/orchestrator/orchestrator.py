@@ -198,14 +198,20 @@ def _pool_for(settings: Settings) -> AccountRegistry | None:
     return AccountRegistry(settings.workspace.root, settings.agent.run_as)
 
 
-def _github_hold_reason(error: str, status_note: str | None) -> str:
+def _github_hold_reason(error: GitHubError, status_note: str | None) -> str:
     """The GitHub hold's reason: this worker's own evidence, the status page as annotation.
 
     ``error`` is capped for the same reason the annotation is: it is ``gh``'s stderr or every
     GraphQL message GitHub sent, neither of them bounded, and this string is written to the
-    snapshot on every tick the hold lasts and drawn on the dashboard's worker line.
+    snapshot on every tick the hold lasts and drawn on the dashboard's worker line. A rate
+    limit is named as one: GitHub is answering, and the budget it refuses on is the account's,
+    shared by every worker and session on its token, which "not answering" hid (2026-09-24).
     """
-    reason = f"GitHub is not answering this worker: {_clipped(error, MAX_HOLD_ERROR_CHARS)}"
+    detail = _clipped(str(error), MAX_HOLD_ERROR_CHARS)
+    if error.category == "rate_limited":
+        reason = f"GitHub is rate-limiting this worker's account: {detail}"
+    else:
+        reason = f"GitHub is not answering this worker: {detail}"
     # The note carries its own stamp, so it joins with a space: "githubstatus.com at 12:01Z: ...".
     return f"{reason} \u2014 githubstatus.com {status_note}" if status_note else reason
 
@@ -596,7 +602,7 @@ class Orchestrator:
         self._auth_key = auth.verdict
         return True
 
-    async def _note_fetch_failure(self, error: str) -> None:
+    async def _note_fetch_failure(self, error: GitHubError) -> None:
         """Count a failed read of the board and, past the threshold, hold dispatch (#88).
 
         This is first-party evidence that *this* worker cannot reach GitHub: it needs nobody to
@@ -614,7 +620,7 @@ class Orchestrator:
             self._github_note = self._stamped(await self._probe_github_status())
         self._github_block = _github_hold_reason(error, self._github_note)
         context = {
-            "error": error,
+            "error": str(error),
             "failures": self._fetch_failures,
             "github_status": self._github_note,
         }
@@ -969,7 +975,7 @@ class Orchestrator:
             issues = await self._adapter.fetch_issues_by_states(states)
         except GitHubError as exc:
             self._log.warning("candidates_fetch_failed", error=str(exc))
-            await self._note_fetch_failure(str(exc))
+            await self._note_fetch_failure(exc)
             return None
         self._note_fetch_success()
         self._report_issues(issues)
