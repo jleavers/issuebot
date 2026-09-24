@@ -55,6 +55,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -505,6 +506,28 @@ def origin_of(path: Path) -> str | None:
     return result.stdout.strip() if result.ok else None
 
 
+def repository_of(url: str) -> str:
+    """`host/owner/repo` for any spelling of a remote, so that two clones of one repository match.
+
+    `git clone` reaches the same repository as `git@host:owner/repo.git`, `ssh://git@host/...`
+    or `https://host/owner/repo`, with or without `.git`, and GitHub ignores case in all three
+    parts. `docs/operations.md` clones over HTTPS where a checkout set up earlier may well have
+    used SSH, and compared as strings the two were different repositories: discovery left the
+    second out of every run, silently. A local path is not a URL and is returned as it is.
+    """
+    text = url.strip().rstrip("/")
+    if "://" in text:
+        parts = urllib.parse.urlsplit(text)
+        host, path = parts.hostname or "", parts.path
+    elif ":" in text.split("/", 1)[0]:
+        # scp-like, `[user@]host:path`, which git recognises by a colon before the first slash.
+        authority, _, path = text.partition(":")
+        host = authority.rpartition("@")[2]
+    else:
+        return text
+    return f"{host}/{path.strip('/').removesuffix('.git')}".lower()
+
+
 def discover(start: Path) -> list[Path]:
     """This checkout, plus every sibling directory that is a checkout of the same repository.
 
@@ -515,10 +538,12 @@ def discover(start: Path) -> list[Path]:
     origin = origin_of(start)
     if origin is None:
         return found
+    repository = repository_of(origin)
     for sibling in sorted(start.parent.iterdir()):
-        if sibling == start or not sibling.is_dir():
+        if sibling == start or not sibling.is_dir() or not looks_like_a_checkout(sibling):
             continue
-        if looks_like_a_checkout(sibling) and origin_of(sibling) == origin:
+        other = origin_of(sibling)
+        if other is not None and repository_of(other) == repository:
             found.append(sibling)
     return found
 
