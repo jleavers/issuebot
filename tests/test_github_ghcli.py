@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,13 +13,15 @@ from pydantic import SecretStr
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError, PageCeilingError
 from issuebot.github.ghcli import (
+    CLOSED_ISSUES_QUERY,
     ID_BATCH_SIZE,
     ISSUE_FIELDS,
+    ISSUE_PAGE_SIZE,
     MAX_COMMENT_PAGES,
     MAX_ISSUE_PAGES,
     MAX_TERMINAL_PAGES,
     MAX_TIMELINE_PAGES,
-    PAGE_SIZE,
+    OPEN_ISSUES_QUERY,
     GhCliAdapter,
     by_ids_query,
 )
@@ -38,6 +41,11 @@ def fixture(name: str) -> str:
 def has(*needles: str) -> Predicate:
     """True when every needle appears inside some argv element."""
     return lambda argv: all(any(needle in arg for arg in argv) for needle in needles)
+
+
+def arg(value: str) -> Predicate:
+    """True when ``value`` is one argv element exactly: ``cursor=c1`` is not ``cursor=c10``."""
+    return lambda argv: value in argv
 
 
 def lacks(needle: str) -> Predicate:
@@ -111,7 +119,7 @@ async def test_fetch_by_states_paginates_merges_and_sorts() -> None:
     first = runner.argv(0)
     assert first[:3] == ["api", "graphql", "-f"]
     assert "states: [OPEN]" in query_of(first)
-    assert "first: 100" in query_of(first)
+    assert f"first: {ISSUE_PAGE_SIZE}," in query_of(first)
     assert "-f" in first and "owner=example" in first and "name=repo" in first
     assert not any(arg.startswith("cursor=") for arg in first)
     assert "cursor=Y3Vyc29yOjI=" in runner.argv(1)
@@ -243,7 +251,7 @@ def _endless_board(runner: StubRunner, label: str, pages: int) -> None:
     )
     for page in range(1, pages + 2):
         runner.on(
-            both(has(f"label={label}"), has(f"cursor=c{page}")),
+            both(has(f"label={label}"), arg(f"cursor=c{page}")),
             stdout=_issues_page(page + 1, end_cursor=f"c{page + 1}"),
         )
 
@@ -263,9 +271,27 @@ async def test_board_poll_gives_up_past_the_page_cap() -> None:
     assert excinfo.value.category == "response"
     assert not excinfo.value.retryable
     assert excinfo.value.message == (
-        f"more than {MAX_ISSUE_PAGES * PAGE_SIZE} issues carry issuebot/todo"
+        f"more than {MAX_ISSUE_PAGES * ISSUE_PAGE_SIZE} issues carry issuebot/todo"
     )
     assert len(runner.calls) == MAX_ISSUE_PAGES
+
+
+@pytest.mark.parametrize("query", [OPEN_ISSUES_QUERY, CLOSED_ISSUES_QUERY], ids=["open", "closed"])
+def test_a_page_of_issues_costs_one_graphql_point(query: str) -> None:
+    """GitHub charges a query a point per hundred connections it could have to return.
+
+    The issues connection is one, and every connection ``IssueFields`` nests is one more for
+    each issue on the page. At a hundred issues a page that came to 301, three points, spent on
+    every role of every poll: four workers on one account at the default interval asked for
+    more than its 5,000 an hour (2026-09-24). Kept at or under a hundred, a page is one point
+    whether GitHub rounds to the nearest or up, and a connection added to ``IssueFields``
+    fails here rather than tripling the poll again.
+    """
+    match = re.search(r"issues\(labels: \[\$label\], states: \[\w+\], first: (\d+),", query)
+    assert match is not None
+    per_page = int(match.group(1))
+    nested = ISSUE_FIELDS.count("(first:")
+    assert 1 + per_page * nested <= 100
 
 
 async def test_board_poll_refuses_every_role_when_one_is_over_the_ceiling() -> None:
@@ -287,7 +313,7 @@ async def test_board_poll_reads_a_full_ceiling_of_pages() -> None:
     for page in range(1, MAX_ISSUE_PAGES):
         last = page == MAX_ISSUE_PAGES - 1
         runner.on(
-            both(has("label=issuebot/todo"), has(f"cursor=c{page}")),
+            both(has("label=issuebot/todo"), arg(f"cursor=c{page}")),
             stdout=_issues_page(page + 1, end_cursor=None if last else f"c{page + 1}"),
         )
     issues = await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
@@ -321,7 +347,7 @@ async def test_terminal_sweep_skips_one_over_ceiling_role_and_keeps_the_rest() -
         if json.loads(line)["event"] == "issue_role_skipped"
     ]
     assert [record["label"] for record in skipped] == ["issuebot/review"]
-    assert str(MAX_TERMINAL_PAGES * PAGE_SIZE) in skipped[0]["reason"]
+    assert str(MAX_TERMINAL_PAGES * ISSUE_PAGE_SIZE) in skipped[0]["reason"]
 
 
 @pytest.mark.parametrize(
@@ -366,7 +392,7 @@ async def test_terminal_sweep_carries_its_own_looser_ceiling() -> None:
 
     # The ceiling was the terminal one and not the board's: it read every page up to it.
     reason = json.loads(stream.getvalue().splitlines()[0])["reason"]
-    assert reason == f"more than {MAX_TERMINAL_PAGES * PAGE_SIZE} issues carry issuebot/todo"
+    assert reason == f"more than {MAX_TERMINAL_PAGES * ISSUE_PAGE_SIZE} issues carry issuebot/todo"
     todo_calls = [argv for argv, _ in runner.calls if has("label=issuebot/todo")(argv)]
     assert len(todo_calls) == MAX_TERMINAL_PAGES
 
@@ -460,6 +486,22 @@ async def test_repository_not_found_raises_not_found_even_for_id_reads() -> None
 async def test_rate_limited_graphql_error() -> None:
     runner = StubRunner()
     body = {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
+    runner.on(has("api"), stdout=json.dumps(body), returncode=1)
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
+    assert exc.value.category == "rate_limited"
+    assert exc.value.retryable
+
+
+async def test_graphql_rate_limit_is_recognised_by_its_message_alone() -> None:
+    """The type is not the only way GitHub says it: the message is the part it keeps.
+
+    When four workers on one account spent its budget (2026-09-24), every poll came back
+    categorised ``response``, so whatever GitHub sent carried no ``RATE_LIMITED`` type, and the
+    hold told the operator GitHub was not answering beside a status page saying all was well.
+    """
+    runner = StubRunner()
+    body = {"errors": [{"message": "API rate limit already exceeded for user ID 11852680."}]}
     runner.on(has("api"), stdout=json.dumps(body), returncode=1)
     with pytest.raises(GitHubError) as exc:
         await make_adapter(runner).fetch_issues_by_states([StateLabel.TODO])
@@ -1111,7 +1153,7 @@ async def test_count_own_label_additions_gives_up_past_the_page_cap() -> None:
     )
     for page in range(1, MAX_TIMELINE_PAGES + 2):
         runner.on(
-            both(has("LABELED_EVENT"), has(f"cursor=c{page}")),
+            both(has("LABELED_EVENT"), arg(f"cursor=c{page}")),
             stdout=_timeline_page(
                 [{"actor": {"login": LOGIN}, "label": {"name": "issuebot/rework"}}],
                 end_cursor=f"c{page + 1}",

@@ -180,8 +180,11 @@ items the adapter's own account made, paginated one page at a time and at most
 `MAX_TIMELINE_PAGES` (10) of them, past which it is a `response` error (#110, the same rule
 as the workpad read), the record the conflict bounce is bounded by;
 `_issues_with_label`, the board poll's own GraphQL cursor loop, walks at most
-`MAX_ISSUE_PAGES` (10) pages per role per tick and *fails* past it with a `response` error
-rather than returning a short board (#139): the query is oldest first, so a truncated answer
+`MAX_ISSUE_PAGES` (30) pages per role per tick, of `ISSUE_PAGE_SIZE` (33) issues each -- a
+third of `PAGE_SIZE` because GraphQL charges a page for every connection it nests per issue,
+so a hundred issues cost three points a role a poll and four workers on one account spent
+more than its hourly 5,000 (2026-09-24), where 33 cost one -- and *fails* past it with a
+`response` error rather than returning a short board (#139): the query is oldest first, so a truncated answer
 would have the worker claim from it believing it had seen everything and silently starve the
 newest issues, where a refused read is the `github` dispatch hold of #88 and says so on
 `issuebot status`, `/healthz` and the dashboard. `fetch_terminal_issues` reads
@@ -192,7 +195,7 @@ column is built -- so the role held everything issuebot had ever finished and ev
 it was read only to be classified `unchanged`, which made the sweep's cost grow with the
 deployment's own successful work and, past the ceiling, spend fifty pages a sweep to learn
 nothing. The four that are read are a working set the sweep itself drains. It still passes
-its own, looser `MAX_TERMINAL_PAGES` (50), now as headroom rather than against growth: the
+its own, looser `MAX_TERMINAL_PAGES` (150), now as headroom rather than against growth: the
 first sweep of a repository holding a backlog of closed-but-labelled issues is legitimately
 large and the sweep is the only thing that drains it, and the two reads fail differently, so
 a number tuned for one is not a number for the other. The sweep's roles are read

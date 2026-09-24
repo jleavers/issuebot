@@ -42,6 +42,16 @@ and Claude credential. The checkouts meet on one Docker network.
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
 
+Tokens that belong to one GitHub account share one budget. GitHub allows 5,000 GraphQL
+points an hour *per account*, not per token, and the sessions' own `gh` calls and yours spend
+from it too. An idle worker at the default `polling.interval_ms` spends about 530 of them an
+hour -- one point per state label per poll while no label holds more than 33 open issues,
+plus the terminal sweep -- and a worker with sessions running up to 120 more, so one account
+carries seven to nine workers before the polls alone use it up. Past that, lengthen
+`polling.interval_ms` in each checkout's `configs/WORKFLOW.local.md`, which reloads without a
+restart, or give the extra deployments a token from another account. What a spent budget
+looks like is under ["GitHub itself"](#github-itself).
+
 ### Running out of Docker networks
 
 Every worker checkout costs the host two Docker networks of its own, `<project>_egress` and
@@ -169,6 +179,16 @@ the first failed write, so a slow, silent or nonsensical answer costs the annota
 nothing else. `All Systems Operational` is worth reading too — it points you at your own
 network rather than at GitHub's. `issuebot validate` reports the same page as a
 `github.status` line, which can warn but never fails.
+
+A spent rate limit holds dispatch the same way, under its own name: `GitHub is
+rate-limiting this worker's account: rate_limited: API rate limit already exceeded for user ID
+...`. GitHub is answering, so the status page will usually read operational beside it, and
+the budget is the account's rather than this worker's ([what spends
+it](#more-than-one-repository)). It lifts when the hour turns over, and the first poll after
+that releases the hold. To see how much is left, ask GraphQL itself, `gh api graphql -f
+query='query { rateLimit { used remaining resetAt } }'`, not `gh api rate_limit`: on
+2026-09-24 the latter reported the GraphQL budget untouched while GraphQL's own answer had it
+nearly half spent.
 
 What none of this catches is GitHub answering `200` with stale data: a label write that
 reports success and is not visible on the next read leaves the worker acting on a state

@@ -36,6 +36,7 @@ from issuebot.events import (
     StateChanged,
 )
 from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, Issue, StateLabel
+from issuebot.github.errors import ErrorCategory
 from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
@@ -3208,15 +3209,23 @@ class FetchOutage:
     running refresh's, and it is only the poll that #88 counts.
     """
 
-    def __init__(self, h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.error = "http 502: Bad Gateway"
+    def __init__(
+        self,
+        h: Harness,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        category: ErrorCategory = "transport",
+        error: str = "http 502: Bad Gateway",
+    ) -> None:
+        self.category: ErrorCategory = category
+        self.error = error
         self.down = True
         self._original = h.github.fetch_issues_by_states
         monkeypatch.setattr(h.github, "fetch_issues_by_states", self)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if self.down:
-            raise GitHubError("transport", self.error)
+            raise GitHubError(self.category, self.error)
         return await self._original(*args, **kwargs)
 
 
@@ -3252,6 +3261,31 @@ async def test_consecutive_failed_polls_hold_dispatch_and_say_so_in_the_snapshot
     # The worker itself is fine; only the hold says why the board is not moving.
     assert (h.snapshots[-1].config_valid, h.snapshots[-1].config_error) == (True, None)
     assert h.sessions.runs == []
+
+
+async def test_a_spent_rate_limit_holds_under_its_own_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub is answering, and the answer is that the account's budget is gone (2026-09-24).
+
+    "Not answering" sent the operator to githubstatus.com, which is the one place that cannot
+    help: the budget is the account's, spent by every worker and session sharing its token.
+    """
+    h = Harness(tmp_path)
+    FetchOutage(
+        h,
+        monkeypatch,
+        category="rate_limited",
+        error="API rate limit already exceeded for user ID 1.",
+    )
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    hold = held(h)
+    assert hold is not None
+    assert hold.reason == (
+        "GitHub is rate-limiting this worker's account:"
+        " rate_limited: API rate limit already exceeded for user ID 1."
+    )
 
 
 async def test_the_first_successful_poll_releases_the_hold_and_dispatch_resumes(
