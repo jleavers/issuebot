@@ -19,13 +19,13 @@ and Claude credential. The checkouts meet on one Docker network.
    reach"](security-model.md#what-a-session-may-reach)).
 2. The checkout you already run is the **hub**: its `.env` says `COMPOSE_PROFILES=hub,worker`,
    so `docker compose up -d` starts the database, the dashboard and this repository's worker.
-3. Every other repository: clone issuebot again, set `github.repo` in its
-   `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`
+3. Every other repository: clone issuebot again: `git clone https://github.com/jleavers/issuebot.git issuebot-myrepo`,
+   set `github.repo` in its    `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`
    and the **hub's** `ISSUEBOT_DB_PASSWORD` (the worker authenticates to the hub's database
    with it; compose refuses to start the worker while it is empty), and `docker compose up -d`.
    The worker reaches the hub's database as `db` over the shared network and registers itself;
    it appears in the dashboard's dropdown on its first start.
-4. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`, and the hub's
+5. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`, and the hub's
    `ISSUEBOT_WEB_PASSWORD` at the prompt). `/` opens the repository you last chose; the header's
    dropdown switches.
 
