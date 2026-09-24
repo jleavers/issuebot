@@ -22,16 +22,53 @@ and Claude credential. The checkouts meet on one Docker network.
 3. Every other repository: clone issuebot again: `git clone https://github.com/jleavers/issuebot.git issuebot-myrepo`,
    set `github.repo` in its `configs/WORKFLOW.local.md`, copy `.env.example` to `.env` with `COMPOSE_PROFILES=worker`
    and the **hub's** `ISSUEBOT_DB_PASSWORD` (the worker authenticates to the hub's database
-   with it; compose refuses to start the worker while it is empty), create and add the repo-scoped GitHub token ([`README.md`, "Prerequisites"](README.md#prerequisites))
-   and `docker compose up -d`.
-   The worker reaches the hub's database as `db` over the shared network and registers itself;
-   it appears in the dashboard's dropdown on its first start.
+   with it; compose refuses to start the worker while it is empty), and create and add the
+   repo-scoped GitHub token ([`README.md`, "Prerequisites"](../README.md#prerequisites)).
+4. Create the labels in that repository, *then* start the worker:
+
+   ```bash
+   docker compose run --rm worker labels ensure   # once per repository
+   docker compose up -d
+   ```
+
+   The worker checks its labels at startup and refuses to start while one is missing, so a
+   worker brought up first only restarts, on `[FAIL] startup: labels missing: ...`, until
+   `labels ensure` has run. Once started it reaches the hub's database as `db` over the shared
+   network and registers itself; it appears in the dashboard's dropdown on its first start.
 5. The dashboard is at http://127.0.0.1:8080 (the hub's `ISSUEBOT_WEB_PORT`, and the hub's
    `ISSUEBOT_WEB_PASSWORD` at the prompt). `/` opens the repository you last chose; the header's
    dropdown switches.
 
 `issuebot status`, `stats` and `refresh` act on the repository their workflow names, so run
 them from that repository's checkout.
+
+### Running out of Docker networks
+
+Every worker checkout costs the host two Docker networks of its own, `<project>_egress` and
+`<project>_outside` -- `<project>` being the checkout's directory name, as compose names the
+project -- and a `test-db` run adds `<project>_default`. They come out of one address pool
+shared by every compose project on the host, and Docker's default pools hold 31 bridge
+networks, the default `bridge` among them: fifteen /16s from 172.17 to 172.31, and sixteen /20s
+in 192.168.0.0/16. A host that runs other projects too, or still keeps the networks of
+worktrees long since removed, runs out, and step 4 stops at the first network it cannot create:
+
+```
+failed to create network issuebot-myrepo_egress: Error response from daemon: all predefined address pools have been fully subnetted
+```
+
+Nothing in the checkout is wrong. `docker network ls` lists what holds the pool, and
+`docker network inspect` which containers are running on each; remove the networks nothing is
+using by name, rather than with `docker network prune`, which takes every network on the host
+that is unused at that moment. The lasting fix is smaller subnets, in `/etc/docker/daemon.json`:
+
+```json
+{ "default-address-pools": [ { "base": "172.16.0.0/12", "size": 24 } ] }
+```
+
+That is 4,096 networks of 254 addresses each; pick a base that your LAN and VPN do not route.
+It applies to networks created after the daemon restarts, and unless `live-restore` is set,
+the restart stops every container on the host and brings back only those with a restart
+policy.
 
 ## Rotating the database password
 

@@ -155,13 +155,13 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
    appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
    personal access token restricted to the target repository with:
-   
+
    - Contents (read/write)
    - Issues (read/write)
    - Pull requests (read/write)
    - Actions (read - so a session can read why a CI run failed)
    - Commit statuses (read - for CI that posts commit statuses rather than Actions check runs)
-  
+
    Metadata read is mandatory and the UI adds it for you. Do not go looking for a
    Checks permission: fine-grained tokens
    [cannot call the Checks API](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#limitations-of-fine-grained-personal-access-tokens),
