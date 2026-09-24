@@ -89,7 +89,12 @@ class Source:
                 command,
             ]
         try:
-            done = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+            # `errors="replace"` because `read_tail` cuts at a byte count, which lands inside a
+            # multi-byte character as often as the log carries them; the broken one is in the
+            # partial first line `decode` already drops. The runner reads this stream the same way.
+            done = subprocess.run(
+                argv, capture_output=True, text=True, errors="replace", timeout=30, check=False
+            )
         except FileNotFoundError as exc:
             raise WatchError(f"cannot run {argv[0]}: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
