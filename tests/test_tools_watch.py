@@ -100,6 +100,34 @@ def test_a_partial_first_line_is_counted_rather_than_raised() -> None:
     assert any(entry.kind == "~" and "not parsed" in entry.detail for entry in lines)
 
 
+def test_a_tail_cut_inside_a_character_is_read_rather_than_raised(tmp_path: Path) -> None:
+    """`tail -c` counts bytes, not characters, and claude writes its stream as raw UTF-8 -- a
+    long turn log carries hundreds of `—` -- so under `--follow` the cut lands inside one sooner
+    or later. A strict decode then raised in `Source.shell`, before `decode` ever saw the tail,
+    and ended the watch with a traceback while the session carried on."""
+    earlier = json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "a — b"}]}},
+        ensure_ascii=False,
+    )
+    good = _assistant({"type": "text", "text": "carrying on"})
+    data = f"{earlier}\n{good}\n".encode()
+    # One byte into the `—` (E2 80 94): the tail begins on a continuation byte.
+    cut = data.index("—".encode()) + 1
+    assert 0x80 <= data[cut] <= 0xBF
+    log = tmp_path / "turn-1.jsonl"
+    log.write_bytes(data)
+    local = watch.Source(workspaces=str(tmp_path), service=None, project_directory=tmp_path)
+
+    tail = watch.read_tail(local, str(log), len(data) - cut)
+
+    lines = list(watch.decode(tail, DEFAULT_SCRUBBER))
+    assert any(entry.detail == "carrying on" for entry in lines)
+    assert any(entry.kind == "~" and "not parsed" in entry.detail for entry in lines)
+    # The broken character sits in the partial first line, which is counted and dropped, so the
+    # replacement never reaches the screen.
+    assert not any("�" in entry.detail for entry in lines)
+
+
 def test_a_routine_rate_limit_reading_is_not_drawn_but_a_refusal_is() -> None:
     """An `allowed` reading arrives every few tool calls and says nothing about the session;
     a refusal is the turn about to fail on the account's window (`usage_limited`)."""
