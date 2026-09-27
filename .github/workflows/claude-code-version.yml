@@ -316,6 +316,13 @@ jobs:
             git commit -am "build: pin Claude Code ${LATEST}"
             git push -u origin "${BRANCH}"
           fi
+          # The body's last paragraph is the step this job leaves to a person. A pull request
+          # opened with GITHUB_TOKEN does get a CI run, held until someone with write access
+          # approves it, and main's ruleset will not merge without its checks. Dispatching
+          # ci.yml from here instead would run CI unattended and still not count: per GitHub's
+          # documentation, checks from a workflow_dispatch run neither show on the pull
+          # request nor satisfy a ruleset's required check. The approval is also where a
+          # person agrees to CI building a release nobody has read yet.
           cat > /tmp/pr-body.md <<BODY
           Claude Code ${CURRENT} → ${LATEST} (npm \`dist-tags.latest\` for
           \`@anthropic-ai/claude-code\`).
@@ -338,8 +345,10 @@ jobs:
 
           Read the [changelog](https://code.claude.com/docs/en/changelog) before merging.
 
-          Note: pull requests opened with \`GITHUB_TOKEN\` do not start the CI workflow. Close
-          and reopen this pull request, or push to the branch, to run it.
+          CI is waiting for approval: GitHub holds the run for a pull request opened with
+          \`GITHUB_TOKEN\` until someone with write access selects **Approve workflows to run**
+          in the merge box, and this cannot merge until \`lint\`, \`test\` and \`docker\`
+          pass. If there is no such banner, close and reopen this pull request to start CI.
           BODY
           if ! gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
             -f title="build: pin Claude Code ${LATEST}" \

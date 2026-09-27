@@ -234,6 +234,14 @@ re-running the checks only declines them again. So while it lasts, read the work
 the check list: the local run recorded there is the evidence that the code is good, and the red
 checks are evidence about the account.
 
+Good evidence is not a merge, though. The ruleset on `main` merges a pull request only once
+CI's `lint`, `test` and `docker` checks have passed on its latest commit, with no bypass for
+admins, so a pull request whose checks never ran waits for the hold to lift and a re-run like
+every other. The weekly bump pull requests (`claude-code-version.yml`, `pre-commit-version.yml`)
+have a milder case of the same thing: they are opened with `GITHUB_TOKEN`, so GitHub holds
+their CI run until someone with write access selects **Approve workflows to run** in the merge
+box, and until then their checks are pending rather than failed.
+
 ### Cost
 
 Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
