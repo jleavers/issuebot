@@ -39,7 +39,8 @@ Everything reaches `main` through a pull request. Without write access to this r
 will be working from a fork, which comes to the same thing: push your branch there and open the
 pull request across. With write access, push a branch here and open one — `main` carries a
 ruleset that refuses a direct push, a force push and a deletion, so there is nothing to
-remember.
+remember. The same ruleset merges a pull request only once CI's `lint`, `test` and `docker`
+checks have passed on its latest commit.
 
 Approvals are not required, because a single maintainer cannot approve their own pull request.
 Review is a person reading the diff, not a button.

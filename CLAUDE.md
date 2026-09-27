@@ -372,7 +372,8 @@ Planned infrastructure: Docker, Python 3.14, PostgreSQL, GitHub Actions CI
   no longer only a convention: `main` carries a repository ruleset that refuses
   a direct push, a force push and a deletion, with no bypass for admins, so the
   push fails at the server rather than landing and being noticed afterwards.
-  `AGENTS.md` records it and says how to read the rejection — the rule working,
+  The same ruleset merges a PR only once CI's `lint`, `test` and `docker`
+  checks have passed. `AGENTS.md` records it and says how to read the rejection — the rule working,
   not an obstacle to route around — and the remedy is the same one this bullet
   already gives, a feature branch and a PR. A contributor without write access
   reaches `main` the same way, through a fork and a PR (`CONTRIBUTING.md`).

@@ -313,6 +313,13 @@ jobs:
             git commit -am "build: freeze the pre-commit hooks at their newest tags"
             git push -u origin "${BRANCH}"
           fi
+          # The body's last paragraph is the step this job leaves to a person. A pull request
+          # opened with GITHUB_TOKEN does get a CI run, held until someone with write access
+          # approves it, and main's ruleset will not merge without its checks. Dispatching
+          # ci.yml from here instead would run CI unattended and still not count: per GitHub's
+          # documentation, checks from a workflow_dispatch run neither show on the pull
+          # request nor satisfy a ruleset's required check. The approval is also where a
+          # person agrees to CI running hooks at digests nobody has read yet.
           {
             echo 'The pre-commit hooks, re-frozen by `pre-commit autoupdate --freeze` at the'
             echo 'digest of each repository'"'"'s newest tag (#111):'
@@ -325,8 +332,10 @@ jobs:
             echo 'request was opened, so they install and the tree passes them. A ruff move'
             echo 'here changes only the hook; the `ruff` the lockfile pins is Dependabot'"'"'s.'
             echo
-            echo 'Note: pull requests opened with `GITHUB_TOKEN` do not start the CI workflow.'
-            echo 'Close and reopen this pull request, or push to the branch, to run it.'
+            echo 'CI is waiting for approval: GitHub holds the run for a pull request opened with'
+            echo '`GITHUB_TOKEN` until someone with write access selects **Approve workflows to run**'
+            echo 'in the merge box, and this cannot merge until `lint`, `test` and `docker`'
+            echo 'pass. If there is no such banner, close and reopen this pull request to start CI.'
           } > /tmp/pr-body.md
           if ! gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
             -f title="build: freeze the pre-commit hooks at their newest tags" \
