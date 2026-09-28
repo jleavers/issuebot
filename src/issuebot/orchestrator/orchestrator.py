@@ -70,6 +70,7 @@ from issuebot.orchestrator.admission import (
     admit,
     seeded_chain,
 )
+from issuebot.orchestrator.approval import Approved, Unapproved, assess
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
     TERMINAL_SWEEP_EVERY_TICKS,
@@ -411,6 +412,10 @@ class Orchestrator:
         # every poll for as long as the answer stays the same is the tick rate set by the
         # thread's length. The next change to the issue is what earns another try.
         self._conflict_gave_up: dict[str, datetime] = {}
+        # Issues whose approval evidence would not read, and the error it failed with
+        # (GHSA-jm8h-q3j6-p8xp): the read fails closed and is retried every tick, so the
+        # warning is logged when the error changes rather than every thirty seconds.
+        self._approval_check_failed: dict[str, str] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -1306,7 +1311,45 @@ class Orchestrator:
             return None, False
         return account, True
 
+    async def _assess_approval(self, issue: Issue) -> Approved | Unapproved | None:
+        """Is the issue's text the text a human approved? ``None`` when GitHub would not say.
+
+        Read at dispatch rather than at poll: one issue is dispatched at a time, where every
+        poll reads the whole board. A failed read fails closed -- the issue waits for the next
+        tick -- and is logged once per error rather than per tick.
+        """
+        labels = self._adapter.labels
+        try:
+            evidence = await self._adapter.approval_evidence(issue.number)
+            own_login = await self._adapter.own_login()
+        except GitHubError as exc:
+            if self._approval_check_failed.get(issue.id) != str(exc):
+                self._approval_check_failed[issue.id] = str(exc)
+                self._log.warning(
+                    "approval_check_failed",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    error=str(exc),
+                    category=exc.category,
+                )
+            return None
+        self._approval_check_failed.pop(issue.id, None)
+        return assess(evidence, admitting=(labels.todo, labels.rework), own_login=own_login)
+
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
+        # Before the account and before the claim (GHSA-jm8h-q3j6-p8xp): an issue whose text
+        # is no longer the text a human approved is handed back, and never holds a slot.
+        verdict = await self._assess_approval(issue)
+        if verdict is None:
+            return False
+        if isinstance(verdict, Unapproved):
+            outcome = await actions.unapproved_escape(
+                self._adapter, self._bus, issue, verdict, now=self._now()
+            )
+            if outcome == "applied":
+                self._counters = self._counters.bump(blocked=1)
+            self._record_escape(issue.identifier, outcome)
+            return False
         # Before the claim: an issue whose account is busy must not be moved to in_progress
         # only to sit there until a slot opens.
         account, ready = self._bind_account(issue)
@@ -1621,6 +1664,7 @@ class Orchestrator:
         )
         self._conflict_limit_noted.pop(issue.id, None)
         self._conflict_gave_up.pop(issue.id, None)
+        self._approval_check_failed.pop(issue.id, None)
         if outcome != "failed":
             self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):

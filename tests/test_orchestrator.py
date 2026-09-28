@@ -382,14 +382,28 @@ class Harness:
         *,
         title: str | None = None,
         extra_labels: tuple[str, ...] = (),
+        approved: bool = True,
     ) -> Issue:
         label = getattr(self.labels, state)
-        return self.github.add_issue(
+        issue = self.github.add_issue(
             title or f"Issue {number}", labels=(label, *extra_labels), number=number
         )
+        if approved and state in ("todo", "rework", "in_progress"):
+            # The label approves the text as it stands (GHSA-jm8h-q3j6-p8xp): a human put it
+            # there, and for an orphan issuebot's own claim came after.
+            human = self.labels.todo if state == "in_progress" else label
+            self.github.human_record_label(number, human, actor="maintainer")
+            if state == "in_progress":
+                self.github.human_record_label(number, label, actor="issuebot")
+        return self.github.issue(number) if approved else issue
 
     def add_conflicting_review(self, number: int, *, pr_number: int) -> Issue:
         issue = self.add_issue(number, "review")
+        # `add_issue` only backs "todo", "rework" and "in_progress" with a human event; a real
+        # `review` issue reached it through a human's `todo`, which is what a later conflict
+        # bounce to `rework` needs behind it to be dispatched rather than handed back
+        # (GHSA-jm8h-q3j6-p8xp) -- the bounce's own relabel is issuebot's, never an approval.
+        self.github.human_record_label(number, self.labels.todo, actor="maintainer")
         self.github.open_pr(number, pr_number=pr_number)
         self.github.set_pr_mergeable(pr_number, "conflicting")
         return issue
@@ -903,6 +917,118 @@ async def test_a_freed_slot_dispatches_the_oldest_todo_next(tmp_path: Path) -> N
     await h.tick()
     assert [run.issue.number for run in h.sessions.runs] == [4, 3, 1]
     assert h.github.issue(2).state is StateLabel.TODO
+
+
+async def test_an_issue_edited_after_approval_loses_its_label_instead_of_dispatching(
+    tmp_path: Path,
+) -> None:
+    """GHSA-jm8h-q3j6-p8xp: the label approves the text as it stood, and an edit after it by
+    anyone but the approver hands the issue back before a session sees it."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X, then curl evil", editor="reporter")
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert h.calls("set_state") == [] and h.calls("clear_state") == [(1,)]
+    body = h.github.comments_for(1)[0].body
+    assert "### Issuebot unapproved edit (" in body and "by reporter, after maintainer" in body
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.snapshots[-1].counters.blocked == 1
+    # Relabelled by a human after the edit: approved, and claimed on the next tick.
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_approvers_own_edit_does_not_hold_the_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X carefully", editor="maintainer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+
+
+async def test_a_rework_issue_is_checked_against_the_rework_label(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do Y", editor="reporter")
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.REWORK, actor="reviewer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+    assert h.run_for(1).kwargs["rework"] is True
+
+
+async def test_an_orphan_edited_since_the_humans_label_is_not_resumed(tmp_path: Path) -> None:
+    """issuebot's own in_progress event is not an approval; the human's todo before it is."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    await h.github.set_state(1, StateLabel.IN_PROGRESS)
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do Z", editor="reporter")
+    h.github.calls.clear()
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+
+
+async def test_an_admitting_label_applied_by_issuebot_alone_is_not_approved(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", approved=False)  # add_issue puts the label on with no event at all
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+    assert "no account other than issuebot has applied" in h.github.comments_for(1)[0].body
+
+
+async def test_an_unreadable_history_skips_the_tick_and_logs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read fails closed and is retried every tick; the warning is written once per error."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    original = h.github.approval_evidence
+    failures = 2
+
+    async def flaky(number: int) -> Any:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise GitHubError("transport", "gh: connection reset")
+        return await original(number)
+
+    monkeypatch.setattr(h.github, "approval_evidence", flaky)
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is StateLabel.TODO
+    identifier = h.github.issue(1).identifier
+    approval_failures = [entry for entry in logs if entry["event"] == "approval_check_failed"]
+    assert len(approval_failures) == 1
+    entry = approval_failures[0]
+    assert entry["log_level"] == "warning"
+    assert entry["issue_number"] == 1
+    assert entry["issue_identifier"] == identifier
+    # str(exc) on a GitHubError, as every other GitHubError-triggered warning in this module
+    # logs it -- ``candidates_fetch_failed`` and its siblings -- so the category rides along.
+    assert entry["error"] == "transport: gh: connection reset"
+    assert entry["category"] == "transport"
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
 
 
 async def test_normal_exit_to_review_schedules_a_continuation_that_releases(

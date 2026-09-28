@@ -321,6 +321,11 @@ class FakeGitHub:
             record.updated_at = self._now()
             record.label_events.append((actor, name, record.updated_at))
 
+    def human_record_label(self, number: int, name: str, *, actor: str | None = "reporter") -> None:
+        """Records the event for a label that is already on the issue, without adding it."""
+        record = self._require_issue(number)
+        record.label_events.append((actor, name, self._now()))
+
     def human_remove_label(self, number: int, name: str) -> None:
         record = self._require_issue(number)
         record.labels = [label for label in record.labels if label.lower() != name.lower()]
