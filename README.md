@@ -150,14 +150,15 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
   `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
   `--strict-mcp-config` (see the `claude.mcp_config` row below, which is the only way to name one). `WORKFLOW.md` owns the labels and the
   process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
-  those files (and to `.github/` itself) for the same reason; it only blocks a merge under
-  branch protection's "Require review from Code Owners".
+  those files (and to `.github/` itself) for the same reason, and names the maintainer for
+  every other path too; the default branch's ruleset turns on "Require review from Code
+  Owners", which makes the request a block on the merge.
 
 ### Prerequisites
 
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
    appears under that account, and the session holds the token, so run issuebot as a
-   dedicated account that cannot merge its own work -- [The account a session acts
+   dedicated account that cannot merge work no human approved -- [The account a session acts
    as](docs/security-model.md#the-account-a-session-acts-as) is the recipe for one person
    and for an organisation -- a dedicated account that is a collaborator rather than an
    organisation member needs a classic token instead, and that section says why. Create a

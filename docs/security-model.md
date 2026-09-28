@@ -186,19 +186,29 @@ what a session does with `GH_TOKEN` at `api.github.com`, which the workflow need
 egress allow-list therefore admits: a session holds whatever that token's account may do to
 the repository. If that account is yours, a persuaded session can merge its own pull request
 past the review rule, or push to the default branch, with your authority
-(GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge what
-it wrote -- and `validate` reads two things about yours, both from the repository's
-*rulesets* and not from classic branch protection, which is readable by an admin alone and
-so cannot be what a check for the account it recommends relies on: `github.token account`
-warns when the token's account administers the repository, since an admin can bypass or
-rewrite the rule below; `github.branch rules` warns when no ruleset requires an approving
-review of the latest push on the default branch, since a review that does not cover the
-latest push survives a later one -- a session can push to its own already-approved pull
-request and merge it, which is what issuebot's own conflict bounce does. Both are warnings,
-because `run-once` against a personal scratch repository is a legitimate use. Rulesets are
-also a paid feature on a private repository -- GitHub Free reads them on a public repository
-only, Pro, Team and Enterprise on a private one too -- and an organisation ruleset needs a
-paid organisation plan the same way.
+(GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge work
+no human approved, its own or anyone else's, and `validate` reads two things about yours.
+
+`github.token account` reads the account's role on the repository, and warns when it
+administers it, since an admin can bypass or rewrite the rule below. `github.branch rules`
+reads the default branch's *rulesets* -- not classic branch protection, which is readable by
+an admin alone and so cannot be what a check for the account it recommends relies on. GitHub
+lists a branch's rules for everyone, the ones the caller may bypass included, so the line
+first asks each ruleset carrying the review rule whether the token's account can bypass it,
+and warns, naming the ruleset, if it can. Otherwise it warns unless the rulesets that do bind
+the account require an approving review of the latest push from a code owner. Of the latest
+push, because without it an approval survives a later push: a session can push to its own
+already-approved pull request and merge it, and issuebot's own conflict bounce sends a
+session to push to an already-approved pull request as a matter of course. From a code
+owner, because any account with write can approve, the session's own included. What the
+line cannot see is `CODEOWNERS` itself, a file rather than a rule: an OK does not prove the
+session's account is not a code owner, which is why both recipes below say whom the file
+names.
+
+Both lines are warnings, because `run-once` against a personal scratch repository is a
+legitimate use. Rulesets are also a paid feature on a private repository -- GitHub Free
+enforces them on a public repository only, Pro, Team and Enterprise on a private one too --
+and an organisation ruleset needs a paid organisation plan the same way.
 
 **A solo operator**, which is who this repository expects. Create a second personal account
 for issuebot and add it as a collaborator with **write** -- never admin. Give it a classic
@@ -216,19 +226,32 @@ Put a ruleset on the default branch requiring one approving review of the latest
 "Require approval of the most recent reviewable push" in the UI
 (`require_last_push_approval` in the API), turned on beside the review count itself, or an
 approval survives a push made after it and a session can push to its own already-approved
-pull request and merge it, which is exactly what issuebot's own conflict bounce does. Add no
-bypass for the bot's account; you approve the bot's pull requests from your own. Your own
-pull requests need an approver too, and GitHub does not let an author approve their own, so
-add *yourself*, never the bot, as a bypass actor for the `Repository admin` role -- a role,
-not a named account, so anyone who holds Admin on the repository gets the bypass, which is
-exactly why the bot must never be admin -- in `pull_request` mode ("For pull requests only"
+pull request and merge it. issuebot's own conflict bounce pushes to an approved pull request
+as a matter of course, and that has a cost you will see: every bounce leaves your approval
+behind the latest push, so you approve again once the session is done, or merge through the
+bypass below.
+
+In the same rule turn on "Require review from Code Owners" (`require_code_owner_review`), and
+commit a `.github/CODEOWNERS` to the default branch naming only you -- `* @<you>`, never the
+bot. Without it any account with write approves, the bot's included: on a pull request someone
+opened from a fork they are the last pusher, so the bot's approval satisfies even the
+latest-push rule, and the bot can then merge it. With it the approval that counts is yours,
+and your own pull requests still merge through the admin bypass below.
+
+You approve the bot's pull requests from your own account. Your own pull requests need an
+approver too, and GitHub does not let an author approve their own, so give the ruleset a
+bypass actor for the `Repository admin` role in `pull_request` mode ("For pull requests only"
 in the UI), not `always` ("Always allow" in the UI): your pull requests merge without a
-second account. A direct push to the branch is refused by the `pull_request` rule itself,
-which requires a pull request rather than a push; add the deletion and non-fast-forward
-rules too and keep them on, since those are what stop the branch being deleted or
-force-pushed instead -- the UI ticks both by default when you create a ruleset, the API does
-not. The session's identity cannot merge what it wrote and cannot change the rule that says
-so.
+second account. A bypass list cannot name a personal account, only roles, teams, apps and
+deploy keys, so the bypass is anyone's who holds Admin on the repository -- exactly why the
+bot must never be admin -- and the mistake to avoid is adding the `Write` role beside it:
+that is the bot's role, and it would lift the rule off the bot, which `validate`'s
+`github.branch rules` line warns about. A direct push to the branch is refused by the
+`pull_request` rule itself, which requires a pull request rather than a push; add the
+deletion and non-fast-forward rules too and keep them on, since those are what stop the
+branch being deleted or force-pushed instead -- the UI ticks both by default when you create
+a ruleset, the API does not. The session's identity cannot merge work no human approved, and
+cannot change the rule that says so.
 
 **An organisation** has the same shape with its own tools, and is the route that keeps a
 fine-grained token: make the dedicated account a *member* of the organisation rather than an
@@ -238,18 +261,23 @@ outside collaborator is back to the classic token the solo recipe above uses. Th
 account is a machine user -- GitHub's name for a personal account an organisation creates
 for automation -- with **write** on the repository, no seat on any team that carries admin
 or maintain, no organisation ownership, and no organisation-wide Admin base permission
-either: `validate`'s `github.token account` line reads the token's *effective* permission on
-the repository, so it catches all three the same way, belt and braces. The ruleset is an
-*organisation* ruleset targeting the repository's default branch rather than a repository
-one, with the same "Require approval of the most recent reviewable push" turned on for the
-same reason as the solo recipe: a repository admin cannot remove an organisation ruleset
-either, so the guarantee holds against the repository's own admins too, and it covers every
-repository the organisation points a deployment at. Its bypass actors are teams of humans,
-never the machine user, and its approvers are whoever reviews there already, so no admin
-bypass is needed. `CODEOWNERS` with "require review from Code Owners" narrows who can
-approve a session's change to a path; that is the organisation's choice. A GitHub App
-installation token is not the recommended credential, though `gh` accepts one: it expires
-after an hour, and a session can run longer than that.
+either: `validate`'s `github.token account` line reads the account's role on the repository,
+however it was granted, so it catches all three the same way, belt and braces. The ruleset
+is an *organisation* ruleset targeting the repository's default branch rather than a
+repository one, with the same "Require approval of the most recent reviewable push" turned
+on for the same reason as the solo recipe: a repository admin cannot remove an organisation
+ruleset either, so the guarantee holds against the repository's own admins too, and it
+covers every repository the organisation points a deployment at. The rule holds the
+approval to humans as well, which is part of the recipe and not a choice: either "Require
+review from Code Owners" with a `CODEOWNERS` naming human teams and never the machine user,
+or the rule's required reviewers naming those teams (generally available since November
+2025). Without one of them the machine user's approval of someone else's pull request
+counts, as in the solo recipe. `validate` reads the first and not the second, so under
+required reviewers alone its `github.branch rules` line keeps warning. Its bypass actors are
+teams of humans the machine user is not on -- the same line warns when the token's account
+can bypass the ruleset -- and its approvers are whoever reviews there already, so no admin
+bypass is needed. A GitHub App installation token is not the recommended credential, though
+`gh` accepts one: it expires after an hour, and a session can run longer than that.
 
 Whichever recipe you use, also leave Settings → Actions → General → Workflow permissions →
 "Allow GitHub Actions to create and approve pull requests" off: turned on, a workflow can

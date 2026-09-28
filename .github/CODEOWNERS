@@ -1,3 +1,5 @@
+# Every path is a human's, so the bot's approval never satisfies code-owner review (docs/security-model.md, "The account a session acts as").
+* @jleavers
 # A change to these paths is a change to what every unattended issuebot session inherits (#107):
 # the instruction files a session is handed, the workflow that governs it, and the skills and
 # workflows a developer's own claude loads from this checkout. Review one as a change to the
