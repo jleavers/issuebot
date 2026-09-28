@@ -189,8 +189,8 @@ past the review rule, or push to the default branch, with your authority
 (GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge work
 no human approved, its own or anyone else's, and `validate` reads two things about yours.
 
-`github.token account` reads the account's role on the repository, and warns when it
-administers it, since an admin can bypass or rewrite the rule below. `github.branch rules`
+`github.token account` reads the account's role on the repository, and warns when that role
+is admin, since an admin can bypass or rewrite the rule below. `github.branch rules`
 reads the default branch's *rulesets* -- not classic branch protection, which is readable by
 an admin alone and so cannot be what a check for the account it recommends relies on. GitHub
 lists a branch's rules for everyone, the ones the caller may bypass included, so the line
@@ -238,7 +238,7 @@ bypass below.
 In the same rule turn on "Require review from Code Owners" (`require_code_owner_review`), and
 commit a `.github/CODEOWNERS` to the default branch naming only you -- `* @<you>`, never the
 bot. Without it any account with write approves, the bot's included: on a pull request someone
-opened from a fork they are the last pusher, so the bot's approval satisfies even the
+opened from a fork, they are the last pusher, so the bot's approval satisfies even the
 latest-push rule, and the bot can then merge it. With it the approval that counts is yours,
 and your own pull requests still merge through the admin bypass below.
 

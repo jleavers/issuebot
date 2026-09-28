@@ -139,7 +139,7 @@ class BranchRules:
 
     A rule binds the caller only when its ruleset says the caller cannot bypass it. GitHub
     lists a branch's rules for everyone -- it does not leave out the ones the caller may
-    bypass -- so the three requirements below are the union over the rulesets that do bind
+    bypass -- so the count and the two flags are the union over the rulesets that do bind
     (the largest count; either flag where any of them sets it), and ``bypassable`` names the
     rulesets carrying a ``pull_request`` rule that the caller may bypass, whose requirements
     hold it to nothing and are therefore not counted (GHSA-jm8h-q3j6-p8xp).

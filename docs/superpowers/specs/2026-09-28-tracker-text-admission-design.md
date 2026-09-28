@@ -173,14 +173,14 @@ design (#77).
 
 ### 3. The identity a session acts as cannot merge work no human approved
 
-Amended 2026-09-28 after the whole-branch review: the invariant's last sentence is "cannot
-merge work no human approved", not "cannot merge its own work", since an account with write
-can approve someone else's pull request and merge it; both recipes therefore hold the approval
-to humans -- code-owner review, with a `CODEOWNERS` naming only the operator or only human
-teams, or for an organisation the rule's required reviewers -- on top of a review of the latest
-push; `branch_rules` reads the rules endpoint as what it is, the branch's rules for everyone,
-and counts only the rulesets the caller cannot bypass, naming the rest; and the solo recipe's
-classic token is stated as the trade it is on a private target.
+Amended 2026-09-28 after the whole-branch review: the invariant's last sentence, and this
+heading, say "cannot merge work no human approved", not "its own work", since an account
+with write can approve someone else's pull request and merge it; both recipes therefore hold
+the approval to humans -- code-owner review, with a `CODEOWNERS` naming only the operator or
+only human teams, or for an organisation the rule's required reviewers -- on top of a review
+of the latest push; `branch_rules` reads the rules endpoint as what it is, the branch's rules
+for everyone, and counts only the rulesets the caller cannot bypass, naming the rest; and the
+solo recipe's classic token is stated as the trade it is on a private target.
 
 **For a solo operator**, which is who this repository expects. Run issuebot as a dedicated
 GitHub account -- a second personal account, added as a collaborator with **write** and never
@@ -195,7 +195,7 @@ ruleset on the default branch requiring one approving review of the latest push
 requests from their own account. Of the latest push, because an approval otherwise survives a
 push made after it, and issuebot's own conflict bounce pushes to an already-approved pull
 request. From a code owner, because otherwise any account with write approves: on a pull
-request someone opened from a fork they are the last pusher, so the bot's approval satisfies
+request someone opened from a fork, they are the last pusher, so the bot's approval satisfies
 the rule and the bot can merge it. A ruleset's bypass list cannot name a personal account, so
 the hazard is a role -- the `Write` role, which is the bot's, must never be on it. The
 operator's own pull requests need an approver too, and GitHub does not let an author approve
