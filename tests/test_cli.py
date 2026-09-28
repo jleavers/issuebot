@@ -49,6 +49,7 @@ from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_r
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
+    BranchRules,
     FakeGitHub,
     GitHubError,
     Issue,
@@ -264,7 +265,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
     assert "secret-token-value" not in out
 
 
@@ -286,7 +287,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -661,9 +662,11 @@ def test_validate_missing_executables_fail(
     assert "[FAIL] gh: 'gh' not found on PATH" in out
     assert "[WARN] gh auth: skipped (gh not found)" in out
     assert "[WARN] github.repo access: skipped (gh not found)" in out
+    assert "[WARN] github.token account: skipped (gh not found)" in out
+    assert "[WARN] github.branch rules: skipped (gh not found)" in out
     assert "[WARN] github.labels: skipped (gh not found)" in out
     assert "[WARN] claude auth: skipped (claude not found)" in out
-    assert "2 failed, 7 warnings" in out
+    assert "2 failed, 9 warnings" in out
 
 
 def test_validate_custom_claude_command_is_looked_up(
@@ -724,7 +727,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_warns_when_the_clones_files_are_claudes_configuration(
@@ -815,7 +818,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
     assert fake_database.urls == []
 
 
@@ -871,7 +874,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_names_the_compose_command_for_a_migration(
@@ -930,7 +933,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -945,7 +948,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -961,7 +964,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -985,7 +988,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "18 checks: 0 failed, 4 warnings" in out
+        assert "20 checks: 0 failed, 4 warnings" in out
     finally:
         released.set()
 
@@ -1003,7 +1006,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -1048,7 +1051,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "18 checks: 0 failed, 2 warnings" in out
+    assert "20 checks: 0 failed, 2 warnings" in out
     assert "secret" not in out
 
 
@@ -1214,7 +1217,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -1493,6 +1496,95 @@ def test_validate_warns_about_missing_labels(
         "run issuebot labels ensure" in out
     )
     assert "0 failed, 4 warnings" in out
+
+
+def test_validate_says_the_token_account_is_not_an_admin_and_the_branch_requires_review(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] github.token account: issuebot has write on example/repo, not admin\n" in out
+    assert "[ OK ] github.branch rules: main requires 1 approving review\n" in out
+
+
+def test_validate_warns_when_the_tokens_account_administers_the_repository(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """GHSA-jm8h-q3j6-p8xp: an admin can bypass or rewrite the ruleset that stops a session
+    merging its own work, and the session holds the token."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.admin = True
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.token account: issuebot administers example/repo, and the session holds "
+        "the token: a session can bypass or rewrite the branch ruleset. Run as a dedicated "
+        'account with write access (docs/security-model.md, "The account a session acts as")'
+    ) in out
+
+
+@pytest.mark.parametrize(
+    ("count", "detail"),
+    [
+        (None, "no pull_request rule applies to main"),
+        (0, "main requires 0 approving reviews"),
+    ],
+)
+def test_validate_warns_when_the_default_branch_needs_no_review(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    count: int | None,
+    detail: str,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(branch="main", required_approving_reviews=count)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: {detail}: the account a session runs as can merge its own "
+        "pull requests. Require at least one approving review (rulesets only; classic branch "
+        "protection is not read here)"
+    ) in out
+
+
+def test_validate_warns_when_the_branch_rules_will_not_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+
+    async def failing(branch: str) -> object:
+        raise GitHubError("not_found", "HTTP 404: Not Found")
+
+    monkeypatch.setattr(fake_github, "branch_rules", failing)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] github.branch rules: could not read: HTTP 404: Not Found\n" in out
+    assert "[ OK ] github.labels:" in out  # the checks after it still run
+
+
+def test_validate_skips_the_identity_checks_without_gh(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[[set[str]], None],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    executables({"claude"})
+    main(["validate", "--workflow", str(GOOD)])
+    out = capsys.readouterr().out
+    assert "[WARN] github.token account: skipped (gh not found)" in out
+    assert "[WARN] github.branch rules: skipped (gh not found)" in out
 
 
 def test_validate_names_the_compose_command_inside_the_image(
@@ -3601,7 +3693,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
         f"other than this process's ({uid}), but all 3 concurrent sessions share it"
     ) in out
     assert probed == ["agent"]
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_run_once_takes_the_workspaces_own_account_from_the_pool(
@@ -3681,7 +3773,7 @@ def test_validate_reports_a_pool_of_session_accounts(
     # this process's, so the line says so rather than leaving the reader to take it on trust.
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
-    assert "18 checks: 0 failed, 2 warnings" in out
+    assert "20 checks: 0 failed, 2 warnings" in out
 
 
 # --- validate: the session's network egress (#126) ------------------------------------
@@ -3886,7 +3978,7 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
@@ -3975,7 +4067,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -4004,7 +4096,7 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     reported = [line for line in out.splitlines() if line.startswith(prefix)]
     assert len(reported) == 1
     assert str(listing) in reported[0]
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
@@ -4024,7 +4116,7 @@ def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(

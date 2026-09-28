@@ -93,6 +93,7 @@ from issuebot.github import (
     GitHubAdapter,
     GitHubError,
     Issue,
+    RepoInfo,
     StateLabel,
     fetch_status_summary,
     model_label_style,
@@ -183,7 +184,13 @@ SLACK_WEBHOOK_PATH = "/services/"
 
 CheckStatus = Literal["ok", "warn", "fail"]
 _TAGS: dict[CheckStatus, str] = {"ok": "[ OK ]", "warn": "[WARN]", "fail": "[FAIL]"}
-_NETWORK_SUBJECTS = ("gh auth", "github.repo access", "github.labels")
+_NETWORK_SUBJECTS = (
+    "gh auth",
+    "github.repo access",
+    "github.token account",
+    "github.branch rules",
+    "github.labels",
+)
 _ROLE_ORDER: dict[StateLabel | None, int] = {role: index for index, role in enumerate(StateLabel)}
 
 
@@ -434,17 +441,24 @@ def _github_checks(adapter: GitHubAdapter | None, model_labels: Sequence[str] = 
 
 async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()) -> list[Check]:
     checks: list[Check] = []
+    auth_login: str | None = None
     try:
         auth = await adapter.auth_status()
+        auth_login = auth.login
         checks.append(Check("gh auth", "ok", f"logged in as {auth.login}"))
     except GitHubError as exc:
         checks.append(Check("gh auth", "fail", f"{exc.message}; run gh auth login or set GH_TOKEN"))
     try:
         info = await adapter.repo_info()
-        detail = f"{info.full_name} (default branch {info.default_branch})"
-        checks.append(Check("github.repo access", "ok", detail))
     except GitHubError as exc:
         checks.append(Check("github.repo access", "fail", str(exc)))
+        info = None
+    else:
+        detail = f"{info.full_name} (default branch {info.default_branch})"
+        checks.append(Check("github.repo access", "ok", detail))
+    if info is not None:
+        checks.append(_token_account_check(auth_login, info))
+        checks.append(await _branch_rules_check(adapter, info.default_branch))
     try:
         missing = await adapter.missing_labels(model_labels)
     except GitHubError as exc:
@@ -456,6 +470,50 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
         else:
             checks.append(Check("github.labels", "ok", _labels_detail(adapter, model_labels)))
     return checks
+
+
+IDENTITY_DOC = 'docs/security-model.md, "The account a session acts as"'
+
+
+def _token_account_check(login: str | None, info: RepoInfo) -> Check:
+    """Whether the token's account could undo the rule that stops a session merging its own
+    work (GHSA-jm8h-q3j6-p8xp): an admin can bypass or rewrite the ruleset, and the session
+    holds the token.
+    """
+    who = login or "the token's account"
+    if info.admin:
+        return Check(
+            "github.token account",
+            "warn",
+            f"{who} administers {info.full_name}, and the session holds the token: a session "
+            "can bypass or rewrite the branch ruleset. Run as a dedicated account with write "
+            f"access ({IDENTITY_DOC})",
+        )
+    return Check("github.token account", "ok", f"{who} has write on {info.full_name}, not admin")
+
+
+async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
+    """Whether the default branch requires a review, so the session's own account cannot merge
+    its own pull request (GHSA-jm8h-q3j6-p8xp): the session holds the token that would do it.
+    """
+    try:
+        rules = await adapter.branch_rules(branch)
+    except GitHubError as exc:
+        return Check("github.branch rules", "warn", f"could not read: {exc.message}")
+    count = rules.required_approving_reviews
+    if count is None:
+        detail = f"no pull_request rule applies to {branch}"
+    elif count == 0:
+        detail = f"{branch} requires 0 approving reviews"
+    else:
+        noun = "approving review" if count == 1 else "approving reviews"
+        return Check("github.branch rules", "ok", f"{branch} requires {count} {noun}")
+    return Check(
+        "github.branch rules",
+        "warn",
+        f"{detail}: the account a session runs as can merge its own pull requests. Require at "
+        "least one approving review (rulesets only; classic branch protection is not read here)",
+    )
 
 
 def _labels_detail(adapter: GitHubAdapter, model_labels: Sequence[str]) -> str:
