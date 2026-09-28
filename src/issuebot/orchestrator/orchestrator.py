@@ -70,7 +70,7 @@ from issuebot.orchestrator.admission import (
     admit,
     seeded_chain,
 )
-from issuebot.orchestrator.approval import Approved, Unapproved, assess
+from issuebot.orchestrator.approval import Approved, Unapproved
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
     TERMINAL_SWEEP_EVERY_TICKS,
@@ -1323,14 +1323,15 @@ class Orchestrator:
         poll reads the whole board. A failed read fails closed -- the issue waits for the next
         tick -- and is logged once per error rather than per tick.
         """
-        labels = self._adapter.labels
         try:
-            evidence = await self._adapter.approval_evidence(issue.number)
-            own_login = await self._adapter.own_login()
-            own_labels_approve = self._own_labels_approve
-            if own_labels_approve is None:
-                own_labels_approve = (await self._adapter.repo_info()).admin
-                self._own_labels_approve = own_labels_approve
+            if self._own_labels_approve is None:
+                self._own_labels_approve = (await self._adapter.repo_info()).admin
+            verdict = await actions.assess_issue(
+                self._adapter,
+                issue.number,
+                todo_label=self._adapter.labels.todo,
+                own_labels_approve=self._own_labels_approve,
+            )
         except GitHubError as exc:
             if self._approval_check_failed.get(issue.id) != str(exc):
                 self._approval_check_failed[issue.id] = str(exc)
@@ -1343,12 +1344,7 @@ class Orchestrator:
                 )
             return None
         self._approval_check_failed.pop(issue.id, None)
-        return assess(
-            evidence,
-            todo_label=labels.todo,
-            own_login=own_login,
-            own_labels_approve=own_labels_approve,
-        )
+        return verdict
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
         # Before the account and before the claim (GHSA-jm8h-q3j6-p8xp): an issue whose text

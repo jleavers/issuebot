@@ -1,4 +1,7 @@
-"""GitHub-writing actions the orchestrator takes: claim, blocked escape, terminal finish."""
+"""GitHub-writing actions the orchestrator takes: claim, the escapes, terminal finish.
+
+And the one read ``run-once`` shares with it, ``assess_issue``, beside the escape it feeds.
+"""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +22,7 @@ from issuebot.github import (
     classify_closed,
 )
 from issuebot.log import get_logger
-from issuebot.orchestrator.approval import Unapproved
+from issuebot.orchestrator.approval import Approved, Unapproved, assess
 from issuebot.orchestrator.state import (
     BlockedContext,
     claimed_snapshot,
@@ -296,6 +299,34 @@ async def blocked_escape(
         reason=context.reason,
     )
     return "applied"
+
+
+async def assess_issue(
+    adapter: GitHubAdapter,
+    number: int,
+    *,
+    todo_label: str,
+    own_labels_approve: bool | None = None,
+) -> Approved | Unapproved:
+    """Read the issue's label and edit history and assess it (GHSA-jm8h-q3j6-p8xp).
+
+    The one place the worker and ``run-once`` both make the check, so the foreground cannot
+    admit what the worker would refuse. ``own_labels_approve`` is whether the adapter's
+    account administers the repository; ``None`` reads it from ``repo_info``, which is what a
+    one-shot command wants and what the orchestrator does once and then passes in. Raises
+    ``GitHubError`` -- a ``PageCeilingError`` past the evidence's ceiling -- for the caller to
+    answer: the worker and the foreground answer an unreadable history differently.
+    """
+    evidence = await adapter.approval_evidence(number)
+    own_login = await adapter.own_login()
+    if own_labels_approve is None:
+        own_labels_approve = (await adapter.repo_info()).admin
+    return assess(
+        evidence,
+        todo_label=todo_label,
+        own_login=own_login,
+        own_labels_approve=own_labels_approve,
+    )
 
 
 # The heading of the block the approval check writes (GHSA-jm8h-q3j6-p8xp). The *reason* is

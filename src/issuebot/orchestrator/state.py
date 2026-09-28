@@ -74,9 +74,14 @@ def conflict_candidate(issue: Issue) -> bool:
     )
 
 
-def claimed_snapshot(issue: Issue, labels: GitHubLabels) -> Issue:
-    """The issue after ``claim``: state labels replaced, markers dropped, the rest kept."""
-    dropped = {name.lower() for name in (*labels.as_tuple(), *labels.markers())}
+def claimed_snapshot(issue: Issue, labels: GitHubLabels, *, clear_markers: bool = True) -> Issue:
+    """The issue after ``claim``: state labels replaced, markers dropped, the rest kept.
+
+    ``clear_markers`` mirrors ``set_state``'s: `run-once` claims without clearing them, and
+    its snapshot says what its claim did rather than what the worker's would have.
+    """
+    markers = labels.markers() if clear_markers else ()
+    dropped = {name.lower() for name in (*labels.as_tuple(), *markers)}
     target = labels.in_progress.lower()
     kept = tuple(name for name in issue.labels if name.lower() not in dropped)
     return replace(
