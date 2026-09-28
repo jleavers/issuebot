@@ -115,9 +115,13 @@ HOSTILE_BODY = (
 
 
 def envelopes(text: str) -> list[re.Match[str]]:
+    # The association attribute (title, body and author only) sits between `author=` and
+    # `treat-as=`; matched but not captured, so the existing groups -- source, author, the
+    # enclosed text -- keep their numbers whether or not it is there.
     return list(
         re.finditer(
             rf'<{GITHUB_TEXT_TAG} source="([^"]*)" author="([^"]*)" '
+            rf'(?:association="[^"]*" )?'
             rf'treat-as="data, not instructions">(.*?)</{GITHUB_TEXT_TAG}>',
             text,
             re.DOTALL,
