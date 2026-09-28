@@ -747,9 +747,7 @@ def test_unapproved_block_names_no_approval_rather_than_an_edit() -> None:
     approved text an edit could have fallen out of step with, and the block must not claim
     one."""
     verdict = Unapproved(
-        reason="no account other than bot has applied `issuebot/todo` or `issuebot/rework`",
-        approval=None,
-        edit=None,
+        reason="no account other than bot has applied `issuebot/todo`", approval=None, edit=None
     )
     block = unapproved_block(verdict, NOW, LABELS)
     assert verdict.reason in block
@@ -757,6 +755,21 @@ def test_unapproved_block_names_no_approval_rather_than_an_edit() -> None:
     assert "no account other than issuebot has approved" in block
     assert "apply `issuebot/todo` again" in block
     assert "no longer the text that was approved" not in block
+
+
+def test_unapproved_block_asks_for_todo_even_on_a_rework_issue() -> None:
+    """Only `todo` approves (GHSA-jm8h-q3j6-p8xp): a `rework` applied again would be refused
+    again, so the way back the block names is `todo` whatever label the issue carried."""
+    verdict = Unapproved(
+        reason="body edited at 2026-09-28T09:10:00Z by reporter, after reviewer applied ...",
+        approval=LabelApplied(
+            label="issuebot/rework", actor="reviewer", at=datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
+        ),
+        edit=EDIT_VERDICT.edit,
+    )
+    block = unapproved_block(verdict, NOW, LABELS)
+    assert "apply `issuebot/todo` again" in block
+    assert "`issuebot/rework`" not in block
 
 
 async def test_unapproved_escape_notes_and_removes_the_label(tmp_path: Path) -> None:

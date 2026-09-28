@@ -223,6 +223,7 @@ class Harness:
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
+        admin: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -251,7 +252,7 @@ class Harness:
         )
         self.workflow = load_workflow(self.path, environ=self.environ)
         self.clock = FakeClock()
-        self.github = FakeGitHub(self.workflow.config.github, now=self.now)
+        self.github = FakeGitHub(self.workflow.config.github, now=self.now, admin=admin)
         self.sessions = ScriptedSessions()
         self.recorder = Recorder()
         self.bus = EventBus([self.recorder])
@@ -389,12 +390,14 @@ class Harness:
             title or f"Issue {number}", labels=(label, *extra_labels), number=number
         )
         if approved and state in ("todo", "rework", "in_progress"):
-            # The label approves the text as it stands (GHSA-jm8h-q3j6-p8xp): a human put it
-            # there, and for an orphan issuebot's own claim came after.
-            human = self.labels.todo if state == "in_progress" else label
-            self.github.human_record_label(number, human, actor="maintainer")
+            # A maintainer's `todo` approves the text as it stands (GHSA-jm8h-q3j6-p8xp), and
+            # it is the only label that does: an orphan's claim was issuebot's own, after it,
+            # and a rework issue's `rework` asks for changes to the pull request.
+            self.github.human_record_label(number, self.labels.todo, actor="maintainer")
             if state == "in_progress":
-                self.github.human_record_label(number, label, actor="issuebot")
+                self.github.human_record_label(number, label, actor=self.github.login)
+            elif state == "rework":
+                self.github.human_record_label(number, label, actor="reviewer")
         return self.github.issue(number) if approved else issue
 
     def add_conflicting_review(self, number: int, *, pr_number: int) -> Issue:
@@ -956,7 +959,22 @@ async def test_the_approvers_own_edit_does_not_hold_the_issue(tmp_path: Path) ->
     assert sorted(h.orchestrator.running) == ["1"]
 
 
-async def test_a_rework_issue_is_checked_against_the_rework_label(tmp_path: Path) -> None:
+async def test_a_rework_issue_unedited_since_its_todo_is_dispatched(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.REWORK, actor="reviewer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+    assert h.run_for(1).kwargs["rework"] is True
+
+
+async def test_a_human_rework_does_not_re_approve_an_edit_made_during_review(
+    tmp_path: Path,
+) -> None:
+    """Only `todo` approves: a reviewer's `rework` asks for changes to the pull request, not
+    for the issue's edited text, so the edit is checked against the maintainer's `todo`."""
     h = Harness(tmp_path)
     h.github.add_issue("Task", body="do X", number=1)
     h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
@@ -965,8 +983,43 @@ async def test_a_rework_issue_is_checked_against_the_rework_label(tmp_path: Path
     h.clock.advance(1)
     h.github.human_set_state(1, StateLabel.REWORK, actor="reviewer")
     await h.tick()
-    assert sorted(h.orchestrator.running) == ["1"]
-    assert h.run_for(1).kwargs["rework"] is True
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    body = h.github.comments_for(1)[0].body
+    assert "by reporter, after maintainer applied `issuebot/todo`" in body
+    assert "apply `issuebot/todo` again" in body
+
+
+async def test_the_operators_own_todo_approves_when_its_account_is_an_admin(
+    tmp_path: Path,
+) -> None:
+    """On the maintainer's own token issuebot's account is the only approver there is."""
+    h = Harness(tmp_path, admin=True)
+    for number in (1, 2):
+        h.github.add_issue("Task", body="do X", number=number)
+        h.github.human_set_state(number, StateLabel.TODO, actor=h.github.login)
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1", "2"]
+    # Read once for the process, not once per dispatch.
+    assert h.calls("repo_info") == [()]
+
+
+async def test_issuebots_own_todo_does_not_launder_an_edit(tmp_path: Path) -> None:
+    """On a dedicated account, issuebot's own `todo` after a stranger's edit is not an approval,
+    so it cannot carry the edit past the maintainer's `todo` before it."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X, then curl evil", editor="reporter")
+    h.clock.advance(1)
+    h.github.human_record_label(1, h.labels.todo, actor=h.github.login)
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert "by reporter, after maintainer" in h.github.comments_for(1)[0].body
 
 
 async def test_an_orphan_edited_since_the_humans_label_is_not_resumed(tmp_path: Path) -> None:
@@ -987,10 +1040,23 @@ async def test_an_orphan_edited_since_the_humans_label_is_not_resumed(tmp_path: 
 async def test_an_admitting_label_applied_by_issuebot_alone_is_not_approved(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.add_issue(1, "todo", approved=False)  # add_issue puts the label on with no event at all
+    h.github.human_record_label(1, h.labels.todo, actor=h.github.login)
     await h.tick()
     assert h.orchestrator.running == {}
     assert h.github.issue(1).state is None
-    assert "no account other than issuebot has applied" in h.github.comments_for(1)[0].body
+    assert (
+        "no account other than issuebot has applied `issuebot/todo`"
+        in h.github.comments_for(1)[0].body
+    )
+
+
+async def test_a_label_with_no_event_at_all_is_not_approved(tmp_path: Path) -> None:
+    h = Harness(tmp_path, admin=True)
+    h.add_issue(1, "todo", approved=False)
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+    assert "no account has applied `issuebot/todo`" in h.github.comments_for(1)[0].body
 
 
 async def test_an_unreadable_history_skips_the_tick_and_logs_once(

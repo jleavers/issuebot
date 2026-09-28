@@ -305,9 +305,8 @@ UNAPPROVED_HEADING = "### Issuebot unapproved edit ("
 
 
 def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -> str:
-    admitting = f"`{labels.todo}`"
-    if verdict.approval is not None and verdict.approval.label.lower() == labels.rework.lower():
-        admitting = f"`{labels.rework}`"
+    # The way back is always `todo`, whatever state the issue was in: it is the one label that
+    # approves, and a `rework` applied again would only be refused again.
     if verdict.approval is not None:
         # An edit after a real approval: the text that was approved is not the text now here.
         explanation = (
@@ -324,7 +323,7 @@ def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -
     return (
         f"{UNAPPROVED_HEADING}{_stamp(now)})\n\n"
         f"{verdict.reason}. {explanation} Read the current title and description; if they "
-        f"are what you want done, apply {admitting} again.\n"
+        f"are what you want done, apply `{labels.todo}` again.\n"
     )
 
 

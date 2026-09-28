@@ -416,6 +416,11 @@ class Orchestrator:
         # (GHSA-jm8h-q3j6-p8xp): the read fails closed and is retried every tick, so the
         # warning is logged when the error changes rather than every thirty seconds.
         self._approval_check_failed: dict[str, str] = {}
+        # Whether the account issuebot acts as administers the repository, which is what lets
+        # its own `todo` approve (GHSA-jm8h-q3j6-p8xp). Read once per process from
+        # `repo_info().admin`, and lazily -- at the first approval check rather than in
+        # `startup()` -- so a test that never starts the worker still exercises it.
+        self._own_labels_approve: bool | None = None
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -1322,6 +1327,10 @@ class Orchestrator:
         try:
             evidence = await self._adapter.approval_evidence(issue.number)
             own_login = await self._adapter.own_login()
+            own_labels_approve = self._own_labels_approve
+            if own_labels_approve is None:
+                own_labels_approve = (await self._adapter.repo_info()).admin
+                self._own_labels_approve = own_labels_approve
         except GitHubError as exc:
             if self._approval_check_failed.get(issue.id) != str(exc):
                 self._approval_check_failed[issue.id] = str(exc)
@@ -1334,7 +1343,12 @@ class Orchestrator:
                 )
             return None
         self._approval_check_failed.pop(issue.id, None)
-        return assess(evidence, admitting=(labels.todo, labels.rework), own_login=own_login)
+        return assess(
+            evidence,
+            todo_label=labels.todo,
+            own_login=own_login,
+            own_labels_approve=own_labels_approve,
+        )
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
         # Before the account and before the claim (GHSA-jm8h-q3j6-p8xp): an issue whose text
