@@ -44,25 +44,42 @@ Three changes, one per finding, each its own pull request.
 
 ### 1. The approved text is pinned, and GitHub is the record
 
+Amended 2026-09-28 after the whole-branch review: issuebot's own `todo` approves when its
+account administers the repository; only `todo` approves, never `rework`; an edit in the
+approval's own second counts as after it; and a history past the page ceiling is a verdict,
+not a failed read, with verdicts remembered while the issue is unchanged. (The same review
+also made a label applied by an app or a bot no approval.)
+
 Nothing is stored. GitHub already keeps everything the check needs, and reading it at dispatch
 time means the check cannot drift from the store, cannot be reset by a restart, and costs one
 GraphQL query per *dispatch* rather than per poll:
 
-- **Approval** is the latest `LabeledEvent` on the issue for the admitting label -- `todo`,
-  or `rework` -- whose actor is *not* the account issuebot runs as. The conflict bounce
-  (`actions.conflict_rework`) applies `rework` itself, so issuebot's own label events are not
-  approvals; the human's earlier one is.
+- **Approval** is the `LabeledEvent` for `todo` with the latest timestamp (the greatest `at`,
+  not the last event read) whose actor is a person -- a `User`; a label an app or a bot
+  applies has no approver -- and is not the account issuebot runs as, unless that account
+  administers the repository. Only `todo` approves. `rework` never does, whoever applies it:
+  the conflict bounce (`actions.conflict_rework`) applies it itself, and a reviewer's `rework`
+  asks for changes to the pull request, not for the issue's current text, so an edit made
+  during review is checked against the `todo` before it and adopted only by applying `todo`
+  again. issuebot's own `todo` is excluded on a dedicated account, so its relabel cannot
+  launder an edit that came before it; on the maintainer's own token it counts
+  (`RepoInfo.admin`, read once per process), because excluding it there leaves no approver at
+  all and every issue refused for ever, and an account that administers the repository can
+  rewrite the branch ruleset anyway, so its label is a maintainer's.
 - **Edits** are the issue's `userContentEdits` (each with `editedAt` and `editor.login`; the
   body) and its `RenamedTitleEvent` timeline items (each with `createdAt` and `actor.login`;
   the title). Both are what the prompt renders.
 
-**Rule.** An edit made after the approval by any account other than the approver un-approves
-the issue. The approver editing what they approved is fine -- a solo operator labels an issue
-and then tightens its wording without being asked to approve their own change -- and anyone
-else's edit is not: the author's, because that is the finding; another maintainer's, because
-the alternative is a permission lookup per editor, and refusing a maintainer's edit costs one
-relabel where admitting an outsider's costs the advisory. The false positive is named here so
-it is not later mistaken for a bug.
+**Rule.** An edit made at or after the approval by any account other than the approver
+un-approves the issue. The approver editing what they approved is fine -- a solo operator
+labels an issue and then tightens its wording without being asked to approve their own change
+-- and anyone else's edit is not: the author's, because that is the finding; another
+maintainer's, because the alternative is a permission lookup per editor, and refusing a
+maintainer's edit costs one relabel where admitting an outsider's costs the advisory. The false
+positive is named here so it is not later mistaken for a bug. An edit stamped in the
+approval's own second counts as after it: GitHub records both to the second, the approver's
+own edits are exempt whatever their time, so a tie that matters is someone else's edit landing
+in that second, and assuming the label went on last would admit it.
 
 **What happens.** A new escape in `orchestrator/actions.py`, `unapproved_escape`, shaped like
 `blocked_escape` and label-first under the same rule (#128, #157): it appends a workpad block
@@ -89,9 +106,14 @@ It runs in `Orchestrator._dispatch` before `_bind_account` and before `actions.c
 un-approved issue is never moved to `in_progress` and never holds an account. A `GitHubError`
 from the read fails closed: the issue is not dispatched this tick, `approval_check_failed` is
 logged once per issue and reason (the `IssueLedger.reported_refusal` pattern), and the next
-tick asks again. An issue whose admitting label has *no* human `LabeledEvent` at all -- a label
-applied by an app, or one older than the query's page ceiling -- is un-approved too, because
-"nobody approved it" is the same fact as "someone edited it after approval".
+tick asks again. A history past the page ceiling (`PageCeilingError`) is the exception: it is
+a property of the issue, not of the moment, so it is an `Unapproved` verdict -- nobody can say
+what was approved -- and the escape takes the label off rather than the next tick reading the
+same pages again. The last verdict is remembered per issue against the poll snapshot's
+`updated_at`, title and body, so a candidate held back by a busy account is not re-read every
+tick. An issue whose `todo` has *no* human `LabeledEvent` at all -- a label applied by an app
+-- is un-approved too, because "nobody approved it" is the same fact as "someone edited it
+after approval".
 
 **Pieces.**
 

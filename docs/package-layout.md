@@ -963,16 +963,27 @@ the issue is already running or retrying, whether it is in a state this worker c
 issue's failure chain, its cumulative spend -- with `Admitted(attempt)` or `Refused(kind,
 reason, wait)`, `wait` being how a caller that can wait requeues (`None` means waiting will
 not change it).
-`approval.py` (pure, GHSA-jm8h-q3j6-p8xp) is the second gate, asked in `_dispatch` before an
-account is bound or the issue claimed: `assess(evidence, admitting=(todo, rework), own_login=)`
-answers `Approved(approver, at)` or `Unapproved(reason, approval, edit)` from the adapter's
-`approval_evidence` -- the issue's `LabeledEvent` and `RenamedTitleEvent` timeline items and
-its `userContentEdits`, two reads bounded at `MAX_TIMELINE_PAGES`. The latest human
-application of an admitting label is the approval; an edit after it by anyone but the
-approver, or no human application at all, is `Unapproved`, and `actions.unapproved_escape`
-writes the `### Issuebot unapproved edit` block, removes the state label and publishes
-`Blocked`, label-first under the same rule as the other escapes. Nothing is stored: GitHub's
-record is the record, and a human applying the label again is what re-approves.
+`approval.py` (pure, GHSA-jm8h-q3j6-p8xp) is the second gate, asked in `_dispatch` before the
+issue is claimed -- and, on the candidate path, before an account is bound; the retry path
+(`_fire`) binds first, to requeue rather than release a retry whose account is busy, and
+`_dispatch` then reuses the binding it already holds.
+`assess(evidence, todo_label=, own_login=, own_labels_approve=)` answers `Approved(approver,
+at)` or `Unapproved(reason, approval, edit)` from the adapter's `approval_evidence` -- the
+issue's `LabeledEvent` and `RenamedTitleEvent` timeline items and its `userContentEdits`, two
+reads bounded at `MAX_TIMELINE_PAGES`, where a label an app or a bot applied has no actor.
+Only `todo` approves: `rework` asks for changes to the pull request, and the conflict bounce
+applies it itself. The approval is the `todo` with the latest timestamp that a person applied,
+issuebot's own account counting only when `own_labels_approve` -- the `RepoInfo.admin` the
+orchestrator reads once per process -- says it administers the repository and so is the
+maintainer's own. An edit at or after it (a same-second tie counts as after) by anyone but the
+approver, or no approval at all, is `Unapproved`, as is a history
+past the ceiling (`PageCeilingError`), and `actions.unapproved_escape` writes the `### Issuebot
+unapproved edit` block, removes the state label and publishes `Blocked`, label-first under the
+same rule as the other escapes. `actions.assess_issue` is the read-and-assess both
+`_assess_approval` and `run-once` call; the orchestrator remembers the last verdict per issue
+against the poll snapshot's `updated_at`, title and body, so a candidate held back by a busy
+account is not re-read every tick. Nothing is stored: GitHub's record is the record, and a
+maintainer applying `todo` again is what re-approves.
 `_dispatch_candidates` and `_fire` both go through `admit` and neither derives a
 precondition of its own; `_fire` asks twice, once before its refresh (a worker that may not
 claim should not spend a request finding out which issue it may not claim, and a GitHub hold
@@ -1598,7 +1609,12 @@ and with `--slack-probe` posts one test message, and a prompt render against a s
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
-runs one session, never sets `review`; `--model` beats both the label and `claude.model`),
+runs one session, never sets `review`; `--model` beats both the label and `claude.model`;
+before the claim it makes the worker's approval check through `actions.assess_issue`, and a
+refusal or an unreadable history is a `[FAIL] approval:` line and exit 1 with the label left
+where it is -- no escape, the operator being the human it would hand the issue to -- while
+`--show-prompt` skips it; the session gets the checked issue relabelled by
+`claimed_snapshot`, never a fetch after the claim),
 `worker [--workflow PATH]` (the orchestrator until SIGTERM/SIGINT; `[FAIL] startup:` lines
 and exit 1 when the startup probes fail, `claude auth: not logged in; ...` among them), `migrate`,
 `status` (through `queries.scoped(repo)`: the snapshot as text, its `workflow:` line reading
