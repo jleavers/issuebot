@@ -6,15 +6,18 @@ from issuebot.github.fake import FakeGitHub
 from issuebot.github.ghcli import GhCliAdapter
 from issuebot.github.models import (
     WORKPAD_MARKER,
+    ApprovalEvidence,
     AuthStatus,
     Comment,
     Issue,
+    LabelApplied,
     LabelEnsured,
     LinkedPr,
     Mergeable,
     RateLimit,
     RepoInfo,
     StateLabel,
+    TextEdit,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
@@ -55,6 +58,7 @@ __all__ = [
     "TRANSITIONS",
     "WORKPAD_MARKER",
     "Actor",
+    "ApprovalEvidence",
     "AuthStatus",
     "Comment",
     "ErrorCategory",
@@ -67,6 +71,7 @@ __all__ = [
     "GitHubError",
     "GitHubStatus",
     "Issue",
+    "LabelApplied",
     "LabelEnsured",
     "LabelStyle",
     "LinkedPr",
@@ -75,6 +80,7 @@ __all__ = [
     "RateLimit",
     "RepoInfo",
     "StateLabel",
+    "TextEdit",
     "carries_no_fault",
     "classify_closed",
     "fetch_status_summary",

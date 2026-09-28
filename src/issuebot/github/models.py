@@ -75,6 +75,37 @@ class Comment:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class LabelApplied:
+    """One label addition as GitHub's timeline records it."""
+
+    label: str
+    actor: str | None  # None once GitHub has deleted the account
+    at: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TextEdit:
+    """One edit to the text a session is handed: the body (``userContentEdits``) or the title
+    (a ``RenamedTitleEvent``)."""
+
+    what: Literal["body", "title"]
+    editor: str | None  # None once GitHub has deleted the account
+    at: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ApprovalEvidence:
+    """What decides whether the text a session would act on is the text a human approved.
+
+    ``label_events`` are oldest first, as GitHub lists the timeline. ``edits`` carry no order
+    promise -- ``userContentEdits`` answers newest first -- so the assessment sorts them.
+    """
+
+    label_events: tuple[LabelApplied, ...]
+    edits: tuple[TextEdit, ...]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RateLimit:
     limit: int
     remaining: int
