@@ -121,25 +121,25 @@ authenticate, and `validate` says the same.
 ## The text a session acts on
 
 A session is handed the issue's title and description and told to run the steps any
-`Validation` or `Test Plan` section asks for. What makes that safe to do unattended is that a
-human read that text and applied `issuebot/todo` to it -- so the label has to approve the text
-*as it stood*, and nothing an author writes afterwards may ride on it. Before every dispatch
-the worker reads GitHub's own record: the latest `issuebot/todo` a person applied is the
-approval, and any title or body edit at or after it by an account other than the approver
-un-approves the issue, which loses its label and gets a `### Issuebot unapproved edit` block
-saying who changed what and when ([`docs/operations.md`, "Blocked"](operations.md#blocked)).
-Only `issuebot/todo` approves: `issuebot/rework` asks for changes to the pull request and
-never re-approves the issue's text -- the conflict bounce applies it itself -- so an edit
-made during review is refused on the rework that follows, and a label an app or a bot applies
-is never an approval. The worker's own `issuebot/todo` counts only when its account
-administers the repository, which is to say when it is the maintainer's own account -- a
-setup a planned `validate` check will warn about; under a dedicated GitHub account only a
-maintainer's `issuebot/todo` approves, so the worker's own relabel can never carry an edit
-past the check. Under an admin token, the worker's own `issuebot/todo` on *another* issue
-counts as an approval there too, covered by the same reasoning -- an admin account could
-rewrite the ruleset regardless -- which is one more reason for the dedicated account [The
-account a session acts as](#the-account-a-session-acts-as) recommends. Nothing is stored, so
-a restart cannot reset it: re-approval is a maintainer applying `issuebot/todo` again.
+`Validation` or `Test Plan` section asks for. What makes that safe to do unattended is that
+a human read that text and applied `issuebot/todo` to it -- so the label has to approve the
+text *as it stood*, and nothing an author writes afterwards may ride on it. Before every
+dispatch the worker reads GitHub's own record: the latest `issuebot/todo` a person applied
+is the approval, and any title or body edit at or after it by an account other than the
+approver un-approves the issue, which loses its label and gets a `### Issuebot unapproved
+edit` block saying who changed what and when ([`docs/operations.md`,
+"Blocked"](operations.md#blocked)). Only `issuebot/todo` approves: `issuebot/rework` asks
+for changes to the pull request and never re-approves the issue's text -- the conflict
+bounce applies it itself -- so an edit made during review is refused on the rework that
+follows, and a label an app or a bot applies is never an approval. The worker's own
+`issuebot/todo` counts only when its account administers the repository, which is to say
+when it is the maintainer's own account -- a setup `validate`'s `github.token account` line
+warns about ([The account a session acts as](#the-account-a-session-acts-as)); under a
+dedicated GitHub account only a maintainer's `issuebot/todo` approves, so the worker's own
+relabel can never carry an edit past the check. Under an admin token the account's own label
+counts on any issue, so a session holding the token can approve another issue for its
+successor. Nothing is stored, so a restart cannot reset it: re-approval is a maintainer
+applying `issuebot/todo` again.
 
 Comments are the other text a session reads, and on a public repository anyone can leave one
 on an issue in `issuebot/review` or `issuebot/rework`. The barrier is in the commands the
@@ -181,40 +181,83 @@ against GHSA-jm8h-q3j6-p8xp at all.
 
 ## The account a session acts as
 
-Everything above bounds where a session's bytes can go. It does not bound what a session does
-with `GH_TOKEN` at `api.github.com`, which the workflow needs and the egress allow-list
-therefore admits: a session holds whatever that token's account may do to the repository. If
-that account is yours, a persuaded session can approve and merge its own pull request, or
-push to the default branch, with your authority (GHSA-jm8h-q3j6-p8xp). So the identity a
-session acts as must be one that cannot merge what it wrote -- and `validate` says whether
-yours is, on two lines: `github.token account` warns when the token's account administers the
-repository, since an admin can bypass or rewrite the rule below; `github.branch rules` warns
-when no ruleset requires an approving review on the default branch, since then the session's
-account can merge its own pull requests. Both are warnings, because `run-once` against a
-scratch repository is a legitimate use.
+Everything above bounds where a session can reach and what it is handed. It does not bound
+what a session does with `GH_TOKEN` at `api.github.com`, which the workflow needs and the
+egress allow-list therefore admits: a session holds whatever that token's account may do to
+the repository. If that account is yours, a persuaded session can merge its own pull request
+past the review rule, or push to the default branch, with your authority
+(GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge what
+it wrote -- and `validate` reads two things about yours, both from the repository's
+*rulesets* and not from classic branch protection, which is readable by an admin alone and
+so cannot be what a check for the account it recommends relies on: `github.token account`
+warns when the token's account administers the repository, since an admin can bypass or
+rewrite the rule below; `github.branch rules` warns when no ruleset requires an approving
+review of the latest push on the default branch, since a review that does not cover the
+latest push survives a later one -- a session can push to its own already-approved pull
+request and merge it, which is what issuebot's own conflict bounce does. Both are warnings,
+because `run-once` against a personal scratch repository is a legitimate use. Rulesets are
+also a paid feature on a private repository -- GitHub Free reads them on a public repository
+only, Pro, Team and Enterprise on a private one too -- and an organisation ruleset needs a
+paid organisation plan the same way.
 
 **A solo operator**, which is who this repository expects. Create a second personal account
-for issuebot and add it as a collaborator with **write** -- never admin. Put a ruleset on
-the default branch requiring one approving review, with no bypass for that account; you
-approve the bot's pull requests from your own. Your own pull requests need an approver too,
-and GitHub does not let an author approve their own, so add yourself as a `Repository admin`
-bypass actor in `pull_request` mode, not `always`: your pull requests merge without a second
-account, and a direct push to the branch is still refused, which is what the ruleset's
-deletion and non-fast-forward rules are there for. The session's identity cannot merge what
-it wrote and cannot change the rule that says so.
+for issuebot and add it as a collaborator with **write** -- never admin. Give it a classic
+`repo` token rather than a fine-grained one: a fine-grained token can only reach
+repositories owned by its own resource owner, and cannot be used to contribute to a
+repository where the account is an outside or repository collaborator rather than the owner
+or an organisation member, so a collaborator account has no fine-grained token to give it.
+`validate`'s `github.token` line will warn about the classic token's account-wide reach, and
+that warning means less here than it does on a maintainer's own token: this account's whole
+reach *is* the one repository it collaborates on, which is the point of a dedicated account,
+not a gap in it. (The organisation recipe below keeps a fine-grained token, if that matters
+to you.)
 
-**An organisation** has the same shape with its own tools. The dedicated account is a machine
-user -- GitHub's name for a personal account an organisation creates for automation -- made a
-member of the organisation, or an outside collaborator, with **write** on the repository and no
-seat on any team that carries admin or maintain. The ruleset is an *organisation* ruleset
-targeting the repository's default branch rather than a repository one: a repository admin
-cannot remove it, so the guarantee holds against the repository's own admins too, and it
-covers every repository the organisation points a deployment at. Its bypass actors are teams
-of humans, never the machine user, and its approvers are whoever reviews there already, so no
-admin bypass is needed. `CODEOWNERS` with "require review from Code Owners" narrows who can
+Put a ruleset on the default branch requiring one approving review of the latest push --
+"Require approval of the most recent reviewable push" in the UI
+(`require_last_push_approval` in the API), turned on beside the review count itself, or an
+approval survives a push made after it and a session can push to its own already-approved
+pull request and merge it, which is exactly what issuebot's own conflict bounce does. Add no
+bypass for the bot's account; you approve the bot's pull requests from your own. Your own
+pull requests need an approver too, and GitHub does not let an author approve their own, so
+add *yourself*, never the bot, as a bypass actor for the `Repository admin` role -- a role,
+not a named account, so anyone who holds Admin on the repository gets the bypass, which is
+exactly why the bot must never be admin -- in `pull_request` mode ("For pull requests only"
+in the UI), not `always` ("Always allow" in the UI): your pull requests merge without a
+second account. A direct push to the branch is refused by the `pull_request` rule itself,
+which requires a pull request rather than a push; add the deletion and non-fast-forward
+rules too and keep them on, since those are what stop the branch being deleted or
+force-pushed instead -- the UI ticks both by default when you create a ruleset, the API does
+not. The session's identity cannot merge what it wrote and cannot change the rule that says
+so.
+
+**An organisation** has the same shape with its own tools, and is the route that keeps a
+fine-grained token: make the dedicated account a *member* of the organisation rather than an
+outside collaborator, since a fine-grained token can be scoped to an organisation its own
+account belongs to but not to a repository it only collaborates on from outside -- an
+outside collaborator is back to the classic token the solo recipe above uses. The dedicated
+account is a machine user -- GitHub's name for a personal account an organisation creates
+for automation -- with **write** on the repository, no seat on any team that carries admin
+or maintain, no organisation ownership, and no organisation-wide Admin base permission
+either: `validate`'s `github.token account` line reads the token's *effective* permission on
+the repository, so it catches all three the same way, belt and braces. The ruleset is an
+*organisation* ruleset targeting the repository's default branch rather than a repository
+one, with the same "Require approval of the most recent reviewable push" turned on for the
+same reason as the solo recipe: a repository admin cannot remove an organisation ruleset
+either, so the guarantee holds against the repository's own admins too, and it covers every
+repository the organisation points a deployment at. Its bypass actors are teams of humans,
+never the machine user, and its approvers are whoever reviews there already, so no admin
+bypass is needed. `CODEOWNERS` with "require review from Code Owners" narrows who can
 approve a session's change to a path; that is the organisation's choice. A GitHub App
 installation token is not the recommended credential, though `gh` accepts one: it expires
 after an hour, and a session can run longer than that.
+
+Whichever recipe you use, also leave Settings → Actions → General → Workflow permissions →
+"Allow GitHub Actions to create and approve pull requests" off: turned on, a workflow can
+approve a pull request as `github-actions[bot]`, a second route past the review rule that
+has nothing to do with which account issuebot runs as -- and if the session holds Workflows
+write (README's Prerequisites), that workflow is the session's own to write. Leave the
+setting off, or make sure nothing a session's own workflow edit can trigger uses that
+approval.
 
 ## Checking that the credential took
 

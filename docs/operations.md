@@ -167,9 +167,10 @@ against. `` no account other than <login> has applied `issuebot/todo` `` means t
 a maintainer's `issuebot/todo` counts, while an account that administers the repository --
 the maintainer's own token -- counts its own, since its label is a maintainer's in every
 sense that matters here. An operator running on their own token without admin -- a write or
-maintain collaborator who is the only one applying the label -- has no approver either, so
-every issue gets this same block: the fix is a second person's `issuebot/todo`, or the
-dedicated-account arrangement ([`docs/security-model.md`, "The account a session acts
+maintain collaborator who is the only one applying the label -- is in the same position: no
+account but its own has applied the label, so every issue gets this same block: the fix is a
+second person's `issuebot/todo`, or the dedicated-account arrangement
+([`docs/security-model.md`, "The account a session acts
 as"](security-model.md#the-account-a-session-acts-as)). `` no account has applied
 `issuebot/todo` `` means no person GitHub still names ever applied it: a label an app, a bot
 or an Actions workflow applied is not an approval, and neither is one by an account since
@@ -408,59 +409,59 @@ that failed stopped rather than running beside the others on an older image. See
 
 ### Safety
 
-The enforced boundary is the container, its **network**, and inside it the uid:
-the session (`claude -p`, every hook, the clone) runs as a session account — by default the
-pool the image built, `agent-1` .. `agent-N` — a different account from the worker
-(`issuebot`, uid 1000) that supervises and credentials it, and -- with a pool, see [One
-account per concurrent session](security-model.md#one-account-per-concurrent-session) -- at a different uid from every other session
-running beside it. So the session runs
-with no permission prompts and may do as it likes at its own uid, but the worker's code
-(`/app`, root-owned), the rest of its environment (the database URL, the Slack webhook, and
-in a hub checkout the dashboard password), its home and the state it keeps inside a
-workspace are all out of the session's reach, and the worker cannot become root or anything
-but a session account. `GH_TOKEN` is the one credential the session is given, since it clones
-and pushes with it, which is why the token should be scoped to the repository: `validate`
-warns when it is a classic or an OAuth token, whose reach is the account's, and says so. The
-session's tools are fixed the same way, by the front matter and the argv issuebot builds
-from it (`claude.disallowed_tools`, which ships with `WebFetch` and `WebSearch` in it, and
-`--strict-mcp-config` on every session), so the prompt's rules about what a reporter wrote
-describe what the session may do *within* that authority rather than granting it, and the
-`<github-text>` envelope is a hint to the model, never the boundary. Its *network* is
-fixed outside the prompt too: under Compose the container's every network is `internal`, so
-the session has no route off the host but the allow-listing proxy beside it, and `GH_TOKEN`
-can be carried to Anthropic, to GitHub and to whatever else the deployment named, and to
-nothing else ([What a session may reach](security-model.md#what-a-session-may-reach)). The session's
-home is its own — `/home/<account>/.claude`, `0700` from the image — and holds no credential:
-it authenticates from the environment, which is why nobody logs into it. With a pool
-the sharing is with the next session bound to that same account rather than with the ones
-running beside it; with one account for the deployment every concurrent session shares that
-home. Either way, before every turn the worker sweeps the config a prior or concurrent
-session could have left there — a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`,
-`agents/`, `workflows/`, `agent-memory/`, `plugins/`, `output-styles/`, `settings.json`,
-`settings.local.json` and each project's auto memory (`projects/<project>/memory/`), the
-surfaces a later `claude -p` loads as instructions or behaviour — and, from the home itself,
-the account's shell start-up files (`.bash_profile`, `.bash_login`, `.profile`, `.bashrc`,
-`.bash_logout`): `/home/<account>` is the account's to write, every hook and the
-post-clone setup run under `bash -lc`, a login shell, and `claude` snapshots one for the
-session's Bash tool, so a `~/.profile` one session leaves is a script every later session
-runs at that uid. That is why the sweep runs before each of those scripts as well as before
-each turn — `before_run` would otherwise be the next session's first login shell, and it runs
-before turn 1 — and before the *clone*, which opens no shell but is the earliest thing a run
-does at that uid, and which reads both `gh`'s and git's config out of the home while holding
-the token. The same home holds the config a *tool* the session runs reads, and that is
-swept with it: `~/.gitconfig` and `~/.config/git/config` — both, because git reads the
-second of them first — and `~/.ssh/config`, each of which can name a command (`core.pager`,
-`credential.helper`, `[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh`
-to run; and `~/.config/gh/config.yml` (#173), which can name one for `gh` (`aliases:`) and can
-also re-point where `gh` sends its requests and its `GH_TOKEN` with them (`http_unix_socket`, a
-unix socket rather than a network route, so the egress proxy never sees it) on an ordinary
-`gh api` or `gh repo clone`. Nothing a deployment needs goes there: the bot's identity is the
-`GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
-entry is the image's system-wide one, the clone's credential helper is written into the clone,
-and global git or ssh config for every session belongs in `/etc/gitconfig` or
-`/etc/ssh/ssh_config`, which are root's and which no session can write. Whose the token is
+The enforced boundary is the container, its **network**, and inside it the uid: the session
+(`claude -p`, every hook, the clone) runs as a session account — by default the pool the
+image built, `agent-1` .. `agent-N` — a different account from the worker (`issuebot`, uid
+1000) that supervises and credentials it, and -- with a pool, see [One account per
+concurrent session](security-model.md#one-account-per-concurrent-session) -- at a different
+uid from every other session running beside it. So the session runs with no permission
+prompts and may do as it likes at its own uid, but the worker's code (`/app`, root-owned),
+the rest of its environment (the database URL, the Slack webhook, and in a hub checkout the
+dashboard password), its home and the state it keeps inside a workspace are all out of the
+session's reach, and the worker cannot become root or anything but a session account.
+`GH_TOKEN` is the one credential the session is given, since it clones and pushes with it,
+which is why the token should be scoped to the repository: `validate` warns when it is a
+classic or an OAuth token, whose reach is the account's, and says so. Whose the token is
 matters as much as its scope: [The account a session acts
-as](security-model.md#the-account-a-session-acts-as).
+as](security-model.md#the-account-a-session-acts-as). The session's tools are fixed the same
+way, by the front matter and the argv issuebot builds from it (`claude.disallowed_tools`,
+which ships with `WebFetch` and `WebSearch` in it, and `--strict-mcp-config` on every
+session), so the prompt's rules about what a reporter wrote describe what the session may do
+*within* that authority rather than granting it, and the `<github-text>` envelope is a hint
+to the model, never the boundary. Its *network* is fixed outside the prompt too: under
+Compose the container's every network is `internal`, so the session has no route off the
+host but the allow-listing proxy beside it, and `GH_TOKEN` can be carried to Anthropic, to
+GitHub and to whatever else the deployment named, and to nothing else ([What a session may
+reach](security-model.md#what-a-session-may-reach)). The session's home is its own —
+`/home/<account>/.claude`, `0700` from the image — and holds no credential: it authenticates
+from the environment, which is why nobody logs into it. With a pool the sharing is with the
+next session bound to that same account rather than with the ones running beside it; with
+one account for the deployment every concurrent session shares that home. Either way, before
+every turn the worker sweeps the config a prior or concurrent session could have left there
+— a user-level `CLAUDE.md`, `rules/`, `skills/`, `commands/`, `agents/`, `workflows/`,
+`agent-memory/`, `plugins/`, `output-styles/`, `settings.json`, `settings.local.json` and
+each project's auto memory (`projects/<project>/memory/`), the surfaces a later `claude -p`
+loads as instructions or behaviour — and, from the home itself, the account's shell start-up
+files (`.bash_profile`, `.bash_login`, `.profile`, `.bashrc`, `.bash_logout`):
+`/home/<account>` is the account's to write, every hook and the post-clone setup run under
+`bash -lc`, a login shell, and `claude` snapshots one for the session's Bash tool, so a
+`~/.profile` one session leaves is a script every later session runs at that uid. That is
+why the sweep runs before each of those scripts as well as before each turn — `before_run`
+would otherwise be the next session's first login shell, and it runs before turn 1 — and
+before the *clone*, which opens no shell but is the earliest thing a run does at that uid,
+and which reads both `gh`'s and git's config out of the home while holding the token. The
+same home holds the config a *tool* the session runs reads, and that is swept with it:
+`~/.gitconfig` and `~/.config/git/config` — both, because git reads the second of them first
+— and `~/.ssh/config`, each of which can name a command (`core.pager`, `credential.helper`,
+`[alias] x = !...`, `ProxyCommand`) for the next session's `git` or `ssh` to run; and
+`~/.config/gh/config.yml` (#173), which can name one for `gh` (`aliases:`) and can also
+re-point where `gh` sends its requests and its `GH_TOKEN` with them (`http_unix_socket`, a
+unix socket rather than a network route, so the egress proxy never sees it) on an ordinary
+`gh api` or `gh repo clone`. Nothing a deployment needs goes there: the bot's identity is
+the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's
+`safe.directory` entry is the image's system-wide one, the clone's credential helper is
+written into the clone, and global git or ssh config for every session belongs in
+`/etc/gitconfig` or `/etc/ssh/ssh_config`, which are root's and which no session can write.
 
 One file is *edited* rather than removed, and it is the only one: `~/.config/gh/hosts.yml`.
 It is credential state — it holds the `oauth_token` a session authenticates `gh` with, where a

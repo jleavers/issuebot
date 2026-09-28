@@ -156,11 +156,12 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 ### Prerequisites
 
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
-   appears under that account, and the session holds the token, so run issuebot as a dedicated
-   account that cannot merge its own work -- [The account a session acts
-   as](docs/security-model.md#the-account-a-session-acts-as) is the recipe for one person and
-   for an organisation. Create a fine-grained personal access token restricted to the target
-   repository with:
+   appears under that account, and the session holds the token, so run issuebot as a
+   dedicated account that cannot merge its own work -- [The account a session acts
+   as](docs/security-model.md#the-account-a-session-acts-as) is the recipe for one person
+   and for an organisation -- a dedicated account that is a collaborator rather than an
+   organisation member needs a classic token instead, and that section says why. Create a
+   fine-grained personal access token restricted to the target repository with:
 
    - Contents (read/write)
    - Issues (read/write)
@@ -317,7 +318,7 @@ docker compose run --rm worker labels ensure
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [ OK ] github.token account: your-bot has write on your-org/your-repo, not admin
-[ OK ] github.branch rules: main requires 1 approving review
+[ OK ] github.branch rules: main requires 1 approving review of the latest push
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4

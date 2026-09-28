@@ -151,8 +151,11 @@ def test_claude_credential_names_the_scoping_it_has_none_of() -> None:
 
 def test_the_bypass_is_pull_request_mode_only() -> None:
     """The admin bypass exists so a solo operator's own pull requests can merge; `always` would
-    also let that account push to the branch directly, which the deletion and non-fast-forward
-    rules are there to stop."""
-    text = (ROOT / "docs" / "security-model.md").read_text(encoding="utf-8")
-    assert "bypass actor in `pull_request` mode" in text
+    also let that account push to the branch directly -- which the `pull_request` rule itself
+    refuses, not the deletion and non-fast-forward rules (those stop the branch being deleted
+    or force-pushed instead)."""
+    text = " ".join((ROOT / "docs" / "security-model.md").read_text(encoding="utf-8").split())
+    assert "bypass actor for the `Repository admin` role" in text
+    assert "`pull_request` mode" in text
     assert "not `always`" in text
+    assert "refused by the `pull_request` rule itself" in text
