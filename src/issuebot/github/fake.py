@@ -9,9 +9,11 @@ from typing import Any
 from issuebot.config import GitHubLabels, GitHubSettings
 from issuebot.github.errors import ErrorCategory, GitHubError
 from issuebot.github.models import (
+    ApprovalEvidence,
     AuthStatus,
     Comment,
     Issue,
+    LabelApplied,
     LabelEnsured,
     LinkedPr,
     Mergeable,
@@ -19,6 +21,7 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    TextEdit,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
@@ -46,8 +49,10 @@ class _FakeIssue:
     updated_at: datetime
     closed_at: datetime | None = None
     comments: list[Comment] = field(default_factory=list)
-    # (actor, label) for every label added, oldest first: GitHub's timeline, in miniature.
-    label_events: list[tuple[str, str]] = field(default_factory=list)
+    # (actor, label, at) for every label added, oldest first: GitHub's timeline, in miniature.
+    label_events: list[tuple[str, str, datetime]] = field(default_factory=list)
+    # Body edits and title renames, oldest first, as ``approval_evidence`` reports them.
+    edits: list[TextEdit] = field(default_factory=list)
 
 
 @dataclass
@@ -153,8 +158,8 @@ class FakeGitHub:
             markers = {name.lower() for name in self.labels.markers()}
             record.labels = [name for name in record.labels if name.lower() not in markers]
         record.labels.append(target)
-        record.label_events.append((self.login, target))
         record.updated_at = self._now()
+        record.label_events.append((self.login, target, record.updated_at))
 
     async def clear_state(self, number: int) -> None:
         self._enter("clear_state", number)
@@ -192,8 +197,22 @@ class FakeGitHub:
         record = self._require_issue(number)
         return sum(
             1
-            for actor, name in record.label_events
+            for actor, name, _at in record.label_events
             if actor.lower() == self.login.lower() and name.lower() == label.lower()
+        )
+
+    async def own_login(self) -> str:
+        return self.login
+
+    async def approval_evidence(self, number: int) -> ApprovalEvidence:
+        self._enter("approval_evidence", number)
+        record = self._require_issue(number)
+        return ApprovalEvidence(
+            label_events=tuple(
+                LabelApplied(label=name, actor=actor, at=at)
+                for actor, name, at in record.label_events
+            ),
+            edits=tuple(record.edits),
         )
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
@@ -292,20 +311,35 @@ class FakeGitHub:
         self._strip_state_labels(record)
         target = label_name(self.labels, state)
         record.labels.append(target)
-        record.label_events.append((actor, target))
         record.updated_at = self._now()
+        record.label_events.append((actor, target, record.updated_at))
 
     def human_add_label(self, number: int, name: str, *, actor: str = "reporter") -> None:
         record = self._require_issue(number)
         if name.lower() not in {label.lower() for label in record.labels}:
             record.labels.append(name)
-            record.label_events.append((actor, name))
             record.updated_at = self._now()
+            record.label_events.append((actor, name, record.updated_at))
 
     def human_remove_label(self, number: int, name: str) -> None:
         record = self._require_issue(number)
         record.labels = [label for label in record.labels if label.lower() != name.lower()]
         record.updated_at = self._now()
+
+    def human_edit_body(
+        self, number: int, body: str | None, *, editor: str | None = "reporter"
+    ) -> None:
+        """An edit to the description by someone else; ``editor`` is who GitHub credits."""
+        record = self._require_issue(number)
+        record.body = body
+        record.updated_at = self._now()
+        record.edits.append(TextEdit(what="body", editor=editor, at=record.updated_at))
+
+    def human_rename(self, number: int, title: str, *, actor: str | None = "reporter") -> None:
+        record = self._require_issue(number)
+        record.title = title
+        record.updated_at = self._now()
+        record.edits.append(TextEdit(what="title", editor=actor, at=record.updated_at))
 
     def add_comment(self, number: int, body: str, *, author: str) -> Comment:
         """A comment by someone else (a human, another bot): what ``comment`` cannot write."""
