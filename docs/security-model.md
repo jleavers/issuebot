@@ -138,6 +138,21 @@ maintainer's `issuebot/todo` approves, so the worker's own relabel can never car
 past the check. Nothing is stored, so a restart cannot reset it: re-approval is
 a maintainer applying `issuebot/todo` again.
 
+Comments are the other text a session reads, and on a public repository anyone can leave one
+on an issue in `issuebot/review` or `issuebot/rework`. The workflow admits them by
+`author_association`, GitHub's own word for whether the account can act on the repository,
+and it does so in the commands it hands the session rather than in a rule asking the model to
+be careful: every fetch is a `gh api --jq` that selects `OWNER`, `MEMBER` or `COLLABORATOR`,
+so what the filter drops never enters the context. What was dropped is listed by author and
+URL under `Quarantined` in the workpad, and a maintainer adopts one of those requests by
+replying to it. A reply adopts only what its own words ask, though: text it quotes from a
+quarantined comment is still its original author's, and the workpad is issuebot's own state,
+not a request the next sweep might act on. The issue's title, body and author envelopes carry
+the same attribute (`association="NONE"`, say), `unknown` when GitHub gives none, so the
+session can see that the description was admitted by the label and not by its author. The
+account issuebot runs as is a collaborator, so its own comments pass: a session persuading its
+successor holds the same authority, not more, which is the line #77 drew for the workpad.
+
 ## Checking that the credential took
 
 `validate`'s `claude auth` line is the answer: it asks `claude` which credential it would
