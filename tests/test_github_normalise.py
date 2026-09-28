@@ -317,7 +317,7 @@ def test_author_association_is_kept_as_github_spells_it(
     assert issue.author_association == expected
 
 
-def test_author_association_defaults_to_unknown_when_the_node_has_none() -> None:
+def test_author_association_is_none_when_the_node_has_none() -> None:
     issue = issue_from_node(node(), repo=REPO, labels=LABELS, login=LOGIN)
     assert issue.author_association is None
 
