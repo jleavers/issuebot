@@ -1021,35 +1021,54 @@ async def test_repo_info_without_admin_reads_false() -> None:
 
 
 @pytest.mark.parametrize(
-    ("rules", "expected_reviews", "expected_last_push"),
+    ("rules", "expected_reviews", "expected_last_push", "expected_code_owner"),
     [
-        ("[]", None, False),
-        ('[{"type": "deletion"}, {"type": "non_fast_forward"}]', None, False),
+        ("[]", None, False, False),
+        ('[{"type": "deletion"}, {"type": "non_fast_forward"}]', None, False, False),
         (
             '[{"type": "pull_request", "parameters": {"required_approving_review_count": 0}}]',
             0,
+            False,
             False,
         ),
         (
             '[{"type": "pull_request", "parameters": {"required_approving_review_count": 2}}]',
             2,
             False,
+            False,
         ),
-        ('[{"type": "pull_request"}]', 0, False),
+        ('[{"type": "pull_request"}]', 0, False, False),
         (
             '[{"type": "pull_request", "parameters": '
             '{"required_approving_review_count": 1, "require_last_push_approval": true}}]',
             1,
             True,
+            False,
+        ),
+        (
+            '[{"type": "pull_request", "parameters": '
+            '{"required_approving_review_count": 1, "require_last_push_approval": true, '
+            '"require_code_owner_review": true}}]',
+            1,
+            True,
+            True,
+        ),
+        (
+            '[{"type": "pull_request", "parameters": '
+            '{"required_approving_review_count": 1, "require_code_owner_review": "yes"}}]',
+            1,
+            False,
+            False,
         ),
     ],
 )
 async def test_branch_rules_reads_the_review_count_in_force(
-    rules: str, expected_reviews: int | None, expected_last_push: bool
+    rules: str, expected_reviews: int | None, expected_last_push: bool, expected_code_owner: bool
 ) -> None:
     """The rules endpoint answers what applies to the caller on that branch (rulesets only),
-    including whether the rule covers the latest push and not just some earlier one
-    (GHSA-jm8h-q3j6-p8xp)."""
+    including whether the rule covers the latest push and not just some earlier one, and
+    whether the approval must come from a code owner rather than from any account with write
+    (GHSA-jm8h-q3j6-p8xp). Only a literal ``true`` turns either on."""
     runner = StubRunner()
     runner.on(has("rules/branches/main"), stdout=rules)
     result = await make_adapter(runner).branch_rules("main")
@@ -1058,7 +1077,8 @@ async def test_branch_rules_reads_the_review_count_in_force(
         result.branch,
         result.required_approving_reviews,
         result.require_last_push_approval,
-    ) == ("main", expected_reviews, expected_last_push)
+        result.require_code_owner_review,
+    ) == ("main", expected_reviews, expected_last_push, expected_code_owner)
 
 
 @pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])

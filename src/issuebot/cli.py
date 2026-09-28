@@ -493,11 +493,18 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
 
 
 async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
-    """Whether the default branch requires a review of the latest push, so the session's own
-    account cannot merge its own pull request (GHSA-jm8h-q3j6-p8xp): the session holds the
-    token that would do it, and a review count alone is not enough -- an approval survives a
-    later push unless the rule also requires approval of the most recent one, and issuebot's
-    own conflict bounce pushes to an already-approved pull request.
+    """Whether the default branch requires a code owner's review of the latest push, so the
+    session's account cannot merge work no human approved (GHSA-jm8h-q3j6-p8xp). The session
+    holds the token that would do it, and each requirement closes its own route. A review
+    count alone is not enough: an approval survives a later push unless the rule also requires
+    approval of the most recent one, and issuebot's own conflict bounce pushes to an
+    already-approved pull request. Nor is the latest push: any account with write approves,
+    the session's included, so on a pull request someone else opened the session's approval
+    satisfies the rule and the session can merge it -- unless the approval must come from a
+    code owner.
+
+    The OK line cannot prove the session's account is not itself a code owner: that is
+    ``CODEOWNERS``, a file in the repository, and this reads the rulesets alone.
     """
     try:
         rules = await adapter.branch_rules(branch)
@@ -510,16 +517,27 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
         detail = f"{branch} requires 0 approving reviews"
     else:
         noun = "approving review" if count == 1 else "approving reviews"
-        if rules.require_last_push_approval:
+        if not rules.require_last_push_approval:
             return Check(
-                "github.branch rules", "ok", f"{branch} requires {count} {noun} of the latest push"
+                "github.branch rules",
+                "warn",
+                f"{branch} requires {count} {noun} but not of the latest push: a session can "
+                'push after the approval and merge. Turn on "Require approval of the most recent '
+                'reviewable push"',
+            )
+        if not rules.require_code_owner_review:
+            return Check(
+                "github.branch rules",
+                "warn",
+                f"{branch} requires {count} {noun} of the latest push, but not from a code "
+                "owner: an account with write can approve and merge another account's pull "
+                'request. Turn on "Require review from Code Owners" with a CODEOWNERS naming '
+                f"only humans ({IDENTITY_DOC})",
             )
         return Check(
             "github.branch rules",
-            "warn",
-            f"{branch} requires {count} {noun} but not of the latest push: a session can push "
-            'after the approval and merge. Turn on "Require approval of the most recent '
-            'reviewable push"',
+            "ok",
+            f"{branch} requires {count} {noun} of the latest push from a code owner",
         )
     return Check(
         "github.branch rules",

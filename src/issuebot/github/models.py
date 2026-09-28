@@ -142,11 +142,19 @@ class BranchRules:
     reviewable push" in the UI). Without it an approval survives a later push, so a session can
     push to an already-approved pull request and merge it (GHSA-jm8h-q3j6-p8xp) -- the review
     count alone does not stop that.
+
+    ``require_code_owner_review`` is the rule's ``require_code_owner_review`` parameter
+    ("Require review from Code Owners"). Without it any account with write approves, the
+    session's own included: on a pull request someone else opened -- from a fork, where they
+    are the last pusher -- the session's approval satisfies the rule, latest push and all, and
+    the session can then merge it. With it, the approval that counts is a code owner's, which
+    keeps it a human's only if ``CODEOWNERS`` names only humans; nothing here reads that file.
     """
 
     branch: str
     required_approving_reviews: int | None
     require_last_push_approval: bool = False
+    require_code_owner_review: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

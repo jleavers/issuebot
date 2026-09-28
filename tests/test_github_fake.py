@@ -310,10 +310,12 @@ async def test_branch_rules_defaults_to_one_review_and_can_be_set() -> None:
     default = await fake.branch_rules("main")
     assert default.required_approving_reviews == 1
     assert default.require_last_push_approval is True
+    assert default.require_code_owner_review is True
     fake.branch_rules_result = BranchRules(branch="main", required_approving_reviews=None)
     result = await fake.branch_rules("main")
     assert result.required_approving_reviews is None
     assert result.require_last_push_approval is False
+    assert result.require_code_owner_review is False
 
 
 async def test_fail_next_injects_errors_in_order(fake: FakeGitHub) -> None:

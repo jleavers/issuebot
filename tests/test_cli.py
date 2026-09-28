@@ -1509,8 +1509,9 @@ def test_validate_says_the_token_account_is_not_an_admin_and_the_branch_requires
     out = capsys.readouterr().out
     assert "[ OK ] github.token account: issuebot has write on example/repo, not admin\n" in out
     assert (
-        "[ OK ] github.branch rules: main requires 1 approving review of the latest push\n" in out
-    )
+        "[ OK ] github.branch rules: main requires 1 approving review of the latest push from a "
+        "code owner\n"
+    ) in out
 
 
 def test_validate_warns_when_the_tokens_account_administers_the_repository(
@@ -1578,6 +1579,34 @@ def test_validate_warns_when_the_review_does_not_cover_the_latest_push(
         "[WARN] github.branch rules: main requires 1 approving review but not of the latest "
         'push: a session can push after the approval and merge. Turn on "Require approval of '
         'the most recent reviewable push"'
+    ) in out
+
+
+def test_validate_warns_when_any_account_with_write_can_approve(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """Covering the latest push is not enough either (GHSA-jm8h-q3j6-p8xp): the session's
+    account has write, and any write account's approval counts toward the review rule, so on a
+    pull request someone else opened -- from a fork, say, where they are the last pusher -- the
+    bot's approval satisfies it and the bot can merge. Only a code-owner requirement, with a
+    CODEOWNERS naming humans, keeps the approval a human's."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=1,
+        require_last_push_approval=True,
+        require_code_owner_review=False,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.branch rules: main requires 1 approving review of the latest push, but "
+        "not from a code owner: an account with write can approve and merge another account's "
+        'pull request. Turn on "Require review from Code Owners" with a CODEOWNERS naming only '
+        'humans (docs/security-model.md, "The account a session acts as")\n'
     ) in out
 
 
