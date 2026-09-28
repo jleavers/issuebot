@@ -81,7 +81,7 @@ MAX_ISSUE_PAGES = 30
 MAX_TERMINAL_PAGES = 150
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
-  number title body state url createdAt updatedAt closedAt
+  number title body state url createdAt updatedAt closedAt authorAssociation
   author { login }
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }

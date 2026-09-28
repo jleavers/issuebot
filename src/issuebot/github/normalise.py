@@ -90,6 +90,7 @@ def issue_from_node(
         closed_at=closed_at,
         linked_pr=_select_pr(node.get("closedByPullRequestsReferences"), login=login),
         dispatchable=github_state == "open" and state is not None,
+        author_association=_association(node.get("authorAssociation")),
     )
 
 
@@ -125,6 +126,11 @@ def _label_names(connection: Any) -> tuple[str, ...]:
             if lowered not in seen:
                 seen.append(lowered)
     return tuple(seen)
+
+
+def _association(value: Any) -> str | None:
+    """GitHub's ``CommentAuthorAssociation``, upper-cased; ``None`` for anything that is not one."""
+    return value.upper() if isinstance(value, str) and value else None
 
 
 def _login(actor: Any) -> str | None:
