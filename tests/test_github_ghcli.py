@@ -127,6 +127,8 @@ async def test_fetch_by_states_paginates_merges_and_sorts() -> None:
     assert by_number[43].state is None  # todo + in-progress from the second query is a conflict
     assert by_number[43].linked_pr is not None and by_number[43].linked_pr.number == 51
     assert by_number[42].identifier == "repo-42"
+    assert "authorAssociation" in ISSUE_FIELDS
+    assert by_number[40].author_association == "NONE"
 
 
 async def test_fetch_by_states_deduplicates_roles_and_skips_empty_input() -> None:

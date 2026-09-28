@@ -62,6 +62,11 @@ class Issue:
     closed_at: datetime | None
     linked_pr: LinkedPr | None
     dispatchable: bool
+    # GitHub's ``CommentAuthorAssociation`` for the account that opened the issue, upper-case
+    # as GitHub spells it (``OWNER``, ``MEMBER``, ``COLLABORATOR``, ``CONTRIBUTOR``, ``NONE``,
+    # ...); ``None`` when the record carries none. What the prompt's envelope reports, so a
+    # session can tell a maintainer's text from anyone else's (GHSA-jm8h-q3j6-p8xp).
+    author_association: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

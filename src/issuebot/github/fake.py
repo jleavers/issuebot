@@ -48,6 +48,7 @@ class _FakeIssue:
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None = None
+    author_association: str = "NONE"
     comments: list[Comment] = field(default_factory=list)
     # (actor, label, at) for every label added, oldest first: GitHub's timeline, in miniature.
     label_events: list[tuple[str, str, datetime]] = field(default_factory=list)
@@ -288,6 +289,7 @@ class FakeGitHub:
         number: int | None = None,
         assignees: Iterable[str] = (),
         author: str | None = "reporter",
+        author_association: str = "NONE",
     ) -> Issue:
         if number is None:
             number = self._next_number
@@ -305,6 +307,7 @@ class FakeGitHub:
             assignees=list(assignees),
             created_at=stamp,
             updated_at=stamp,
+            author_association=author_association,
         )
         self._issues[number] = record
         return self._snapshot(record)
@@ -484,6 +487,7 @@ class FakeGitHub:
             "createdAt": record.created_at.isoformat(),
             "updatedAt": record.updated_at.isoformat(),
             "closedAt": record.closed_at.isoformat() if record.closed_at else None,
+            "authorAssociation": record.author_association,
             "labels": {"nodes": [{"name": name} for name in record.labels]},
             "assignees": {"nodes": [{"login": login} for login in record.assignees]},
             "closedByPullRequestsReferences": {

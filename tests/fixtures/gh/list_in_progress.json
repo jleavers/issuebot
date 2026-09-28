@@ -25,6 +25,7 @@
             "createdAt": "2026-08-30T08:00:00Z",
             "updatedAt": "2026-09-02T08:00:00Z",
             "closedAt": null,
+            "authorAssociation": "NONE",
             "labels": {"nodes": [{"name": "issuebot/in-progress"}]},
             "assignees": {"nodes": []},
             "closedByPullRequestsReferences": {"nodes": []}

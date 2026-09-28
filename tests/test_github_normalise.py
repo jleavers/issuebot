@@ -304,6 +304,24 @@ def test_unusable_optional_metadata_normalises_quietly() -> None:
     assert issue.closed_at is None
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("OWNER", "OWNER"), ("none", "NONE"), (None, None), (42, None), ("", None)],
+)
+def test_author_association_is_kept_as_github_spells_it(
+    value: object, expected: str | None
+) -> None:
+    issue = issue_from_node(
+        {**node(), "authorAssociation": value}, repo=REPO, labels=LABELS, login=LOGIN
+    )
+    assert issue.author_association == expected
+
+
+def test_author_association_defaults_to_unknown_when_the_node_has_none() -> None:
+    issue = issue_from_node(node(), repo=REPO, labels=LABELS, login=LOGIN)
+    assert issue.author_association is None
+
+
 # --- is_workpad_body --------------------------------------------------------------
 
 
