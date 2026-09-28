@@ -118,6 +118,20 @@ run `claude setup-token` on a machine with a browser and put the value in this c
 refuses to start without one rather than claim issues every session would fail to
 authenticate, and `validate` says the same.
 
+## The text a session acts on
+
+A session is handed the issue's title and description and told to run the steps any
+`Validation` or `Test Plan` section asks for. What makes that safe to do unattended is that a
+human read that text and applied `issuebot/todo` to it -- so the label has to approve the text
+*as it stood*, and nothing an author writes afterwards may ride on it. Before every dispatch
+the worker reads GitHub's own record: the last human application of `issuebot/todo` or
+`issuebot/rework` is the approval, and any title or body edit after it by an account other
+than the approver un-approves the issue, which loses its label and gets a `### Issuebot
+unapproved edit` block saying who changed what and when ([`docs/operations.md`,
+"Blocked"](operations.md#blocked)). The worker's own label events never count -- the conflict
+bounce applies `issuebot/rework` itself -- and nothing is stored, so a restart cannot reset
+it: re-approval is a human applying the label again.
+
 ## Checking that the credential took
 
 `validate`'s `claude auth` line is the answer: it asks `claude` which credential it would

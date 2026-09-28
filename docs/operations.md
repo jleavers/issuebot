@@ -145,6 +145,17 @@ days. A worker that refuses an issue on either budget logs `dispatch_refused`, w
 `issuebot/review`: a ceiling nobody can see would be worse than no ceiling, so the board
 never just stops for an issue without saying so on it.
 
+One more thing removes a state label rather than moving it, and its block says so:
+`### Issuebot unapproved edit`. A human applying `issuebot/todo` or `issuebot/rework` approves
+the issue's title and description as they stand, and before every dispatch the worker reads
+GitHub's own edit history to check that they still do. An edit after the label by anyone but
+the account that applied it -- the issue's author, or another maintainer -- un-approves the
+issue: the worker writes the block, removes the label, and publishes `blocked`, so the issue
+leaves the board and the Slack line says why. Read the current text; if it is what you want
+done, apply the label again. That is the whole recovery, because the new label event is
+after the edit. (The account that applied the label may edit freely; the check is about
+someone *else* changing what was approved.)
+
 ### GitHub itself
 
 The worker reads and writes its whole state machine through `gh`, so an

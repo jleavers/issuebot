@@ -962,7 +962,18 @@ preconditions outrank each other -- shutdown, the `Hold` in force, the free slot
 the issue is already running or retrying, whether it is in a state this worker claims, the
 issue's failure chain, its cumulative spend -- with `Admitted(attempt)` or `Refused(kind,
 reason, wait)`, `wait` being how a caller that can wait requeues (`None` means waiting will
-not change it). `_dispatch_candidates` and `_fire` both go through it and neither derives a
+not change it).
+`approval.py` (pure, GHSA-jm8h-q3j6-p8xp) is the second gate, asked in `_dispatch` before an
+account is bound or the issue claimed: `assess(evidence, admitting=(todo, rework), own_login=)`
+answers `Approved(approver, at)` or `Unapproved(reason, approval, edit)` from the adapter's
+`approval_evidence` -- the issue's `LabeledEvent` and `RenamedTitleEvent` timeline items and
+its `userContentEdits`, two reads bounded at `MAX_TIMELINE_PAGES`. The latest human
+application of an admitting label is the approval; an edit after it by anyone but the
+approver, or no human application at all, is `Unapproved`, and `actions.unapproved_escape`
+writes the `### Issuebot unapproved edit` block, removes the state label and publishes
+`Blocked`, label-first under the same rule as the other escapes. Nothing is stored: GitHub's
+record is the record, and a human applying the label again is what re-approves.
+`_dispatch_candidates` and `_fire` both go through it and neither derives a
 precondition of its own; `_fire` asks twice, once before its refresh (a worker that may not
 claim should not spend a request finding out which issue it may not claim, and a GitHub hold
 means it has just failed to read the board it would be writing to) and again with the issue
