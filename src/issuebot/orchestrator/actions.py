@@ -308,10 +308,22 @@ def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -
     admitting = f"`{labels.todo}`"
     if verdict.approval is not None and verdict.approval.label.lower() == labels.rework.lower():
         admitting = f"`{labels.rework}`"
+    if verdict.approval is not None:
+        # An edit after a real approval: the text that was approved is not the text now here.
+        explanation = (
+            "issuebot has removed the label: the text a session would act on is no longer "
+            "the text that was approved."
+        )
+    else:
+        # No human ever applied the label -- issuebot's own conflict bounce, or an app -- so
+        # there is no approved text to have fallen out of step with.
+        explanation = (
+            "issuebot has removed the label: no account other than issuebot has approved the "
+            "text a session would act on."
+        )
     return (
         f"{UNAPPROVED_HEADING}{_stamp(now)})\n\n"
-        f"{verdict.reason}. issuebot has removed the label: the text a session would act on is "
-        "no longer the text that was approved. Read the current title and description; if they "
+        f"{verdict.reason}. {explanation} Read the current title and description; if they "
         f"are what you want done, apply {admitting} again.\n"
     )
 

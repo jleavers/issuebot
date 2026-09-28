@@ -742,6 +742,23 @@ def test_unapproved_block_names_the_edit_and_the_way_back() -> None:
     assert "apply `issuebot/todo` again" in block
 
 
+def test_unapproved_block_names_no_approval_rather_than_an_edit() -> None:
+    """No human ever applied the label -- issuebot's own bounce, or an app -- so there is no
+    approved text an edit could have fallen out of step with, and the block must not claim
+    one."""
+    verdict = Unapproved(
+        reason="no account other than bot has applied `issuebot/todo` or `issuebot/rework`",
+        approval=None,
+        edit=None,
+    )
+    block = unapproved_block(verdict, NOW, LABELS)
+    assert verdict.reason in block
+    assert "issuebot has removed the label" in block
+    assert "no account other than issuebot has approved" in block
+    assert "apply `issuebot/todo` again" in block
+    assert "no longer the text that was approved" not in block
+
+
 async def test_unapproved_escape_notes_and_removes_the_label(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
