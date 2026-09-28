@@ -1617,9 +1617,10 @@ def test_validate_warns_when_the_review_does_not_cover_the_latest_push(
     executables: object,
     fake_github: FakeGitHub,
 ) -> None:
-    """A review count alone is not enough (GHSA-jm8h-q3j6-p8xp): an approval survives a later
-    push unless the rule also requires approval of the most recent one, so a session can push
-    to an already-approved pull request and merge it. Nothing about that is contrived here:
+    """A review count alone is not enough (GHSA-jm8h-q3j6-p8xp): an approval of an earlier push
+    still satisfies it after a later one unless the rule also requires approval of the most
+    recent push, so a session can push to an already-approved pull request and merge it.
+    Nothing about that is contrived here:
     issuebot's own conflict bounce sends a session to push to an already-approved pull
     request."""
     monkeypatch.setenv("GH_TOKEN", "t")

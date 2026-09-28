@@ -179,8 +179,12 @@ with write can approve someone else's pull request and merge it; both recipes th
 the approval to humans -- code-owner review, with a `CODEOWNERS` naming only the operator or
 only human teams, or for an organisation the rule's required reviewers -- on top of a review
 of the latest push; `branch_rules` reads the rules endpoint as what it is, the branch's rules
-for everyone, and counts only the rulesets the caller cannot bypass, naming the rest; and the
-solo recipe's classic token is stated as the trade it is on a private target.
+for everyone, and counts only the rulesets the caller cannot bypass, naming the rest; the
+solo recipe's classic token is stated as the trade it is on a private target; and, after the
+re-review, both recipes dismiss stale approvals on push (`dismiss_stale_reviews_on_push`),
+since GitHub checks latest-push and code-owner review separately and an undismissed human
+approval of an earlier push pairs with the bot's approval of the latest -- the three settings
+hold the invariant together, and `validate` warns while any is off.
 
 **For a solo operator**, which is who this repository expects. Run issuebot as a dedicated
 GitHub account -- a second personal account, added as a collaborator with **write** and never
@@ -189,21 +193,26 @@ account holds a classic `repo` token, and that is a trade: its reach is the acco
 on a public target adds little the session could not already do there, but on a private one
 lets a session push the code to a public repository the account creates. The organisation
 route below keeps a fine-grained token, and is the better one for a private target. Put a
-ruleset on the default branch requiring one approving review of the latest push
-(`require_last_push_approval`) from a code owner (`require_code_owner_review`), with a
-`CODEOWNERS` naming only the operator (`* @<operator>`); the operator approves the bot's pull
-requests from their own account. Of the latest push, because an approval otherwise survives a
-push made after it, and issuebot's own conflict bounce pushes to an already-approved pull
-request. From a code owner, because otherwise any account with write approves: on a pull
-request someone opened from a fork, they are the last pusher, so the bot's approval satisfies
-the rule and the bot can merge it. A ruleset's bypass list cannot name a personal account, so
-the hazard is a role -- the `Write` role, which is the bot's, must never be on it. The
-operator's own pull requests need an approver too, and GitHub does not let an author approve
-their own, so the `Repository admin` role is a bypass actor in `pull_request` mode: their pull
-requests merge without a second account, and a direct push to the branch is still refused.
-What the arrangement guarantees is the invariant's last sentence: the session's identity
-cannot merge work no human approved, and cannot rewrite the rule that says so, because it is
-not an admin.
+ruleset on the default branch whose `pull_request` rule sets three things together: one
+approving review of the latest push (`require_last_push_approval`), from a code owner
+(`require_code_owner_review`), with stale approvals dismissed on push
+(`dismiss_stale_reviews_on_push`) -- and a `CODEOWNERS` naming only the operator
+(`* @<operator>`), so that every path has a human owner. The operator approves the bot's pull
+requests from their own account. Of the latest push, because otherwise an approval of an
+earlier push still satisfies the rule after a later one, and issuebot's own conflict bounce
+pushes to an already-approved pull request. From a code owner, because otherwise any account
+with write approves: on a pull request someone opened from a fork, they are the last pusher,
+so the bot's approval satisfies the rule and the bot can merge it. Stale approvals dismissed,
+because GitHub checks the other two separately: without it the operator's approval of an
+earlier push survives the next one, and the bot's approval of that push completes the pair.
+A ruleset's bypass list cannot name a personal account, so the hazard is a role -- the
+`Write` role, which is the bot's, must never be on it. The operator's own pull requests need
+an approver too, and GitHub does not let an author approve their own, so the `Repository
+admin` role is a bypass actor in `pull_request` mode: their pull requests merge without a
+second account, and a direct push to the branch is still refused. What the three settings
+guarantee together, and none of them alone, is the invariant's last sentence: the session's
+identity cannot merge work no human approved, and cannot rewrite the rule that says so,
+because it is not an admin.
 
 **For an organisation**, the same shape with the organisation's own tools in place of the
 personal ones. The dedicated account is a machine user -- GitHub's name for a personal account
@@ -213,9 +222,10 @@ repository and no seat on any team that carries admin or maintain. The ruleset i
 *organisation* ruleset targeting the repository's default branch, rather than a repository
 one: a repository admin cannot remove it, so the guarantee holds against the repository's own
 admins too, and it applies to every repository the organisation points a deployment at. It
-requires a review of the latest push for the same reason, and holds the approval to humans
-the same way, as part of the recipe rather than the organisation's choice: code-owner review
-with a `CODEOWNERS` naming human teams, or the rule's required reviewers naming them. Its
+requires a review of the latest push and dismisses stale approvals for the same reasons, and
+holds the approval to humans the same way, as part of the recipe rather than the
+organisation's choice: code-owner review with a `CODEOWNERS` naming human teams for every
+path, or the rule's required reviewers naming them. Its
 bypass actors are teams of humans the machine user is not on; its approvers are whoever
 reviews there already, so no admin bypass is needed and none is granted. A GitHub App
 installation token is *not* the recommended credential, though `gh` accepts one: it expires
@@ -234,16 +244,18 @@ characters of its incentive.
   account` warns that the token's account is an admin of the repository and a session holding
   it can bypass or rewrite the branch ruleset; run as a dedicated account with write access.
 - `branch_rules(branch) -> BranchRules(required_approving_reviews: int | None,
-  require_last_push_approval, require_code_owner_review, bypassable)` (from
+  require_last_push_approval, require_code_owner_review, dismiss_stale_reviews_on_push,
+  bypassable)` (from
   `repos/{repo}/rules/branches/{branch}`, which lists the branch's rules for everyone -- it
   does not leave out a rule the caller can bypass -- and, for each ruleset carrying a
   `pull_request` rule, `repos/{repo}/rulesets/{id}`'s `current_user_can_bypass`, where only
   `never` binds): when the token's account can bypass a ruleset carrying the review rule,
   `github.branch rules` warns and names it; otherwise it warns unless the rulesets that bind
-  require at least one approving review of the latest push from a code owner. Rulesets only:
-  classic branch protection is readable by admins alone, and the check must work for the
-  account it recommends. The warning says so. It cannot read `CODEOWNERS`, so an OK line does
-  not prove the session's account is not itself a code owner.
+  require at least one approving review of the latest push from a code owner, and dismiss
+  stale approvals on push. Rulesets only: classic branch protection is readable by admins
+  alone, and the check must work for the account it recommends. The warning says so. It cannot
+  read `CODEOWNERS`, so an OK line proves neither that the session's account is not itself a
+  code owner nor that every path has one: code-owner review binds only the paths that do.
 
 Both are warnings, not failures: `run-once` against a personal scratch repository is a
 legitimate use and should not be refused.
