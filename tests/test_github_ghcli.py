@@ -1020,6 +1020,36 @@ async def test_repo_info_without_admin_reads_false() -> None:
     assert info.admin is False
 
 
+@pytest.mark.parametrize(
+    ("rules", "expected"),
+    [
+        ("[]", None),
+        ('[{"type": "deletion"}, {"type": "non_fast_forward"}]', None),
+        ('[{"type": "pull_request", "parameters": {"required_approving_review_count": 0}}]', 0),
+        ('[{"type": "pull_request", "parameters": {"required_approving_review_count": 2}}]', 2),
+        ('[{"type": "pull_request"}]', 0),
+    ],
+)
+async def test_branch_rules_reads_the_review_count_in_force(
+    rules: str, expected: int | None
+) -> None:
+    """The rules endpoint answers what applies to the caller on that branch (rulesets only)."""
+    runner = StubRunner()
+    runner.on(has("rules/branches/main"), stdout=rules)
+    result = await make_adapter(runner).branch_rules("main")
+    assert runner.argv(0) == ["api", "repos/example/repo/rules/branches/main"]
+    assert (result.branch, result.required_approving_reviews) == ("main", expected)
+
+
+@pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
+async def test_branch_rules_rejects_a_malformed_response(stdout: str) -> None:
+    runner = StubRunner()
+    runner.on(has("rules/branches/main"), stdout=stdout)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).branch_rules("main")
+    assert excinfo.value.category == "response"
+
+
 @pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
 async def test_probe_responses_are_validated(stdout: str) -> None:
     runner = StubRunner()

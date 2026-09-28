@@ -130,6 +130,19 @@ class RepoInfo:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class BranchRules:
+    """What the repository's rulesets require of a pull request into ``branch``.
+
+    ``required_approving_reviews`` is ``None`` when no ``pull_request`` rule applies. Rulesets
+    only: classic branch protection is readable by admins alone, and the check that reads
+    this must work for the account it recommends, which is not one.
+    """
+
+    branch: str
+    required_approving_reviews: int | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class AuthStatus:
     login: str
 

@@ -11,6 +11,7 @@ from issuebot.github.errors import ErrorCategory, GitHubError
 from issuebot.github.models import (
     ApprovalEvidence,
     AuthStatus,
+    BranchRules,
     Comment,
     Issue,
     LabelApplied,
@@ -90,6 +91,7 @@ class FakeGitHub:
         self._now = now or (lambda: datetime.now(UTC))
         self.login = login
         self.admin = admin
+        self.branch_rules_result: BranchRules | None = None
         self.repo_labels: dict[str, LabelStyle] = {}
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._issues: dict[int, _FakeIssue] = {}
@@ -277,6 +279,12 @@ class FakeGitHub:
     async def repo_info(self) -> RepoInfo:
         self._enter("repo_info")
         return RepoInfo(full_name=self.repo, default_branch="main", private=False, admin=self.admin)
+
+    async def branch_rules(self, branch: str) -> BranchRules:
+        self._enter("branch_rules", branch)
+        if self.branch_rules_result is not None:
+            return self.branch_rules_result
+        return BranchRules(branch=branch, required_approving_reviews=1)
 
     # --- test helpers (never recorded in `calls`) --------------------------------
 

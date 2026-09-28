@@ -11,6 +11,7 @@ from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.models import (
     ApprovalEvidence,
     AuthStatus,
+    BranchRules,
     Comment,
     Issue,
     LabelApplied,
@@ -634,6 +635,27 @@ class GhCliAdapter:
             )
         except (TypeError, KeyError, AttributeError) as exc:
             raise GitHubError("response", "unexpected repository response") from exc
+
+    async def branch_rules(self, branch: str) -> BranchRules:
+        self._log.debug("branch_rules", branch=branch)
+        result = await self._gh(["api", f"repos/{self.repo}/rules/branches/{branch}"])
+        payload = _parse_json(result.stdout)
+        if not isinstance(payload, list):
+            raise GitHubError("response", "branch rules response is not a list")
+        required: int | None = None
+        for rule in payload:
+            if not isinstance(rule, Mapping):
+                raise GitHubError("response", "branch rule is not an object")
+            if rule.get("type") != "pull_request":
+                continue
+            parameters = rule.get("parameters")
+            count = (
+                parameters.get("required_approving_review_count")
+                if isinstance(parameters, Mapping)
+                else None
+            )
+            required = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        return BranchRules(branch=branch, required_approving_reviews=required)
 
     async def _collect(
         self, roles: Sequence[StateLabel], query: str, *, max_pages: int, per_role: bool = False
