@@ -676,6 +676,7 @@ class GhCliAdapter:
         required: int | None = None
         require_last_push_approval = False
         require_code_owner_review = False
+        dismiss_stale_reviews_on_push = False
         for ruleset_id, parameters in pull_requests:
             if rulesets[ruleset_id][1]:
                 continue
@@ -686,11 +687,14 @@ class GhCliAdapter:
                 require_last_push_approval = True
             if parameters.get("require_code_owner_review") is True:
                 require_code_owner_review = True
+            if parameters.get("dismiss_stale_reviews_on_push") is True:
+                dismiss_stale_reviews_on_push = True
         return BranchRules(
             branch=branch,
             required_approving_reviews=required,
             require_last_push_approval=require_last_push_approval,
             require_code_owner_review=require_code_owner_review,
+            dismiss_stale_reviews_on_push=dismiss_stale_reviews_on_push,
             bypassable=tuple(name for name, bypass in rulesets.values() if bypass),
         )
 

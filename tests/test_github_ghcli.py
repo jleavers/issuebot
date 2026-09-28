@@ -1044,13 +1044,14 @@ def _ruleset(name: str, bypass: str = "never") -> str:
 
 
 @pytest.mark.parametrize(
-    ("rules", "expected_reviews", "expected_last_push", "expected_code_owner"),
+    ("rules", "expected_reviews", "expected_last_push", "expected_code_owner", "expected_dismiss"),
     [
-        ([], None, False, False),
-        ([_rule("deletion"), _rule("non_fast_forward")], None, False, False),
+        ([], None, False, False, False),
+        ([_rule("deletion"), _rule("non_fast_forward")], None, False, False, False),
         (
             [_rule("pull_request", parameters={"required_approving_review_count": 0})],
             0,
+            False,
             False,
             False,
         ),
@@ -1062,8 +1063,9 @@ def _ruleset(name: str, bypass: str = "never") -> str:
             2,
             False,
             False,
+            False,
         ),
-        ([_rule("pull_request")], 0, False, False),
+        ([_rule("pull_request")], 0, False, False, False),
         (
             [
                 _rule(
@@ -1076,6 +1078,7 @@ def _ruleset(name: str, bypass: str = "never") -> str:
             ],
             1,
             True,
+            False,
             False,
         ),
         (
@@ -1092,6 +1095,24 @@ def _ruleset(name: str, bypass: str = "never") -> str:
             1,
             True,
             True,
+            False,
+        ),
+        (
+            [
+                _rule(
+                    "pull_request",
+                    parameters={
+                        "required_approving_review_count": 1,
+                        "require_last_push_approval": True,
+                        "require_code_owner_review": True,
+                        "dismiss_stale_reviews_on_push": True,
+                    },
+                )
+            ],
+            1,
+            True,
+            True,
+            True,
         ),
         (
             [
@@ -1100,10 +1121,12 @@ def _ruleset(name: str, bypass: str = "never") -> str:
                     parameters={
                         "required_approving_review_count": 1,
                         "require_code_owner_review": "yes",
+                        "dismiss_stale_reviews_on_push": 1,
                     },
                 )
             ],
             1,
+            False,
             False,
             False,
         ),
@@ -1114,11 +1137,13 @@ async def test_branch_rules_reads_the_review_count_in_force(
     expected_reviews: int | None,
     expected_last_push: bool,
     expected_code_owner: bool,
+    expected_dismiss: bool,
 ) -> None:
     """The rules endpoint lists every ruleset rule on the branch (rulesets only), including
-    whether a review must cover the latest push and not just some earlier one, and whether the
-    approval must come from a code owner rather than from any account with write
-    (GHSA-jm8h-q3j6-p8xp). Only a literal ``true`` turns either on.
+    whether a review must cover the latest push and not just some earlier one, whether the
+    approval must come from a code owner rather than from any account with write, and whether
+    a push dismisses the approvals given before it (GHSA-jm8h-q3j6-p8xp). Only a literal
+    ``true`` turns any of them on.
 
     It lists them for everyone, though, not only the ones that bind the caller, so each
     ``pull_request`` rule's ruleset is read as well for whether the caller can bypass it --
@@ -1137,20 +1162,33 @@ async def test_branch_rules_reads_the_review_count_in_force(
         result.required_approving_reviews,
         result.require_last_push_approval,
         result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
         result.bypassable,
-    ) == ("main", expected_reviews, expected_last_push, expected_code_owner, ())
+    ) == (
+        "main",
+        expected_reviews,
+        expected_last_push,
+        expected_code_owner,
+        expected_dismiss,
+        (),
+    )
 
 
 async def test_branch_rules_hold_the_branch_to_every_ruleset_at_once() -> None:
     """A pull request must satisfy every rule that binds it, so what the branch requires is
-    their union -- the largest count, and latest-push and code-owner review wherever any
-    ruleset asks for them -- not whichever rule the endpoint happened to list last."""
+    their union -- the largest count, and latest-push review, code-owner review and dismissed
+    stale approvals wherever any ruleset asks for them -- not whichever rule the endpoint
+    happened to list last."""
     runner = StubRunner()
     rules = [
         _rule(
             "pull_request",
             ruleset=7,
-            parameters={"required_approving_review_count": 2, "require_code_owner_review": True},
+            parameters={
+                "required_approving_review_count": 2,
+                "require_code_owner_review": True,
+                "dismiss_stale_reviews_on_push": True,
+            },
         ),
         _rule(
             "pull_request",
@@ -1166,8 +1204,9 @@ async def test_branch_rules_hold_the_branch_to_every_ruleset_at_once() -> None:
         result.required_approving_reviews,
         result.require_last_push_approval,
         result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
         result.bypassable,
-    ) == (2, True, True, ())
+    ) == (2, True, True, True, ())
 
 
 async def test_branch_rules_count_only_the_rulesets_the_caller_cannot_bypass() -> None:
@@ -1185,6 +1224,7 @@ async def test_branch_rules_count_only_the_rulesets_the_caller_cannot_bypass() -
                 "required_approving_review_count": 3,
                 "require_last_push_approval": True,
                 "require_code_owner_review": True,
+                "dismiss_stale_reviews_on_push": True,
             },
         ),
         _rule("pull_request", ruleset=9, parameters={"required_approving_review_count": 1}),
@@ -1200,8 +1240,9 @@ async def test_branch_rules_count_only_the_rulesets_the_caller_cannot_bypass() -
         result.required_approving_reviews,
         result.require_last_push_approval,
         result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
         result.bypassable,
-    ) == (1, False, False, ("writers may bypass",))
+    ) == (1, False, False, False, ("writers may bypass",))
 
 
 @pytest.mark.parametrize(

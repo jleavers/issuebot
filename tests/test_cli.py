@@ -1510,7 +1510,7 @@ def test_validate_says_the_token_account_is_not_an_admin_and_the_branch_requires
     assert "[ OK ] github.token account: issuebot does not administer example/repo\n" in out
     assert (
         "[ OK ] github.branch rules: main requires 1 approving review of the latest push from a "
-        "code owner\n"
+        "code owner, and dismisses stale approvals\n"
     ) in out
 
 
@@ -1526,12 +1526,13 @@ def test_validate_counts_the_reviews_the_branch_requires(
         required_approving_reviews=2,
         require_last_push_approval=True,
         require_code_owner_review=True,
+        dismiss_stale_reviews_on_push=True,
     )
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert (
         "[ OK ] github.branch rules: main requires 2 approving reviews of the latest push from a "
-        "code owner\n"
+        "code owner, and dismisses stale approvals\n"
     ) in out
 
 
@@ -1660,6 +1661,41 @@ def test_validate_warns_when_any_account_with_write_can_approve(
         "not from a code owner: an account with write can approve and merge another account's "
         'pull request. Turn on "Require review from Code Owners" with a CODEOWNERS naming only '
         'humans (docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+@pytest.mark.parametrize(
+    ("count", "required"), [(1, "1 approving review"), (2, "2 approving reviews")]
+)
+def test_validate_warns_when_a_push_keeps_the_approvals_before_it(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    count: int,
+    required: str,
+) -> None:
+    """Latest-push and code-owner review are satisfied separately (GHSA-jm8h-q3j6-p8xp): the
+    first by any approval of the latest push from someone other than its pusher, the second by
+    any code owner's approval not yet dismissed. So a maintainer's approval of an earlier push
+    survives the next one, the session's own approval of that push completes the pair, and the
+    session can merge what no human saw -- unless a push dismisses the approvals before it."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=count,
+        require_last_push_approval=True,
+        require_code_owner_review=True,
+        dismiss_stale_reviews_on_push=False,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: main requires {required} of the latest push from a code "
+        "owner, but keeps stale approvals: an earlier human approval survives a later push, and "
+        "an approval of that push from the account a session runs as completes the pair. Turn "
+        'on "Dismiss stale pull request approvals when new commits are pushed" '
+        '(docs/security-model.md, "The account a session acts as")\n'
     ) in out
 
 

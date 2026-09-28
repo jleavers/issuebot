@@ -493,22 +493,29 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
 
 
 async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | None) -> Check:
-    """Whether the default branch requires a code owner's review of the latest push, so the
-    session's account cannot merge work no human approved (GHSA-jm8h-q3j6-p8xp). The session
-    holds the token that would do it, and each requirement closes its own route. A review
-    count alone is not enough: an approval survives a later push unless the rule also requires
-    approval of the most recent one, and issuebot's own conflict bounce pushes to an
-    already-approved pull request. Nor is the latest push: any account with write approves,
-    the session's included, so on a pull request someone else opened the session's approval
-    satisfies the rule and the session can merge it -- unless the approval must come from a
-    code owner.
+    """Whether the default branch requires a code owner's review of the latest push, and
+    dismisses stale approvals, so the session's account cannot merge work no human approved
+    (GHSA-jm8h-q3j6-p8xp). The session holds the token that would do it, and each requirement
+    closes its own route. A review count alone is not enough: an approval of an earlier push
+    still satisfies it after a later one unless the rule also requires approval of the most
+    recent push, and issuebot's own conflict bounce pushes to an already-approved pull
+    request. Nor is the latest push: any account with write approves, the session's included,
+    so on a pull request someone else opened the session's approval satisfies the rule and the
+    session can merge it -- unless the approval must come from a code owner. Nor are the two
+    together: GitHub checks them separately, so a maintainer's approval of an earlier push,
+    not dismissed, satisfies code-owner review while the session's own approval of the latest
+    push satisfies the other, and the session merges what no human saw -- unless a push
+    dismisses the approvals before it.
 
     A ruleset the token's account can bypass comes first and alone: it holds that account to
     none of what it requires, so reporting the other rulesets' requirements beside it would
     read as a binding that is not there.
 
-    The OK line cannot prove the session's account is not itself a code owner: that is
-    ``CODEOWNERS``, a file in the repository, and this reads the rulesets alone.
+    The OK line cannot prove the approval it describes is a human's. That is ``CODEOWNERS``, a
+    file in the repository, and this reads the rulesets alone: it cannot see whether the
+    session's account is itself a code owner, nor whether every path has an owner at all --
+    code-owner review binds only the paths that do, so without a ``CODEOWNERS`` line matching
+    a path (the recipes' ``* @<you>``) any write approval counts there again.
     """
     try:
         rules = await adapter.branch_rules(branch)
@@ -550,10 +557,21 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | 
                 'request. Turn on "Require review from Code Owners" with a CODEOWNERS naming '
                 f"only humans ({IDENTITY_DOC})",
             )
+        if not rules.dismiss_stale_reviews_on_push:
+            return Check(
+                "github.branch rules",
+                "warn",
+                f"{branch} requires {count} {noun} of the latest push from a code owner, but "
+                "keeps stale approvals: an earlier human approval survives a later push, and an "
+                "approval of that push from the account a session runs as completes the pair. "
+                'Turn on "Dismiss stale pull request approvals when new commits are pushed" '
+                f"({IDENTITY_DOC})",
+            )
         return Check(
             "github.branch rules",
             "ok",
-            f"{branch} requires {count} {noun} of the latest push from a code owner",
+            f"{branch} requires {count} {noun} of the latest push from a code owner, and "
+            "dismisses stale approvals",
         )
     return Check(
         "github.branch rules",

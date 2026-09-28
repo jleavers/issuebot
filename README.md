@@ -319,7 +319,7 @@ docker compose run --rm worker labels ensure
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
 [ OK ] github.token account: your-bot does not administer your-org/your-repo
-[ OK ] github.branch rules: main requires 1 approving review of the latest push from a code owner
+[ OK ] github.branch rules: main requires 1 approving review of the latest push from a code owner, and dismisses stale approvals
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
