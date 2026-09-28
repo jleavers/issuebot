@@ -131,11 +131,18 @@ class RepoInfo:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BranchRules:
-    """What the repository's rulesets require of a pull request into ``branch``.
+    """What the repository's rulesets require of the caller's pull request into ``branch``.
 
-    ``required_approving_reviews`` is ``None`` when no ``pull_request`` rule applies. Rulesets
-    only: classic branch protection is readable by admins alone, and the check that reads
-    this must work for the account it recommends, which is not one.
+    ``required_approving_reviews`` is ``None`` when no ``pull_request`` rule binds the caller.
+    Rulesets only: classic branch protection is readable by admins alone, and the check that
+    reads this must work for the account it recommends, which is not one.
+
+    A rule binds the caller only when its ruleset says the caller cannot bypass it. GitHub
+    lists a branch's rules for everyone -- it does not leave out the ones the caller may
+    bypass -- so the three requirements below are the union over the rulesets that do bind
+    (the largest count; either flag where any of them sets it), and ``bypassable`` names the
+    rulesets carrying a ``pull_request`` rule that the caller may bypass, whose requirements
+    hold it to nothing and are therefore not counted (GHSA-jm8h-q3j6-p8xp).
 
     ``require_last_push_approval`` is the ``pull_request`` rule's own
     ``require_last_push_approval`` parameter (API name; "Require approval of the most recent
@@ -155,6 +162,7 @@ class BranchRules:
     required_approving_reviews: int | None
     require_last_push_approval: bool = False
     require_code_owner_review: bool = False
+    bypassable: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

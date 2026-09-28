@@ -94,5 +94,6 @@ class GitHubAdapter(Protocol):
     async def repo_info(self) -> RepoInfo: ...
 
     async def branch_rules(self, branch: str) -> BranchRules:
-        """The ruleset requirements in force for pull requests into ``branch``."""
+        """The ruleset requirements that bind the caller's pull requests into ``branch``, and
+        the rulesets carrying a review rule the caller may bypass."""
         ...

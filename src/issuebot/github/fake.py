@@ -289,6 +289,7 @@ class FakeGitHub:
             required_approving_reviews=1,
             require_last_push_approval=True,
             require_code_owner_review=True,
+            bypassable=(),
         )
 
     # --- test helpers (never recorded in `calls`) --------------------------------

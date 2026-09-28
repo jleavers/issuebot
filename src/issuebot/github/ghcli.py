@@ -637,32 +637,70 @@ class GhCliAdapter:
             raise GitHubError("response", "unexpected repository response") from exc
 
     async def branch_rules(self, branch: str) -> BranchRules:
+        """What binds the caller's pull request into ``branch`` (GHSA-jm8h-q3j6-p8xp).
+
+        The rules endpoint lists the branch's ruleset rules for everyone: it does not leave
+        out a rule the caller can bypass, and answers the operator's own admin token, whose
+        ruleset says ``pull_requests_only``, with the ``pull_request`` rule all the same. So
+        each ruleset carrying a ``pull_request`` rule is read once more, for
+        ``current_user_can_bypass``, and only one that says ``never`` counts. Anything else,
+        an answer without the field included, is a bypass: the ruleset is named in
+        ``bypassable`` and its requirements are left out, because they hold the caller to
+        nothing. A rule that names no ruleset, or a ruleset that will not read, fails the read
+        rather than being guessed at.
+        """
         self._log.debug("branch_rules", branch=branch)
-        result = await self._gh(["api", f"repos/{self.repo}/rules/branches/{branch}"])
+        result = await self._gh(
+            ["api", f"repos/{self.repo}/rules/branches/{branch}?per_page={PAGE_SIZE}"]
+        )
         payload = _parse_json(result.stdout)
         if not isinstance(payload, list):
             raise GitHubError("response", "branch rules response is not a list")
-        required: int | None = None
-        require_last_push_approval = False
-        require_code_owner_review = False
+        pull_requests: list[tuple[int, Mapping[str, Any]]] = []
         for rule in payload:
             if not isinstance(rule, Mapping):
                 raise GitHubError("response", "branch rule is not an object")
             if rule.get("type") != "pull_request":
                 continue
+            ruleset_id = rule.get("ruleset_id")
+            if not isinstance(ruleset_id, int) or isinstance(ruleset_id, bool):
+                raise GitHubError("response", "pull_request rule names no ruleset")
             parameters = rule.get("parameters")
             if not isinstance(parameters, Mapping):
                 parameters = {}
+            pull_requests.append((ruleset_id, parameters))
+        rulesets: dict[int, tuple[str, bool]] = {}
+        for ruleset_id, _ in pull_requests:
+            if ruleset_id not in rulesets:
+                rulesets[ruleset_id] = await self._ruleset_bypass(ruleset_id)
+        required: int | None = None
+        require_last_push_approval = False
+        require_code_owner_review = False
+        for ruleset_id, parameters in pull_requests:
+            if rulesets[ruleset_id][1]:
+                continue
             count = parameters.get("required_approving_review_count")
-            required = count if isinstance(count, int) and not isinstance(count, bool) else 0
-            require_last_push_approval = parameters.get("require_last_push_approval") is True
-            require_code_owner_review = parameters.get("require_code_owner_review") is True
+            count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+            required = count if required is None else max(required, count)
+            if parameters.get("require_last_push_approval") is True:
+                require_last_push_approval = True
+            if parameters.get("require_code_owner_review") is True:
+                require_code_owner_review = True
         return BranchRules(
             branch=branch,
             required_approving_reviews=required,
             require_last_push_approval=require_last_push_approval,
             require_code_owner_review=require_code_owner_review,
+            bypassable=tuple(name for name, bypass in rulesets.values() if bypass),
         )
+
+    async def _ruleset_bypass(self, ruleset_id: int) -> tuple[str, bool]:
+        """A ruleset's name, and whether the caller can bypass it: anything but ``never``."""
+        result = await self._gh(["api", f"repos/{self.repo}/rulesets/{ruleset_id}"])
+        payload = _parse_json(result.stdout)
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("name"), str):
+            raise GitHubError("response", "ruleset response has no name")
+        return payload["name"], payload.get("current_user_can_bypass") != "never"
 
     async def _collect(
         self, roles: Sequence[StateLabel], query: str, *, max_pages: int, per_role: bool = False

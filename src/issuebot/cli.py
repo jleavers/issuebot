@@ -458,7 +458,7 @@ async def _probe_github(adapter: GitHubAdapter, model_labels: Sequence[str] = ()
         checks.append(Check("github.repo access", "ok", detail))
     if info is not None:
         checks.append(_token_account_check(auth_login, info))
-        checks.append(await _branch_rules_check(adapter, info.default_branch))
+        checks.append(await _branch_rules_check(adapter, info.default_branch, auth_login))
     try:
         missing = await adapter.missing_labels(model_labels)
     except GitHubError as exc:
@@ -492,7 +492,7 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
     return Check("github.token account", "ok", f"{who} has write on {info.full_name}, not admin")
 
 
-async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
+async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | None) -> Check:
     """Whether the default branch requires a code owner's review of the latest push, so the
     session's account cannot merge work no human approved (GHSA-jm8h-q3j6-p8xp). The session
     holds the token that would do it, and each requirement closes its own route. A review
@@ -503,6 +503,10 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
     satisfies the rule and the session can merge it -- unless the approval must come from a
     code owner.
 
+    A ruleset the token's account can bypass comes first and alone: it holds that account to
+    none of what it requires, so reporting the other rulesets' requirements beside it would
+    read as a binding that is not there.
+
     The OK line cannot prove the session's account is not itself a code owner: that is
     ``CODEOWNERS``, a file in the repository, and this reads the rulesets alone.
     """
@@ -510,6 +514,15 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
         rules = await adapter.branch_rules(branch)
     except GitHubError as exc:
         return Check("github.branch rules", "warn", f"could not read: {exc.message}")
+    if rules.bypassable:
+        noun = "ruleset" if len(rules.bypassable) == 1 else "rulesets"
+        names = ", ".join(f'"{name}"' for name in rules.bypassable)
+        return Check(
+            "github.branch rules",
+            "warn",
+            f"{login or "the token's account"} can bypass {noun} {names}: the account a session "
+            f"runs as is not held to the review rule ({IDENTITY_DOC})",
+        )
     count = rules.required_approving_reviews
     if count is None:
         detail = f"no pull_request rule applies to {branch}"

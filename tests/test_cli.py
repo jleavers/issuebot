@@ -1610,6 +1610,41 @@ def test_validate_warns_when_any_account_with_write_can_approve(
     ) in out
 
 
+@pytest.mark.parametrize(
+    ("bypassable", "named"),
+    [
+        (("writers",), 'ruleset "writers"'),
+        (("writers", "org-wide"), 'rulesets "writers", "org-wide"'),
+    ],
+)
+def test_validate_warns_when_the_sessions_account_can_bypass_the_rule(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    bypassable: tuple[str, ...],
+    named: str,
+) -> None:
+    """A rule the account can bypass holds it to nothing (GHSA-jm8h-q3j6-p8xp), so the bypass is
+    the finding: the line names it and stops there, rather than reporting the requirements the
+    other rulesets make as if they bound the account -- which here would read OK."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=1,
+        require_last_push_approval=True,
+        require_code_owner_review=True,
+        bypassable=bypassable,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: issuebot can bypass {named}: the account a session runs "
+        "as is not held to the review rule "
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
 def test_validate_warns_when_the_branch_rules_will_not_read(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
