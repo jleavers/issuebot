@@ -147,3 +147,12 @@ def test_claude_credential_names_the_scoping_it_has_none_of() -> None:
         "`agent.max_issue_cost_usd` never fires",
         "an account dedicated to the bot rather than the login you use yourself",
     )
+
+
+def test_the_bypass_is_pull_request_mode_only() -> None:
+    """The admin bypass exists so a solo operator's own pull requests can merge; `always` would
+    also let that account push to the branch directly, which the deletion and non-fast-forward
+    rules are there to stop."""
+    text = (ROOT / "docs" / "security-model.md").read_text(encoding="utf-8")
+    assert "bypass actor in `pull_request` mode" in text
+    assert "not `always`" in text

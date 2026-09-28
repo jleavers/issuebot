@@ -156,8 +156,11 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 ### Prerequisites
 
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
-   appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
-   personal access token restricted to the target repository with:
+   appears under that account, and the session holds the token, so run issuebot as a dedicated
+   account that cannot merge its own work -- [The account a session acts
+   as](docs/security-model.md#the-account-a-session-acts-as) is the recipe for one person and
+   for an organisation. Create a fine-grained personal access token restricted to the target
+   repository with:
 
    - Contents (read/write)
    - Issues (read/write)
@@ -313,12 +316,14 @@ docker compose run --rm worker labels ensure
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
+[ OK ] github.token account: your-bot has write on your-org/your-repo, not admin
+[ OK ] github.branch rules: main requires 1 approving review
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-18 checks: 0 failed, 2 warnings
+20 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in

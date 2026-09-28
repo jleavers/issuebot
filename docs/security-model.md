@@ -2,8 +2,8 @@
 
 Three things fix what one unattended session may do, and none of them is the prompt: the
 network the container can reach, the account the session runs as, and the credential it
-authenticates with. Each is reported by a line of `issuebot validate`, and each is set outside
-anything an issue or the agent can write.
+authenticates with — and, for the GitHub credential, whose it is. Each is reported by a line
+of `issuebot validate`, and each is set outside anything an issue or the agent can write.
 
 What counts as a vulnerability in each of them, and how to report one, is
 [`SECURITY.md`](../SECURITY.md).
@@ -135,8 +135,11 @@ is never an approval. The worker's own `issuebot/todo` counts only when its acco
 administers the repository, which is to say when it is the maintainer's own account -- a
 setup a planned `validate` check will warn about; under a dedicated GitHub account only a
 maintainer's `issuebot/todo` approves, so the worker's own relabel can never carry an edit
-past the check. Nothing is stored, so a restart cannot reset it: re-approval is
-a maintainer applying `issuebot/todo` again.
+past the check. Under an admin token, the worker's own `issuebot/todo` on *another* issue
+counts as an approval there too, covered by the same reasoning -- an admin account could
+rewrite the ruleset regardless -- which is one more reason for the dedicated account [The
+account a session acts as](#the-account-a-session-acts-as) recommends. Nothing is stored, so
+a restart cannot reset it: re-approval is a maintainer applying `issuebot/todo` again.
 
 Comments are the other text a session reads, and on a public repository anyone can leave one
 on an issue in `issuebot/review` or `issuebot/rework`. The barrier is in the commands the
@@ -175,6 +178,43 @@ None of this travels with an overlay whose body replaces the prompt (the README'
 overrides passage): what it keeps is whatever Step 6 its own prompt had, so a replaced prompt
 must carry Step 6's four filtered commands and Ground rule 7 itself, or it has no barrier
 against GHSA-jm8h-q3j6-p8xp at all.
+
+## The account a session acts as
+
+Everything above bounds where a session's bytes can go. It does not bound what a session does
+with `GH_TOKEN` at `api.github.com`, which the workflow needs and the egress allow-list
+therefore admits: a session holds whatever that token's account may do to the repository. If
+that account is yours, a persuaded session can approve and merge its own pull request, or
+push to the default branch, with your authority (GHSA-jm8h-q3j6-p8xp). So the identity a
+session acts as must be one that cannot merge what it wrote -- and `validate` says whether
+yours is, on two lines: `github.token account` warns when the token's account administers the
+repository, since an admin can bypass or rewrite the rule below; `github.branch rules` warns
+when no ruleset requires an approving review on the default branch, since then the session's
+account can merge its own pull requests. Both are warnings, because `run-once` against a
+scratch repository is a legitimate use.
+
+**A solo operator**, which is who this repository expects. Create a second personal account
+for issuebot and add it as a collaborator with **write** -- never admin. Put a ruleset on
+the default branch requiring one approving review, with no bypass for that account; you
+approve the bot's pull requests from your own. Your own pull requests need an approver too,
+and GitHub does not let an author approve their own, so add yourself as a `Repository admin`
+bypass actor in `pull_request` mode, not `always`: your pull requests merge without a second
+account, and a direct push to the branch is still refused, which is what the ruleset's
+deletion and non-fast-forward rules are there for. The session's identity cannot merge what
+it wrote and cannot change the rule that says so.
+
+**An organisation** has the same shape with its own tools. The dedicated account is a machine
+user -- GitHub's name for a personal account an organisation creates for automation -- made a
+member of the organisation, or an outside collaborator, with **write** on the repository and no
+seat on any team that carries admin or maintain. The ruleset is an *organisation* ruleset
+targeting the repository's default branch rather than a repository one: a repository admin
+cannot remove it, so the guarantee holds against the repository's own admins too, and it
+covers every repository the organisation points a deployment at. Its bypass actors are teams
+of humans, never the machine user, and its approvers are whoever reviews there already, so no
+admin bypass is needed. `CODEOWNERS` with "require review from Code Owners" narrows who can
+approve a session's change to a path; that is the organisation's choice. A GitHub App
+installation token is not the recommended credential, though `gh` accepts one: it expires
+after an hour, and a session can run longer than that.
 
 ## Checking that the credential took
 

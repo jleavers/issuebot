@@ -163,15 +163,20 @@ the check is about someone *else* changing what was approved.)
 
 The same block has three other openings, for an issue with no approval to measure the text
 against. `` no account other than <login> has applied `issuebot/todo` `` means the only
-`issuebot/todo` on record is the worker's own account's: under a dedicated bot account only a
-maintainer's `issuebot/todo` counts, while an account that administers the repository -- the
-maintainer's own token -- counts its own, since its label is a maintainer's in every sense
-that matters here. `` no account has applied `issuebot/todo` `` means no person GitHub still
-names ever applied it: a label an app, a bot or an Actions workflow applied is not an
-approval, and neither is one by an account since deleted. And one ending `issuebot cannot tell
-what was approved` says the issue's label or edit history runs past the thousand entries the
-worker will read, so nobody can say what was approved; the label comes off once rather than
-the same pages being read every poll, and an issue that long is best closed and filed afresh.
+`issuebot/todo` on record is the worker's own account's: under a dedicated bot account only
+a maintainer's `issuebot/todo` counts, while an account that administers the repository --
+the maintainer's own token -- counts its own, since its label is a maintainer's in every
+sense that matters here. An operator running on their own token without admin -- a write or
+maintain collaborator who is the only one applying the label -- has no approver either, so
+every issue gets this same block: the fix is a second person's `issuebot/todo`, or the
+dedicated-account arrangement ([`docs/security-model.md`, "The account a session acts
+as"](security-model.md#the-account-a-session-acts-as)). `` no account has applied
+`issuebot/todo` `` means no person GitHub still names ever applied it: a label an app, a bot
+or an Actions workflow applied is not an approval, and neither is one by an account since
+deleted. And one ending `issuebot cannot tell what was approved` says the issue's label or
+edit history runs past the thousand entries the worker will read, so nobody can say what was
+approved; the label comes off once rather than the same pages being read every poll, and an
+issue that long is best closed and filed afresh.
 
 An issue whose history will not read at all (GitHub down, a token that cannot see the issue)
 is not handed back: it stays in `issuebot/todo`, the log carries one `approval_check_failed`
@@ -453,7 +458,9 @@ unix socket rather than a network route, so the egress proxy never sees it) on a
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values you set in `.env`, the workspace's `safe.directory`
 entry is the image's system-wide one, the clone's credential helper is written into the clone,
 and global git or ssh config for every session belongs in `/etc/gitconfig` or
-`/etc/ssh/ssh_config`, which are root's and which no session can write.
+`/etc/ssh/ssh_config`, which are root's and which no session can write. Whose the token is
+matters as much as its scope: [The account a session acts
+as](security-model.md#the-account-a-session-acts-as).
 
 One file is *edited* rather than removed, and it is the only one: `~/.config/gh/hosts.yml`.
 It is credential state — it holds the `oauth_token` a session authenticates `gh` with, where a

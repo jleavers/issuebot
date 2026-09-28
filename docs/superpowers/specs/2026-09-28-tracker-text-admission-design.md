@@ -122,8 +122,9 @@ after approval".
 - `github/adapter.py`: `approval_evidence(number) -> ApprovalEvidence`, on `GhCli` (one query
   over `timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT])` and
   `userContentEdits`, each paginated under a ceiling of its own; past the ceiling is a
-  `response` error, as for `count_own_label_additions`) and on the fake, whose records gain an
-  edit and a rename operation so the tests are hermetic.
+  `response` error, as for `count_own_label_additions` (a `PageCeilingError`, which the
+  orchestrator maps to `Unapproved`)) and on the fake, whose records gain an edit and a
+  rename operation so the tests are hermetic.
 - `orchestrator/approval.py`, pure: `assess(evidence, *, admitting: StateLabel, own_login,
   labels) -> Approved(approver, at) | Unapproved(reason, edit, approval)`.
 - `orchestrator/actions.py`: `unapproved_escape`.
@@ -158,16 +159,17 @@ issuebot's side is one attribute. `GitHubText` gains `association`, rendered in 
 carry, so the body's envelope states the fact for the text the session already holds.
 `tests/test_agent_prompt.py` pins the attribute the way it pins `author`.
 
-Not configurable: the three associations are GitHub's own meaning of the author's relationship
-to the repository, not a permission check -- `OWNER` is the repository's owner, `MEMBER` is a
-member of the owning organisation whether or not they hold any permission on this repository,
-and `COLLABORATOR` is anyone invited to the repository at read level and up -- so on an
-organisation-owned repository the filter admits every member of the organisation; a deployment
-that wants narrower admission narrows the organisation, not the filter, and a setting here
-would only be another way to widen what the three already admit. Known and accepted: the
-account issuebot runs as is a collaborator, so its own comments pass the filter. A session
-persuading its successor holds the same authority, not more, and the workpad is that account's
-text by design (#77).
+Not configurable: the three associations are GitHub's own meaning of the author's
+relationship to the repository, not a permission check -- `OWNER` is the repository's owner,
+`MEMBER` is a member of the owning organisation whether or not they hold any permission on
+this repository, and `COLLABORATOR` is anyone invited to the repository at read level and up
+-- so on an organisation-owned repository the filter admits every member of the
+organisation; a deployment that wants narrower admission narrows the organisation, not the
+filter, and a setting here would only be another way to widen what the three already admit.
+Known and accepted: the account issuebot runs as is at least a collaborator (the owner, on a
+maintainer's own token), so its own comments pass the filter. A session persuading its
+successor holds the same authority, not more, and the workpad is that account's text by
+design (#77).
 
 ### 3. The identity a session acts as cannot merge its own work
 
