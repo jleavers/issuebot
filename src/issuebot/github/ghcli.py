@@ -123,7 +123,7 @@ LABEL_EVENTS_QUERY = (
 )
 # The issue's label additions and title renames, oldest first, for the approval check
 # (GHSA-jm8h-q3j6-p8xp): which human last handed the issue to issuebot, and whether the
-# title moved after that.
+# title moved after that. A label's actor carries its type, since only a person's approves.
 APPROVAL_TIMELINE_QUERY = (
     "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\n"
     "  repository(owner: $owner, name: $name) {\n"
@@ -132,7 +132,7 @@ APPROVAL_TIMELINE_QUERY = (
     f"first: {PAGE_SIZE}, after: $cursor) {{\n"
     "        nodes {\n"
     "          __typename\n"
-    "          ... on LabeledEvent { createdAt actor { login } label { name } }\n"
+    "          ... on LabeledEvent { createdAt actor { __typename login } label { name } }\n"
     "          ... on RenamedTitleEvent { createdAt actor { login } }\n"
     "        }\n"
     "        pageInfo { hasNextPage endCursor }\n"
@@ -427,9 +427,20 @@ class GhCliAdapter:
 
         Two paginated reads, each bounded at ``MAX_TIMELINE_PAGES`` under #110's rule: the
         timeline for ``LabeledEvent`` and ``RenamedTitleEvent`` items, and ``userContentEdits``
-        for the body. A node without a timestamp is skipped, since an edit issuebot cannot
-        place in time is one it cannot assess; a deleted actor is kept as ``None``, because
-        "somebody GitHub no longer names" is a fact the assessment acts on.
+        for the body. Past either ceiling is a ``PageCeilingError``, which the orchestrator
+        answers by handing the issue back rather than re-reading it every tick.
+
+        A deleted actor is kept as ``None``, because "somebody GitHub no longer names" is a
+        fact the assessment acts on. So is a label an app or a bot applied: an actor whose
+        ``__typename`` is not ``User`` -- a workflow, or an integration that re-applies the
+        label -- is not a maintainer reading the text, and ``None`` is never an approval. An
+        edit keeps its editor's login whatever the account, since a bot's edit un-approves
+        like anyone else's.
+
+        A rename or an edit without its timestamp is a malformed response, not a node to skip:
+        both are non-null in GitHub's schema, and an edit issuebot cannot place in time is one
+        it would otherwise leave out -- which fails open. A label event without one is skipped,
+        which fails closed: it can only have been an approval.
         """
         self._log.debug("approval_evidence", issue_number=number)
         label_events: list[LabelApplied] = []
@@ -442,13 +453,17 @@ class GhCliAdapter:
             f"{MAX_TIMELINE_PAGES * PAGE_SIZE} events",
         ):
             at = optional_timestamp(node.get("createdAt"))
-            if at is None:
-                continue
             actor = _dig(node, "actor", "login")
             login = actor if isinstance(actor, str) and actor else None
             if node.get("__typename") == "RenamedTitleEvent":
+                if at is None:
+                    raise GitHubError("response", "rename without createdAt")
                 edits.append(TextEdit(what="title", editor=login, at=at))
                 continue
+            if at is None:
+                continue
+            if _dig(node, "actor", "__typename") != "User":
+                login = None
             name = _dig(node, "label", "name")
             if isinstance(name, str) and name:
                 label_events.append(LabelApplied(label=name, actor=login, at=at))
@@ -460,7 +475,7 @@ class GhCliAdapter:
         ):
             at = optional_timestamp(node.get("editedAt"))
             if at is None:
-                continue
+                raise GitHubError("response", "edit without editedAt")
             editor = _dig(node, "editor", "login")
             edits.append(
                 TextEdit(
@@ -474,7 +489,12 @@ class GhCliAdapter:
     async def _paginate(
         self, query: str, number: int, path: tuple[str, ...], *, overflow: str
     ) -> AsyncIterator[Mapping[str, Any]]:
-        """The mapping nodes of one issue connection, page by page, under the timeline cap."""
+        """The mapping nodes of one issue connection, page by page, under the timeline cap.
+
+        Past the cap is a ``PageCeilingError`` carrying ``overflow``: the read did not fail,
+        the resource is longer than issuebot will read, and a caller may treat that as a fact
+        about the issue rather than as a moment's failure (#139's distinction).
+        """
         cursor: str | None = None
         for _page_number in range(MAX_TIMELINE_PAGES):
             variables: dict[str, str | int] = {
@@ -498,7 +518,7 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
-        raise GitHubError("response", overflow)
+        raise PageCeilingError(overflow)
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._log.debug("update_comment", comment_id=comment_id)

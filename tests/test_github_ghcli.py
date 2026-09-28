@@ -1252,7 +1252,7 @@ async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
                 {
                     "__typename": "LabeledEvent",
                     "createdAt": "2026-09-28T09:00:00Z",
-                    "actor": {"login": "maintainer"},
+                    "actor": {"__typename": "User", "login": "maintainer"},
                     "label": {"name": "issuebot/todo"},
                 },
                 {
@@ -1263,7 +1263,7 @@ async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
                 {
                     "__typename": "LabeledEvent",
                     "createdAt": "2026-09-28T09:06:00Z",
-                    "actor": {"login": LOGIN},
+                    "actor": {"__typename": "User", "login": LOGIN},
                     "label": None,
                 },
                 {},
@@ -1278,7 +1278,7 @@ async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
                 {
                     "__typename": "LabeledEvent",
                     "createdAt": "2026-09-28T09:10:00Z",
-                    "actor": {"login": LOGIN},
+                    "actor": {"__typename": "User", "login": LOGIN},
                     "label": {"name": "issuebot/in-progress"},
                 }
             ],
@@ -1291,7 +1291,6 @@ async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
             [
                 {"editedAt": "2026-09-28T09:20:00Z", "editor": {"login": "reporter"}},
                 {"editedAt": "2026-09-28T08:00:00Z", "editor": None},
-                {"editor": {"login": "nobody"}},  # no timestamp: not an edit issuebot can place
             ],
             end_cursor=None,
         ),
@@ -1308,11 +1307,86 @@ async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
     ]
     first = runner.argv(0)
     assert first[:3] == ["api", "graphql", "-f"]
+    query = query_of(first)
     assert (
         "timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT], first: 100, after: $cursor)"
-    ) in query_of(first)
+    ) in query
+    assert "... on LabeledEvent { createdAt actor { __typename login } label { name } }" in query
     assert first[first.index("number=42") - 1] == "-F"
     assert len(runner.calls) == 3
+
+
+async def test_approval_evidence_credits_an_app_or_bot_label_to_nobody() -> None:
+    """A label an app or a bot applies is not a maintainer reading the text, so it reaches the
+    assessment with no actor -- never an approval -- where a person keeps their login. Edits
+    keep theirs whatever the account: a bot's edit un-approves like anyone else's."""
+    runner = StubRunner()
+    runner.on(
+        has("RENAMED_TITLE_EVENT"),
+        stdout=_approval_timeline_page(
+            [
+                {
+                    "__typename": "LabeledEvent",
+                    "createdAt": "2026-09-28T09:00:00Z",
+                    "actor": {"__typename": "Bot", "login": "github-actions"},
+                    "label": {"name": "issuebot/todo"},
+                },
+                {
+                    "__typename": "LabeledEvent",
+                    "createdAt": "2026-09-28T09:01:00Z",
+                    "actor": {"__typename": "User", "login": "maintainer"},
+                    "label": {"name": "issuebot/todo"},
+                },
+                {
+                    "__typename": "RenamedTitleEvent",
+                    "createdAt": "2026-09-28T09:02:00Z",
+                    "actor": {"login": "renovate"},
+                },
+            ],
+            end_cursor=None,
+        ),
+    )
+    runner.on(
+        has("userContentEdits"),
+        stdout=_edits_page(
+            [{"editedAt": "2026-09-28T09:03:00Z", "editor": {"login": "dependabot"}}],
+            end_cursor=None,
+        ),
+    )
+    evidence = await make_adapter(runner).approval_evidence(42)
+    assert [(e.label, e.actor) for e in evidence.label_events] == [
+        ("issuebot/todo", None),
+        ("issuebot/todo", "maintainer"),
+    ]
+    assert [(e.what, e.editor) for e in evidence.edits] == [
+        ("title", "renovate"),
+        ("body", "dependabot"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("timeline", "edits", "needle"),
+    [
+        (
+            [{"__typename": "RenamedTitleEvent", "actor": {"login": "reporter"}}],
+            [],
+            "rename without createdAt",
+        ),
+        ([], [{"editor": {"login": "reporter"}}], "edit without editedAt"),
+    ],
+)
+async def test_approval_evidence_refuses_an_edit_it_cannot_place_in_time(
+    timeline: list[dict[str, object]], edits: list[dict[str, object]], needle: str
+) -> None:
+    """Both timestamps are non-null in GitHub's schema, so a missing one is a malformed answer
+    -- and skipping it would drop an edit the assessment needed to see, which fails open."""
+    runner = StubRunner()
+    runner.on(has("RENAMED_TITLE_EVENT"), stdout=_approval_timeline_page(timeline, end_cursor=None))
+    runner.on(has("userContentEdits"), stdout=_edits_page(edits, end_cursor=None))
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).approval_evidence(42)
+    assert excinfo.value.category == "response"
+    assert excinfo.value.message == needle
 
 
 async def test_approval_evidence_gives_up_past_the_page_cap() -> None:
@@ -1323,10 +1397,12 @@ async def test_approval_evidence_gives_up_past_the_page_cap() -> None:
             both(has("RENAMED_TITLE_EVENT"), predicate),
             stdout=_approval_timeline_page([], end_cursor=f"t{page + 1}"),
         )
-    with pytest.raises(GitHubError) as excinfo:
+    # A named error, so the approval check can tell "too long to read" -- a property of the
+    # issue, handed back once -- from a read that failed and is worth another tick.
+    with pytest.raises(PageCeilingError) as excinfo:
         await make_adapter(runner).approval_evidence(42)
     assert excinfo.value.category == "response"
-    assert str(excinfo.value).endswith(
+    assert excinfo.value.message == (
         f"label and title history of #42 runs past {MAX_TIMELINE_PAGES * 100} events"
     )
 
@@ -1340,10 +1416,10 @@ async def test_approval_evidence_gives_up_past_the_edit_page_cap() -> None:
             both(has("userContentEdits"), predicate),
             stdout=_edits_page([], end_cursor=f"e{page + 1}"),
         )
-    with pytest.raises(GitHubError) as excinfo:
+    with pytest.raises(PageCeilingError) as excinfo:
         await make_adapter(runner).approval_evidence(42)
     assert excinfo.value.category == "response"
-    assert str(excinfo.value).endswith(
+    assert excinfo.value.message == (
         f"edit history of #42 runs past {MAX_TIMELINE_PAGES * 100} edits"
     )
 
@@ -1355,3 +1431,5 @@ async def test_approval_evidence_rejects_a_malformed_response(stdout: str) -> No
     with pytest.raises(GitHubError) as excinfo:
         await make_adapter(runner).approval_evidence(42)
     assert excinfo.value.category == "response"
+    # Malformed is a failed read, retried; only the ceiling is the issue's own length.
+    assert not isinstance(excinfo.value, PageCeilingError)
