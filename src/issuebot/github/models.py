@@ -136,10 +136,17 @@ class BranchRules:
     ``required_approving_reviews`` is ``None`` when no ``pull_request`` rule applies. Rulesets
     only: classic branch protection is readable by admins alone, and the check that reads
     this must work for the account it recommends, which is not one.
+
+    ``require_last_push_approval`` is the ``pull_request`` rule's own
+    ``require_last_push_approval`` parameter (API name; "Require approval of the most recent
+    reviewable push" in the UI). Without it an approval survives a later push, so a session can
+    push to an already-approved pull request and merge it (GHSA-jm8h-q3j6-p8xp) -- the review
+    count alone does not stop that.
     """
 
     branch: str
     required_approving_reviews: int | None
+    require_last_push_approval: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

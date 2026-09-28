@@ -493,8 +493,11 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
 
 
 async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
-    """Whether the default branch requires a review, so the session's own account cannot merge
-    its own pull request (GHSA-jm8h-q3j6-p8xp): the session holds the token that would do it.
+    """Whether the default branch requires a review of the latest push, so the session's own
+    account cannot merge its own pull request (GHSA-jm8h-q3j6-p8xp): the session holds the
+    token that would do it, and a review count alone is not enough -- an approval survives a
+    later push unless the rule also requires approval of the most recent one, and issuebot's
+    own conflict bounce pushes to an already-approved pull request.
     """
     try:
         rules = await adapter.branch_rules(branch)
@@ -507,7 +510,17 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str) -> Check:
         detail = f"{branch} requires 0 approving reviews"
     else:
         noun = "approving review" if count == 1 else "approving reviews"
-        return Check("github.branch rules", "ok", f"{branch} requires {count} {noun}")
+        if rules.require_last_push_approval:
+            return Check(
+                "github.branch rules", "ok", f"{branch} requires {count} {noun} of the latest push"
+            )
+        return Check(
+            "github.branch rules",
+            "warn",
+            f"{branch} requires {count} {noun} but not of the latest push: a session can push "
+            'after the approval and merge. Turn on "Require approval of the most recent '
+            'reviewable push"',
+        )
     return Check(
         "github.branch rules",
         "warn",

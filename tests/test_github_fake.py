@@ -307,9 +307,13 @@ async def test_probes(fake: FakeGitHub) -> None:
 
 async def test_branch_rules_defaults_to_one_review_and_can_be_set() -> None:
     fake = FakeGitHub(GitHubSettings(repo="example/repo"))
-    assert (await fake.branch_rules("main")).required_approving_reviews == 1
+    default = await fake.branch_rules("main")
+    assert default.required_approving_reviews == 1
+    assert default.require_last_push_approval is True
     fake.branch_rules_result = BranchRules(branch="main", required_approving_reviews=None)
-    assert (await fake.branch_rules("main")).required_approving_reviews is None
+    result = await fake.branch_rules("main")
+    assert result.required_approving_reviews is None
+    assert result.require_last_push_approval is False
 
 
 async def test_fail_next_injects_errors_in_order(fake: FakeGitHub) -> None:

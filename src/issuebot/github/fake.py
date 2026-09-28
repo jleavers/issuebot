@@ -284,7 +284,9 @@ class FakeGitHub:
         self._enter("branch_rules", branch)
         if self.branch_rules_result is not None:
             return self.branch_rules_result
-        return BranchRules(branch=branch, required_approving_reviews=1)
+        return BranchRules(
+            branch=branch, required_approving_reviews=1, require_last_push_approval=True
+        )
 
     # --- test helpers (never recorded in `calls`) --------------------------------
 

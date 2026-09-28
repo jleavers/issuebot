@@ -643,6 +643,7 @@ class GhCliAdapter:
         if not isinstance(payload, list):
             raise GitHubError("response", "branch rules response is not a list")
         required: int | None = None
+        require_last_push_approval = False
         for rule in payload:
             if not isinstance(rule, Mapping):
                 raise GitHubError("response", "branch rule is not an object")
@@ -655,7 +656,17 @@ class GhCliAdapter:
                 else None
             )
             required = count if isinstance(count, int) and not isinstance(count, bool) else 0
-        return BranchRules(branch=branch, required_approving_reviews=required)
+            last_push = (
+                parameters.get("require_last_push_approval")
+                if isinstance(parameters, Mapping)
+                else None
+            )
+            require_last_push_approval = last_push is True
+        return BranchRules(
+            branch=branch,
+            required_approving_reviews=required,
+            require_last_push_approval=require_last_push_approval,
+        )
 
     async def _collect(
         self, roles: Sequence[StateLabel], query: str, *, max_pages: int, per_role: bool = False

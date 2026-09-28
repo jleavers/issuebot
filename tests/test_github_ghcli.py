@@ -1021,24 +1021,44 @@ async def test_repo_info_without_admin_reads_false() -> None:
 
 
 @pytest.mark.parametrize(
-    ("rules", "expected"),
+    ("rules", "expected_reviews", "expected_last_push"),
     [
-        ("[]", None),
-        ('[{"type": "deletion"}, {"type": "non_fast_forward"}]', None),
-        ('[{"type": "pull_request", "parameters": {"required_approving_review_count": 0}}]', 0),
-        ('[{"type": "pull_request", "parameters": {"required_approving_review_count": 2}}]', 2),
-        ('[{"type": "pull_request"}]', 0),
+        ("[]", None, False),
+        ('[{"type": "deletion"}, {"type": "non_fast_forward"}]', None, False),
+        (
+            '[{"type": "pull_request", "parameters": {"required_approving_review_count": 0}}]',
+            0,
+            False,
+        ),
+        (
+            '[{"type": "pull_request", "parameters": {"required_approving_review_count": 2}}]',
+            2,
+            False,
+        ),
+        ('[{"type": "pull_request"}]', 0, False),
+        (
+            '[{"type": "pull_request", "parameters": '
+            '{"required_approving_review_count": 1, "require_last_push_approval": true}}]',
+            1,
+            True,
+        ),
     ],
 )
 async def test_branch_rules_reads_the_review_count_in_force(
-    rules: str, expected: int | None
+    rules: str, expected_reviews: int | None, expected_last_push: bool
 ) -> None:
-    """The rules endpoint answers what applies to the caller on that branch (rulesets only)."""
+    """The rules endpoint answers what applies to the caller on that branch (rulesets only),
+    including whether the rule covers the latest push and not just some earlier one
+    (GHSA-jm8h-q3j6-p8xp)."""
     runner = StubRunner()
     runner.on(has("rules/branches/main"), stdout=rules)
     result = await make_adapter(runner).branch_rules("main")
     assert runner.argv(0) == ["api", "repos/example/repo/rules/branches/main"]
-    assert (result.branch, result.required_approving_reviews) == ("main", expected)
+    assert (
+        result.branch,
+        result.required_approving_reviews,
+        result.require_last_push_approval,
+    ) == ("main", expected_reviews, expected_last_push)
 
 
 @pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])

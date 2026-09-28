@@ -1508,7 +1508,9 @@ def test_validate_says_the_token_account_is_not_an_admin_and_the_branch_requires
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] github.token account: issuebot has write on example/repo, not admin\n" in out
-    assert "[ OK ] github.branch rules: main requires 1 approving review\n" in out
+    assert (
+        "[ OK ] github.branch rules: main requires 1 approving review of the latest push\n" in out
+    )
 
 
 def test_validate_warns_when_the_tokens_account_administers_the_repository(
@@ -1553,6 +1555,29 @@ def test_validate_warns_when_the_default_branch_needs_no_review(
         f"[WARN] github.branch rules: {detail}: the account a session runs as can merge its own "
         "pull requests. Require at least one approving review (rulesets only; classic branch "
         "protection is not read here)"
+    ) in out
+
+
+def test_validate_warns_when_the_review_does_not_cover_the_latest_push(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """A review count alone is not enough (GHSA-jm8h-q3j6-p8xp): an approval survives a later
+    push unless the rule also requires approval of the most recent one, so a session can push
+    to an already-approved pull request and merge it -- exactly what issuebot's own conflict
+    bounce does."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main", required_approving_reviews=1, require_last_push_approval=False
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.branch rules: main requires 1 approving review but not of the latest "
+        'push: a session can push after the approval and merge. Turn on "Require approval of '
+        'the most recent reviewable push"'
     ) in out
 
 
