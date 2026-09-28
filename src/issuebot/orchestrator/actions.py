@@ -19,6 +19,7 @@ from issuebot.github import (
     classify_closed,
 )
 from issuebot.log import get_logger
+from issuebot.orchestrator.approval import Unapproved
 from issuebot.orchestrator.state import (
     BlockedContext,
     claimed_snapshot,
@@ -293,6 +294,80 @@ async def blocked_escape(
         issue_identifier=issue.identifier,
         run_id=context.run_id,
         reason=context.reason,
+    )
+    return "applied"
+
+
+# The heading of the block the approval check writes (GHSA-jm8h-q3j6-p8xp). The *reason* is
+# what makes two blocks the same block, as with the budget escape: it names the edit and the
+# approval to the second, so a later edit gets its own block and the same edit never two.
+UNAPPROVED_HEADING = "### Issuebot unapproved edit ("
+
+
+def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -> str:
+    admitting = f"`{labels.todo}`"
+    if verdict.approval is not None and verdict.approval.label.lower() == labels.rework.lower():
+        admitting = f"`{labels.rework}`"
+    return (
+        f"{UNAPPROVED_HEADING}{_stamp(now)})\n\n"
+        f"{verdict.reason}. issuebot has removed the label: the text a session would act on is "
+        "no longer the text that was approved. Read the current title and description; if they "
+        f"are what you want done, apply {admitting} again.\n"
+    )
+
+
+async def unapproved_escape(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    verdict: Unapproved,
+    *,
+    now: datetime,
+) -> EscapeOutcome:
+    """Hand an issue whose approved text has changed back to a human: note, then no label.
+
+    Label-first like ``blocked_escape`` (#128, #157): the note is best effort and the label
+    removal is the point, since an issue nobody has approved must not be a candidate on the
+    next tick. ``issue`` is the record the poll just returned; the evidence behind
+    ``verdict`` was read a moment ago, so there is no second fetch here. Re-approval is the
+    human applying the admitting label again, which is a new label event after the edit.
+    """
+    log = get_logger(__name__)
+    block = unapproved_block(verdict, now, adapter.labels)
+    try:
+        note_failure = await _escape_note(
+            adapter, issue.number, block, lambda body: verdict.reason in body
+        )
+        await adapter.clear_state(issue.number)
+    except GitHubError as exc:
+        log.warning(
+            "unapproved_escape_failed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            error=str(exc),
+            category=exc.category,
+        )
+        return "failed"
+    bus.publish(
+        StateChanged(
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            from_label=state_label_name(issue),
+            to_label=None,
+            actor="issuebot",
+            pr_url=pr_url(issue),
+        )
+    )
+    bus.publish(
+        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=verdict.reason)
+    )
+    if note_failure is not None:
+        await _report_note_failure(adapter, issue, block, note_failure, prefix="unapproved_escape")
+    log.info(
+        "unapproved_escape_applied",
+        issue_number=issue.number,
+        issue_identifier=issue.identifier,
+        reason=verdict.reason,
     )
     return "applied"
 
