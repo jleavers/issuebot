@@ -217,10 +217,14 @@ repositories owned by its own resource owner, and cannot be used to contribute t
 repository where the account is an outside or repository collaborator rather than the owner
 or an organisation member, so a collaborator account has no fine-grained token to give it.
 `validate`'s `github.token` line will warn about the classic token's account-wide reach, and
-that warning means less here than it does on a maintainer's own token: this account's whole
-reach *is* the one repository it collaborates on, which is the point of a dedicated account,
-not a gap in it. (The organisation recipe below keeps a fine-grained token, if that matters
-to you.)
+the warning is a real trade, not a formality. The account collaborates on one repository, but
+a classic `repo` token still lets it create repositories, fork, and open issues, comments and
+pull requests on any public repository, all through hosts the egress allow-list admits. On a
+public target that adds little: the code is public already, and a session can post what it
+likes on the target itself. On a *private* target it opens a route for the code, since a
+session can push it to a public repository the account creates, which a fine-grained token
+scoped to the one repository cannot do. For a private target the organisation route below is
+the better one, because it keeps the fine-grained token.
 
 Put a ruleset on the default branch requiring one approving review of the latest push --
 "Require approval of the most recent reviewable push" in the UI
@@ -252,6 +256,18 @@ deletion and non-fast-forward rules too and keep them on, since those are what s
 branch being deleted or force-pushed instead -- the UI ticks both by default when you create
 a ruleset, the API does not. The session's identity cannot merge work no human approved, and
 cannot change the rule that says so.
+
+That is all the arrangement guarantees, and write keeps a good deal of reach short of a merge.
+The account can still approve other people's pull requests; code-owner review is what stops
+that approval merging them. It can create, move and delete tags and releases, which no branch
+ruleset covers: if a workflow publishes a release when a tag is pushed, a session's tag
+publishes code nobody reviewed, so add a tag ruleset restricting the creation, update and
+deletion of your release tags, with the same `Repository admin` bypass -- in `always` mode
+this time, since a tag never arrives through a pull request. It can push to or delete any
+branch but the default one, other people's included. It can run its own code under the
+workflows that already fire on a push, with their secrets, as the README's Prerequisites
+says. It can label, comment on, close and edit issues and pull requests. And with the classic
+token, it has the reach beyond the repository described above.
 
 **An organisation** has the same shape with its own tools, and is the route that keeps a
 fine-grained token: make the dedicated account a *member* of the organisation rather than an
