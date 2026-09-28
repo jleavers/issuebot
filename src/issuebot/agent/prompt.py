@@ -87,8 +87,8 @@ template, and use the id the POST returns for every update this turn.
 {% endif %}
 - The original task instructions and prior turn context are already present in this session, \
 so do not restate them before acting.
-- If a pull request exists, check it for new review comments and failed checks and address \
-them before anything else.
+- If a pull request exists, check it for new feedback with the workflow's feedback-sweep \
+commands, and for failed checks, and address them before anything else.
 - Focus on the remaining work and do not end the turn while the issue stays \
 `{{ labels.in_progress }}` unless you are truly blocked.
 """

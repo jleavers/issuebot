@@ -631,6 +631,11 @@ def test_continuation_prompt_names_turn_and_label(make_issue: Callable[..., Issu
     assert "`issuebot/in-progress`" in rendered
     assert "repo-42" in rendered
     assert "found no workpad on the issue yet" in rendered
+    # GHSA-jm8h-q3j6-p8xp: this template is shared by every workflow, so it cannot name a
+    # specific workflow's Ground rule 7, but it must not invite an unfiltered `--comments`
+    # fetch either; it defers to whichever feedback-sweep commands the workflow provides.
+    assert "with the workflow's feedback-sweep commands" in rendered
+    assert "new review comments" not in rendered
 
 
 def test_continuation_prompt_names_the_workpad(make_issue: Callable[..., Issue]) -> None:
