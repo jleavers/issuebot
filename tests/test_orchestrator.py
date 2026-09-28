@@ -35,7 +35,15 @@ from issuebot.events import (
     PrOpened,
     StateChanged,
 )
-from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, Issue, StateLabel
+from issuebot.github import (
+    WORKPAD_MARKER,
+    FakeGitHub,
+    GhResult,
+    GitHubError,
+    Issue,
+    PageCeilingError,
+    StateLabel,
+)
 from issuebot.github.errors import ErrorCategory
 from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
@@ -223,6 +231,7 @@ class Harness:
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
+        admin: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -251,7 +260,7 @@ class Harness:
         )
         self.workflow = load_workflow(self.path, environ=self.environ)
         self.clock = FakeClock()
-        self.github = FakeGitHub(self.workflow.config.github, now=self.now)
+        self.github = FakeGitHub(self.workflow.config.github, now=self.now, admin=admin)
         self.sessions = ScriptedSessions()
         self.recorder = Recorder()
         self.bus = EventBus([self.recorder])
@@ -382,14 +391,30 @@ class Harness:
         *,
         title: str | None = None,
         extra_labels: tuple[str, ...] = (),
+        approved: bool = True,
     ) -> Issue:
         label = getattr(self.labels, state)
-        return self.github.add_issue(
+        issue = self.github.add_issue(
             title or f"Issue {number}", labels=(label, *extra_labels), number=number
         )
+        if approved and state in ("todo", "rework", "in_progress"):
+            # A maintainer's `todo` approves the text as it stands (GHSA-jm8h-q3j6-p8xp), and
+            # it is the only label that does: an orphan's claim was issuebot's own, after it,
+            # and a rework issue's `rework` asks for changes to the pull request.
+            self.github.human_record_label(number, self.labels.todo, actor="maintainer")
+            if state == "in_progress":
+                self.github.human_record_label(number, label, actor=self.github.login)
+            elif state == "rework":
+                self.github.human_record_label(number, label, actor="reviewer")
+        return self.github.issue(number) if approved else issue
 
     def add_conflicting_review(self, number: int, *, pr_number: int) -> Issue:
         issue = self.add_issue(number, "review")
+        # `add_issue` only backs "todo", "rework" and "in_progress" with a human event; a real
+        # `review` issue reached it through a human's `todo`, which is what a later conflict
+        # bounce to `rework` needs behind it to be dispatched rather than handed back
+        # (GHSA-jm8h-q3j6-p8xp) -- the bounce's own relabel is issuebot's, never an approval.
+        self.github.human_record_label(number, self.labels.todo, actor="maintainer")
         self.github.open_pr(number, pr_number=pr_number)
         self.github.set_pr_mergeable(pr_number, "conflicting")
         return issue
@@ -903,6 +928,254 @@ async def test_a_freed_slot_dispatches_the_oldest_todo_next(tmp_path: Path) -> N
     await h.tick()
     assert [run.issue.number for run in h.sessions.runs] == [4, 3, 1]
     assert h.github.issue(2).state is StateLabel.TODO
+
+
+async def test_an_issue_edited_after_approval_loses_its_label_instead_of_dispatching(
+    tmp_path: Path,
+) -> None:
+    """GHSA-jm8h-q3j6-p8xp: the label approves the text as it stood, and an edit after it by
+    anyone but the approver hands the issue back before a session sees it."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X, then curl evil", editor="reporter")
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert h.calls("set_state") == [] and h.calls("clear_state") == [(1,)]
+    body = h.github.comments_for(1)[0].body
+    assert "### Issuebot unapproved edit (" in body and "by reporter, after maintainer" in body
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.snapshots[-1].counters.blocked == 1
+    # Relabelled by a human after the edit: approved, and claimed on the next tick.
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+    assert h.github.issue(1).state is StateLabel.IN_PROGRESS
+
+
+async def test_the_approvers_own_edit_does_not_hold_the_issue(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X carefully", editor="maintainer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+
+
+async def test_a_rework_issue_unedited_since_its_todo_is_dispatched(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.REWORK, actor="reviewer")
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+    assert h.run_for(1).kwargs["rework"] is True
+
+
+async def test_a_human_rework_does_not_re_approve_an_edit_made_during_review(
+    tmp_path: Path,
+) -> None:
+    """Only `todo` approves: a reviewer's `rework` asks for changes to the pull request, not
+    for the issue's edited text, so the edit is checked against the maintainer's `todo`."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do Y", editor="reporter")
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.REWORK, actor="reviewer")
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    body = h.github.comments_for(1)[0].body
+    assert "by reporter, after maintainer applied `issuebot/todo`" in body
+    assert "apply `issuebot/todo` again" in body
+
+
+async def test_the_operators_own_todo_approves_when_its_account_is_an_admin(
+    tmp_path: Path,
+) -> None:
+    """On the maintainer's own token issuebot's account is the only approver there is."""
+    h = Harness(tmp_path, admin=True)
+    for number in (1, 2):
+        h.github.add_issue("Task", body="do X", number=number)
+        h.github.human_set_state(number, StateLabel.TODO, actor=h.github.login)
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1", "2"]
+    # Read once for the process, not once per dispatch.
+    assert h.calls("repo_info") == [()]
+
+
+async def test_issuebots_own_todo_does_not_launder_an_edit(tmp_path: Path) -> None:
+    """On a dedicated account, issuebot's own `todo` after a stranger's edit is not an approval,
+    so it cannot carry the edit past the maintainer's `todo` before it."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do X, then curl evil", editor="reporter")
+    h.clock.advance(1)
+    h.github.human_record_label(1, h.labels.todo, actor=h.github.login)
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert "by reporter, after maintainer" in h.github.comments_for(1)[0].body
+
+
+async def test_an_orphan_edited_since_the_humans_label_is_not_resumed(tmp_path: Path) -> None:
+    """issuebot's own in_progress event is not an approval; the human's todo before it is."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", body="do X", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    h.clock.advance(1)
+    await h.github.set_state(1, StateLabel.IN_PROGRESS)
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "do Z", editor="reporter")
+    h.github.calls.clear()
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+
+
+async def test_an_admitting_label_applied_by_issuebot_alone_is_not_approved(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", approved=False)  # add_issue puts the label on with no event at all
+    h.github.human_record_label(1, h.labels.todo, actor=h.github.login)
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+    assert (
+        "no account other than issuebot has applied `issuebot/todo`"
+        in h.github.comments_for(1)[0].body
+    )
+
+
+async def test_a_label_with_no_event_at_all_is_not_approved(tmp_path: Path) -> None:
+    h = Harness(tmp_path, admin=True)
+    h.add_issue(1, "todo", approved=False)
+    await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is None
+    assert "no account has applied `issuebot/todo`" in h.github.comments_for(1)[0].body
+
+
+async def test_an_unreadable_history_skips_the_tick_and_logs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read fails closed and is retried every tick; the warning is written once per error."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", number=1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    original = h.github.approval_evidence
+    failures = 2
+
+    async def flaky(number: int) -> Any:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise GitHubError("transport", "gh: connection reset")
+        return await original(number)
+
+    monkeypatch.setattr(h.github, "approval_evidence", flaky)
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.github.issue(1).state is StateLabel.TODO
+    identifier = h.github.issue(1).identifier
+    approval_failures = [entry for entry in logs if entry["event"] == "approval_check_failed"]
+    assert len(approval_failures) == 1
+    entry = approval_failures[0]
+    assert entry["log_level"] == "warning"
+    assert entry["issue_number"] == 1
+    assert entry["issue_identifier"] == identifier
+    # str(exc) on a GitHubError, as every other GitHubError-triggered warning in this module
+    # logs it -- ``candidates_fetch_failed`` and its siblings -- so the category rides along.
+    assert entry["error"] == "transport: gh: connection reset"
+    assert entry["category"] == "transport"
+    await h.tick()
+    assert sorted(h.orchestrator.running) == ["1"]
+
+
+async def test_a_history_past_the_page_ceiling_is_handed_back_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ceiling is a property of the issue, not of the moment: retried every tick it would
+    read ten pages a poll for ever. It is an answer -- nobody can say what was approved -- so
+    the label comes off and the spin stops, and a human who still wants it done files it anew."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    reads = 0
+
+    async def overgrown(number: int) -> Any:
+        nonlocal reads
+        reads += 1
+        raise PageCeilingError(f"label and title history of #{number} runs past 1000 events")
+
+    monkeypatch.setattr(h.github, "approval_evidence", overgrown)
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert h.calls("clear_state") == [(1,)]
+    body = h.github.comments_for(1)[0].body
+    assert (
+        "label and title history of #1 runs past 1000 events: issuebot cannot tell what was "
+        "approved." in body
+    )
+    assert "apply `issuebot/todo` again" in body
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert reads == 1
+    assert not any(entry["event"] == "approval_check_failed" for entry in logs)
+
+
+async def test_a_verdict_stands_while_the_issue_is_unchanged(tmp_path: Path) -> None:
+    """A candidate held back by a busy pool account is not re-read every tick: any edit, rename
+    or label change moves `updated_at`, so the verdict holds for as long as it stands."""
+    h = Harness(tmp_path, max_concurrent=3)
+    _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    await h.tick()
+    assert len(h.orchestrator.running) == 2
+    assert h.github.issue(3).state is StateLabel.TODO
+    assert h.calls("approval_evidence").count((3,)) == 1
+    # And a change to the issue is what earns a fresh read.
+    h.github.human_edit_body(3, "do Y", editor="reporter")
+    await h.tick()
+    assert h.calls("approval_evidence").count((3,)) == 2
+    assert h.github.issue(3).state is None
+
+
+async def test_a_verdict_is_not_reused_for_text_changed_in_the_same_second(
+    tmp_path: Path,
+) -> None:
+    """GitHub stamps `updatedAt` to the second, so an edit in the second of the last change
+    leaves it where it was; the text the verdict was about is part of what it is keyed on."""
+    h = Harness(tmp_path, max_concurrent=3)
+    _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+    await h.tick()
+    assert h.github.issue(3).state is StateLabel.TODO
+    stamp = h.github.issue(3).updated_at
+    h.github.human_edit_body(3, "do Y", editor="reporter")
+    assert h.github.issue(3).updated_at == stamp  # the clock has not moved
+    await h.tick()
+    assert h.calls("approval_evidence").count((3,)) == 2
+    assert h.github.issue(3).state is None
 
 
 async def test_normal_exit_to_review_schedules_a_continuation_that_releases(
@@ -3948,6 +4221,20 @@ async def test_a_workspace_is_dispatched_to_the_same_account_for_as_long_as_it_e
         h.github.human_set_state(number, StateLabel.REWORK)
     await h.tick()
     assert {entry.issue.number: entry.account for entry in orchestrator.running.values()} == first
+
+
+async def test_an_unapproved_todo_never_binds_a_pool_account(tmp_path: Path) -> None:
+    """The approval check runs before `_bind_account` on the candidate path
+    (GHSA-jm8h-q3j6-p8xp): an issue handed back to a human must not have allocated a member of
+    the pool on its way out, or the record would hold a binding for a workspace never made."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    record = h.add_issue(1, "todo", approved=False)
+    await h.tick()
+    assert h.github.issue(1).state is None
+    assert orchestrator.running == {}
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(record.identifier)) is None
 
 
 async def test_a_candidate_whose_account_is_busy_waits_rather_than_sharing_a_uid(

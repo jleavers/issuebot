@@ -59,7 +59,7 @@ def issue_from_node(
         raise GitHubError("response", f"malformed issue record #{number}: missing url")
     created_at = _required_timestamp(node.get("createdAt"), number, "createdAt")
     updated_at = _required_timestamp(node.get("updatedAt"), number, "updatedAt")
-    closed_at = _optional_timestamp(node.get("closedAt"))
+    closed_at = optional_timestamp(node.get("closedAt"))
 
     body = node.get("body")
     all_labels = _label_names(node.get("labels"))
@@ -94,13 +94,13 @@ def issue_from_node(
 
 
 def _required_timestamp(value: Any, number: int, field: str) -> datetime:
-    parsed = _optional_timestamp(value)
+    parsed = optional_timestamp(value)
     if parsed is None:
         raise GitHubError("response", f"malformed issue record #{number}: missing {field}")
     return parsed
 
 
-def _optional_timestamp(value: Any) -> datetime | None:
+def optional_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
@@ -181,7 +181,7 @@ def _select_pr(connection: Any, *, login: str) -> LinkedPr | None:
                 number=number,
                 url=url,
                 state=state,
-                merged_at=_optional_timestamp(item.get("mergedAt")),
+                merged_at=optional_timestamp(item.get("mergedAt")),
                 mergeable=mergeable,
             )
         )

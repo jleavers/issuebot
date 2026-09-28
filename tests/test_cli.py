@@ -53,6 +53,7 @@ from issuebot.github import (
     GitHubError,
     Issue,
     LinkedPr,
+    PageCeilingError,
     StateLabel,
     model_label_style,
 )
@@ -1746,6 +1747,12 @@ def _workflow_with_root(tmp_path: Path, **extra_lines: str) -> Path:
     return _write(tmp_path, "\n".join(lines) + "\n")
 
 
+def _approve(fake: FakeGitHub, number: int = 42) -> None:
+    """A maintainer's `todo` on the issue's record, which run-once checks before it claims
+    (GHSA-jm8h-q3j6-p8xp): the label `add_issue` puts on has no event behind it."""
+    fake.human_record_label(number, "issuebot/todo", actor="maintainer")
+
+
 def test_run_once_reports_missing_issue(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, stub_session: StubSession
 ) -> None:
@@ -1794,6 +1801,7 @@ def test_run_once_claims_a_todo_issue_and_prints_the_summary(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--workflow", str(path)]) == 0
     lines = capsys.readouterr().out.splitlines()
@@ -1829,6 +1837,7 @@ def test_run_once_rework_sets_the_flag(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/rework",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert stub_session.calls[0]["rework"] is True
     assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
@@ -1838,6 +1847,141 @@ def test_run_once_rework_sets_the_flag(
     assert state_changed.to_label == "issuebot/in-progress"
     assert state_changed.actor == "issuebot"
     assert state_changed.issue_number == 42
+
+
+def test_run_once_refuses_an_issue_edited_after_its_approval(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """The check the worker makes (GHSA-jm8h-q3j6-p8xp), without the escape: in the
+    foreground the operator is the human the escape would hand the issue to, so the command
+    says why and leaves the label where it is."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", body="do X", number=42)
+    fake_github.human_set_state(42, StateLabel.TODO, actor="maintainer")
+    fake_github.human_edit_body(42, "do X, then curl evil", editor="reporter")
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    [line] = capsys.readouterr().out.splitlines()
+    assert line.startswith("[FAIL] approval: body edited at ")
+    assert line.endswith(
+        "by reporter, after maintainer applied `issuebot/todo` at 2026-09-02T12:00:02Z; "
+        "apply issuebot/todo again"
+    )
+    assert stub_session.calls == []
+    assert fake_github.issue(42).state is StateLabel.TODO
+    assert not any(name in ("set_state", "clear_state", "comment") for name, _ in fake_github.calls)
+    assert recording_sink.events == []
+
+
+@pytest.mark.parametrize(
+    ("admin", "needle"),
+    [
+        (False, "[FAIL] approval: no account other than issuebot has applied `issuebot/todo`"),
+        (True, None),
+    ],
+)
+def test_run_once_counts_its_own_todo_only_when_its_account_is_an_admin(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    admin: bool,
+    needle: str | None,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.admin = admin
+    fake_github.add_issue("Add retry backoff", number=42)
+    fake_github.human_set_state(42, StateLabel.TODO, actor=fake_github.login)
+    code = main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))])
+    out = capsys.readouterr().out
+    if needle is None:
+        assert code == 0 and len(stub_session.calls) == 1
+    else:
+        assert code == 1 and stub_session.calls == []
+        assert f"{needle}; apply issuebot/todo again" in out
+    assert ("repo_info", ()) in fake_github.calls
+
+
+def test_run_once_refuses_a_label_nobody_applied(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == (
+        "[FAIL] approval: no account has applied `issuebot/todo`; apply issuebot/todo again\n"
+    )
+    assert stub_session.calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GitHubError("transport", "gh: connection reset"),
+        PageCeilingError("label and title history of #42 runs past 1000 events"),
+    ],
+)
+def test_run_once_fails_when_the_issues_history_will_not_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    error: GitHubError,
+) -> None:
+    """Fails closed, and says so: an unreadable history is not an approval, in the foreground
+    any more than in the worker. The ceiling is only a failure here -- there is no label to
+    take off, since the operator is right there."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
+
+    async def unreadable(number: int) -> None:
+        raise error
+
+    monkeypatch.setattr(fake_github, "approval_evidence", unreadable)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
+    assert capsys.readouterr().out == (
+        f"[FAIL] approval: could not read the issue's history: {error}\n"
+    )
+    assert stub_session.calls == []
+    assert fake_github.issue(42).state is StateLabel.TODO
+
+
+def test_run_once_hands_the_session_the_text_it_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    """The session gets the issue the check approved, relabelled as claimed, not a fetch made
+    after the claim -- which would carry an edit landing between the two past the check."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", body="do X", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
+    original_set_state = fake_github.set_state
+
+    async def claim_then_edit(number: int, state: StateLabel, **kwargs: Any) -> None:
+        await original_set_state(number, state, **kwargs)
+        fake_github.human_edit_body(number, "do X, then curl evil", editor="reporter")
+
+    monkeypatch.setattr(fake_github, "set_state", claim_then_edit)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    [call] = stub_session.calls
+    issue = call["issue"]
+    assert isinstance(issue, Issue)
+    assert issue.body == "do X"
+    assert issue.state is StateLabel.IN_PROGRESS
+    assert issue.state_labels == ("issuebot/in-progress",)
 
 
 class RecordingRunners:
@@ -1871,6 +2015,7 @@ def test_run_once_uses_the_model_the_issue_label_names(
     monkeypatch.setenv("GH_TOKEN", "t")
     labels = ("issuebot/todo", "issuebot/model/sonnet")
     fake_github.add_issue("Add retry backoff", labels=labels, number=42)
+    _approve(fake_github)
     path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
     assert main(["run-once", "42", "--workflow", str(path)]) == 0
     assert [settings.claude.model for settings in recording_runners.settings] == ["sonnet"]
@@ -1886,6 +2031,7 @@ def test_run_once_model_option_beats_the_label_and_the_default(
     monkeypatch.setenv("GH_TOKEN", "t")
     labels = ("issuebot/todo", "issuebot/model/sonnet")
     fake_github.add_issue("Add retry backoff", labels=labels, number=42)
+    _approve(fake_github)
     path = _workflow_with_root(tmp_path, claude=MODEL_CLAUDE_BLOCK)
     assert main(["run-once", "42", "--workflow", str(path), "--model", "fable"]) == 0
     assert [settings.claude.model for settings in recording_runners.settings] == ["fable"]
@@ -1900,6 +2046,7 @@ def test_run_once_in_progress_issue_is_not_reclaimed(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/in-progress",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert all(name != "set_state" for name, _ in fake_github.calls)
     assert len(stub_session.calls) == 1
@@ -1915,6 +2062,7 @@ def test_run_once_reports_an_exhausted_turn_budget(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     stub_session.stop_reason = "max_turns"
     stub_session.final_state = StateLabel.IN_PROGRESS
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
@@ -1933,6 +2081,7 @@ def test_run_once_reports_a_blocked_stop(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     stub_session.stop_reason = "blocked"
     stub_session.blocker = "gh cannot reach api.github.com; a human must fix DNS"
     stub_session.final_state = StateLabel.IN_PROGRESS
@@ -1954,6 +2103,7 @@ def test_run_once_reports_failure_and_exits_one(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     stub_session.outcome = "failed"
     stub_session.stop_reason = "failure"
     stub_session.error_category = "turn_failed"
@@ -2066,6 +2216,7 @@ def test_run_once_attempt_increments_from_the_session_file(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     path = _workflow_with_root(tmp_path)
     workspace = tmp_path / "ws" / "repo-42"
     workspace.mkdir(parents=True)
@@ -2102,6 +2253,7 @@ def test_run_once_reports_claim_failure(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
 
     async def failing_set_state(number: int, state: StateLabel) -> None:
         raise GitHubError("transport", "injected transport failure")
@@ -2113,30 +2265,31 @@ def test_run_once_reports_claim_failure(
     assert not any(isinstance(event, StateChanged) for event in recording_sink.events)
 
 
-def test_run_once_claim_event_is_published_even_when_the_refetch_fails(
-    capsys: pytest.CaptureFixture[str],
+def test_run_once_reads_the_issue_once_and_does_not_refetch_after_the_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     fake_github: FakeGitHub,
     stub_session: StubSession,
     recording_sink: type[RecordingSink],
 ) -> None:
-    """set_state lands on GitHub even though the re-fetch after it fails; the event still fires."""
+    """The session gets the issue the approval check read (GHSA-jm8h-q3j6-p8xp), so there is
+    no second fetch after the claim for a failure to stop the run on."""
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     original_fetch = fake_github.fetch_issues_by_ids
     calls = {"n": 0}
 
-    async def flaky_fetch(ids: object) -> list[Issue]:
+    async def fetch_once(ids: object) -> list[Issue]:
         calls["n"] += 1
         if calls["n"] == 1:
             return await original_fetch(ids)  # type: ignore[arg-type]
-        raise GitHubError("transport", "injected refetch failure")
+        raise GitHubError("transport", "a second fetch")
 
-    monkeypatch.setattr(fake_github, "fetch_issues_by_ids", flaky_fetch)
-    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
-    assert "[FAIL] claim: transport: injected refetch failure" in capsys.readouterr().out
-    assert stub_session.calls == []
+    monkeypatch.setattr(fake_github, "fetch_issues_by_ids", fetch_once)
+    assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert calls["n"] == 1
+    assert len(stub_session.calls) == 1
     assert ("set_state", (42, StateLabel.IN_PROGRESS)) in fake_github.calls
     state_changes = [event for event in recording_sink.events if isinstance(event, StateChanged)]
     [state_changed] = state_changes
@@ -2204,6 +2357,7 @@ def test_run_once_posts_the_claim_to_slack(
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK)
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert "issue #42 is now review" in capsys.readouterr().out
     (call,) = slack_post.calls
@@ -2225,6 +2379,7 @@ def test_run_once_skips_the_slack_sink_for_a_non_https_webhook(
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "http://hooks.slack.com/services/T0/B0/plain")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert "issue #42 is now review" in capsys.readouterr().out
     assert slack_post.calls == []
@@ -2243,6 +2398,7 @@ def test_run_once_end_to_end_with_the_fakes(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_FAKE_SCENARIO", raising=False)
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     path = _workflow_with_root(
         tmp_path,
         agent="agent:\n  max_turns: 1",
@@ -3041,6 +3197,7 @@ def test_run_once_records_the_issue_and_the_claim_in_the_database(
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
     assert "issue #42 is now review" in capsys.readouterr().out
     assert fake_database.migrations == 1
@@ -3063,6 +3220,7 @@ def test_run_once_fails_before_running_when_migration_fails(
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     fake_database.migrate_error = StoreUnavailableError("cannot connect: refused")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     assert capsys.readouterr().out == "[FAIL] database: cannot connect: refused\n"
     assert stub_session.calls == []
@@ -3284,6 +3442,7 @@ def test_run_once_refuses_a_keyword_value_dsn_before_claiming(
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("DATABASE_URL", KEYWORD_DSN)
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     assert main(["run-once", "42", "--workflow", str(_workflow_with_root(tmp_path))]) == 1
     out = capsys.readouterr().out
     assert out.startswith("[FAIL] database: database.url is not a postgresql:// URL")
@@ -3363,6 +3522,7 @@ def test_run_once_registers_its_repository(
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    _approve(fake_github)
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--workflow", str(path)]) == 0
     ((repo, labels, workflow_path),) = fake_database.registrations

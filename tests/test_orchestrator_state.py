@@ -137,6 +137,18 @@ def test_claimed_snapshot_replaces_only_the_state_labels(
     assert (claimed.number, claimed.title, claimed.url) == (issue.number, issue.title, issue.url)
 
 
+def test_claimed_snapshot_keeps_the_markers_a_claim_left_on(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """`run-once` claims without clearing the markers, so its snapshot must not drop them."""
+    issue = make_issue(
+        labels=("bug", "issuebot/no-fault", "issuebot/rework"), state_labels=("issuebot/rework",)
+    )
+    claimed = claimed_snapshot(issue, GitHubLabels(), clear_markers=False)
+    assert claimed.labels == ("bug", "issuebot/no-fault", "issuebot/in-progress")
+    assert claimed.state_labels == ("issuebot/in-progress",)
+
+
 def test_claimed_snapshot_uses_configured_names(make_issue: Callable[..., Issue]) -> None:
     labels = GitHubLabels(in_progress="Bot/Working", todo="bot/queue")
     issue = make_issue(labels=("bot/queue",), state_labels=("bot/queue",))

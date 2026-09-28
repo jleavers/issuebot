@@ -22,6 +22,17 @@ class Clock:
         return self.now
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.value
+
+    def advance(self, seconds: int) -> None:
+        self.value += timedelta(seconds=seconds)
+
+
 @pytest.fixture
 def fake() -> FakeGitHub:
     return FakeGitHub(SETTINGS, now=Clock())
@@ -287,6 +298,9 @@ async def test_probes(fake: FakeGitHub) -> None:
     assert (await fake.auth_status()).login == "issuebot"
     info = await fake.repo_info()
     assert (info.full_name, info.default_branch, info.private) == ("example/repo", "main", False)
+    assert info.admin is False
+    admin = FakeGitHub(SETTINGS, admin=True)
+    assert (await admin.repo_info()).admin is True
     limit = await fake.rate_limit()
     assert limit.remaining == 4999 and limit.limit == 5000
 
@@ -338,3 +352,27 @@ async def test_the_fake_keeps_a_label_history_credited_to_its_actor(fake: FakeGi
     with pytest.raises(GitHubError) as exc:
         await fake.count_own_label_additions(999, "issuebot/rework")
     assert exc.value.category == "not_found"
+
+
+async def test_approval_evidence_records_labels_edits_and_renames() -> None:
+    clock = _Clock()
+    fake = FakeGitHub(GitHubSettings(repo="example/repo"), now=clock, login="bot")
+    fake.add_issue("Task", body="original", number=42)
+    clock.advance(60)
+    fake.human_set_state(42, StateLabel.TODO, actor="maintainer")
+    clock.advance(60)
+    fake.human_edit_body(42, "edited", editor="reporter")
+    clock.advance(60)
+    fake.human_rename(42, "Renamed", actor=None)
+    clock.advance(60)
+    await fake.set_state(42, StateLabel.IN_PROGRESS)
+    evidence = await fake.approval_evidence(42)
+    assert [(e.label, e.actor) for e in evidence.label_events] == [
+        ("issuebot/todo", "maintainer"),
+        ("issuebot/in-progress", "bot"),
+    ]
+    assert evidence.label_events[0].at < evidence.label_events[1].at
+    assert [(e.what, e.editor) for e in evidence.edits] == [("body", "reporter"), ("title", None)]
+    assert fake.issue(42).body == "edited" and fake.issue(42).title == "Renamed"
+    assert await fake.own_login() == "bot"
+    assert await fake.count_own_label_additions(42, "issuebot/in-progress") == 1

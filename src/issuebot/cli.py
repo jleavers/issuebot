@@ -112,6 +112,9 @@ from issuebot.orchestrator import (
     IssueLedger,
     Orchestrator,
     OrchestratorStartupError,
+    Unapproved,
+    assess_issue,
+    claimed_snapshot,
     probe_run_as,
 )
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
@@ -1273,6 +1276,8 @@ async def _run_once(
     if problem is not None:
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
+    if not show_prompt and not await _approved_for_run_once(adapter, issue, settings.github.labels):
+        return 1
     rework = issue.state is StateLabel.REWORK
     try:
         # One issue, so one account: under a pool this run takes the workspace's own bound
@@ -1369,15 +1374,12 @@ async def _claim_and_run(
                 actor="issuebot",
             )
         )
-        try:
-            refreshed = await adapter.fetch_issues_by_ids([str(number)])
-        except GitHubError as exc:
-            print(f"[FAIL] claim: {exc}")
-            return 1
-        if refreshed:
-            issue = refreshed[0]
-            if record is not None:
-                record(refreshed)
+        # The issue the approval check read, relabelled as claimed -- not a fetch made after
+        # the claim, which would carry an edit landing between the two past the check
+        # (GHSA-jm8h-q3j6-p8xp). The worker hands its session the poll snapshot the same way.
+        issue = claimed_snapshot(issue, settings.github.labels, clear_markers=False)
+        if record is not None:
+            record([issue])
     result = await _run_session(
         issue,
         workflow,
@@ -1408,6 +1410,29 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
     if issue.state not in (StateLabel.TODO, StateLabel.REWORK, StateLabel.IN_PROGRESS):
         return f"is {issue.state.value}" + hint
     return None
+
+
+async def _approved_for_run_once(
+    adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels
+) -> bool:
+    """The worker's approval check, answered in the foreground (GHSA-jm8h-q3j6-p8xp).
+
+    The same ``assess_issue`` the orchestrator calls, so `run-once` cannot run what the worker
+    would refuse. What differs is the answer to a refusal: no escape, because the operator who
+    typed the command is the human the escape would hand the issue to -- the line says why and
+    the label stays where it is. An unreadable history, the ceiling included, is a failure
+    too; here there is nobody to hand an issue back to, only a command to stop.
+    ``--show-prompt`` skips it: a preview renders for the operator and runs nothing.
+    """
+    try:
+        verdict = await assess_issue(adapter, issue.number, todo_label=labels.todo)
+    except GitHubError as exc:
+        print(f"[FAIL] approval: could not read the issue's history: {exc}")
+        return False
+    if isinstance(verdict, Unapproved):
+        print(f"[FAIL] approval: {verdict.reason}; apply {labels.todo} again")
+        return False
+    return True
 
 
 def _with_bound_account(workflow: Workflow, issue: Issue) -> Workflow:

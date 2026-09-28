@@ -509,6 +509,17 @@ def test_continuation_renders(make_issue: Callable[..., Issue]) -> None:
     assert "continuation turn 2 of 5" in text
 
 
+def test_the_description_is_the_text_a_human_approved(make_issue: Callable[..., Issue]) -> None:
+    """GHSA-jm8h-q3j6-p8xp: the prompt says what the label means about the text it carries."""
+    workflow = load()
+    text = PromptRenderer(workflow.prompt_template).render(
+        context(workflow, dispatched(make_issue))
+    )
+    assert "as they stood when a human applied the label that handed you this issue" in text
+    assert "handed back to a human before any session sees it" in text
+    assert "the text above is the approved text" in text
+
+
 def test_after_create_unshallows_a_shallow_clone() -> None:
     hook = load().config.hooks.after_create
     assert hook is not None

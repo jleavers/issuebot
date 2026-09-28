@@ -5,6 +5,7 @@ from typing import Protocol
 
 from issuebot.config import GitHubLabels
 from issuebot.github.models import (
+    ApprovalEvidence,
     AuthStatus,
     Comment,
     Issue,
@@ -58,6 +59,19 @@ class GitHubAdapter(Protocol):
         to the account that made it: a bound issuebot keeps out of it cannot be edited away
         by anyone, the session included, since an added event only tightens it (#104).
         """
+        ...
+
+    async def approval_evidence(self, number: int) -> ApprovalEvidence:
+        """Every label addition and every title or body edit GitHub records for the issue.
+
+        What the orchestrator's approval check reads (GHSA-jm8h-q3j6-p8xp): the record is
+        GitHub's, so nothing a session writes can change it, and nothing issuebot stores can
+        drift from it.
+        """
+        ...
+
+    async def own_login(self) -> str:
+        """The login of the account the adapter acts as."""
         ...
 
     async def update_comment(self, comment_id: int, body: str) -> Comment: ...

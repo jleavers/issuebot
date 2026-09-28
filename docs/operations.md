@@ -145,6 +145,38 @@ days. A worker that refuses an issue on either budget logs `dispatch_refused`, w
 `issuebot/review`: a ceiling nobody can see would be worse than no ceiling, so the board
 never just stops for an issue without saying so on it.
 
+One more thing removes a state label rather than moving it, and its block says so:
+`### Issuebot unapproved edit`. A maintainer applying `issuebot/todo` approves the issue's
+title and description as they stand, and before every dispatch the worker reads GitHub's own
+label and edit history to check that they still do. Only `issuebot/todo` approves:
+`issuebot/rework` asks for changes to the pull request and never re-approves the issue's
+text, so an edit by anyone but the approver after the last human `issuebot/todo` is refused
+even on a rework -- including an edit made while the issue sat in review. An edit after the
+label by anyone but the account that applied it (the issue's author, or another maintainer)
+un-approves the issue, and so does one stamped in the label's own second, since GitHub
+records both to the second and cannot say which came first: the worker writes the block,
+removes the label, and publishes `blocked`, so the issue leaves the board and the Slack line
+says why. Read the current text; if it is what you want done, apply `issuebot/todo` again --
+not `issuebot/rework`, which would only be refused again. That is the whole recovery, because
+the new label event is after the edit. (The account that applied the label may edit freely;
+the check is about someone *else* changing what was approved.)
+
+The same block has three other openings, for an issue with no approval to measure the text
+against. `` no account other than <login> has applied `issuebot/todo` `` means the only
+`issuebot/todo` on record is the worker's own account's: under a dedicated bot account only a
+maintainer's `issuebot/todo` counts, while an account that administers the repository -- the
+maintainer's own token -- counts its own, since its label is a maintainer's in every sense
+that matters here. `` no account has applied `issuebot/todo` `` means no person GitHub still
+names ever applied it: a label an app, a bot or an Actions workflow applied is not an
+approval, and neither is one by an account since deleted. And one ending `issuebot cannot tell
+what was approved` says the issue's label or edit history runs past the thousand entries the
+worker will read, so nobody can say what was approved; the label comes off once rather than
+the same pages being read every poll, and an issue that long is best closed and filed afresh.
+
+An issue whose history will not read at all (GitHub down, a token that cannot see the issue)
+is not handed back: it stays in `issuebot/todo`, the log carries one `approval_check_failed`
+warning for it and another only if the error changes, and the worker asks again every poll.
+
 ### GitHub itself
 
 The worker reads and writes its whole state machine through `gh`, so an
@@ -348,6 +380,15 @@ registry surfaces as a failing hook or a failing test mid-run rather than as a c
 error (see [What a session may reach](security-model.md#what-a-session-may-reach)). A setting that a newer
 `WORKFLOW.md` introduces fails against a stale image at `validate`, as
 `<key>: Extra inputs are not permitted`.
+
+The upgrade that brings in the approval check (GHSA-jm8h-q3j6-p8xp) reads the history of every
+issue already on the board as it next dispatches it, including the edits made before the
+upgrade. So an issue whose description or title someone other than the labeller edited after
+it was labelled is handed back on its first dispatch -- label removed, an `### Issuebot
+unapproved edit` block on the workpad -- and so is one whose `issuebot/todo` only an app, an
+Actions workflow or a dedicated bot account ever applied. That is the check working, not a
+regression: read the current text and apply `issuebot/todo` again to approve it
+([Blocked](#blocked)).
 
 **With more than one checkout, that recipe is not the one to repeat per deployment.** They are
 clones of the same repository against one store, and a migration applied by whichever you upgrade

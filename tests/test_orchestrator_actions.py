@@ -23,7 +23,9 @@ from issuebot.github import (
     ErrorCategory,
     FakeGitHub,
     GitHubError,
+    LabelApplied,
     StateLabel,
+    TextEdit,
 )
 from issuebot.orchestrator.actions import (
     BUDGET_HEADING,
@@ -31,6 +33,7 @@ from issuebot.orchestrator.actions import (
     CANCEL_REASON,
     CONFLICT_HEADING,
     CONFLICT_LIMIT_HEADING,
+    UNAPPROVED_HEADING,
     _has_budget_block,
     blocked_block,
     blocked_escape,
@@ -42,7 +45,10 @@ from issuebot.orchestrator.actions import (
     conflict_rework,
     finish_terminal,
     remove_workspace,
+    unapproved_block,
+    unapproved_escape,
 )
+from issuebot.orchestrator.approval import Unapproved
 from issuebot.orchestrator.state import BlockedContext
 
 NOW = datetime(2026, 9, 3, 14, 2, 11, tzinfo=UTC)
@@ -712,6 +718,130 @@ async def test_escape_retries_a_retryable_workpad_write_failure(
     assert len(h.github.comments_for(42)) == 1
     assert h.github.comments_for(42)[0].body.count("### Issuebot blocked") == 1
     assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+# --- unapproved escape ----------------------------------------------------------------
+
+EDIT_VERDICT = Unapproved(
+    reason=(
+        "body edited at 2026-09-28T09:10:00Z by reporter, after maintainer applied "
+        "`issuebot/todo` at 2026-09-28T09:00:00Z"
+    ),
+    approval=LabelApplied(
+        label="issuebot/todo", actor="maintainer", at=datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
+    ),
+    edit=TextEdit(what="body", editor="reporter", at=datetime(2026, 9, 28, 9, 10, tzinfo=UTC)),
+)
+
+
+def test_unapproved_block_names_the_edit_and_the_way_back() -> None:
+    block = unapproved_block(EDIT_VERDICT, NOW, LABELS)
+    assert block.startswith(UNAPPROVED_HEADING)
+    assert EDIT_VERDICT.reason in block
+    assert "issuebot has removed the label" in block
+    assert "apply `issuebot/todo` again" in block
+
+
+def test_unapproved_block_names_no_approval_rather_than_an_edit() -> None:
+    """No human ever applied the label -- issuebot's own bounce, or an app -- so there is no
+    approved text an edit could have fallen out of step with, and the block must not claim
+    one."""
+    verdict = Unapproved(
+        reason="no account other than bot has applied `issuebot/todo`", approval=None, edit=None
+    )
+    block = unapproved_block(verdict, NOW, LABELS)
+    assert verdict.reason in block
+    assert "issuebot has removed the label: it can find no approval of the text" in block
+    assert "apply `issuebot/todo` again" in block
+    assert "no longer the text that was approved" not in block
+
+
+def test_unapproved_block_asks_for_todo_even_on_a_rework_issue() -> None:
+    """Only `todo` approves (GHSA-jm8h-q3j6-p8xp): a `rework` applied again would be refused
+    again, so the way back the block names is `todo` whatever label the issue carried."""
+    verdict = Unapproved(
+        reason="body edited at 2026-09-28T09:10:00Z by reporter, after reviewer applied ...",
+        approval=LabelApplied(
+            label="issuebot/rework", actor="reviewer", at=datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
+        ),
+        edit=EDIT_VERDICT.edit,
+    )
+    block = unapproved_block(verdict, NOW, LABELS)
+    assert "apply `issuebot/todo` again" in block
+    assert "`issuebot/rework`" not in block
+
+
+async def test_unapproved_escape_notes_and_removes_the_label(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    await h.github.comment(42, f"{WORKPAD_MARKER}\n\n### Plan\n")
+    h.github.calls.clear()
+    issue = h.github.issue(42)
+    assert await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert body.count(UNAPPROVED_HEADING) == 1 and EDIT_VERDICT.reason in body
+    assert h.github.issue(42).state is None and h.github.issue(42).labels == ()
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label, changed.actor) == (
+        "issuebot/todo",
+        None,
+        "issuebot",
+    )
+    blocked = h.recorder.events[1]
+    assert isinstance(blocked, Blocked) and blocked.reason == EDIT_VERDICT.reason
+
+
+async def test_unapproved_escape_is_idempotent_per_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    issue = h.github.issue(42)
+    with monkeypatch.context() as patch:
+        fail_on(h, "clear_state", patch)
+        assert await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.recorder.events == []
+    first = h.github.comments_for(42)[0].body
+    assert await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "applied"
+    assert h.github.comments_for(42)[0].body == first
+    assert h.github.issue(42).state is None
+
+
+@pytest.mark.parametrize("category", ["response", "not_found", "auth", "status", "config"])
+async def test_unapproved_escape_removes_the_label_when_the_note_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    issue = h.github.issue(42)
+    with monkeypatch.context() as patch:
+        fail_on(h, "comment", patch, category)
+        with capture_logs() as logs:
+            assert (
+                await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "applied"
+            )
+    assert h.github.issue(42).state is None
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    # Which note is missing, as the sibling escapes say with their run id or budget reason.
+    [failed] = [entry for entry in logs if entry["event"] == "unapproved_escape_note_failed"]
+    assert failed["reason"] == EDIT_VERDICT.reason
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limited"])
+async def test_unapproved_escape_retries_a_retryable_note_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: ErrorCategory
+) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo",), number=42)
+    issue = h.github.issue(42)
+    with monkeypatch.context() as patch:
+        fail_on(h, "find_workpad_comment", patch, category)
+        assert await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "failed"
+    assert h.github.issue(42).state is StateLabel.TODO
+    assert h.recorder.events == []
 
 
 # --- finish_terminal ------------------------------------------------------------------

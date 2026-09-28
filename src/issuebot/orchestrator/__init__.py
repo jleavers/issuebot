@@ -5,6 +5,7 @@ from issuebot.orchestrator.actions import (
     CANCEL_REASON,
     EscapeOutcome,
     FinishOutcome,
+    assess_issue,
     blocked_block,
     blocked_escape,
     budget_block,
@@ -26,6 +27,7 @@ from issuebot.orchestrator.admission import (
     admit,
     seeded_chain,
 )
+from issuebot.orchestrator.approval import Approved, Unapproved, assess
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     OBSERVED_STATES,
@@ -74,6 +76,7 @@ __all__ = [
     "Admission",
     "AdmissionRequest",
     "Admitted",
+    "Approved",
     "BlockedContext",
     "ClaudeAuthProbe",
     "ClaudeTotals",
@@ -98,7 +101,10 @@ __all__ = [
     "RunningRow",
     "RuntimeSnapshot",
     "StopCause",
+    "Unapproved",
     "admit",
+    "assess",
+    "assess_issue",
     "backoff_ms",
     "blocked_block",
     "blocked_escape",
