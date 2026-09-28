@@ -298,10 +298,11 @@ bypass is needed. A GitHub App installation token is not the recommended credent
 Whichever recipe you use, also leave Settings → Actions → General → Workflow permissions →
 "Allow GitHub Actions to create and approve pull requests" off: turned on, a workflow can
 approve a pull request as `github-actions[bot]`, a second route past the review rule that
-has nothing to do with which account issuebot runs as -- and if the session holds Workflows
-write (README's Prerequisites), that workflow is the session's own to write. Leave the
-setting off, or make sure nothing a session's own workflow edit can trigger uses that
-approval.
+has nothing to do with which account issuebot runs as. Leave it off, rather than weighing
+which workflows could use it: with Workflows write (README's Prerequisites) the session
+writes such a workflow outright, and without it any existing workflow that runs repository
+code -- the session's code, on its branch -- with a `pull-requests: write` token reaches the
+same setting.
 
 ## Checking that the credential took
 

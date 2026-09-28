@@ -168,7 +168,7 @@ a maintainer's `issuebot/todo` counts, while an account that administers the rep
 the maintainer's own token -- counts its own, since its label is a maintainer's in every
 sense that matters here. An operator running on their own token without admin -- a write or
 maintain collaborator who is the only one applying the label -- is in the same position: no
-account but its own has applied the label, so every issue gets this same block: the fix is a
+account but its own has applied the label, so every issue gets this same block. The fix is a
 second person's `issuebot/todo`, or the dedicated-account arrangement
 ([`docs/security-model.md`, "The account a session acts
 as"](security-model.md#the-account-a-session-acts-as)). `` no account has applied
