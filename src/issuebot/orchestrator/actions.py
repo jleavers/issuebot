@@ -405,7 +405,14 @@ async def unapproved_escape(
         Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=verdict.reason)
     )
     if note_failure is not None:
-        await _report_note_failure(adapter, issue, block, note_failure, prefix="unapproved_escape")
+        await _report_note_failure(
+            adapter,
+            issue,
+            block,
+            note_failure,
+            prefix="unapproved_escape",
+            reason=verdict.reason,
+        )
     log.info(
         "unapproved_escape_applied",
         issue_number=issue.number,

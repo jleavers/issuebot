@@ -4223,6 +4223,20 @@ async def test_a_workspace_is_dispatched_to_the_same_account_for_as_long_as_it_e
     assert {entry.issue.number: entry.account for entry in orchestrator.running.values()} == first
 
 
+async def test_an_unapproved_todo_never_binds_a_pool_account(tmp_path: Path) -> None:
+    """The approval check runs before `_bind_account` on the candidate path
+    (GHSA-jm8h-q3j6-p8xp): an issue handed back to a human must not have allocated a member of
+    the pool on its way out, or the record would hold a binding for a workspace never made."""
+    h = Harness(tmp_path)
+    orchestrator = _with_pool(h)
+    record = h.add_issue(1, "todo", approved=False)
+    await h.tick()
+    assert h.github.issue(1).state is None
+    assert orchestrator.running == {}
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(record.identifier)) is None
+
+
 async def test_a_candidate_whose_account_is_busy_waits_rather_than_sharing_a_uid(
     tmp_path: Path,
 ) -> None:

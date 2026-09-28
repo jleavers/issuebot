@@ -819,9 +819,15 @@ async def test_unapproved_escape_removes_the_label_when_the_note_cannot_be_writt
     issue = h.github.issue(42)
     with monkeypatch.context() as patch:
         fail_on(h, "comment", patch, category)
-        assert await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "applied"
+        with capture_logs() as logs:
+            assert (
+                await unapproved_escape(h.github, h.bus, issue, EDIT_VERDICT, now=NOW) == "applied"
+            )
     assert h.github.issue(42).state is None
     assert h.recorder.kinds == ["state_changed", "blocked"]
+    # Which note is missing, as the sibling escapes say with their run id or budget reason.
+    [failed] = [entry for entry in logs if entry["event"] == "unapproved_escape_note_failed"]
+    assert failed["reason"] == EDIT_VERDICT.reason
 
 
 @pytest.mark.parametrize("category", ["transport", "rate_limited"])

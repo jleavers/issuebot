@@ -2031,6 +2031,11 @@ class Orchestrator:
         one, and the chain is over either way. The README's recovery -- fix the cause, then
         relabel -- works because of this line, and it is the *only* thing besides a run that
         succeeded which clears the chain, so a label move on its own still cannot (#112).
+
+        Three escapes call it: ``blocked_escape``, ``budget_escape`` and ``unapproved_escape``
+        (GHSA-jm8h-q3j6-p8xp). The last only ever answers ``applied`` or ``failed``; an issue
+        it handed back is a human's in the same sense, and the one relabel that brings it
+        back -- a maintainer's ``todo`` -- starts from a cleared chain like the others.
         """
         if outcome in ("applied", "skipped"):
             self._ledger.cleared(identifier)
