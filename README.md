@@ -317,7 +317,7 @@ docker compose run --rm worker labels ensure
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
-[ OK ] github.token account: your-bot has write on your-org/your-repo, not admin
+[ OK ] github.token account: your-bot does not administer your-org/your-repo
 [ OK ] github.branch rules: main requires 1 approving review of the latest push from a code owner
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational

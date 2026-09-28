@@ -489,7 +489,7 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
             "can bypass or rewrite the branch ruleset. Run as a dedicated account with write "
             f"access ({IDENTITY_DOC})",
         )
-    return Check("github.token account", "ok", f"{who} has write on {info.full_name}, not admin")
+    return Check("github.token account", "ok", f"{who} does not administer {info.full_name}")
 
 
 async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | None) -> Check:
@@ -513,15 +513,18 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | 
     try:
         rules = await adapter.branch_rules(branch)
     except GitHubError as exc:
-        return Check("github.branch rules", "warn", f"could not read: {exc.message}")
+        return Check(
+            "github.branch rules", "warn", f"could not read: {exc.message} ({IDENTITY_DOC})"
+        )
     if rules.bypassable:
+        who = login or "the token's account"
         noun = "ruleset" if len(rules.bypassable) == 1 else "rulesets"
         names = ", ".join(f'"{name}"' for name in rules.bypassable)
         return Check(
             "github.branch rules",
             "warn",
-            f"{login or "the token's account"} can bypass {noun} {names}: the account a session "
-            f"runs as is not held to the review rule ({IDENTITY_DOC})",
+            f"{who} can bypass {noun} {names}: the account a session runs as is not held to the "
+            f"review rule ({IDENTITY_DOC})",
         )
     count = rules.required_approving_reviews
     if count is None:
@@ -536,7 +539,7 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | 
                 "warn",
                 f"{branch} requires {count} {noun} but not of the latest push: a session can "
                 'push after the approval and merge. Turn on "Require approval of the most recent '
-                'reviewable push"',
+                f'reviewable push" ({IDENTITY_DOC})',
             )
         if not rules.require_code_owner_review:
             return Check(
@@ -555,8 +558,9 @@ async def _branch_rules_check(adapter: GitHubAdapter, branch: str, login: str | 
     return Check(
         "github.branch rules",
         "warn",
-        f"{detail}: the account a session runs as can merge its own pull requests. Require at "
-        "least one approving review (rulesets only; classic branch protection is not read here)",
+        f"{detail}: the account a session runs as can merge any pull request, its own included. "
+        "Require at least one approving review of the latest push from a code owner, in a "
+        f"ruleset: classic branch protection is not read here ({IDENTITY_DOC})",
     )
 
 
