@@ -153,12 +153,27 @@ their own, so the operator is a `Repository admin` bypass actor in `pull_request
 pull requests merge without a second account, and a direct push to the branch is still
 refused. What the arrangement guarantees is the invariant's last sentence: the session's
 identity cannot merge what it wrote, and cannot rewrite the rule that says so, because it is
-not an admin. A team has the same shape with its members as the approvers.
+not an admin.
 
-`docs/security-model.md` gets a section, "The account a session acts as", saying this, and the
-README's Prerequisites a pointer to it beside the token choice point -- inside the bounds
-`tests/test_readme_bounds.py` pins, which holds the consequence within 700 characters of its
-incentive.
+**For an organisation**, the same shape with the organisation's own tools in place of the
+personal ones. The dedicated account is a machine user -- GitHub's name for a personal account
+an organisation creates for automation -- made a member of the organisation, or an outside
+collaborator, with **write** on the repository and no seat on any team that carries admin or
+maintain. The ruleset is an *organisation* ruleset targeting the repository's default branch,
+rather than a repository one: a repository admin cannot remove it, so the guarantee holds
+against the repository's own admins too, and it applies to every repository the organisation
+points a deployment at. Its bypass actors are teams of humans, never the machine user; its
+approvers are whoever reviews there already, so no admin bypass is needed and none is
+granted. `CODEOWNERS` with `require_code_owner_review` narrows who can approve a session's
+change to a path, which is the organisation's choice rather than this design's. A GitHub App
+installation token is *not* the recommended credential, though `gh` accepts one: it expires
+after an hour, and a session can run longer than that.
+
+Both are documented in `docs/security-model.md` in a section, "The account a session acts as",
+solo operator first and organisation second, since the first is who this repository expects;
+and the README's Prerequisites gets a pointer to it beside the token choice point -- inside
+the bounds `tests/test_readme_bounds.py` pins, which holds the consequence within 700
+characters of its incentive.
 
 **`validate`** says when a deployment is not in that shape. Two warnings in
 `cli._probe_github`, from two reads the adapter gains:
