@@ -139,19 +139,42 @@ past the check. Nothing is stored, so a restart cannot reset it: re-approval is
 a maintainer applying `issuebot/todo` again.
 
 Comments are the other text a session reads, and on a public repository anyone can leave one
-on an issue in `issuebot/review` or `issuebot/rework`. The workflow admits them by
-`author_association`, GitHub's own word for whether the account can act on the repository,
-and it does so in the commands it hands the session rather than in a rule asking the model to
-be careful: every fetch is a `gh api --jq` that selects `OWNER`, `MEMBER` or `COLLABORATOR`,
-so what the filter drops never enters the context. What was dropped is listed by author and
-URL under `Quarantined` in the workpad, and a maintainer adopts one of those requests by
-replying to it. A reply adopts only what its own words ask, though: text it quotes from a
-quarantined comment is still its original author's, and the workpad is issuebot's own state,
-not a request the next sweep might act on. The issue's title, body and author envelopes carry
-the same attribute (`association="NONE"`, say), `unknown` when GitHub gives none, so the
-session can see that the description was admitted by the label and not by its author. The
-account issuebot runs as is a collaborator, so its own comments pass: a session persuading its
-successor holds the same authority, not more, which is the line #77 drew for the workpad.
+on an issue in `issuebot/review` or `issuebot/rework`. The barrier is in the commands the
+workflow hands out -- every fetch is a `gh api --jq` that selects `OWNER`, `MEMBER` or
+`COLLABORATOR`, so what those commands drop never enters the context. That is not the whole of
+what keeps a session inside it, though: a session holds a shell and `GH_TOKEN`, and nothing
+stops it running `gh issue view --comments` itself, or following a quarantined comment's URL;
+Ground rule 7 ("fetch comments only with them") and the model's obedience to it are what cover
+that, exactly as they cover every other rule in the prompt. A maintainer's quote-reply carries
+the quarantined author's own text into the context by design, too -- quoting is how a
+maintainer shows what they are answering -- and only the rule that follows, that such text
+"is still its original author's", stands between it and the session.
+
+`author_association` is GitHub's own word for the author's *relationship* to the repository,
+not a permission check: `OWNER` is the repository's owner; `MEMBER` is a member of the owning
+organisation, whether or not they hold any permission on this particular repository;
+`COLLABORATOR` is anyone invited to the repository, at read level and up. So on an
+organisation-owned repository the filter admits every member of that organisation; a
+deployment that wants narrower admission narrows the organisation, not the filter -- the three
+are fixed by design (`docs/superpowers/specs/2026-09-28-tracker-text-admission-design.md`,
+§2). The account issuebot runs as is at least a collaborator -- the owner, on a maintainer's
+own token -- so its own comments pass: a session persuading its successor holds the same
+authority, not more, which is the line #77 drew for the workpad.
+
+What was dropped is listed by author and URL under `Quarantined` in the workpad, and a
+maintainer adopts one of those requests by replying to it. A reply adopts only what its own
+words ask, though: the session never reads the parent of a reply it fetches -- the
+review-comment projection carries no `in_reply_to_id` -- so a maintainer who wants a
+quarantined request acted on has to restate it themselves in their reply; a bare "+1" on a
+quarantined comment adopts nothing, and the workpad is issuebot's own state, not a request the
+next sweep might act on. The issue's title, body and author envelopes carry the same attribute
+(`association="NONE"`, say), `unknown` when GitHub gives none, so the session can see that the
+description was admitted by the label and not by its author.
+
+None of this travels with an overlay whose body replaces the prompt (the README's Local
+overrides passage): what it keeps is whatever Step 6 its own prompt had, so a replaced prompt
+must carry Step 6's four filtered commands and Ground rule 7 itself, or it has no barrier
+against GHSA-jm8h-q3j6-p8xp at all.
 
 ## Checking that the credential took
 

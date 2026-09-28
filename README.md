@@ -123,9 +123,12 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
   a whole, so a deployment can subscribe to *fewer* Slack event kinds), and an explicit
   `null` deletes the key so the setting falls back to its default (`hooks.after_create:
   null` drops the shipped hook; `claude.model: null` takes Claude Code's default). Anything
-  after the overlay's front matter replaces the prompt; leave it out to inherit. `validate`
-  names the overlay and counts its overrides, and a running worker reports the one in force
-  in `issuebot status`, on the dashboard's worker line and in
+  after the overlay's front matter replaces the prompt; leave it out to inherit. A replacement
+  that drops Step 6 and Ground rule 7 drops the comment filter with them and has no barrier
+  against unfiltered tracker text at all ([The text a session acts
+  on](docs/security-model.md#the-text-a-session-acts-on)); keep both if you write your own.
+  `validate` names the overlay and counts its overrides, and a running worker reports the one
+  in force in `issuebot status`, on the dashboard's worker line and in
   `/api/v1/repos/<owner>/<name>/state`.
 - `.env` (copied from `.env.example`, git-ignored) holds the secrets -- the GitHub token, the
   Claude key, the Slack webhook and the database password -- and the identity the agent

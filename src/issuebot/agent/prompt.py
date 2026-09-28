@@ -99,11 +99,12 @@ class GitHubText(str):
 
     ``{{ }}`` renders ``str()``, and this is a ``str`` whose characters are the envelope: an
     opening tag that precedes the text, names its source and author and marks it as data, then
-    the text, then the closing tag. The association is GitHub's word for whether the author can
-    act on the repository, and it is rendered so the session can apply the workflow's admission
-    rule to text it already holds. The envelope is a property of the value, not of the
-    template, so a template author cannot substitute the text bare by forgetting a caveat, and
-    no prose *after* the payload has to undo what the payload said. Being a ``str`` also means
+    the text, then the closing tag. The association is GitHub's word for the author's
+    relationship to the repository, not a permission check, and it is rendered so the session
+    can apply the workflow's admission rule to text it already holds. The envelope is a
+    property of the value, not of the template, so a template author cannot substitute the
+    text bare by forgetting a caveat, and no prose *after* the payload has to undo what the
+    payload said. Being a ``str`` also means
     every string filter (``length``, ``truncate``, ``wordwrap``, slicing, ``in``) operates on
     the envelope rather than raising; one that cuts a tag is caught by ``PromptRenderer``,
     which refuses an output whose envelopes do not pair up. A tag inside the text is
