@@ -973,7 +973,7 @@ approver, or no human application at all, is `Unapproved`, and `actions.unapprov
 writes the `### Issuebot unapproved edit` block, removes the state label and publishes
 `Blocked`, label-first under the same rule as the other escapes. Nothing is stored: GitHub's
 record is the record, and a human applying the label again is what re-approves.
-`_dispatch_candidates` and `_fire` both go through it and neither derives a
+`_dispatch_candidates` and `_fire` both go through `admit` and neither derives a
 precondition of its own; `_fire` asks twice, once before its refresh (a worker that may not
 claim should not spend a request finding out which issue it may not claim, and a GitHub hold
 means it has just failed to read the board it would be writing to) and again with the issue
