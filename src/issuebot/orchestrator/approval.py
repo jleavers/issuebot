@@ -37,8 +37,8 @@ from issuebot.github import ApprovalEvidence, LabelApplied, TextEdit
 
 DELETED_ACCOUNT = "an account GitHub has deleted"
 # The two ways an issue has no approval at all. The first is a deployment on a dedicated
-# account whose own `todo` is the only one there is; the second is a label nobody GitHub names
-# as a person applied -- an app, a deleted account, or a label put on before anyone watched.
+# account whose own `todo` is the only one there is; the second is a `todo` no person GitHub
+# still names applied -- an app, a bot, an Actions workflow, or an account since deleted.
 NO_OTHER_APPROVER = "no account other than {own_login} has applied `{todo_label}`"
 NO_APPROVER = "no account has applied `{todo_label}`"
 
