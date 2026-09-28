@@ -594,8 +594,15 @@ class GhCliAdapter:
 
     async def repo_info(self) -> RepoInfo:
         self._log.debug("repo_info")
+        # `permissions` is the token's own standing on the repository; an answer without it (an
+        # anonymous or app read) is an account that does not administer it.
         result = await self._gh(
-            ["api", f"repos/{self.repo}", "--jq", "{full_name,default_branch,private}"]
+            [
+                "api",
+                f"repos/{self.repo}",
+                "--jq",
+                "{full_name,default_branch,private,admin: (.permissions.admin // false)}",
+            ]
         )
         payload = _parse_json(result.stdout)
         try:
@@ -603,8 +610,9 @@ class GhCliAdapter:
                 full_name=str(payload["full_name"]),
                 default_branch=str(payload["default_branch"]),
                 private=bool(payload["private"]),
+                admin=bool(payload.get("admin", False)),
             )
-        except (TypeError, KeyError) as exc:
+        except (TypeError, KeyError, AttributeError) as exc:
             raise GitHubError("response", "unexpected repository response") from exc
 
     async def _collect(

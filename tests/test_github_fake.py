@@ -298,6 +298,9 @@ async def test_probes(fake: FakeGitHub) -> None:
     assert (await fake.auth_status()).login == "issuebot"
     info = await fake.repo_info()
     assert (info.full_name, info.default_branch, info.private) == ("example/repo", "main", False)
+    assert info.admin is False
+    admin = FakeGitHub(SETTINGS, admin=True)
+    assert (await admin.repo_info()).admin is True
     limit = await fake.rate_limit()
     assert limit.remaining == 4999 and limit.limit == 5000
 

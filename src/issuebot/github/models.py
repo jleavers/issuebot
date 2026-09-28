@@ -118,6 +118,10 @@ class RepoInfo:
     full_name: str
     default_branch: str
     private: bool
+    # Whether the token's account administers the repository. Such an account can bypass or
+    # rewrite the branch ruleset, and its label events are a maintainer's, so the approval
+    # check counts its own `todo` when this is true (GHSA-jm8h-q3j6-p8xp).
+    admin: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

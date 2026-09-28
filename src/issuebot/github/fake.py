@@ -71,7 +71,9 @@ class FakeGitHub:
 
     ``login`` is the account the fake acts as: what ``auth_status`` reports, who ``comment``
     writes as, whose pull requests ``open_pr`` opens by default, and the provenance the
-    normaliser resolves ``linked_pr`` and ``find_workpad_comment`` by (#77).
+    normaliser resolves ``linked_pr`` and ``find_workpad_comment`` by (#77). ``admin`` is what
+    ``repo_info`` says about that account's standing on the repository: whether its own label
+    events approve (GHSA-jm8h-q3j6-p8xp).
     """
 
     def __init__(
@@ -81,10 +83,12 @@ class FakeGitHub:
         preseed_labels: bool = True,
         now: Callable[[], datetime] | None = None,
         login: str = "issuebot",
+        admin: bool = False,
     ) -> None:
         self._settings = settings
         self._now = now or (lambda: datetime.now(UTC))
         self.login = login
+        self.admin = admin
         self.repo_labels: dict[str, LabelStyle] = {}
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._issues: dict[int, _FakeIssue] = {}
@@ -271,7 +275,7 @@ class FakeGitHub:
 
     async def repo_info(self) -> RepoInfo:
         self._enter("repo_info")
-        return RepoInfo(full_name=self.repo, default_branch="main", private=False)
+        return RepoInfo(full_name=self.repo, default_branch="main", private=False, admin=self.admin)
 
     # --- test helpers (never recorded in `calls`) --------------------------------
 

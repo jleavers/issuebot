@@ -1000,9 +1000,22 @@ async def test_repo_info_parses_fields() -> None:
         "api",
         "repos/example/repo",
         "--jq",
-        "{full_name,default_branch,private}",
+        "{full_name,default_branch,private,admin: (.permissions.admin // false)}",
     ]
     assert (info.full_name, info.default_branch, info.private) == ("example/repo", "main", False)
+    assert info.admin is True
+
+
+async def test_repo_info_without_admin_reads_false() -> None:
+    """An answer that does not say the account administers the repository is one it does not:
+    ``admin`` is what lets issuebot's own label events approve (GHSA-jm8h-q3j6-p8xp)."""
+    runner = StubRunner()
+    runner.on(
+        has("repos/example/repo"),
+        stdout='{"full_name": "example/repo", "default_branch": "main", "private": true}',
+    )
+    info = await make_adapter(runner).repo_info()
+    assert info.admin is False
 
 
 @pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
