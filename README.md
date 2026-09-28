@@ -394,8 +394,8 @@ the logs on your terminal.
   `COLLABORATOR`), addressing each one; everyone else's -- including an app's or a bot's, a
   review or CI bot among them -- is listed under `Quarantined` in the workpad rather than
   acted on. To have one of those acted on, restate the request yourself in a reply. It then
-  returns the issue to review. You need not do
-  this for a merge conflict: when a sibling PR merges and yours turns `CONFLICTING`, the worker
+  returns the issue to review. You need not do this for a merge conflict: when a sibling PR
+  merges and yours turns `CONFLICTING`, the worker
   moves the issue to `issuebot/rework` itself and notes each bounce in the workpad, up to
   `agent.max_conflict_reworks` times, after which it leaves a note and waits for you. The
   bounces are counted from the issue's own label history -- the `issuebot/rework` labels the
