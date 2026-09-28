@@ -463,11 +463,15 @@ def test_a_blocked_turn_marks_its_final_message(make_issue: Callable[..., Issue]
 
 def test_missing_body_and_pr_render_fallbacks(make_issue: Callable[..., Issue]) -> None:
     workflow = load()
+    repo = workflow.config.github.repo
     text = PromptRenderer(workflow.prompt_template).render(
         context(workflow, dispatched(make_issue, body=None, linked_pr=None), rework=True)
     )
     assert "No description provided." in text
     assert "No linked pull request was found" in text
+    # A fork's PR whose head ref happens to match `issuebot/<n>-*` is not the agent's own
+    # pull request; `--author "@me"` is the same rule `_select_pr` applies (#77).
+    assert f'gh pr list -R {repo} --head <branch> --author "@me"' in text
 
 
 def test_no_fault_found_hands_over_without_a_pull_request(
