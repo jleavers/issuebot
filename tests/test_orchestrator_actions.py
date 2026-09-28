@@ -751,8 +751,7 @@ def test_unapproved_block_names_no_approval_rather_than_an_edit() -> None:
     )
     block = unapproved_block(verdict, NOW, LABELS)
     assert verdict.reason in block
-    assert "issuebot has removed the label" in block
-    assert "no account other than issuebot has approved" in block
+    assert "issuebot has removed the label: it can find no approval of the text" in block
     assert "apply `issuebot/todo` again" in block
     assert "no longer the text that was approved" not in block
 

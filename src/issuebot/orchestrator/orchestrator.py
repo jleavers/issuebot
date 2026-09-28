@@ -52,6 +52,7 @@ from issuebot.github import (
     GitHubAdapter,
     GitHubError,
     Issue,
+    PageCeilingError,
     StateLabel,
     fetch_status_summary,
     parse_status_summary,
@@ -421,6 +422,17 @@ class Orchestrator:
         # `repo_info().admin`, and lazily -- at the first approval check rather than in
         # `startup()` -- so a test that never starts the worker still exercises it.
         self._own_labels_approve: bool | None = None
+        # The last verdict per issue, and what it was a verdict *about*: the poll snapshot's
+        # `updated_at`, title and body. Any edit, rename or label change bumps `updatedAt`,
+        # and the session gets the poll snapshot, so a verdict is good for as long as those
+        # stand -- and a candidate held back by a busy pool account no longer re-reads its
+        # history every tick. The text is in the key as well as the stamp because GitHub
+        # stamps `updatedAt` to the second, and an edit landing in the second of the change
+        # the verdict saw would otherwise leave the key where it was and reuse an approval of
+        # the text before it -- the same-second race the tie rule in `approval.py` closes.
+        self._approval_verdicts: dict[
+            str, tuple[tuple[datetime, str, str | None], Approved | Unapproved]
+        ] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -1320,9 +1332,18 @@ class Orchestrator:
         """Is the issue's text the text a human approved? ``None`` when GitHub would not say.
 
         Read at dispatch rather than at poll: one issue is dispatched at a time, where every
-        poll reads the whole board. A failed read fails closed -- the issue waits for the next
-        tick -- and is logged once per error rather than per tick.
+        poll reads the whole board. A verdict is remembered for as long as the issue is
+        unchanged (`_approval_verdicts`). A failed read fails closed -- the issue waits for the
+        next tick -- and is logged once per error rather than per tick.
+
+        A history past the page ceiling is not a failed read but an answer: nobody can say
+        what was approved, and the next tick would read the same ten pages to say so again.
+        It is a verdict, so the escape takes the label off and the spin stops.
         """
+        key = (issue.updated_at, issue.title, issue.body)
+        remembered = self._approval_verdicts.get(issue.id)
+        if remembered is not None and remembered[0] == key:
+            return remembered[1]
         try:
             if self._own_labels_approve is None:
                 self._own_labels_approve = (await self._adapter.repo_info()).admin
@@ -1331,6 +1352,14 @@ class Orchestrator:
                 issue.number,
                 todo_label=self._adapter.labels.todo,
                 own_labels_approve=self._own_labels_approve,
+            )
+        except PageCeilingError as exc:
+            # The message names the ceiling; the orchestrator does not import the adapter's
+            # constants to say it again.
+            verdict = Unapproved(
+                reason=f"{exc.message}: issuebot cannot tell what was approved",
+                approval=None,
+                edit=None,
             )
         except GitHubError as exc:
             if self._approval_check_failed.get(issue.id) != str(exc):
@@ -1344,6 +1373,7 @@ class Orchestrator:
                 )
             return None
         self._approval_check_failed.pop(issue.id, None)
+        self._approval_verdicts[issue.id] = (key, verdict)
         return verdict
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
@@ -1358,6 +1388,9 @@ class Orchestrator:
             )
             if outcome == "applied":
                 self._counters = self._counters.bump(blocked=1)
+                # Spent: the issue has left the board, and what brings it back is a new label
+                # event to be read afresh. A failed escape keeps it, so the retry reads nothing.
+                self._approval_verdicts.pop(issue.id, None)
             self._record_escape(issue.identifier, outcome)
             return False
         # Before the claim: an issue whose account is busy must not be moved to in_progress
@@ -1665,6 +1698,12 @@ class Orchestrator:
         starts from zero either way. Dropping ``_conflict_gave_up`` here is what keeps it a
         memo rather than a leak: an issue that hit a capped read once would otherwise hold an
         entry for the life of the process, which is the growth this issue is about (#110).
+
+        The two approval memos go for the same reason (GHSA-jm8h-q3j6-p8xp):
+        ``_approval_check_failed``, the error an unreadable history was last logged with, and
+        ``_approval_verdicts``, the last verdict and the snapshot it was about. A closed issue
+        is never a candidate, so neither can be read again for it, and a reopened one is a
+        fresh snapshot that would miss the verdict anyway.
         """
         # Removing a workspace means unlinking what the session wrote, which only the session's
         # own account can do (#75) -- and under a pool that is the account bound to *this*
@@ -1675,6 +1714,7 @@ class Orchestrator:
         self._conflict_limit_noted.pop(issue.id, None)
         self._conflict_gave_up.pop(issue.id, None)
         self._approval_check_failed.pop(issue.id, None)
+        self._approval_verdicts.pop(issue.id, None)
         if outcome != "failed":
             self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):

@@ -345,11 +345,12 @@ def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -
             "the text that was approved."
         )
     else:
-        # No human ever applied the label -- issuebot's own conflict bounce, or an app -- so
-        # there is no approved text to have fallen out of step with.
+        # No approval to measure the text against: nobody who can approve applied `todo`, or
+        # the history is too long to find out who did. Either way there is no approved text to
+        # have fallen out of step with, so the block does not claim one.
         explanation = (
-            "issuebot has removed the label: no account other than issuebot has approved the "
-            "text a session would act on."
+            "issuebot has removed the label: it can find no approval of the text a session "
+            "would act on."
         )
     return (
         f"{UNAPPROVED_HEADING}{_stamp(now)})\n\n"
@@ -371,8 +372,8 @@ async def unapproved_escape(
     Label-first like ``blocked_escape`` (#128, #157): the note is best effort and the label
     removal is the point, since an issue nobody has approved must not be a candidate on the
     next tick. ``issue`` is the record the poll just returned; the evidence behind
-    ``verdict`` was read a moment ago, so there is no second fetch here. Re-approval is the
-    human applying the admitting label again, which is a new label event after the edit.
+    ``verdict`` was read a moment ago, so there is no second fetch here. Re-approval is a
+    maintainer applying ``todo`` again, which is a new label event after the edit.
     """
     log = get_logger(__name__)
     block = unapproved_block(verdict, now, adapter.labels)

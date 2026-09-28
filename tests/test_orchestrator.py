@@ -35,7 +35,15 @@ from issuebot.events import (
     PrOpened,
     StateChanged,
 )
-from issuebot.github import WORKPAD_MARKER, FakeGitHub, GhResult, GitHubError, Issue, StateLabel
+from issuebot.github import (
+    WORKPAD_MARKER,
+    FakeGitHub,
+    GhResult,
+    GitHubError,
+    Issue,
+    PageCeilingError,
+    StateLabel,
+)
 from issuebot.github.errors import ErrorCategory
 from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
@@ -1095,6 +1103,79 @@ async def test_an_unreadable_history_skips_the_tick_and_logs_once(
     assert entry["category"] == "transport"
     await h.tick()
     assert sorted(h.orchestrator.running) == ["1"]
+
+
+async def test_a_history_past_the_page_ceiling_is_handed_back_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ceiling is a property of the issue, not of the moment: retried every tick it would
+    read ten pages a poll for ever. It is an answer -- nobody can say what was approved -- so
+    the label comes off and the spin stops, and a human who still wants it done files it anew."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    reads = 0
+
+    async def overgrown(number: int) -> Any:
+        nonlocal reads
+        reads += 1
+        raise PageCeilingError(f"label and title history of #{number} runs past 1000 events")
+
+    monkeypatch.setattr(h.github, "approval_evidence", overgrown)
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    assert h.orchestrator.running == {}
+    assert h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    assert h.calls("clear_state") == [(1,)]
+    body = h.github.comments_for(1)[0].body
+    assert (
+        "label and title history of #1 runs past 1000 events: issuebot cannot tell what was "
+        "approved." in body
+    )
+    assert "apply `issuebot/todo` again" in body
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert reads == 1
+    assert not any(entry["event"] == "approval_check_failed" for entry in logs)
+
+
+async def test_a_verdict_stands_while_the_issue_is_unchanged(tmp_path: Path) -> None:
+    """A candidate held back by a busy pool account is not re-read every tick: any edit, rename
+    or label change moves `updated_at`, so the verdict holds for as long as it stands."""
+    h = Harness(tmp_path, max_concurrent=3)
+    _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+        h.clock.advance(1)
+    await h.tick()
+    await h.tick()
+    assert len(h.orchestrator.running) == 2
+    assert h.github.issue(3).state is StateLabel.TODO
+    assert h.calls("approval_evidence").count((3,)) == 1
+    # And a change to the issue is what earns a fresh read.
+    h.github.human_edit_body(3, "do Y", editor="reporter")
+    await h.tick()
+    assert h.calls("approval_evidence").count((3,)) == 2
+    assert h.github.issue(3).state is None
+
+
+async def test_a_verdict_is_not_reused_for_text_changed_in_the_same_second(
+    tmp_path: Path,
+) -> None:
+    """GitHub stamps `updatedAt` to the second, so an edit in the second of the last change
+    leaves it where it was; the text the verdict was about is part of what it is keyed on."""
+    h = Harness(tmp_path, max_concurrent=3)
+    _with_pool(h)
+    for number in (1, 2, 3):
+        h.add_issue(number, "todo")
+    await h.tick()
+    assert h.github.issue(3).state is StateLabel.TODO
+    stamp = h.github.issue(3).updated_at
+    h.github.human_edit_body(3, "do Y", editor="reporter")
+    assert h.github.issue(3).updated_at == stamp  # the clock has not moved
+    await h.tick()
+    assert h.calls("approval_evidence").count((3,)) == 2
+    assert h.github.issue(3).state is None
 
 
 async def test_normal_exit_to_review_schedules_a_continuation_that_releases(

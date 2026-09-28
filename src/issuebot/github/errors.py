@@ -35,10 +35,12 @@ class PageCeilingError(GitHubError):
 
     A ``response`` error like any other -- GitHub answered, and the answer is one issuebot
     refuses -- but a *named* one, so a caller that treats reaching a ceiling differently from
-    every other refused response can tell them apart. Only ``GhCliAdapter._collect`` does:
+    every other refused response can tell them apart. Two do. ``GhCliAdapter._collect``:
     ``response`` also covers a GraphQL errors payload, which is what a server-side query
     timeout arrives as, and catching the category there would have isolated far more than the
-    cap it means to.
+    cap it means to. And the orchestrator's approval check (GHSA-jm8h-q3j6-p8xp), which hands
+    an issue whose history runs past the ceiling back to a human rather than failing closed
+    and reading the same pages again on every tick.
     """
 
     def __init__(self, message: str) -> None:
