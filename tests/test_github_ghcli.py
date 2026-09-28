@@ -1198,3 +1198,147 @@ async def test_count_own_label_additions_probes_the_login_once() -> None:
     assert await adapter.count_own_label_additions(42, "issuebot/rework") == 1
     assert await adapter.count_own_label_additions(42, "issuebot/rework") == 1
     assert sum(argv[:2] == ["api", "user"] for argv, _ in runner.calls) == 1
+
+
+# --- approval evidence ----------------------------------------------------------------
+
+
+def _approval_timeline_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:
+    return _timeline_page(nodes, end_cursor=end_cursor)
+
+
+def _edits_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issue": {
+                        "userContentEdits": {
+                            "nodes": nodes,
+                            "pageInfo": {
+                                "hasNextPage": end_cursor is not None,
+                                "endCursor": end_cursor,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+async def test_approval_evidence_reads_labels_renames_and_edits() -> None:
+    """Two bounded reads (GHSA-jm8h-q3j6-p8xp): the timeline for label additions and title
+    renames, and ``userContentEdits`` for the body. Edits keep GitHub's order; the assessment
+    sorts."""
+    runner = StubRunner()
+    runner.on(
+        both(has("RENAMED_TITLE_EVENT"), lacks("cursor=")),
+        stdout=_approval_timeline_page(
+            [
+                {
+                    "__typename": "LabeledEvent",
+                    "createdAt": "2026-09-28T09:00:00Z",
+                    "actor": {"login": "maintainer"},
+                    "label": {"name": "issuebot/todo"},
+                },
+                {
+                    "__typename": "RenamedTitleEvent",
+                    "createdAt": "2026-09-28T09:05:00Z",
+                    "actor": None,
+                },
+                {
+                    "__typename": "LabeledEvent",
+                    "createdAt": "2026-09-28T09:06:00Z",
+                    "actor": {"login": LOGIN},
+                    "label": None,
+                },
+                {},
+            ],
+            end_cursor="t1",
+        ),
+    )
+    runner.on(
+        both(has("RENAMED_TITLE_EVENT"), arg("cursor=t1")),
+        stdout=_approval_timeline_page(
+            [
+                {
+                    "__typename": "LabeledEvent",
+                    "createdAt": "2026-09-28T09:10:00Z",
+                    "actor": {"login": LOGIN},
+                    "label": {"name": "issuebot/in-progress"},
+                }
+            ],
+            end_cursor=None,
+        ),
+    )
+    runner.on(
+        both(has("userContentEdits"), lacks("cursor=")),
+        stdout=_edits_page(
+            [
+                {"editedAt": "2026-09-28T09:20:00Z", "editor": {"login": "reporter"}},
+                {"editedAt": "2026-09-28T08:00:00Z", "editor": None},
+                {"editor": {"login": "nobody"}},  # no timestamp: not an edit issuebot can place
+            ],
+            end_cursor=None,
+        ),
+    )
+    evidence = await make_adapter(runner).approval_evidence(42)
+    assert [(e.label, e.actor, e.at.isoformat()) for e in evidence.label_events] == [
+        ("issuebot/todo", "maintainer", "2026-09-28T09:00:00+00:00"),
+        ("issuebot/in-progress", LOGIN, "2026-09-28T09:10:00+00:00"),
+    ]
+    assert [(e.what, e.editor, e.at.isoformat()) for e in evidence.edits] == [
+        ("title", None, "2026-09-28T09:05:00+00:00"),
+        ("body", "reporter", "2026-09-28T09:20:00+00:00"),
+        ("body", None, "2026-09-28T08:00:00+00:00"),
+    ]
+    first = runner.argv(0)
+    assert first[:3] == ["api", "graphql", "-f"]
+    assert (
+        "timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT], first: 100, after: $cursor)"
+    ) in query_of(first)
+    assert first[first.index("number=42") - 1] == "-F"
+    assert len(runner.calls) == 3
+
+
+async def test_approval_evidence_gives_up_past_the_page_cap() -> None:
+    runner = StubRunner()
+    for page in range(0, MAX_TIMELINE_PAGES + 2):
+        predicate = lacks("cursor=") if page == 0 else arg(f"cursor=t{page}")
+        runner.on(
+            both(has("RENAMED_TITLE_EVENT"), predicate),
+            stdout=_approval_timeline_page([], end_cursor=f"t{page + 1}"),
+        )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).approval_evidence(42)
+    assert excinfo.value.category == "response"
+    assert str(excinfo.value).endswith(
+        f"label and title history of #42 runs past {MAX_TIMELINE_PAGES * 100} events"
+    )
+
+
+async def test_approval_evidence_gives_up_past_the_edit_page_cap() -> None:
+    runner = StubRunner()
+    runner.on(has("RENAMED_TITLE_EVENT"), stdout=_approval_timeline_page([], end_cursor=None))
+    for page in range(0, MAX_TIMELINE_PAGES + 2):
+        predicate = lacks("cursor=") if page == 0 else arg(f"cursor=e{page}")
+        runner.on(
+            both(has("userContentEdits"), predicate),
+            stdout=_edits_page([], end_cursor=f"e{page + 1}"),
+        )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).approval_evidence(42)
+    assert excinfo.value.category == "response"
+    assert str(excinfo.value).endswith(
+        f"edit history of #42 runs past {MAX_TIMELINE_PAGES * 100} edits"
+    )
+
+
+@pytest.mark.parametrize("stdout", ["{}", '{"data": {"repository": {"issue": null}}}'])
+async def test_approval_evidence_rejects_a_malformed_response(stdout: str) -> None:
+    runner = StubRunner()
+    runner.on(has("graphql"), stdout=stdout)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).approval_evidence(42)
+    assert excinfo.value.category == "response"

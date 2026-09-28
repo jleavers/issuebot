@@ -2,23 +2,26 @@
 
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from issuebot.config import GitHubLabels, GitHubSettings
 from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.models import (
+    ApprovalEvidence,
     AuthStatus,
     Comment,
     Issue,
+    LabelApplied,
     LabelEnsured,
     RateLimit,
     RepoInfo,
     StateLabel,
+    TextEdit,
     is_workpad_body,
 )
-from issuebot.github.normalise import issue_from_node, label_name
+from issuebot.github.normalise import issue_from_node, label_name, optional_timestamp
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
 from issuebot.github.state import (
     LABEL_STYLES,
@@ -112,6 +115,40 @@ LABEL_EVENTS_QUERY = (
     "    issue(number: $number) {\n"
     f"      timelineItems(itemTypes: [LABELED_EVENT], first: {PAGE_SIZE}, after: $cursor) {{\n"
     "        nodes { ... on LabeledEvent { actor { login } label { name } } }\n"
+    "        pageInfo { hasNextPage endCursor }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+# The issue's label additions and title renames, oldest first, for the approval check
+# (GHSA-jm8h-q3j6-p8xp): which human last handed the issue to issuebot, and whether the
+# title moved after that.
+APPROVAL_TIMELINE_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    issue(number: $number) {\n"
+    "      timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT], "
+    f"first: {PAGE_SIZE}, after: $cursor) {{\n"
+    "        nodes {\n"
+    "          __typename\n"
+    "          ... on LabeledEvent { createdAt actor { login } label { name } }\n"
+    "          ... on RenamedTitleEvent { createdAt actor { login } }\n"
+    "        }\n"
+    "        pageInfo { hasNextPage endCursor }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+# The issue body's edit history: who changed the description, and when. GitHub answers it
+# newest first; the assessment sorts, so the order here is not relied on.
+CONTENT_EDITS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    issue(number: $number) {\n"
+    f"      userContentEdits(first: {PAGE_SIZE}, after: $cursor) {{\n"
+    "        nodes { editedAt editor { login } }\n"
     "        pageInfo { hasNextPage endCursor }\n"
     "      }\n"
     "    }\n"
@@ -384,6 +421,84 @@ class GhCliAdapter:
             "response",
             f"label history of #{number} runs past {MAX_TIMELINE_PAGES * PAGE_SIZE} events",
         )
+
+    async def approval_evidence(self, number: int) -> ApprovalEvidence:
+        """Every label addition, title rename and body edit GitHub records for the issue.
+
+        Two paginated reads, each bounded at ``MAX_TIMELINE_PAGES`` under #110's rule: the
+        timeline for ``LabeledEvent`` and ``RenamedTitleEvent`` items, and ``userContentEdits``
+        for the body. A node without a timestamp is skipped, since an edit issuebot cannot
+        place in time is one it cannot assess; a deleted actor is kept as ``None``, because
+        "somebody GitHub no longer names" is a fact the assessment acts on.
+        """
+        self._log.debug("approval_evidence", issue_number=number)
+        label_events: list[LabelApplied] = []
+        edits: list[TextEdit] = []
+        async for node in self._paginate(
+            APPROVAL_TIMELINE_QUERY,
+            number,
+            ("repository", "issue", "timelineItems"),
+            overflow=f"label and title history of #{number} runs past "
+            f"{MAX_TIMELINE_PAGES * PAGE_SIZE} events",
+        ):
+            at = optional_timestamp(node.get("createdAt"))
+            if at is None:
+                continue
+            actor = _dig(node, "actor", "login")
+            login = actor if isinstance(actor, str) and actor else None
+            if node.get("__typename") == "RenamedTitleEvent":
+                edits.append(TextEdit(what="title", editor=login, at=at))
+                continue
+            name = _dig(node, "label", "name")
+            if isinstance(name, str) and name:
+                label_events.append(LabelApplied(label=name, actor=login, at=at))
+        async for node in self._paginate(
+            CONTENT_EDITS_QUERY,
+            number,
+            ("repository", "issue", "userContentEdits"),
+            overflow=f"edit history of #{number} runs past {MAX_TIMELINE_PAGES * PAGE_SIZE} edits",
+        ):
+            at = optional_timestamp(node.get("editedAt"))
+            if at is None:
+                continue
+            editor = _dig(node, "editor", "login")
+            edits.append(
+                TextEdit(
+                    what="body",
+                    editor=editor if isinstance(editor, str) and editor else None,
+                    at=at,
+                )
+            )
+        return ApprovalEvidence(label_events=tuple(label_events), edits=tuple(edits))
+
+    async def _paginate(
+        self, query: str, number: int, path: tuple[str, ...], *, overflow: str
+    ) -> AsyncIterator[Mapping[str, Any]]:
+        """The mapping nodes of one issue connection, page by page, under the timeline cap."""
+        cursor: str | None = None
+        for _page_number in range(MAX_TIMELINE_PAGES):
+            variables: dict[str, str | int] = {
+                "owner": self._owner,
+                "name": self._name,
+                "number": number,
+            }
+            if cursor:
+                variables["cursor"] = cursor
+            data = await self._graphql(query, variables)
+            connection = _dig(data, *path)
+            if not isinstance(connection, Mapping):
+                raise GitHubError("response", f"GraphQL response has no {'.'.join(path[1:])}")
+            for node in connection.get("nodes") or []:
+                if isinstance(node, Mapping):
+                    yield node
+            page = connection.get("pageInfo")
+            page = page if isinstance(page, Mapping) else {}
+            if not page.get("hasNextPage"):
+                return
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+        raise GitHubError("response", overflow)
 
     async def update_comment(self, comment_id: int, body: str) -> Comment:
         self._log.debug("update_comment", comment_id=comment_id)
