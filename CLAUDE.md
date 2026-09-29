@@ -49,7 +49,7 @@ docker compose build                 # image: git, gh, claude, app venv
 docker compose up                    # db + web (profile hub) + worker + egress (profile worker),
                                      #   COMPOSE_PROFILES in .env
                                      #   (http://127.0.0.1:${ISSUEBOT_WEB_PORT:-8080})
-docker network create issuebot && docker network create --internal issuebot-internal
+docker network create issuebot && docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
                                      # once per host, before any of the above (#126): the worker
                                      #   joins internal networks alone, so its only route off the
                                      #   host is the egress proxy

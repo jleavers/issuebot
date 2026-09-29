@@ -74,6 +74,22 @@ def outside_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_gateway_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``validate``'s ``gateway`` canary reads the real route table and opens real sockets
+    when a test puts the constant above at a real directory (the compose-wording tests do),
+    which is a connection to whatever sits at the LAN's ``.1`` -- and the suite is hermetic.
+    A test about the canary itself overrides both seams the way ``_gateway`` in the CLI tests
+    does; every other test sees no network and a probe that is never reached.
+    """
+
+    def never(address: str, port: int, *, timeout_s: float) -> bool:
+        raise AssertionError(f"the gateway canary probed {address}:{port} in a hermetic test")
+
+    monkeypatch.setattr("issuebot.cli._read_route_table", lambda: "")
+    monkeypatch.setattr("issuebot.cli._host_port_open", never)
+
+
+@pytest.fixture(autouse=True)
 def no_sweep_outside_the_suite(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

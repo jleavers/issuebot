@@ -303,5 +303,20 @@ networks:
   # resolves to its own proxy rather than round-robin across the host's.
   egress:
     internal: true
+    # `internal` removes the default route, not the host: the bridge still carries the host's
+    # own address at the network's first address, and a service bound to 0.0.0.0 there --
+    # sshd, say -- answers a session. Isolated gateway mode (Docker 28.0) gives the bridge no
+    # address at all, so joining this network reaches the proxy and nothing else; both
+    # families, since a daemon that gives new networks IPv6 puts the host at that gateway
+    # too. The shared `issuebot-internal` is created with the same options by hand in the
+    # README's once-per-host step, and `validate`'s `gateway` line is the canary for both. A
+    # network created before this option is recreated by the next `up` when compose 2.31 or
+    # later created it (the options are part of the config hash it compares, and it stops the
+    # attached services itself); one without that label is removed by hand first, as the
+    # operations doc's upgrade note says. The shared network is the one that needs every
+    # worker stopped, since compose does not own it.
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
   # And the proxy's other leg, the only default route in the worker profile.
   outside:

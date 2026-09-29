@@ -59,7 +59,7 @@ value.
 
 ## Quick start
 
-Docker with Compose (Engine 25.0 or newer), a GitHub token for the account the agent will act
+Docker with Compose (Engine 28.0 or newer), a GitHub token for the account the agent will act
 as, and a Claude credential. [Prerequisites](#prerequisites) explains what each needs to be;
 this is the shape of it.
 
@@ -67,7 +67,7 @@ this is the shape of it.
 # Once per host: two shared networks. The internal one is what leaves a session no route
 # off the host except the allow-listing proxy.
 docker network create issuebot
-docker network create --internal issuebot-internal
+docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
 
 git clone https://github.com/jleavers/issuebot.git
 cd issuebot
@@ -222,11 +222,14 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
    on an account dedicated to the bot rather than the login you use yourself -- and there
    `claude.max_budget_usd` (`5.0`, per turn, so up to `agent.max_turns` times a run) and
    `agent.max_issue_cost_usd` (`0`, off until you set it) are real money.
-4. **Docker with Compose, Engine 25.0 or newer**: the image bundles `git`, `gh` and `claude`,
-   and Compose brings PostgreSQL for history and the dashboard. The version floor is the
-   `start_interval` health-check option (Engine 25.0, January 2024), which the `egress` proxy
-   uses so that the worker's `depends_on` on it clears in about a second rather than after a
-   full health-check interval; an older engine rejects the key rather than ignoring it.
+4. **Docker with Compose, Engine 28.0 or newer**: the image bundles `git`, `gh` and `claude`,
+   and Compose brings PostgreSQL for history and the dashboard. The version floor is isolated
+   gateway mode on the worker's networks (Engine 28.0, February 2025), which is what keeps
+   the host's own services out of a session's reach
+   ([What a session may reach](docs/security-model.md#what-a-session-may-reach)): Engine 27
+   rejects the option outright, and 25 and 26 drop it silently, leaving the host reachable
+   while the docs say it is not. The `start_interval` health-check option the `egress` proxy
+   uses (Engine 25.0) sits inside that floor.
 5. **The target repository's toolchain**, wherever the agent runs, so it can run the tests.
    The image has Python 3.14, `git`, `gh` and `claude` and nothing else; for another stack
    install the tools in `hooks.after_create`, or build an image `FROM` it and add them. Two
@@ -244,7 +247,7 @@ The commands below are Bash, and they work as-is under Docker Desktop on Windows
 ```bash
 # Once per host, two shared networks: every checkout's containers join them.
 docker network create issuebot              # the dashboard's route to the database
-docker network create --internal issuebot-internal   # the worker's, with no route off the host
+docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal   # the worker's, with no route off the host
 git clone https://github.com/jleavers/issuebot.git
 cd issuebot
 cp .env.example .env
@@ -315,6 +318,7 @@ docker compose run --rm worker labels ensure
 [ OK ] agent.run_as: agent-1 (uid 1011), agent-2 (uid 1012), agent-3 (uid 1013); a pool of 3, one account per concurrent session; each at a uid other than this process's (1000)
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] egress: http://egress:3128: egress-probe.invalid refused, api.github.com admitted; no route round it
+[ OK ] gateway: nothing answered on port 22 at the first address of each attached network (192.168.112.1, 192.168.128.1): the host's own without an isolated gateway, a container's or nobody's with one -- a canary, not a proof
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
@@ -325,7 +329,7 @@ docker compose run --rm worker labels ensure
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-20 checks: 0 failed, 2 warnings
+21 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in

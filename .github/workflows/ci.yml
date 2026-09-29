@@ -61,10 +61,12 @@ jobs:
       - name: compose config under each profile
         run: |
           docker network create issuebot
-          # The second shared network, and `--internal` is the whole of it (#126): a container
-          # on internal networks alone gets no default route, which is what leaves the worker
-          # with no way off the host but the proxy.
-          docker network create --internal issuebot-internal
+          # The second shared network. `--internal` (#126) is what leaves a container on
+          # internal networks alone no default route, so no way off the host but the proxy;
+          # the isolated gateway options (2026-09-29) are what leave it no way *onto* the
+          # host either, since an internal bridge otherwise still carries the host's own
+          # address. Engine 28.0 or later accepts them; the README's floor says so.
+          docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
           for profiles in hub worker hub,worker; do
             # Both directions (#78): without the store's password nothing configures -- the
             # refusal is the invariant, so a default creeping back in fails the PR -- and with

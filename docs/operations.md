@@ -13,7 +13,7 @@ worker, in its own checkout, with its own `configs/WORKFLOW.local.md`, workspace
 and Claude credential. The checkouts meet on one Docker network.
 
 1. Once per host: `docker network create issuebot` and
-   `docker network create --internal issuebot-internal`. The second is where the workers reach
+   `docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal`. The second is where the workers reach
    the hub's database; `--internal` is what leaves them no route off the host except the
    allow-listing proxy ([`docs/security-model.md`, "What a session may
    reach"](security-model.md#what-a-session-may-reach)).
@@ -395,6 +395,31 @@ unapproved edit` block on the workpad -- and so is one whose `issuebot/todo` onl
 Actions workflow or a dedicated bot account ever applied. That is the check working, not a
 regression: read the current text and apply `issuebot/todo` again to approve it
 ([Blocked](#blocked)).
+
+The upgrade that isolates the gateway (2026-09-29; [What a session may
+reach](security-model.md#what-a-session-may-reach)) is the one upgrade that touches the shared
+network, and that network has the hub's database and every checkout's worker attached, so it
+cannot be recreated underneath them: `docker network rm` refuses while a running container is
+attached, and a stopped container whose network went away does not start again without
+`--force-recreate`. Each checkout's own `egress` network needs nothing of you when Compose
+2.31 or later created it -- the option is part of the config hash it compares, so the next
+`up` stops the attached services, recreates the network and reconnects them; one an older
+Compose created carries no hash and is kept as it is, so remove it by hand first
+(`docker compose stop worker egress && docker network rm <project>_egress`, then the `up`
+below). For the shared one, once every checkout is on the new code and image:
+
+```bash
+docker compose stop worker                      # in every checkout, hub included, and any
+                                                #   `run --rm` one-off still going
+docker compose rm -sf db                        # hub only: the cluster is in the pgdata volume
+docker network rm issuebot-internal
+docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
+docker compose up -d --force-recreate           # hub first, then every other checkout
+docker compose run --rm worker validate         # the `gateway` line, in each
+```
+
+Until that is done every worker's `validate` warns on its `gateway` line, and the host is as
+reachable as it was; the warning is what says which.
 
 **With more than one checkout, that recipe is not the one to repeat per deployment.** They are
 clones of the same repository against one store, and a migration applied by whichever you upgrade

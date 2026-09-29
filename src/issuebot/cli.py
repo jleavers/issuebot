@@ -3,10 +3,13 @@
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import os
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -100,7 +103,7 @@ from issuebot.github import (
     parse_status_summary,
 )
 from issuebot.github.normalise import repo_short_name
-from issuebot.invocation import run_hint
+from issuebot.invocation import in_container, run_hint
 from issuebot.log import LOG_LEVELS, configure_logging, get_logger
 from issuebot.notifications import (
     POST_TIMEOUT_S,
@@ -410,6 +413,7 @@ def run_checks(
         _run_as_check(cfg),
         _mcp_config_check(cfg),
         _egress_check(os.environ),
+        _gateway_check(inside=in_container(), route_table=_read_route_table()),
         _executable_check("gh", "gh"),
     ]
     checks.extend(_github_checks(adapter, tuple(cfg.claude.model_labels)))
@@ -1013,11 +1017,127 @@ def _egress_check(environ: Mapping[str, str]) -> Check:
         concerns.append(
             f"{PROBE_DIRECT_HOST} answered a direct connection, so the allow-list bounds only "
             "what asks the proxy. Under compose, create the shared network with "
-            "`docker network create --internal issuebot-internal`"
+            f"`{ISOLATED_NETWORK_RECIPE}`"
         )
     if concerns:
         return Check(subject, "warn", f"{detail}; but " + "; and ".join(concerns))
     return Check(subject, "ok", f"{detail}; no route round it")
+
+
+# The host service the gateway canary tries (2026-09-29). Without an isolated gateway the
+# first address of every bridge network is the host's own, and a service bound to 0.0.0.0
+# answers there; with one the bridge has no address at all, and the first address goes to
+# whichever container attached first, or to nobody. A closed port goes unanswered either way
+# (refused by a container, or nothing at the address at all), so only a *listening* host
+# service tells the two apart, and sshd is the one nearly every Linux host has -- and the one
+# a session was found able to reach.
+GATEWAY_CANARY_PORT = 22
+_GATEWAY_PROBE_TIMEOUT_S = 1.0
+# Isolated gateway mode on both address families (Docker 28.0 or later; a daemon that gives
+# new networks IPv6 puts the host at that gateway too). The shared network takes it by hand,
+# the checkout's own `egress` network as `driver_opts` in compose.yaml.
+ISOLATED_NETWORK_RECIPE = (
+    "docker network create --internal"
+    " -o com.docker.network.bridge.gateway_mode_ipv4=isolated"
+    " -o com.docker.network.bridge.gateway_mode_ipv6=isolated"
+    " issuebot-internal"
+)
+_RTF_UP = 0x1
+_RTF_GATEWAY = 0x2
+
+
+def _read_route_table() -> str:
+    try:
+        return Path("/proc/net/route").read_text(encoding="ascii")
+    except OSError:
+        return ""
+
+
+def gateway_candidates(route_table: str) -> list[tuple[str, str, str]]:
+    """``(interface, first address, network)`` for every network the container sits on.
+
+    Docker hands the first address of a bridge network to the host, ``internal`` ones
+    included -- unless the network's gateway is isolated, when the bridge takes no address and
+    the first goes to whichever container attaches first. So the ``.1`` of each directly
+    attached network is where a host service would answer, and the canary's OK says only
+    that nothing did. The table is ``/proc/net/route``: one line per route, destination and
+    mask as hex in the host's byte order. A default route names no attached network, a host
+    route no gateway, and a route through a gateway leaves the host, so none is a candidate;
+    a line that does not parse is skipped. A network created with its own ``--gateway`` puts
+    the host somewhere other than first, which the canary does not see.
+    """
+    candidates: list[tuple[str, str, str]] = []
+    for line in route_table.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 8 or fields[0] == "lo":
+            continue
+        try:
+            network = int(fields[1], 16)
+            via = int(fields[2], 16)
+            flags = int(fields[3], 16)
+            netmask = int(fields[7], 16)
+            base = ipaddress.IPv4Address(network.to_bytes(4, sys.byteorder))
+            mask = ipaddress.IPv4Address(netmask.to_bytes(4, sys.byteorder))
+            prefix = ipaddress.IPv4Network((base, str(mask)), strict=False)
+        except ValueError:  # ipaddress's own errors are ValueErrors too
+            continue
+        if network == 0 or via != 0 or netmask == 0xFFFFFFFF:
+            continue
+        if not flags & _RTF_UP or flags & _RTF_GATEWAY:
+            continue
+        candidates.append((fields[0], str(base + 1), str(prefix)))
+    return candidates
+
+
+def _host_port_open(address: str, port: int, *, timeout_s: float) -> bool:
+    try:
+        with socket.create_connection((address, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _gateway_check(*, inside: bool, route_table: str) -> Check:
+    """The other half of "no route off the host": whether the host itself answers a session.
+
+    An ``internal`` network removes the container's default route and nothing else -- the
+    bridge still carries the host's own address at the network's first address, and a host
+    service bound to ``0.0.0.0`` answers there. Docker's isolated gateway mode gives the
+    bridge no address at all, and this line is its canary: from inside the container, try
+    the host's sshd at every attached network's first address. A canary rather than a proof,
+    since with the option that address is a container's or nobody's and a closed port is
+    refused either way; a warning rather than a failure, because a host running an
+    operator's own isolation is entitled to answer differently; and skipped outside a
+    container, where the host is this process's own.
+    """
+    subject = "gateway"
+    if not inside:
+        return Check(subject, "ok", "skipped outside a container: the host is this process's own")
+    candidates = gateway_candidates(route_table)
+    if not candidates:
+        return Check(subject, "ok", "no attached network found in the route table")
+    for interface, address, network in candidates:
+        if _host_port_open(address, GATEWAY_CANARY_PORT, timeout_s=_GATEWAY_PROBE_TIMEOUT_S):
+            return Check(
+                subject,
+                "warn",
+                f"something answered on port {GATEWAY_CANARY_PORT} at {address}, the first "
+                f"address of {interface}'s network {network}: without an isolated gateway that "
+                "address is the host's own, so a session can reach any host service. Recreate "
+                "the network with isolated gateway mode (Docker 28 or later): the shared one "
+                f"with `{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with "
+                "`docker compose stop worker egress && docker network rm <project>_egress && "
+                "docker compose up -d` once its compose.yaml carries the option "
+                '(docs/operations.md, "Upgrades")',
+            )
+    addresses = ", ".join(address for _interface, address, _network in candidates)
+    return Check(
+        subject,
+        "ok",
+        f"nothing answered on port {GATEWAY_CANARY_PORT} at the first address of each attached "
+        f"network ({addresses}): the host's own without an isolated gateway, a container's or "
+        "nobody's with one -- a canary, not a proof",
+    )
 
 
 def _github_status_check() -> Check:
