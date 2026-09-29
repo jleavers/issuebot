@@ -7,6 +7,7 @@ from issuebot.config import GitHubLabels
 from issuebot.github.models import (
     ApprovalEvidence,
     AuthStatus,
+    BranchRules,
     Comment,
     Issue,
     LabelEnsured,
@@ -91,3 +92,8 @@ class GitHubAdapter(Protocol):
     async def auth_status(self) -> AuthStatus: ...
 
     async def repo_info(self) -> RepoInfo: ...
+
+    async def branch_rules(self, branch: str) -> BranchRules:
+        """The ruleset requirements that bind the caller's pull requests into ``branch``, and
+        the rulesets carrying a review rule the caller may bypass."""
+        ...

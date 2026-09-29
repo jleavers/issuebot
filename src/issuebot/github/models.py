@@ -130,6 +130,53 @@ class RepoInfo:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class BranchRules:
+    """What the repository's rulesets require of the caller's pull request into ``branch``.
+
+    ``required_approving_reviews`` is ``None`` when no ``pull_request`` rule binds the caller.
+    Rulesets only: classic branch protection is readable by admins alone, and the check that
+    reads this must work for the account it recommends, which is not one.
+
+    A rule binds the caller only when its ruleset says the caller cannot bypass it. GitHub
+    lists a branch's rules for everyone -- it does not leave out the ones the caller may
+    bypass -- so the count and the three flags are the union over the rulesets that do bind
+    (the largest count; each flag where any of them sets it), and ``bypassable`` names the
+    rulesets carrying a ``pull_request`` rule that the caller may bypass, whose requirements
+    hold it to nothing and are therefore not counted (GHSA-jm8h-q3j6-p8xp).
+
+    ``require_last_push_approval`` is the ``pull_request`` rule's own
+    ``require_last_push_approval`` parameter (API name; "Require approval of the most recent
+    reviewable push" in the UI). Without it an approval of an earlier push still satisfies the
+    rule after a later one, so a session can push to an already-approved pull request and merge
+    it (GHSA-jm8h-q3j6-p8xp) -- the review count alone does not stop that.
+
+    ``require_code_owner_review`` is the rule's ``require_code_owner_review`` parameter
+    ("Require review from Code Owners"). Without it any account with write approves, the
+    session's own included: on a pull request someone else opened -- from a fork, where they
+    are the last pusher -- the session's approval satisfies the rule, latest push and all, and
+    the session can then merge it. With it, the approval that counts is a code owner's, which
+    keeps it a human's only if ``CODEOWNERS`` names only humans and names one for every path:
+    code-owner review binds only the paths that have an owner, so with no ``CODEOWNERS``, or
+    none matching a path (the recipes' ``* @<you>`` line is what matches them all), any write
+    approval counts there again. Nothing here reads that file.
+
+    ``dismiss_stale_reviews_on_push`` is the rule's ``dismiss_stale_reviews_on_push`` parameter
+    ("Dismiss stale pull request approvals when new commits are pushed"). GitHub checks the two
+    above separately -- latest-push review wants an approval of the latest push from anyone but
+    its pusher, code-owner review any code owner's approval not yet dismissed -- so without it
+    a maintainer's approval of an earlier push survives the next one, the session's own
+    approval of that push completes the pair, and the session can merge what no human saw.
+    """
+
+    branch: str
+    required_approving_reviews: int | None
+    require_last_push_approval: bool = False
+    require_code_owner_review: bool = False
+    dismiss_stale_reviews_on_push: bool = False
+    bypassable: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class AuthStatus:
     login: str
 

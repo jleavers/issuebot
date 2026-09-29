@@ -1020,6 +1020,311 @@ async def test_repo_info_without_admin_reads_false() -> None:
     assert info.admin is False
 
 
+RULES_CALL = ["api", "repos/example/repo/rules/branches/main?per_page=100"]
+
+
+def _rule(
+    kind: str, *, ruleset: int = 7, parameters: dict[str, object] | None = None
+) -> dict[str, object]:
+    """One entry of the rules endpoint's answer, shaped as GitHub shapes it."""
+    rule: dict[str, object] = {
+        "type": kind,
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "example/repo",
+        "ruleset_id": ruleset,
+    }
+    if parameters is not None:
+        rule["parameters"] = parameters
+    return rule
+
+
+def _ruleset(name: str, bypass: str = "never") -> str:
+    """The ruleset endpoint's answer, trimmed to what the read uses."""
+    return json.dumps({"id": 7, "name": name, "current_user_can_bypass": bypass})
+
+
+@pytest.mark.parametrize(
+    ("rules", "expected_reviews", "expected_last_push", "expected_code_owner", "expected_dismiss"),
+    [
+        ([], None, False, False, False),
+        ([_rule("deletion"), _rule("non_fast_forward")], None, False, False, False),
+        (
+            [_rule("pull_request", parameters={"required_approving_review_count": 0})],
+            0,
+            False,
+            False,
+            False,
+        ),
+        (
+            [
+                _rule("deletion"),
+                _rule("pull_request", parameters={"required_approving_review_count": 2}),
+            ],
+            2,
+            False,
+            False,
+            False,
+        ),
+        ([_rule("pull_request")], 0, False, False, False),
+        (
+            [
+                _rule(
+                    "pull_request",
+                    parameters={
+                        "required_approving_review_count": 1,
+                        "require_last_push_approval": True,
+                    },
+                )
+            ],
+            1,
+            True,
+            False,
+            False,
+        ),
+        (
+            [
+                _rule(
+                    "pull_request",
+                    parameters={
+                        "required_approving_review_count": 1,
+                        "require_last_push_approval": True,
+                        "require_code_owner_review": True,
+                    },
+                )
+            ],
+            1,
+            True,
+            True,
+            False,
+        ),
+        (
+            [
+                _rule(
+                    "pull_request",
+                    parameters={
+                        "required_approving_review_count": 1,
+                        "require_last_push_approval": True,
+                        "require_code_owner_review": True,
+                        "dismiss_stale_reviews_on_push": True,
+                    },
+                )
+            ],
+            1,
+            True,
+            True,
+            True,
+        ),
+        (
+            [
+                _rule(
+                    "pull_request",
+                    parameters={
+                        "required_approving_review_count": 1,
+                        "require_code_owner_review": "yes",
+                        "dismiss_stale_reviews_on_push": 1,
+                    },
+                )
+            ],
+            1,
+            False,
+            False,
+            False,
+        ),
+    ],
+)
+async def test_branch_rules_reads_the_review_count_in_force(
+    rules: list[dict[str, object]],
+    expected_reviews: int | None,
+    expected_last_push: bool,
+    expected_code_owner: bool,
+    expected_dismiss: bool,
+) -> None:
+    """The rules endpoint lists every ruleset rule on the branch (rulesets only), including
+    whether a review must cover the latest push and not just some earlier one, whether the
+    approval must come from a code owner rather than from any account with write, and whether
+    a push dismisses the approvals given before it (GHSA-jm8h-q3j6-p8xp). Only a literal
+    ``true`` turns any of them on.
+
+    It lists them for everyone, though, not only the ones that bind the caller, so each
+    ``pull_request`` rule's ruleset is read as well for whether the caller can bypass it --
+    one read per ruleset that carries one, and none for a branch without. Here none can be.
+    """
+    runner = StubRunner()
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(arg("repos/example/repo/rulesets/7"), stdout=_ruleset("main"))
+    result = await make_adapter(runner).branch_rules("main")
+    reads_ruleset = any(rule["type"] == "pull_request" for rule in rules)
+    assert [argv for argv, _ in runner.calls] == [RULES_CALL] + (
+        [["api", "repos/example/repo/rulesets/7"]] if reads_ruleset else []
+    )
+    assert (
+        result.branch,
+        result.required_approving_reviews,
+        result.require_last_push_approval,
+        result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
+        result.bypassable,
+    ) == (
+        "main",
+        expected_reviews,
+        expected_last_push,
+        expected_code_owner,
+        expected_dismiss,
+        (),
+    )
+
+
+async def test_branch_rules_hold_the_branch_to_every_ruleset_at_once() -> None:
+    """A pull request must satisfy every rule that binds it, so what the branch requires is
+    their union -- the largest count, and latest-push review, code-owner review and dismissed
+    stale approvals wherever any ruleset asks for them -- not whichever rule the endpoint
+    happened to list last."""
+    runner = StubRunner()
+    rules = [
+        _rule(
+            "pull_request",
+            ruleset=7,
+            parameters={
+                "required_approving_review_count": 2,
+                "require_code_owner_review": True,
+                "dismiss_stale_reviews_on_push": True,
+            },
+        ),
+        _rule(
+            "pull_request",
+            ruleset=9,
+            parameters={"required_approving_review_count": 1, "require_last_push_approval": True},
+        ),
+    ]
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(arg("repos/example/repo/rulesets/7"), stdout=_ruleset("main"))
+    runner.on(arg("repos/example/repo/rulesets/9"), stdout=_ruleset("org-wide"))
+    result = await make_adapter(runner).branch_rules("main")
+    assert (
+        result.required_approving_reviews,
+        result.require_last_push_approval,
+        result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
+        result.bypassable,
+    ) == (2, True, True, True, ())
+
+
+async def test_branch_rules_count_only_the_rulesets_the_caller_cannot_bypass() -> None:
+    """The rules endpoint does not leave out a rule the caller can bypass: it answers the
+    operator's own admin token, whose ruleset says ``pull_requests_only``, with the
+    ``pull_request`` rule all the same (GHSA-jm8h-q3j6-p8xp). So a ruleset the session's account
+    can bypass is named, not counted -- whatever it requires, it holds that account to none of
+    it, and an operator who made the Write role a bypass actor would otherwise read OK."""
+    runner = StubRunner()
+    rules = [
+        _rule(
+            "pull_request",
+            ruleset=7,
+            parameters={
+                "required_approving_review_count": 3,
+                "require_last_push_approval": True,
+                "require_code_owner_review": True,
+                "dismiss_stale_reviews_on_push": True,
+            },
+        ),
+        _rule("pull_request", ruleset=9, parameters={"required_approving_review_count": 1}),
+    ]
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(
+        arg("repos/example/repo/rulesets/7"),
+        stdout=_ruleset("writers may bypass", "pull_requests_only"),
+    )
+    runner.on(arg("repos/example/repo/rulesets/9"), stdout=_ruleset("main"))
+    result = await make_adapter(runner).branch_rules("main")
+    assert (
+        result.required_approving_reviews,
+        result.require_last_push_approval,
+        result.require_code_owner_review,
+        result.dismiss_stale_reviews_on_push,
+        result.bypassable,
+    ) == (1, False, False, False, ("writers may bypass",))
+
+
+@pytest.mark.parametrize(
+    "ruleset",
+    [
+        '{"name": "main", "current_user_can_bypass": "always"}',
+        '{"name": "main", "current_user_can_bypass": "pull_requests_only"}',
+        '{"name": "main", "current_user_can_bypass": "exempt"}',
+        '{"name": "main", "current_user_can_bypass": null}',
+        '{"name": "main"}',
+    ],
+)
+async def test_branch_rules_count_a_ruleset_only_on_an_explicit_never(ruleset: str) -> None:
+    """Fail closed: a ruleset binds the caller only when it says ``never``. An answer that
+    leaves the field out, or carries a value this code does not know, is a bypass."""
+    runner = StubRunner()
+    rules = [_rule("pull_request", parameters={"required_approving_review_count": 1})]
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(arg("repos/example/repo/rulesets/7"), stdout=ruleset)
+    result = await make_adapter(runner).branch_rules("main")
+    assert (result.required_approving_reviews, result.bypassable) == (None, ("main",))
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["", "null", "[1]", '{"current_user_can_bypass": "never"}', '{"name": 7}'],
+)
+async def test_branch_rules_rejects_a_malformed_ruleset(stdout: str) -> None:
+    runner = StubRunner()
+    rules = [_rule("pull_request", parameters={"required_approving_review_count": 1})]
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(arg("repos/example/repo/rulesets/7"), stdout=stdout)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).branch_rules("main")
+    assert excinfo.value.category == "response"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"type": "pull_request"},
+        {"type": "pull_request", "ruleset_id": "7"},
+        {"type": "pull_request", "ruleset_id": True},
+    ],
+)
+async def test_branch_rules_rejects_a_pull_request_rule_without_its_ruleset(
+    rule: dict[str, object],
+) -> None:
+    """Without the ruleset there is no telling whether the caller can bypass the rule, so the
+    rule cannot be counted and the read fails rather than guessing."""
+    runner = StubRunner()
+    runner.on(has("rules/branches/main"), stdout=json.dumps([rule]))
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).branch_rules("main")
+    assert excinfo.value.category == "response"
+
+
+async def test_branch_rules_fail_when_a_ruleset_will_not_read() -> None:
+    """A ruleset read that fails fails the whole read: counting the rule without it would
+    claim a binding nobody checked, and leaving it out would drop a requirement."""
+    runner = StubRunner()
+    rules = [_rule("pull_request", parameters={"required_approving_review_count": 1})]
+    runner.on(has("rules/branches/main"), stdout=json.dumps(rules))
+    runner.on(
+        arg("repos/example/repo/rulesets/7"),
+        stderr="gh: Not Found (HTTP 404)",
+        returncode=1,
+    )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).branch_rules("main")
+    assert excinfo.value.category == "not_found"
+
+
+@pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
+async def test_branch_rules_rejects_a_malformed_response(stdout: str) -> None:
+    runner = StubRunner()
+    runner.on(has("rules/branches/main"), stdout=stdout)
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).branch_rules("main")
+    assert excinfo.value.category == "response"
+
+
 @pytest.mark.parametrize("stdout", ["", "null", "{}", "[1]"])
 async def test_probe_responses_are_validated(stdout: str) -> None:
     runner = StubRunner()

@@ -49,6 +49,7 @@ from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_r
 from issuebot.events import Event, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
+    BranchRules,
     FakeGitHub,
     GitHubError,
     Issue,
@@ -264,7 +265,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
     assert "secret-token-value" not in out
 
 
@@ -286,7 +287,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -661,9 +662,11 @@ def test_validate_missing_executables_fail(
     assert "[FAIL] gh: 'gh' not found on PATH" in out
     assert "[WARN] gh auth: skipped (gh not found)" in out
     assert "[WARN] github.repo access: skipped (gh not found)" in out
+    assert "[WARN] github.token account: skipped (gh not found)" in out
+    assert "[WARN] github.branch rules: skipped (gh not found)" in out
     assert "[WARN] github.labels: skipped (gh not found)" in out
     assert "[WARN] claude auth: skipped (claude not found)" in out
-    assert "2 failed, 7 warnings" in out
+    assert "2 failed, 9 warnings" in out
 
 
 def test_validate_custom_claude_command_is_looked_up(
@@ -724,7 +727,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_warns_when_the_clones_files_are_claudes_configuration(
@@ -815,7 +818,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
     assert fake_database.urls == []
 
 
@@ -871,7 +874,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_names_the_compose_command_for_a_migration(
@@ -930,7 +933,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -945,7 +948,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -961,7 +964,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -985,7 +988,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "18 checks: 0 failed, 4 warnings" in out
+        assert "20 checks: 0 failed, 4 warnings" in out
     finally:
         released.set()
 
@@ -1003,7 +1006,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "18 checks: 0 failed, 4 warnings" in out
+    assert "20 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -1048,7 +1051,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "18 checks: 0 failed, 2 warnings" in out
+    assert "20 checks: 0 failed, 2 warnings" in out
     assert "secret" not in out
 
 
@@ -1214,7 +1217,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("18 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -1493,6 +1496,277 @@ def test_validate_warns_about_missing_labels(
         "run issuebot labels ensure" in out
     )
     assert "0 failed, 4 warnings" in out
+
+
+def test_validate_says_the_token_account_is_not_an_admin_and_the_branch_requires_review(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] github.token account: issuebot does not administer example/repo\n" in out
+    assert (
+        "[ OK ] github.branch rules: main requires 1 approving review of the latest push from a "
+        "code owner, and dismisses stale approvals\n"
+    ) in out
+
+
+def test_validate_counts_the_reviews_the_branch_requires(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=2,
+        require_last_push_approval=True,
+        require_code_owner_review=True,
+        dismiss_stale_reviews_on_push=True,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] github.branch rules: main requires 2 approving reviews of the latest push from a "
+        "code owner, and dismisses stale approvals\n"
+    ) in out
+
+
+def test_validate_names_the_tokens_account_when_the_login_will_not_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """``gh auth`` failing does not skip the identity lines -- ``repo_info`` may still answer --
+    so they name the account by the only thing left to call it."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+
+    async def failing() -> object:
+        raise GitHubError("response", "user response has no login")
+
+    monkeypatch.setattr(fake_github, "auth_status", failing)
+    fake_github.branch_rules_result = BranchRules(
+        branch="main", required_approving_reviews=1, bypassable=("main",)
+    )
+    main(["validate", "--workflow", str(GOOD)])
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] github.token account: the token's account does not administer example/repo\n"
+    ) in out
+    assert (
+        '[WARN] github.branch rules: the token\'s account can bypass ruleset "main": the account '
+        "a session runs as is not held to the review rule "
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+def test_validate_warns_when_the_tokens_account_administers_the_repository(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """GHSA-jm8h-q3j6-p8xp: an admin can bypass or rewrite the ruleset that stops a session
+    merging its own work, and the session holds the token."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.admin = True
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.token account: issuebot administers example/repo, and the session holds "
+        "the token: a session can bypass or rewrite the branch ruleset. Run as a dedicated "
+        'account with write access (docs/security-model.md, "The account a session acts as")'
+    ) in out
+
+
+@pytest.mark.parametrize(
+    ("count", "detail"),
+    [
+        (None, "no pull_request rule applies to main"),
+        (0, "main requires 0 approving reviews"),
+    ],
+)
+def test_validate_warns_when_the_default_branch_needs_no_review(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    count: int | None,
+    detail: str,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(branch="main", required_approving_reviews=count)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: {detail}: the account a session runs as can merge any pull "
+        "request, its own included. Require at least one approving review of the latest push "
+        "from a code owner, in a ruleset: classic branch protection is not read here "
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+def test_validate_warns_when_the_review_does_not_cover_the_latest_push(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """A review count alone is not enough (GHSA-jm8h-q3j6-p8xp): an approval of an earlier push
+    still satisfies it after a later one unless the rule also requires approval of the most
+    recent push, so a session can push to an already-approved pull request and merge it.
+    Nothing about that is contrived here:
+    issuebot's own conflict bounce sends a session to push to an already-approved pull
+    request."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main", required_approving_reviews=1, require_last_push_approval=False
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.branch rules: main requires 1 approving review but not of the latest "
+        'push: a session can push after the approval and merge. Turn on "Require approval of '
+        'the most recent reviewable push" '
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+def test_validate_warns_when_any_account_with_write_can_approve(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    """Covering the latest push is not enough either (GHSA-jm8h-q3j6-p8xp): the session's
+    account has write, and any write account's approval counts toward the review rule, so on a
+    pull request someone else opened -- from a fork, say, where they are the last pusher -- the
+    bot's approval satisfies it and the bot can merge. Only a code-owner requirement, with a
+    CODEOWNERS naming humans, keeps the approval a human's."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=1,
+        require_last_push_approval=True,
+        require_code_owner_review=False,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.branch rules: main requires 1 approving review of the latest push, but "
+        "not from a code owner: an account with write can approve and merge another account's "
+        'pull request. Turn on "Require review from Code Owners" with a CODEOWNERS naming only '
+        'humans (docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+@pytest.mark.parametrize(
+    ("count", "required"), [(1, "1 approving review"), (2, "2 approving reviews")]
+)
+def test_validate_warns_when_a_push_keeps_the_approvals_before_it(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    count: int,
+    required: str,
+) -> None:
+    """Latest-push and code-owner review are satisfied separately (GHSA-jm8h-q3j6-p8xp): the
+    first by any approval of the latest push from someone other than its pusher, the second by
+    any code owner's approval not yet dismissed. So a maintainer's approval of an earlier push
+    survives the next one, the session's own approval of that push completes the pair, and the
+    session can merge what no human saw -- unless a push dismisses the approvals before it."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=count,
+        require_last_push_approval=True,
+        require_code_owner_review=True,
+        dismiss_stale_reviews_on_push=False,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: main requires {required} of the latest push from a code "
+        "owner, but keeps stale approvals: an earlier human approval survives a later push, and "
+        "an approval of that push from the account a session runs as completes the pair. Turn "
+        'on "Dismiss stale pull request approvals when new commits are pushed" '
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+@pytest.mark.parametrize(
+    ("bypassable", "named"),
+    [
+        (("writers",), 'ruleset "writers"'),
+        (("writers", "org-wide"), 'rulesets "writers", "org-wide"'),
+    ],
+)
+def test_validate_warns_when_the_sessions_account_can_bypass_the_rule(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+    bypassable: tuple[str, ...],
+    named: str,
+) -> None:
+    """A rule the account can bypass holds it to nothing (GHSA-jm8h-q3j6-p8xp), so the bypass is
+    the finding: the line names it and stops there, rather than reporting the requirements the
+    other rulesets make as if they bound the account -- which here would read OK."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.branch_rules_result = BranchRules(
+        branch="main",
+        required_approving_reviews=1,
+        require_last_push_approval=True,
+        require_code_owner_review=True,
+        bypassable=bypassable,
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"[WARN] github.branch rules: issuebot can bypass {named}: the account a session runs "
+        "as is not held to the review rule "
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+
+
+def test_validate_warns_when_the_branch_rules_will_not_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: object,
+    fake_github: FakeGitHub,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+
+    async def failing(branch: str) -> object:
+        raise GitHubError("not_found", "HTTP 404: Not Found")
+
+    monkeypatch.setattr(fake_github, "branch_rules", failing)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] github.branch rules: could not read: HTTP 404: Not Found "
+        '(docs/security-model.md, "The account a session acts as")\n'
+    ) in out
+    assert "[ OK ] github.labels:" in out  # the checks after it still run
+
+
+def test_validate_skips_the_identity_checks_without_gh(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    executables: Callable[[set[str]], None],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    executables({"claude"})
+    main(["validate", "--workflow", str(GOOD)])
+    out = capsys.readouterr().out
+    assert "[WARN] github.token account: skipped (gh not found)" in out
+    assert "[WARN] github.branch rules: skipped (gh not found)" in out
 
 
 def test_validate_names_the_compose_command_inside_the_image(
@@ -3601,7 +3875,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
         f"other than this process's ({uid}), but all 3 concurrent sessions share it"
     ) in out
     assert probed == ["agent"]
-    assert "18 checks: 0 failed, 3 warnings" in out
+    assert "20 checks: 0 failed, 3 warnings" in out
 
 
 def test_run_once_takes_the_workspaces_own_account_from_the_pool(
@@ -3681,7 +3955,7 @@ def test_validate_reports_a_pool_of_session_accounts(
     # this process's, so the line says so rather than leaving the reader to take it on trust.
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
-    assert "18 checks: 0 failed, 2 warnings" in out
+    assert "20 checks: 0 failed, 2 warnings" in out
 
 
 # --- validate: the session's network egress (#126) ------------------------------------
@@ -3886,7 +4160,7 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
@@ -3975,7 +4249,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -4004,7 +4278,7 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     reported = [line for line in out.splitlines() if line.startswith(prefix)]
     assert len(reported) == 1
     assert str(listing) in reported[0]
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
@@ -4024,7 +4298,7 @@ def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
-    assert "18 checks: 1 failed, 2 warnings" in out
+    assert "20 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(

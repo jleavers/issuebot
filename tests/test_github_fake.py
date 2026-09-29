@@ -7,7 +7,7 @@ import pytest
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError
 from issuebot.github.fake import FakeGitHub
-from issuebot.github.models import WORKPAD_MARKER, StateLabel
+from issuebot.github.models import WORKPAD_MARKER, BranchRules, StateLabel
 from issuebot.github.state import LABEL_STYLES, LabelStyle
 
 SETTINGS = GitHubSettings(repo="example/repo")
@@ -303,6 +303,23 @@ async def test_probes(fake: FakeGitHub) -> None:
     assert (await admin.repo_info()).admin is True
     limit = await fake.rate_limit()
     assert limit.remaining == 4999 and limit.limit == 5000
+
+
+async def test_branch_rules_defaults_to_one_review_and_can_be_set() -> None:
+    fake = FakeGitHub(GitHubSettings(repo="example/repo"))
+    default = await fake.branch_rules("main")
+    assert default.required_approving_reviews == 1
+    assert default.require_last_push_approval is True
+    assert default.require_code_owner_review is True
+    assert default.dismiss_stale_reviews_on_push is True
+    assert default.bypassable == ()
+    fake.branch_rules_result = BranchRules(branch="main", required_approving_reviews=None)
+    result = await fake.branch_rules("main")
+    assert result.required_approving_reviews is None
+    assert result.require_last_push_approval is False
+    assert result.require_code_owner_review is False
+    assert result.dismiss_stale_reviews_on_push is False
+    assert result.bypassable == ()
 
 
 async def test_fail_next_injects_errors_in_order(fake: FakeGitHub) -> None:

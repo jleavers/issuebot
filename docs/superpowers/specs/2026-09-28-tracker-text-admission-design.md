@@ -36,7 +36,7 @@ includes this one.
 
 Tracker text reaches a session that holds a shell or a GitHub credential only if a maintainer
 wrote it, in the version a maintainer approved, labelled with its author and that author's
-association. And the identity a session acts as cannot merge its own work.
+association. And the identity a session acts as cannot merge work no human approved.
 
 ## Design
 
@@ -122,8 +122,9 @@ after approval".
 - `github/adapter.py`: `approval_evidence(number) -> ApprovalEvidence`, on `GhCli` (one query
   over `timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT])` and
   `userContentEdits`, each paginated under a ceiling of its own; past the ceiling is a
-  `response` error, as for `count_own_label_additions`) and on the fake, whose records gain an
-  edit and a rename operation so the tests are hermetic.
+  `response` error, as for `count_own_label_additions` (a `PageCeilingError`, which the
+  orchestrator maps to `Unapproved`)) and on the fake, whose records gain an edit and a
+  rename operation so the tests are hermetic.
 - `orchestrator/approval.py`, pure: `assess(evidence, *, admitting: StateLabel, own_login,
   labels) -> Approved(approver, at) | Unapproved(reason, edit, approval)`.
 - `orchestrator/actions.py`: `unapproved_escape`.
@@ -158,41 +159,75 @@ issuebot's side is one attribute. `GitHubText` gains `association`, rendered in 
 carry, so the body's envelope states the fact for the text the session already holds.
 `tests/test_agent_prompt.py` pins the attribute the way it pins `author`.
 
-Not configurable: the three associations are GitHub's own meaning of the author's relationship
-to the repository, not a permission check -- `OWNER` is the repository's owner, `MEMBER` is a
-member of the owning organisation whether or not they hold any permission on this repository,
-and `COLLABORATOR` is anyone invited to the repository at read level and up -- so on an
-organisation-owned repository the filter admits every member of the organisation; a deployment
-that wants narrower admission narrows the organisation, not the filter, and a setting here
-would only be another way to widen what the three already admit. Known and accepted: the
-account issuebot runs as is a collaborator, so its own comments pass the filter. A session
-persuading its successor holds the same authority, not more, and the workpad is that account's
-text by design (#77).
+Not configurable: the three associations are GitHub's own meaning of the author's
+relationship to the repository, not a permission check -- `OWNER` is the repository's owner,
+`MEMBER` is a member of the owning organisation whether or not they hold any permission on
+this repository, and `COLLABORATOR` is anyone invited to the repository at read level and up
+-- so on an organisation-owned repository the filter admits every member of the
+organisation; a deployment that wants narrower admission narrows the organisation, not the
+filter, and a setting here would only be another way to widen what the three already admit.
+Known and accepted: the account issuebot runs as is at least a collaborator (the owner, on a
+maintainer's own token), so its own comments pass the filter. A session persuading its
+successor holds the same authority, not more, and the workpad is that account's text by
+design (#77).
 
-### 3. The identity a session acts as cannot merge its own work
+### 3. The identity a session acts as cannot merge work no human approved
+
+Amended 2026-09-28 after the whole-branch review: the invariant's last sentence, and this
+heading, say "cannot merge work no human approved", not "its own work", since an account
+with write can approve someone else's pull request and merge it; both recipes therefore hold
+the approval to humans -- code-owner review, with a `CODEOWNERS` naming only the operator or
+only human teams, or for an organisation the rule's required reviewers -- on top of a review
+of the latest push; `branch_rules` reads the rules endpoint as what it is, the branch's rules
+for everyone, and counts only the rulesets the caller cannot bypass, naming the rest; the
+solo recipe's classic token is stated as the trade it is on a private target; and, after the
+re-review, both recipes dismiss stale approvals on push (`dismiss_stale_reviews_on_push`),
+since GitHub checks latest-push and code-owner review separately and an undismissed human
+approval of an earlier push pairs with the bot's approval of the latest -- the three settings
+hold the invariant together, and `validate` warns while any is off.
 
 **For a solo operator**, which is who this repository expects. Run issuebot as a dedicated
 GitHub account -- a second personal account, added as a collaborator with **write** and never
-admin. Put a ruleset on the default branch requiring one approving review with no bypass for
-that account; the operator approves the bot's pull requests from their own account. The
-operator's own pull requests need an approver too, and GitHub does not let an author approve
-their own, so the operator is a `Repository admin` bypass actor in `pull_request` mode: their
-pull requests merge without a second account, and a direct push to the branch is still
-refused. What the arrangement guarantees is the invariant's last sentence: the session's
-identity cannot merge what it wrote, and cannot rewrite the rule that says so, because it is
-not an admin.
+admin. A fine-grained token cannot reach a repository its account only collaborates on, so the
+account holds a classic `repo` token, and that is a trade: its reach is the account's, which
+on a public target adds little the session could not already do there, but on a private one
+lets a session push the code to a public repository the account creates. The organisation
+route below keeps a fine-grained token, and is the better one for a private target. Put a
+ruleset on the default branch whose `pull_request` rule sets three things together: one
+approving review of the latest push (`require_last_push_approval`), from a code owner
+(`require_code_owner_review`), with stale approvals dismissed on push
+(`dismiss_stale_reviews_on_push`) -- and a `CODEOWNERS` naming only the operator
+(`* @<operator>`), so that every path has a human owner. The operator approves the bot's pull
+requests from their own account. Of the latest push, because otherwise an approval of an
+earlier push still satisfies the rule after a later one, and issuebot's own conflict bounce
+pushes to an already-approved pull request. From a code owner, because otherwise any account
+with write approves: on a pull request someone opened from a fork, they are the last pusher,
+so the bot's approval satisfies the rule and the bot can merge it. Stale approvals dismissed,
+because GitHub checks the other two separately: without it the operator's approval of an
+earlier push survives the next one, and the bot's approval of that push completes the pair.
+A ruleset's bypass list cannot name a personal account, so the hazard is a role -- the
+`Write` role, which is the bot's, must never be on it. The operator's own pull requests need
+an approver too, and GitHub does not let an author approve their own, so the `Repository
+admin` role is a bypass actor in `pull_request` mode: their pull requests merge without a
+second account, and a direct push to the branch is still refused. What the three settings
+guarantee together, and none of them alone, is the invariant's last sentence: the session's
+identity cannot merge work no human approved, and cannot rewrite the rule that says so,
+because it is not an admin.
 
 **For an organisation**, the same shape with the organisation's own tools in place of the
 personal ones. The dedicated account is a machine user -- GitHub's name for a personal account
-an organisation creates for automation -- made a member of the organisation, or an outside
-collaborator, with **write** on the repository and no seat on any team that carries admin or
-maintain. The ruleset is an *organisation* ruleset targeting the repository's default branch,
-rather than a repository one: a repository admin cannot remove it, so the guarantee holds
-against the repository's own admins too, and it applies to every repository the organisation
-points a deployment at. Its bypass actors are teams of humans, never the machine user; its
-approvers are whoever reviews there already, so no admin bypass is needed and none is
-granted. `CODEOWNERS` with `require_code_owner_review` narrows who can approve a session's
-change to a path, which is the organisation's choice rather than this design's. A GitHub App
+an organisation creates for automation -- made a member of the organisation, which keeps a
+fine-grained token (an outside collaborator is back to the classic one), with **write** on the
+repository and no seat on any team that carries admin or maintain. The ruleset is an
+*organisation* ruleset targeting the repository's default branch, rather than a repository
+one: a repository admin cannot remove it, so the guarantee holds against the repository's own
+admins too, and it applies to every repository the organisation points a deployment at. It
+requires a review of the latest push and dismisses stale approvals for the same reasons, and
+holds the approval to humans the same way, as part of the recipe rather than the
+organisation's choice: code-owner review with a `CODEOWNERS` naming human teams for every
+path, or the rule's required reviewers naming them. Its
+bypass actors are teams of humans the machine user is not on; its approvers are whoever
+reviews there already, so no admin bypass is needed and none is granted. A GitHub App
 installation token is *not* the recommended credential, though `gh` accepts one: it expires
 after an hour, and a session can run longer than that.
 
@@ -208,12 +243,19 @@ characters of its incentive.
 - `RepoInfo.admin` (from `repos/{repo}`'s `permissions.admin`): when true, `github.token
   account` warns that the token's account is an admin of the repository and a session holding
   it can bypass or rewrite the branch ruleset; run as a dedicated account with write access.
-- `branch_rules(branch) -> BranchRules(required_approving_reviews: int | None)` (from
-  `repos/{repo}/rules/branches/{branch}`, the rules in force for the caller): when no
-  `pull_request` rule requires at least one review, `github.branch rules` warns that the
-  account a session runs as can merge its own pull requests. Rulesets only: classic branch
-  protection is readable by admins alone, and the check must work for the account it
-  recommends. The warning says so.
+- `branch_rules(branch) -> BranchRules(required_approving_reviews: int | None,
+  require_last_push_approval, require_code_owner_review, dismiss_stale_reviews_on_push,
+  bypassable)` (from
+  `repos/{repo}/rules/branches/{branch}`, which lists the branch's rules for everyone -- it
+  does not leave out a rule the caller can bypass -- and, for each ruleset carrying a
+  `pull_request` rule, `repos/{repo}/rulesets/{id}`'s `current_user_can_bypass`, where only
+  `never` binds): when the token's account can bypass a ruleset carrying the review rule,
+  `github.branch rules` warns and names it; otherwise it warns unless the rulesets that bind
+  require at least one approving review of the latest push from a code owner, and dismiss
+  stale approvals on push. Rulesets only: classic branch protection is readable by admins
+  alone, and the check must work for the account it recommends. The warning says so. It cannot
+  read `CODEOWNERS`, so an OK line proves neither that the session's account is not itself a
+  code owner nor that every path has one: code-owner review binds only the paths that do.
 
 Both are warnings, not failures: `run-once` against a personal scratch repository is a
 legitimate use and should not be refused.
@@ -228,7 +270,8 @@ legitimate use and should not be refused.
 - `tests/test_orchestrator.py`: a `todo` issue edited after labelling is not claimed and loses
   its label; relabelled, it is claimed; a failing evidence read skips the tick and logs once.
 - `tests/test_github_ghcli.py`: the query's pagination and its `response` error past the
-  ceiling; `RepoInfo.admin`; `branch_rules` over the four rule shapes above.
+  ceiling; `RepoInfo.admin`; `branch_rules` over the rule shapes above, the union over the
+  rulesets that bind, and a bypassable ruleset named rather than counted.
 - `tests/test_agent_prompt.py`: the `association` attribute.
 - `tests/test_workflow_default.py`: every
   comment-fetching command in the shipped workflow carries the association filter.

@@ -150,14 +150,19 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
   `validate` says so; the clone's `.mcp.json` stays out either way, since every turn runs with
   `--strict-mcp-config` (see the `claude.mcp_config` row below, which is the only way to name one). `WORKFLOW.md` owns the labels and the
   process. In this repository, `.github/CODEOWNERS` requests a human's review of a change to
-  those files (and to `.github/` itself) for the same reason; it only blocks a merge under
-  branch protection's "Require review from Code Owners".
+  those files (and to `.github/` itself) for the same reason, and names the maintainer for
+  every other path too; the default branch's ruleset turns on "Require review from Code
+  Owners", which makes the request a block on the merge.
 
 ### Prerequisites
 
 1. **A GitHub token** for the account the agent will act as. Every commit, PR and comment
-   appears under that account, so a dedicated bot account is a good idea. Create a fine-grained
-   personal access token restricted to the target repository with:
+   appears under that account, and the session holds the token, so run issuebot as a
+   dedicated account that cannot merge work no human approved. [The account a session acts
+   as](docs/security-model.md#the-account-a-session-acts-as) is the recipe for one person
+   and for an organisation. A dedicated account that is a collaborator rather than an
+   organisation member needs a classic token instead, and that section says why. Create a
+   fine-grained personal access token restricted to the target repository with:
 
    - Contents (read/write)
    - Issues (read/write)
@@ -313,12 +318,14 @@ docker compose run --rm worker labels ensure
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)
+[ OK ] github.token account: your-bot does not administer your-org/your-repo
+[ OK ] github.branch rules: main requires 1 approving review of the latest push from a code owner, and dismisses stale approvals
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 21444 characters, renders
-18 checks: 0 failed, 2 warnings
+20 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
