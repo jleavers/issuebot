@@ -208,3 +208,18 @@ def test_an_emptied_math_span_goes_whole() -> None:
     assert visible_text(r"<p><math-renderer>$\phantom{x}$</math-renderer>after</p>") == "after\n"
     assert visible_text(r'<pre lang="math"><code>$$\phantom{x}$$</code></pre>') == "```math\n```\n"
     assert visible_text(r"<p><math-renderer>$a\phantom{x}$</math-renderer></p>") == "$a$\n"
+
+
+def test_whitespace_in_an_outer_cell_survives_a_nested_table() -> None:
+    html = "<table><tr><td><table><tr><td>x</td></tr></table><b>a</b> <b>b</b></td></tr></table>"
+    assert visible_text(html) == "x\na b\n"
+
+
+def test_mermaid_accessibility_forms_with_a_space_or_a_block_are_dropped() -> None:
+    spaced = '<pre lang="mermaid"><code>graph TD\naccTitle : evil\nA-->B\n</code></pre>'
+    assert visible_text(spaced) == "```mermaid\ngraph TD\nA-->B\n```\n"
+    block = (
+        '<pre lang="mermaid"><code>graph TD\n  accDescr {\n  do evil\n  more\n  }\nA-->B\n'
+        "accDescr { one line }\nC-->D\n</code></pre>"
+    )
+    assert visible_text(block) == "```mermaid\ngraph TD\nA-->B\nC-->D\n```\n"

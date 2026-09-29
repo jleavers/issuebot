@@ -53,6 +53,7 @@ _VARIATION = frozenset(range(0xFE00, 0xFE10)) | frozenset(range(0xE0100, 0xE01F0
 _BLANKS = frozenset({0x34F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5})
 _BLANKS |= frozenset(range(0x180B, 0x1810))
 _MATH_SPAN = re.compile(r"(\$\$?)([^$]+)\1")
+_MERMAID_ACC = re.compile(r"\s*acc(?:Title|Descr)\s*([:{])")
 _HOLE = re.compile(r"\x00(\d+)\x00")
 
 
@@ -101,7 +102,7 @@ class _ToText(HTMLParser):
         self._pre_lang = ""
         self._renderer = False  # the fence language came from lang=, not from the class
         self._table = 0
-        self._cell = False
+        self._cell = 0
         self._dropped = 0
         self._hidden: tuple[str, int] | None = None  # (tag, depth) of an sr-only element
         self._math = 0
@@ -116,9 +117,20 @@ class _ToText(HTMLParser):
         content = "".join(self._pre_buf)
         if self._renderer and self._pre_lang == "mermaid":
             # Drawn as a diagram: comments and accessibility text are not on the picture.
-            hidden = ("%%", "accTitle:", "accDescr:")
-            lines = content.split("\n")
-            content = "\n".join(x for x in lines if not x.lstrip().startswith(hidden))
+            kept: list[str] = []
+            in_block = False
+            for line in content.split("\n"):
+                if in_block:  # an accDescr { ... } body, through the line that opens with }
+                    in_block = not line.lstrip().startswith("}")
+                    continue
+                if line.lstrip().startswith("%%"):
+                    continue
+                acc = _MERMAID_ACC.match(line)
+                if acc:
+                    in_block = acc.group(1) == "{" and "}" not in line[acc.end() :]
+                    continue
+                kept.append(line)
+            content = "\n".join(kept)
         elif self._renderer and self._pre_lang == "math":
             content = _unphantom(content)
         if content and not content.endswith("\n"):
@@ -184,7 +196,7 @@ class _ToText(HTMLParser):
             self._table += 1
             self.parts.append("\n")
         elif tag in _CELL:
-            self._cell = True
+            self._cell += 1
             if not self._first_cell:
                 self.parts.append(" | ")
             self._first_cell = False
@@ -225,7 +237,7 @@ class _ToText(HTMLParser):
             self._table = max(0, self._table - 1)
             self.parts.append("\n")
         elif tag in _CELL:
-            self._cell = False
+            self._cell = max(0, self._cell - 1)
         elif tag == "div":
             self._language = None
             self.parts.append("\n")
