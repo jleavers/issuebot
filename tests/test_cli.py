@@ -739,7 +739,75 @@ def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
         "own-account exclusion, the first `gh pr view 1 --comments`: a prompt that replaces "
         "the shipped one has no comment barrier unless it carries Step 6's commands "
         '(docs/security-model.md, "The text a session acts on")'
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login"
     ) in out
+
+
+def test_validate_warns_about_a_read_inside_the_rework_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#250's scenario is a prompt that reads the review it is answering, and that read sits
+    inside ``{% if rework %}``: one render at the defaults would never see it."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if rework %}\n"
+        "Read the review: `gh pr view {{ issue.number }} --comments`\n{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 1 --comments`: " in out
+    )
+
+
+def test_validate_warns_about_a_read_inside_the_linked_pr_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The same read under ``{% if issue.pr %}``: the sample context has no PR by default, and
+    the check renders the variant that has one. Reached by sixteen variants, counted once."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if issue.pr %}\n"
+        "Read the review: `gh pr view {{ issue.pr.number }} --comments`\n{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 2 --comments`: " in out
+    )
+
+
+def test_validate_warns_about_a_literal_login_in_the_exclusion(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Both halves present, but the exclusion names a login rather than ``{{ login }}``: right
+    until the account changes, so the warning says which half is the problem."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}, then "
+        "`gh api repos/o/r/issues/1/comments --jq '.[] | select((.author_association | "
+        'IN("OWNER","MEMBER","COLLABORATOR")) and .user.login != "my-bot") | .body\'`.',
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] prompt: renders, but 1 comment read lacks" in out
+    assert (
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
+    )
 
 
 def test_validate_warns_in_the_singular_about_one_unfiltered_comment_read(
@@ -759,7 +827,10 @@ def test_validate_warns_in_the_singular_about_one_unfiltered_comment_read(
     assert (
         "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
         "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq '.[].body'`: "
-        "a prompt that replaces the shipped one has no comment barrier" in out
+        "a prompt that replaces the shipped one has no comment barrier unless it carries "
+        "Step 6's commands "
+        '(docs/security-model.md, "The text a session acts on")'
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
     )
 
 
