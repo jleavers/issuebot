@@ -2,6 +2,7 @@
 
 import html
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -307,37 +308,108 @@ def _visible_body(issue: Issue) -> str:
 
 
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
-_GH_COMMAND = re.compile(r"`gh [^`]*`")
-_ASSOCIATION_FILTER = 'select(.author_association | IN("OWNER","MEMBER","COLLABORATOR")'
-_OWN_LOGIN_EXCLUSION = re.compile(r'\.user\.login != "[^"]+"')
-_UNFILTERED_FLAGS = ("--comments", "--json reviews", "--json comments")
-_WORKPAD_BY_ID = re.compile(r"issues/comments/<?\w+>?|-X POST [^ ]*/issues/[^/ ]+/comments")
+_GH_SPAN = re.compile(r"`gh [^`\n]*`")
+_FENCE = re.compile(r"^(`{3,}|~{3,})[^\n]*\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
+_UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
+_WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
+_WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 
 
-def unfiltered_comment_reads(rendered: str) -> list[str]:
-    """Every backticked ``gh`` command in a rendered prompt that reads ``/comments`` or
-    ``/reviews`` without both the association filter and the own-login exclusion, or that uses
-    ``--comments``, ``--json reviews`` or ``--json comments``; ``[]`` when the prompt is clean.
+def _gh_commands(rendered: str) -> list[str]:
+    """Backticked ``gh`` spans, and lines starting ``gh `` inside fenced code blocks."""
+    commands: list[str] = []
+    for fence in _FENCE.finditer(rendered):
+        commands.extend(
+            line.strip() for line in fence.group(2).splitlines() if line.strip().startswith("gh ")
+        )
+    commands.extend(match.strip("`") for match in _GH_SPAN.findall(_FENCE.sub("", rendered)))
+    return commands
 
-    Both halves are needed: the association filter keeps strangers' text out
-    (GHSA-jm8h-q3j6-p8xp), and the exclusion keeps the session's own account out, since a
-    dedicated bot is a ``COLLABORATOR`` and would otherwise pass the filter with its own
-    comments on other issues (GHSA-f3fm-r55f-2vgm). The workpad's by-id calls
-    (``issues/comments/<id>``; ``-X POST .../issues/N/comments``) are exempt (#77): they read
-    or write one comment issuebot itself made and never sweep a thread.
-    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use this, so
-    the shipped prompt and a deployment's prompt are held to one rule.
+
+def _tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _uses_unfiltered_flag(tokens: list[str]) -> bool:
+    for index, token in enumerate(tokens):
+        if token in ("-c", "--comments"):
+            return True
+        if token == "--json" and index + 1 < len(tokens):
+            fields = tokens[index + 1]
+        elif token.startswith("--json="):
+            fields = token.removeprefix("--json=")
+        else:
+            continue
+        if _UNFILTERED_FIELDS.intersection(fields.split(",")):
+            return True
+    return False
+
+
+def _is_write(tokens: list[str]) -> bool:
+    """A ``gh api`` call with a write method: it posts or edits one comment and never reads a
+    thread back, so the read filter has nothing to say about it."""
+    if tokens[:2] != ["gh", "api"]:
+        return False
+    for index, token in enumerate(tokens):
+        if token in ("-X", "--method") and index + 1 < len(tokens):
+            method = tokens[index + 1]
+        elif token.startswith("-X") and len(token) > 2:
+            method = token[2:]
+        else:
+            continue
+        if method.upper() in _WRITE_METHODS:
+            return True
+    return False
+
+
+def _is_workpad_read(tokens: list[str]) -> bool:
+    """``gh api repos/<o>/<r>/issues/comments/<id> --jq .body``, optionally redirected to a
+    file, and nothing else: the one read of a single comment by id that the workpad section
+    makes, spelled with the document's own ``<id>`` placeholder."""
+    if len(tokens) < 5 or tokens[:2] != ["gh", "api"]:
+        return False
+    if not _WORKPAD_READ.fullmatch(tokens[2]) or tokens[3:5] != ["--jq", ".body"]:
+        return False
+    rest = tokens[5:]
+    return rest == [] or (len(rest) == 2 and rest[0] == ">")
+
+
+def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
+    """Every ``gh`` command in a rendered prompt that reads ``/comments`` or ``/reviews``
+    without the one conjunctive filter, or that uses ``-c``, ``--comments`` or ``--json`` with
+    ``comments``, ``reviews`` or ``latestReviews``; ``[]`` when the prompt is clean.
+
+    The filter is ``select((.author_association | IN(<maintainer associations>)) and
+    .user.login != "<login>")``. Both halves are needed: the association keeps strangers' text
+    out (GHSA-jm8h-q3j6-p8xp), and the exclusion keeps the session's own account out, since a
+    dedicated bot is a ``COLLABORATOR`` and would otherwise pass the association with its own
+    comments on other issues (GHSA-f3fm-r55f-2vgm). The parentheses are load-bearing: jq's
+    ``|`` binds loosest, so without them ``.user`` is read from the association string and the
+    call errors. A negated, ``or``-joined or wrong-login filter is flagged, because it is a
+    different string. Exempt are ``gh api`` writes (``-X POST``, ``PATCH``, ``DELETE``) and the
+    workpad's one read by id (``issues/comments/<id> --jq .body``, #77): neither sweeps a thread.
+
+    This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
+    guarantee: prose that tells the agent to fetch comments some other way is beyond it.
+    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
+    shipped prompt and a deployment's prompt are held to one rule.
     """
+    associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
+    required = f'select((.author_association | IN({associations})) and .user.login != "{login}")'
     gaps: list[str] = []
-    for command in _GH_COMMAND.findall(rendered):
-        if any(flag in command for flag in _UNFILTERED_FLAGS):
+    for command in _gh_commands(rendered):
+        tokens = _tokens(command)
+        if _uses_unfiltered_flag(tokens):
             gaps.append(command)
             continue
         if "/comments" not in command and "/reviews" not in command:
             continue
-        if _WORKPAD_BY_ID.search(command):
+        if _is_write(tokens) or _is_workpad_read(tokens):
             continue
-        if _ASSOCIATION_FILTER not in command or not _OWN_LOGIN_EXCLUSION.search(command):
+        if required not in command:
             gaps.append(command)
     return gaps
 

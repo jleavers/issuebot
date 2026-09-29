@@ -50,7 +50,8 @@ def render_body_html(body: str | None) -> str | None:
     code, everything else escaped, HTML comments dropped. Enough for the hermetic suite to
     exercise the same path production takes; the real renderer is GitHub's. Limits: fences are
     split before comments are dropped, so a fence inside a comment surfaces, and ``~~~`` fences
-    are prose; both err toward revealing."""
+    are prose, so a comment inside one is dropped where GitHub shows it as code. The first errs
+    toward revealing, the second toward hiding."""
     if body is None:
         return None
     parts: list[str] = []
@@ -242,6 +243,7 @@ class FakeGitHub:
         )
 
     async def own_login(self) -> str:
+        self._enter("own_login")
         return self.login
 
     async def approval_evidence(self, number: int) -> ApprovalEvidence:

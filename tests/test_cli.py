@@ -2406,9 +2406,32 @@ def test_run_once_show_prompt_has_no_side_effects(
     assert [name for name, _ in fake_github.calls] == [
         "fetch_issues_by_ids",
         "find_workpad_comment",
+        "own_login",
     ]
     assert fake_github.issue(42).state is StateLabel.TODO
     assert not (tmp_path / "ws").exists()
+
+
+def test_run_once_show_prompt_names_a_login_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    find_workpad = fake_github.find_workpad_comment
+
+    async def then_fail_the_login(number: int) -> object:
+        comment = await find_workpad(number)
+        fake_github.fail_next("transport")
+        return comment
+
+    fake_github.find_workpad_comment = then_fail_the_login  # type: ignore[method-assign]
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] login:" in capsys.readouterr().out
 
 
 def test_run_once_show_prompt_carries_the_workspaces_instruction_files(

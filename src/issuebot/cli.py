@@ -1539,9 +1539,13 @@ async def _run_once(
         # The preview shows what the session's first turn would get, workpad included (#77).
         try:
             workpad = await adapter.find_workpad_comment(number)
-            login = await adapter.own_login()
         except GitHubError as exc:
             print(f"[FAIL] workpad: {exc}")
+            return 1
+        try:
+            login = await adapter.own_login()
+        except GitHubError as exc:
+            print(f"[FAIL] login: {exc}")
             return 1
         context = PromptContext(
             issue=issue,
