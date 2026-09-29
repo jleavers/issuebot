@@ -292,17 +292,36 @@ own output.
 
 **Fix shape, one pull request.**
 
-1. **The body a session gets is the body the approver saw.** A pure `visible_text(markdown)`
-   in `agent/visible.py`, applied by `issue_variables` to the title and body before they go
-   into the envelope, removes what GitHub renders as nothing: HTML comments; link-reference
-   definitions (`[label]: target`) that no reference in the text uses; and Unicode format
-   characters (category `Cf`: zero-width joiners and spaces, direction marks, the BOM). It is
-   fence-aware -- an HTML comment inside a fenced block or an inline code span *is* rendered,
-   so those stay. What it deliberately leaves, and the docs say so: a collapsed `<details>`
-   block (its summary line is visible and a reader can expand it) and length (a long body was
-   on the page). GraphQL's `bodyText` is the rendered text and was rejected because it
-   flattens code fences, where the steps live. The prompt's paragraph after the description
-   says the text is as it renders, and that what the page hides is not here.
+1. **The body a session gets is the body the approver saw -- GitHub's own render.** The
+   issues query also asks for `bodyHTML`, the sanitised HTML the maintainer's page was built
+   from: comments are already gone from it, `<script>` and `<style>` are neutralised, code
+   fences are `<pre><code>` blocks, attribute text is not text. `Issue.body_html` carries
+   it, and a pure `visible_text(html)` in `agent/visible.py` -- the standard library's
+   `html.parser`, no Markdown library -- turns it back into readable text for the prompt:
+   text nodes only; `<pre>` back to a fence with its language; `<code>` to backticks;
+   `<a>` to `[text](href)`, since a session needs URLs for legitimate steps and the
+   pinned-reference rule below governs what it may follow; block elements to line breaks,
+   list items to `- `, task-list checkboxes to `[ ]`/`[x]`; the *content* of `<script>`,
+   `<style>` and `<template>` dropped, and `<img>` rendered as nothing (its `alt` is
+   attacker-writable text the page does not show). Then the characters that print as
+   nothing are removed: Unicode format characters (`Cf`), variation selectors
+   (`U+FE00-FE0F`, `U+E0100-E01EF`) and C0 controls other than tab and newline. The title
+   gets only that last pass. `issue_variables` applies both before the envelope.
+
+   Why the render and not a stripper: the first cut of this section removed HTML comments,
+   unused link definitions and format characters from the raw Markdown with fence-aware
+   regexes, and review found single-line whole-body bypasses (a fence line inside a comment,
+   a list-item fence, an unterminated `<!--`, a task-list `[x]` keeping a hidden
+   definition, multi-line definitions) and a catastrophic-backtracking hang on a row of
+   backticks. Every fix was another approximation of GitHub's Markdown; the render is what
+   the maintainer saw by definition. `bodyText` was rejected because it flattens the
+   fences the steps live in. What is deliberately left, and the docs say so: a collapsed
+   `<details>` block (its summary line is visible and a reader can expand it) and length.
+   The fake produces a minimal `bodyHTML` (paragraphs and fences, everything else escaped)
+   so the hermetic suite exercises the same path; the normaliser refuses an issue record
+   that has a body and no `bodyHTML`, so production never takes a raw-body path. The
+   prompt's paragraph after the description says the text is as it renders, and that what
+   the page hides is not here.
 2. **A reference the body makes is followed only if pinned.** A ground rule in
    `WORKFLOW.md`: a step that fetches something the description points at is followed only
    when the reference is pinned by content -- a commit SHA, a digest -- and a branch name or a
@@ -344,9 +363,10 @@ every other prompt rule.
   comment-fetching command in the shipped workflow carries the association filter.
 - `tests/test_cli.py`: the two new checks, warn and ok.
 - `tests/test_doc_pointers.py` and `tests/test_readme_bounds.py` cover the prose.
-- Section 4: `tests/test_agent_visible.py` (each hidden class removed; a comment inside a
-  fence and inside an inline code span kept; a comment straddling lines; a referenced link
-  definition kept and an unreferenced one removed; an all-hidden body renders empty);
+- Section 4: `tests/test_agent_visible.py` (the HTML-to-text conversion: comments and
+  hidden element content dropped, fences and inline code kept, links, lists and checkboxes,
+  entities, invisible characters; an all-hidden body renders empty; a body-shaped record
+  without `bodyHTML` is refused by the normaliser);
   `tests/test_agent_prompt.py` (the title and body variables carry the visible text; the
   `login` variable); `tests/test_workflow_default.py` (the login in every filter; the
   ground rules' phrases; the every-command scan requiring both halves);
