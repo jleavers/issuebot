@@ -49,6 +49,7 @@ from issuebot.agent.accounts import (
     settings_with_run_as,
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
+from issuebot.agent.prompt import unfiltered_comment_reads
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
@@ -1233,14 +1234,40 @@ def _slack_check(settings: Settings, *, probe: bool) -> Check:
     return Check(subject, status, detail)
 
 
+# The login ``_sample_context`` renders, and so the one ``unfiltered_comment_reads`` must be
+# handed: the own-account exclusion is a string comparison against exactly this name.
+SAMPLE_LOGIN = "sample-bot"
+
+
 def _prompt_check(workflow: Workflow) -> Check:
+    """The prompt in force renders, and its ``gh`` comment reads carry the barrier (#250).
+
+    An overlay that replaces the prompt keeps whatever Step 6 it had, so the shipped prompt
+    passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
+    text is scanned with the same ``unfiltered_comment_reads`` the shipped one is held to, and a
+    gap is a *warning* rather than a failure: an operator's prompt may fetch comments by a route
+    the scanner accepts and the filter still be applied, or may not fetch them at all in prose
+    the scanner cannot read, and ``validate`` cannot tell the two apart. What it can do is say
+    which command it found, how many, and name the document that says what the barrier is.
+    """
     body = workflow.prompt_template
     if not body:
         return Check("prompt", "warn", "body is empty")
     try:
-        PromptRenderer(body).render(_sample_context(workflow.config))
+        rendered = PromptRenderer(body).render(_sample_context(workflow.config))
     except AgentError as exc:
         return Check("prompt", "fail", exc.message)
+    gaps = unfiltered_comment_reads(rendered, SAMPLE_LOGIN)
+    if gaps:
+        noun = "comment read lacks" if len(gaps) == 1 else "comment reads lack"
+        return Check(
+            "prompt",
+            "warn",
+            f"renders, but {len(gaps)} {noun} the maintainer filter or the own-account "
+            f"exclusion, the first `{gaps[0]}`: a prompt that replaces the shipped one has no "
+            "comment barrier unless it carries Step 6's commands "
+            '(docs/security-model.md, "The text a session acts on")',
+        )
     return Check("prompt", "ok", f"{len(body)} characters, renders")
 
 
@@ -1271,7 +1298,7 @@ def _sample_context(settings: Settings) -> PromptContext:
     return PromptContext(
         issue=issue,
         repo=settings.github.repo,
-        login="sample-bot",
+        login=SAMPLE_LOGIN,
         labels=settings.github.labels,
         attempt=1,
         turn_number=1,

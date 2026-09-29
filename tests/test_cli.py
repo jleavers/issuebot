@@ -711,6 +711,77 @@ def test_validate_empty_prompt_warns(
     assert "[WARN] prompt: body is empty" in capsys.readouterr().out
 
 
+def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#250, GHSA-f3fm-r55f-2vgm: an overlay that replaces the prompt keeps whatever Step 6 it
+    had, and nothing else says it has no comment barrier.
+
+    The second command carries the *old* filter, the association alone with no own-account
+    exclusion, so it is a gap too: the count is 2, and the first reported is the ``--comments``
+    one because spans are found in document order.
+    """
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}. Then "
+        "`gh pr view 1 --comments` and "
+        "`gh api repos/o/r/pulls/1/reviews --jq '.[] | select(.author_association | "
+        'IN("OWNER","MEMBER","COLLABORATOR")) | {id}\'`.',
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 2 comment reads lack the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 1 --comments`: a prompt that replaces "
+        "the shipped one has no comment barrier unless it carries Step 6's commands "
+        '(docs/security-model.md, "The text a session acts on")'
+    ) in out
+
+
+def test_validate_warns_in_the_singular_about_one_unfiltered_comment_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}, then "
+        "`gh api repos/o/r/issues/1/comments --jq '.[].body'`.",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq '.[].body'`: "
+        "a prompt that replaces the shipped one has no comment barrier" in out
+    )
+
+
+def test_validate_passes_the_shipped_prompt(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The shipped prompt is held to the same scan as a deployment's (#250), and it passes.
+
+    Through a copy in ``tmp_path`` rather than ``configs/WORKFLOW.md`` in place, for the reason
+    ``tests/test_workflow_default.py::load`` passes ``overlay=False``: a developer's own
+    ``configs/WORKFLOW.local.md`` would otherwise be what this test validated.
+    """
+    shipped = Path(__file__).parent.parent / "configs" / "WORKFLOW.md"
+    path = _write(tmp_path, shipped.read_text(encoding="utf-8"))
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] prompt: " in capsys.readouterr().out
+
+
 def test_validate_configured_database_and_slack(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
