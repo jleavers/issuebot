@@ -173,9 +173,12 @@ text; fenced code from `<pre>`, with its language; inline code; a link as its te
 refused rather than rendered raw. What is left in is left in knowingly. A collapsed `<details>` block keeps its
 content, since it is one click away for the approver and hiding it from the session would
 hide a legitimate reproduction; length is not bounded; a `dir="rtl"` span reads in logical
-rather than visual order; and text hidden inside a mermaid diagram or a math expression is
+rather than visual order; a `geojson`, `topojson` or `stl` block keeps its source verbatim in
+a fence, though the page draws a map or a model and never shows the text, since a GIS or 3D
+report needs its source; and text hidden inside a mermaid diagram or a math expression is
 stripped best-effort (`%%` comments and accessibility titles, `\phantom{}`) rather than
-proven gone. The conversion runs exactly once, on the render and never on its own output,
+proven gone, as is text nested three or more levels deep in `<sub>` or `<sup>`, whose 75%
+font-size compounds to nothing on the page. The conversion runs exactly once, on the render and never on its own output,
 because it is not idempotent: a literal `<!-- x -->` the page *did* show is text after one
 pass and a comment to drop after a second. What the body points at is a different question
 from what it says: a branch, a tag or a URL is followed only when it is pinned by content -- a

@@ -12,9 +12,10 @@ inside can close it) with the language from GitHub's ``highlight-source-*`` clas
 to backticks; ``<del>``, ``<s>`` and ``<strike>`` to ``~~``;
 ``<a>`` to ``[text](href)``; block elements to line breaks
 and table cells to `` | ``; the content of ``<script>``, ``<style>``, ``<template>``, ``<rp>``
-and ``sr-only`` elements dropped; ``<img>`` rendered as nothing. Then the characters that
-print as nothing go: Unicode format characters, variation selectors, fillers, C0 and C1
-controls other than tab and newline.
+and ``sr-only`` elements dropped, as is text nested three or more levels deep in ``<sub>``
+and ``<sup>``, whose 75% font-size compounds to nothing; ``<img>`` rendered as nothing. Then
+the characters that print as nothing go: Unicode format characters, variation selectors,
+fillers, C0 and C1 controls other than tab and newline.
 
 ``href`` is the one attribute whose text reaches the output: a session needs URLs for
 legitimate steps, and the workflow's pinned-reference rule governs what it may follow. It is
@@ -42,6 +43,11 @@ _BLOCK = frozenset(
 _DROPPED = frozenset({"script", "style", "template", "rp"})
 _STRIKE = frozenset({"del", "s", "strike"})
 _CELL = frozenset({"td", "th"})
+_SMALL = frozenset({"sub", "sup"})
+_SMALL_LIMIT = 3
+"""GitHub sets ``sub, sup { font-size: 75% }`` and it compounds, so text nested this deep is
+below a pixel on the page: one level is footnote and formula markup, two is rare, three has no
+honest use."""
 _VOID = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param"}
     | {"source", "track", "wbr"}
@@ -106,6 +112,7 @@ class _ToText(HTMLParser):
         self._dropped = 0
         self._hidden: tuple[str, int] | None = None  # (tag, depth) of an sr-only element
         self._math = 0
+        self._small = 0  # open <sub>/<sup> depth: each nests at 75% font-size
         self._first_cell = True
         self._language: str | None = None
         self._link: list[tuple[str | None, int]] = []  # (href, index into parts)
@@ -162,6 +169,8 @@ class _ToText(HTMLParser):
         if "sr-only" in classes and tag not in _VOID:
             self._hidden = (tag, 1)
             return
+        if tag in _SMALL:
+            self._small += 1
         if tag == "div":
             match = _LANGUAGE.search(a.get("class") or "")
             if match:
@@ -214,6 +223,8 @@ class _ToText(HTMLParser):
             return
         if self._dropped:
             return
+        if tag in _SMALL:
+            self._small = max(0, self._small - 1)
         if tag == "pre":
             if self._pre:
                 self._pre -= 1
@@ -252,7 +263,7 @@ class _ToText(HTMLParser):
             self.handle_starttag(tag, attrs)
 
     def handle_data(self, data: str) -> None:
-        if self._dropped or self._hidden:
+        if self._dropped or self._hidden or self._small >= _SMALL_LIMIT:
             return
         # Stripped here, so no C0 control (the NUL of a fence's hole) can arrive in the text.
         data = _clean(data)

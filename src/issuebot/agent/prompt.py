@@ -111,9 +111,10 @@ class GitHubText(str):
     the envelope rather than raising; one that cuts a tag is caught by ``PromptRenderer``,
     which refuses an output whose envelopes do not pair up. A tag inside the text is
     neutralised, so the text cannot end its own envelope. Truthiness is the text's, so
-    ``{% if issue.body %}`` still guards a missing body. ``text`` is the raw value, which a
-    template only reaches by naming it (``issue.body.text``); ``| striptags`` is not that, since
-    it unescapes the neutralised tag back into a real one and the render is then refused.
+    ``{% if issue.body %}`` still guards a missing body. ``text`` is the same rendered text
+    without its envelope, which a template only reaches by naming it (``issue.body.text``);
+    ``| striptags`` is not that, since it unescapes the neutralised tag back into a real one and
+    the render is then refused.
     """
 
     text: str

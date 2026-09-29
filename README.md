@@ -524,7 +524,7 @@ what the tags mean; a template cannot hand that text over bare, and a copy of th
 drops the rule still ships the envelope. Each `<github-text>` tag names its `source`, `author`
 and, for the issue's own text, the author's `association` (GitHub's `OWNER`, `COLLABORATOR`,
 `NONE`, ...). String filters act on the envelope, one that cuts a tag (`truncate`) fails the
-render, and `issue.body.text` is the raw value for a template that wants it. `issue.body` is
+render, and `issue.body.text` is the same rendered text without its envelope, for a template that wants it. `issue.body` is
 the description as GitHub renders it, not the Markdown: an HTML comment, a link definition
 nothing uses and anything else the page did not show are gone, since the person who approved
 the text never saw them ([The text a session acts
