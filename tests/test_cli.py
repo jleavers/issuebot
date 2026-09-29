@@ -1762,7 +1762,9 @@ def test_validate_warns_when_the_tokens_account_administers_the_repository(
     out = capsys.readouterr().out
     assert (
         "[WARN] github.token account: issuebot administers example/repo, and the session holds "
-        "the token: a session can bypass or rewrite the branch ruleset. Run as a dedicated "
+        "the token: a session can bypass or rewrite the branch ruleset, and its own comments "
+        "and reviews come back to it as requests, since the prompt's own-account exclusion is "
+        "off for an admin. Run as a dedicated "
         'account with write access (docs/security-model.md, "The account a session acts as")'
     ) in out
 
@@ -2588,6 +2590,7 @@ def test_run_once_show_prompt_has_no_side_effects(
         "fetch_issues_by_ids",
         "find_workpad_comment",
         "own_login",
+        "repo_info",
     ]
     assert fake_github.issue(42).state is StateLabel.TODO
     assert not (tmp_path / "ws").exists()

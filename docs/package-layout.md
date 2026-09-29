@@ -682,7 +682,9 @@ deployment invites. `PromptRenderer`
 `repo_instructions`). `login` is the account the session acts as, `own_login()` read once per
 session in `session.py` before the turn loop (a failure is `github_error`) and rendered bare
 like `repo`, so the workflow's comment reads can leave that account's own text out
-(GHSA-f3fm-r55f-2vgm). `unfiltered_comment_reads(rendered, login, workpad_id=)` is the lint
+(GHSA-f3fm-r55f-2vgm); `admin` is `repo_info().admin` read beside it (a failure is likewise
+`github_error`), and when true the workflow drops that exclusion, as approval does for labels
+(`own_labels_approve`), because on a maintainer's own token the account is the maintainer. `unfiltered_comment_reads(rendered, login, workpad_id=)` is the lint
 over a rendered prompt's `gh` commands -- backticked spans and fenced lines, a chain split at
 `;`, `&&`, `||` and `|` and scanned segment by segment -- that reports each read of
 `/comments` or `/reviews` whose last `--jq` program lacks the association filter *and* that

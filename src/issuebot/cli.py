@@ -495,8 +495,9 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
             "github.token account",
             "warn",
             f"{who} administers {info.full_name}, and the session holds the token: a session "
-            "can bypass or rewrite the branch ruleset. Run as a dedicated account with write "
-            f"access ({IDENTITY_DOC})",
+            "can bypass or rewrite the branch ruleset, and its own comments and reviews come back "
+            "to it as requests, since the prompt's own-account exclusion is off for an admin. "
+            f"Run as a dedicated account with write access ({IDENTITY_DOC})",
         )
     return Check("github.token account", "ok", f"{who} does not administer {info.full_name}")
 
@@ -1377,6 +1378,7 @@ def _sample_context(
         issue=issue,
         repo=settings.github.repo,
         login=SAMPLE_LOGIN,
+        admin=False,
         labels=settings.github.labels,
         attempt=attempt,
         turn_number=turn_number,
@@ -1653,10 +1655,16 @@ async def _run_once(
         except GitHubError as exc:
             print(f"[FAIL] login: {exc}")
             return 1
+        try:
+            admin = (await adapter.repo_info()).admin
+        except GitHubError as exc:
+            print(f"[FAIL] repository role: {exc}")
+            return 1
         context = PromptContext(
             issue=issue,
             repo=settings.github.repo,
             login=login,
+            admin=admin,
             labels=settings.github.labels,
             attempt=attempt,
             turn_number=1,

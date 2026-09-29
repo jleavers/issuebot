@@ -413,7 +413,9 @@ the logs on your terminal.
   worker's account added, which nothing edits away -- not from the workpad, whose body the
   session rewrites. That history is GitHub's word on *who* added the label, so if the token
   is your own login rather than a bot account's, a rework you set by hand is counted as a
-  bounce as well; a dedicated account keeps the two apart.
+  bounce as well; a dedicated account keeps the two apart. The same goes for the session's own
+  comments: on an admin token the prompt's own-account exclusion is off, so they come back to it
+  as requests, the degraded posture the labels have too.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:

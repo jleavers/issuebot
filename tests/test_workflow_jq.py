@@ -46,7 +46,7 @@ PAGE = [
 ]
 
 
-def _rendered(make_issue: Callable[..., Issue]) -> str:
+def _rendered(make_issue: Callable[..., Issue], *, admin: bool = False) -> str:
     workflow = load_workflow(WORKFLOW, environ={"GH_TOKEN": "t"}, overlay=False)
     now = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
     issue = make_issue(
@@ -65,6 +65,7 @@ def _rendered(make_issue: Callable[..., Issue]) -> str:
         issue=issue,
         repo=workflow.config.github.repo,
         login=LOGIN,
+        admin=admin,
         labels=workflow.config.github.labels,
         attempt=1,
         turn_number=1,
@@ -105,3 +106,12 @@ def test_the_five_step_6_programs_run_and_filter(make_issue: Callable[..., Issue
         assert results[0]["body"] == "body 1"
     quarantine = _run(programs[4])
     assert quarantine == [{"author": "mallory", "association": "NONE", "url": "u3"}]
+
+
+def test_on_an_admin_account_the_own_row_is_kept(make_issue: Callable[..., Issue]) -> None:
+    """The same five programs with the login term off: the maintainer's own row comes back."""
+    programs = _programs(_rendered(make_issue, admin=True))
+    assert len(programs) == 5
+    for program in programs[:4]:
+        assert [item["id"] for item in _run(program)] == [1, 2], program
+    assert _run(programs[4]) == [{"author": "mallory", "association": "NONE", "url": "u3"}]

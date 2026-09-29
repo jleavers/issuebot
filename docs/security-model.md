@@ -241,6 +241,13 @@ past the review rule, or push to the default branch, with your authority
 (GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge work
 no human approved, its own or anyone else's, and `validate` reads two things about yours.
 
+The same account is the one the prompt's comment reads leave out: text it wrote itself is agent
+output, so Step 6 excludes its login. On an admin account that exclusion is off, since the
+account is then the maintainer and excluding it would leave a rework none of their review
+feedback; its own comments and reviews therefore come back to it as requests. That is the same
+degraded posture as labels above, where an admin token's own label counts on any issue, and one
+more reason for a bot account.
+
 `github.token account` reads the account's role on the repository, and warns when that role
 is admin, since an admin can bypass or rewrite the rule below. `github.branch rules`
 reads the default branch's *rulesets* -- not classic branch protection, which is readable by

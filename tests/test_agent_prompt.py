@@ -58,6 +58,7 @@ def context(issue: Issue, **overrides: object) -> PromptContext:
         "rework": False,
         "self_review": True,
         "login": "issuebot",
+        "admin": False,
     }
     fields.update(overrides)
     return PromptContext(**fields)  # type: ignore[arg-type]

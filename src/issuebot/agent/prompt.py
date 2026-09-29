@@ -259,6 +259,11 @@ class PromptContext:
     # rendered bare like ``repo``. The workflow's comment fetches leave this account's own
     # text out, whatever its association (GHSA-f3fm-r55f-2vgm).
     login: str
+    # Whether that account administers the repository (``repo_info().admin``), the same fact
+    # ``own_labels_approve`` reads for labels: on an admin's own token the account *is* the
+    # maintainer, so excluding its login would leave no maintainer text at all, and the
+    # workflow drops the exclusion (and says so) when this is true.
+    admin: bool
     labels: GitHubLabels
     attempt: int
     turn_number: int
@@ -279,6 +284,7 @@ class PromptContext:
             "issue": issue_variables(self.issue),
             "repo": self.repo,
             "login": self.login,
+            "admin": self.admin,
             "repo_instructions": [
                 instruction_variables(file, self.repo) for file in self.repo_instructions
             ],
