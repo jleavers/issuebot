@@ -1327,9 +1327,9 @@ _SAMPLE_PR = LinkedPr(
     number=2, url="https://github.com/example/repo/pull/2", state="open", merged_at=None
 )
 _SAMPLE_WORKPAD = Comment(
-    id=1,
+    id=987654321,  # distinctive, so a literal id in an example cannot collide with the exemption
     body=f"{WORKPAD_MARKER}\n",
-    url="https://github.com/example/repo/issues/1#issuecomment-1",
+    url="https://github.com/example/repo/issues/1#issuecomment-987654321",
     author=SAMPLE_LOGIN,
     created_at=datetime(2026, 1, 1, tzinfo=UTC),
     updated_at=datetime(2026, 1, 1, tzinfo=UTC),
