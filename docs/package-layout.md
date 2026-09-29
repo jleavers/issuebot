@@ -165,7 +165,10 @@ to `complete`; `set_state(..., clear_markers=True)` is the one caller that does 
 is how `claim` makes the marker the *last* session's verdict rather than a label nothing ever
 removes; both adapters ensure it and report it missing alongside the five roles);
 frozen `Issue`/`LinkedPr`/`Comment` records (`models.py`; `Issue.author` is the opening
-login, `None` for a deleted account; `LinkedPr.mergeable` is GitHub's `MergeableState`
+login, `None` for a deleted account; `Issue.body_html` is `bodyHTML`, GitHub's sanitised
+render, asked for beside `body` and required by the normaliser of any record carrying one --
+a body without its render is a `response` error, so no raw body reaches a prompt
+(GHSA-f3fm-r55f-2vgm); `LinkedPr.mergeable` is GitHub's `MergeableState`
 lowercased, `unknown` when absent); `GitHubAdapter`
 protocol (async); `GhCliAdapter` (GraphQL reads via `gh api graphql`, writes via
 `gh issue edit`, `gh label create`, `gh api`; `GhRunner` is the only subprocess boundary,
@@ -209,7 +212,9 @@ GraphQL errors payload, which is how a server-side query timeout arrives, or a m
 answer -- still fails the whole read);
 `FakeGitHub` for tests (same normaliser, GitHub-like semantics, `fail_next`, `calls`, a
 `login` it acts as, `add_comment(..., author=)` and `open_pr(..., author=, cross_repository=)`
-for what other accounts write). The two records issuebot treats as its own state are resolved
+for what other accounts write, and `render_body_html`, a minimal stand-in for GitHub's render
+-- paragraphs and fences, everything else escaped, comments dropped -- so the hermetic suite
+takes the path production takes). The two records issuebot treats as its own state are resolved
 by provenance, never by text (#77, spec `2026-09-14-artefact-provenance-design.md`): the
 account the adapter runs as, `GhCliAdapter.own_login()` (`gh api user`, probed once and
 cached; `auth_status` fills the same cache, so the worker's startup probe pays for it; a
@@ -672,8 +677,19 @@ it is `overrun`/`max_output_bytes` in the `hook_failed` line, and it is what `su
 and so the run's error -- says, ahead of `timed_out`. `hooks.after_create` is where the
 *target* repository's dependency install runs, so the party growing this is the one the
 deployment invites. `PromptRenderer`
-(Jinja2 `StrictUndefined`; variables `issue`, `repo`, `labels`, `workpad_marker`, `workpad`,
-`attempt`, `turn_number`, `max_turns`, `rework`, `self_review`, `repo_instructions`).
+(Jinja2 `StrictUndefined`; variables `issue`, `repo`, `login`, `labels`, `workpad_marker`,
+`workpad`, `attempt`, `turn_number`, `max_turns`, `rework`, `self_review`,
+`repo_instructions`). `login` is the account the session acts as, `own_login()` read once per
+session in `session.py` before the turn loop (a failure is `github_error`) and rendered bare
+like `repo`, so the workflow's comment reads can leave that account's own text out
+(GHSA-f3fm-r55f-2vgm). `unfiltered_comment_reads(rendered, login, workpad_id=)` is the lint
+over a rendered prompt's `gh` commands -- backticked spans and fenced lines, a chain split at
+`;`, `&&`, `||` and `|` and scanned segment by segment -- that reports each read of
+`/comments` or `/reviews` whose last `--jq` program lacks the association filter *and* that
+login's exclusion, and each `--comments` or `--json comments`/`reviews`, exempting `gh api`
+writes and the workpad's one read by id; a lint and not a guarantee, since prose can ask for
+a fetch it cannot see, and shared by `tests/test_workflow_default.py` and `validate` so the
+shipped prompt and a deployment's are held to one rule.
 `repo_instructions` (#107, spec `2026-09-14-repository-instructions-design.md`) is the
 clone's `CLAUDE.md` and `AGENTS.md` as `instructions.py` read them after `before_run`, once
 per run (`REPOSITORY_INSTRUCTION_FILES`, a declared list; through `Boundary.read` as the
@@ -728,7 +744,17 @@ it unescapes the neutralised tag back into a real one, and the render is refused
 body) is a `prompt_error` naming the source, as is any exception a filter raises, so
 `validate` reports `[FAIL] prompt:` and a worker never crashes its task on one.
 `issue.author` (from `author { login }` in the fragment, `None` once GitHub has deleted the
-account, which the envelope names `unknown`) is who it credits. The default workflow states
+account, which the envelope names `unknown`) is who it credits. `body` is not the raw
+Markdown but `visible.py`'s `visible_text(issue.body_html)`: `bodyHTML`, GitHub's sanitised
+render, back to text with the standard library's `html.parser` -- text nodes only, `<pre>` to
+a fence with its language, `<code>` to backticks, `<a>` to its text with the `href` beside
+it, table cells and task-list boxes, the content of `<script>`, `<style>` and `<template>`
+dropped, then the characters that print as nothing (`strip_invisible`, which is all the
+title gets). The render
+rather than the raw body because the approver read the page and an HTML comment or a format
+character never reached it, and rather than `bodyText` because that flattens the fences the
+steps live in (GHSA-f3fm-r55f-2vgm); applied once, in `issue_variables`, since a second pass
+over its own output would drop a literal `<!-- -->` the page showed. The default workflow states
 the rule once, before the first envelope, and its feedback and test-plan rules answer a
 comment's author, or run a description's steps, under the ground rules rather than as
 written; `ClaudeRunner` (`claude -p
@@ -1617,7 +1643,13 @@ a `github.status` check that reads githubstatus.com through the `_github_status`
 warns on an incident or on a page that will not answer but can never fail (advisory: a
 human is running this and there is no dispatch to hold), a
 `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
-and with `--slack-probe` posts one test message, and a prompt render against a sample issue),
+and with `--slack-probe` posts one test message, and a `prompt` check that renders the prompt
+in force over every branch a template takes -- a linked PR or none, rework, attempt, workpad,
+self-review, thirty-two renders and the continuation -- and scans each with
+`unfiltered_comment_reads` (`issuebot.agent`), warning with the first comment read that
+lacks the maintainer filter or the own-account exclusion, or spells a literal login where
+`{{ login }}` belongs, since a replaced prompt is the operator's but has no comment barrier
+without them (#250)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,

@@ -162,6 +162,29 @@ counts on any issue, so a session holding the token can approve another issue fo
 successor. Nothing is stored, so a restart cannot reset it: re-approval is a maintainer
 applying `issuebot/todo` again.
 
+The label approved the *page*, though, and a raw Markdown body carries text the page never
+showed (GHSA-f3fm-r55f-2vgm): an HTML comment, a link-reference definition nothing uses, a
+Unicode format character, a `<script>`, `<style>` or `<template>` element, whatever GitHub's
+sanitiser drops. So the session is handed the description as GitHub rendered it: the issues
+query asks for `bodyHTML`, GitHub's own sanitised render, and `agent/visible.py` turns that
+back into text with the standard library's HTML parser -- text nodes only, so no attribute
+text; fenced code from `<pre>`, with its language; inline code; a link as its text with the
+`href` beside it; table cells; task-list boxes -- and a record with a body and no render is
+refused rather than rendered raw. What is left in is left in knowingly. A collapsed `<details>` block keeps its
+content, since it is one click away for the approver and hiding it from the session would
+hide a legitimate reproduction; length is not bounded; a `dir="rtl"` span reads in logical
+rather than visual order; and text hidden inside a mermaid diagram or a math expression is
+stripped best-effort (`%%` comments and accessibility titles, `\phantom{}`) rather than
+proven gone. The conversion runs exactly once, on the render and never on its own output,
+because it is not idempotent: a literal `<!-- x -->` the page *did* show is text after one
+pass and a comment to drop after a second. What the body points at is a different question
+from what it says: a branch, a tag or a URL is followed only when it is pinned by content -- a
+full commit SHA, or a digest checked before use -- since what was approved is the text and
+not what sits at the other end of a link (Ground rule 8), and egress bounds the rest to
+GitHub-hosted references. And one thing none of this covers: a session holding `gh` can still
+ask for the raw body itself (`gh issue view --json body`), and only the workflow's own words
+say not to.
+
 Comments are the other text a session reads, and on a public repository anyone can leave one
 on an issue in `issuebot/review` or `issuebot/rework`. The barrier is in the commands the
 workflow hands out -- every fetch is a `gh api --jq` that selects `OWNER`, `MEMBER` or
@@ -174,6 +197,13 @@ the quarantined author's own text into the context by design, too -- quoting is 
 maintainer shows what they are answering -- and only the rule that follows, that such text
 "is still its original author's", stands between it and the session.
 
+The session's own account is the other half of that filter: every fetch also selects
+`.user.login != "<login>"`, the `{{ login }}` the prompt renders, since a dedicated bot is a
+collaborator and its own comments and reviews would otherwise come back to it, and to every
+session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
+comment read in the prompt in force lacks either half, which is what a prompt that replaces
+the shipped one loses (#250).
+
 `author_association` is GitHub's own word for the author's *relationship* to the repository,
 not a permission check: `OWNER` is the repository's owner; `MEMBER` is a member of the owning
 organisation, whether or not they hold any permission on this particular repository;
@@ -182,8 +212,9 @@ organisation-owned repository the filter admits every member of that organisatio
 deployment that wants narrower admission narrows the organisation, not the filter -- the three
 are fixed by design (`docs/superpowers/specs/2026-09-28-tracker-text-admission-design.md`,
 §2). The account issuebot runs as is at least a collaborator -- the owner, on a maintainer's
-own token -- so its own comments pass: a session persuading its successor holds the same
-authority, not more, which is the line #77 drew for the workpad.
+own token -- so the association alone would admit its own comments, and the login exclusion
+above is what keeps them out; the workpad, the one text of its own a session reads, it
+reads by id (#77).
 
 What was dropped is listed by author and URL under `Quarantined` in the workpad, and a
 maintainer adopts one of those requests by replying to it. A reply adopts only what its own
