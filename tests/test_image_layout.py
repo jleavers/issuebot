@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from issuebot.cli import ISOLATED_NETWORK_RECIPE
 from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 
@@ -490,11 +491,19 @@ def test_the_worker_has_no_route_off_the_host_but_the_proxy() -> None:
     networks = yaml.safe_load(COMPOSE)["networks"]
     assert sorted(SERVICES["worker"]["networks"]) == ["egress", "issuebot-internal"]
     assert networks["egress"]["internal"] is True
-    # The shared one is external, so its `--internal` is the operator's to pass and cannot be
-    # asserted here -- compose rejects any other attribute beside `external`. The README says
-    # so and `validate` probes for a route round the proxy.
+    # `internal` removes the default route and not the host, which still answers at the
+    # network's first address (2026-09-29); isolated gateway mode gives the bridge no address
+    # at all, so the host is simply not on the network.
+    assert networks["egress"]["driver_opts"] == {
+        "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+        "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
+    }
+    # The shared one is external, so its `--internal` and the same option are the operator's
+    # to pass and cannot be asserted here -- compose rejects any other attribute beside
+    # `external`. The README says so, `validate` probes for a route round the proxy, and its
+    # `gateway` line for the host answering at the gateway.
     assert networks["issuebot-internal"] == {"external": True}
-    assert "--internal issuebot-internal" in (ROOT / "README.md").read_text()
+    assert ISOLATED_NETWORK_RECIPE in (ROOT / "README.md").read_text()
     # The proxy is the only service with a leg on each side.
     assert sorted(SERVICES["egress"]["networks"]) == ["egress", "outside"]
     assert not (networks["outside"] or {}).get("internal")
@@ -541,8 +550,10 @@ def test_the_worker_waits_for_the_proxy_it_has_no_route_without() -> None:
     # And the start period has to be short enough that a proxy which can never pass still
     # reaches `unhealthy` quickly, since failures in it do not count against `retries`.
     assert _seconds(health["start_period"]) <= 10
-    # An older engine rejects `start_interval` outright, so the floor is a documented one.
-    assert "Engine 25.0 or newer" in (ROOT / "README.md").read_text()
+    # An older engine rejects `start_interval` outright, so the floor is a documented one --
+    # and since 2026-09-29 it is the isolated-gateway option's (28.0), which 27 rejects and 25
+    # and 26 drop silently, leaving the host reachable while the docs say it is not.
+    assert "Engine 28.0 or newer" in (ROOT / "README.md").read_text()
 
 
 def test_the_worker_points_every_client_at_the_proxy() -> None:
@@ -557,7 +568,7 @@ def test_the_worker_points_every_client_at_the_proxy() -> None:
 
 
 def test_ci_proves_a_session_reaches_github_and_nothing_else() -> None:
-    assert "docker network create --internal issuebot-internal" in CI
+    assert ISOLATED_NETWORK_RECIPE in CI
     assert "a session reached a host off the egress allow-list" in CI
     assert "a session left the container without the proxy" in CI
     # Both halves in one step, since either alone proves nothing: a proxy that filters is no

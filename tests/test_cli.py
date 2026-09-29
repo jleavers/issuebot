@@ -23,10 +23,12 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceMana
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
+    ISOLATED_NETWORK_RECIPE,
     StatsView,
     _deployment_scrubber,
     _turn_capture,
     _with_uid,
+    gateway_candidates,
     main,
     not_runnable,
     render_issue_table,
@@ -265,7 +267,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
     assert "secret-token-value" not in out
 
 
@@ -287,7 +289,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -727,7 +729,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "20 checks: 0 failed, 3 warnings" in out
+    assert "21 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_warns_when_the_clones_files_are_claudes_configuration(
@@ -818,7 +820,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "20 checks: 1 failed, 2 warnings" in out
+    assert "21 checks: 1 failed, 2 warnings" in out
     assert fake_database.urls == []
 
 
@@ -874,7 +876,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "20 checks: 0 failed, 3 warnings" in out
+    assert "21 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_names_the_compose_command_for_a_migration(
@@ -933,7 +935,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "20 checks: 0 failed, 4 warnings" in out
+    assert "21 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -948,7 +950,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "20 checks: 0 failed, 4 warnings" in out
+    assert "21 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -964,7 +966,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "20 checks: 0 failed, 4 warnings" in out
+    assert "21 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -988,7 +990,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "20 checks: 0 failed, 4 warnings" in out
+        assert "21 checks: 0 failed, 4 warnings" in out
     finally:
         released.set()
 
@@ -1006,7 +1008,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "20 checks: 0 failed, 4 warnings" in out
+    assert "21 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -1051,7 +1053,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "20 checks: 0 failed, 2 warnings" in out
+    assert "21 checks: 0 failed, 2 warnings" in out
     assert "secret" not in out
 
 
@@ -1217,7 +1219,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("20 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -3875,7 +3877,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
         f"other than this process's ({uid}), but all 3 concurrent sessions share it"
     ) in out
     assert probed == ["agent"]
-    assert "20 checks: 0 failed, 3 warnings" in out
+    assert "21 checks: 0 failed, 3 warnings" in out
 
 
 def test_run_once_takes_the_workspaces_own_account_from_the_pool(
@@ -3955,7 +3957,7 @@ def test_validate_reports_a_pool_of_session_accounts(
     # this process's, so the line says so rather than leaving the reader to take it on trust.
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
-    assert "20 checks: 0 failed, 2 warnings" in out
+    assert "21 checks: 0 failed, 2 warnings" in out
 
 
 # --- validate: the session's network egress (#126) ------------------------------------
@@ -4094,7 +4096,110 @@ def test_validate_warns_when_there_is_a_route_round_the_proxy(
     out = capsys.readouterr().out
     assert "[WARN] egress: http://egress:3128: egress-probe.invalid refused" in out
     assert "example.com answered a direct connection" in out
-    assert "docker network create --internal issuebot-internal" in out
+    assert ISOLATED_NETWORK_RECIPE in out
+
+
+# The route table a worker container sees: no default route (internal networks), one entry
+# per attached network, little-endian hex as /proc/net/route prints it. 192.168.112.0/20 is the
+# shared `issuebot-internal`, 192.168.128.0/20 the checkout's own `egress`.
+ROUTE_TABLE = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t0070A8C0\t00000000\t0001\t0\t0\t0\t00F0FFFF\t0\t0\t0\n"
+    "eth1\t0080A8C0\t00000000\t0001\t0\t0\t0\t00F0FFFF\t0\t0\t0\n"
+    "lo\t0000007F\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n"
+)
+
+
+def test_gateway_candidates_are_the_first_address_of_each_attached_network() -> None:
+    """Docker puts the host at the first address of every bridge network it creates, an
+    `internal` one included, unless its gateway is isolated -- so that address is the one the
+    canary probes, and the network is named beside it for the operator."""
+    assert gateway_candidates(ROUTE_TABLE) == [
+        ("eth0", "192.168.112.1", "192.168.112.0/20"),
+        ("eth1", "192.168.128.1", "192.168.128.0/20"),
+    ]
+    # A default route (destination 0) names no attached network, a host route (/32) no
+    # gateway, a route *through* a gateway leaves the host, and a route that is down is not
+    # a route; none is a candidate. A malformed line is skipped, not fatal.
+    assert (
+        gateway_candidates(
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+            "eth0\t00000000\t0180A8C0\t0003\t0\t0\t0\t00000000\n"
+            "eth0\t0580A8C0\t00000000\t0005\t0\t0\t0\tFFFFFFFF\n"
+            "eth0\t000A0A0A\t0180A8C0\t0003\t0\t0\t0\t00FFFFFF\n"
+            "eth0\t0090A8C0\t00000000\t0000\t0\t0\t0\t00F0FFFF\n"
+            "garbage\n"
+        )
+        == []
+    )
+
+
+def _gateway(
+    monkeypatch: pytest.MonkeyPatch, *, inside: bool = True, open_at: str | None = None
+) -> list[tuple[str, int]]:
+    """Put `validate` inside a container with ROUTE_TABLE's networks; `open_at` is the gateway
+    whose sshd answers, or None for none. Returns the (address, port) pairs probed."""
+    probed: list[tuple[str, int]] = []
+
+    def port_open(address: str, port: int, *, timeout_s: float) -> bool:
+        probed.append((address, port))
+        return address == open_at
+
+    monkeypatch.setattr("issuebot.cli.in_container", lambda: inside)
+    monkeypatch.setattr("issuebot.cli._read_route_table", lambda: ROUTE_TABLE)
+    monkeypatch.setattr("issuebot.cli._host_port_open", port_open)
+    return probed
+
+
+def test_validate_warns_when_the_hosts_sshd_answers_at_a_gateway(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """An `internal` network still carries the host at its gateway address (2026-09-29): a
+    session on the worker's networks could open the host's sshd. Isolated gateway mode is the
+    fix, and the warning names it."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed = _gateway(monkeypatch, open_at="192.168.112.1")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] gateway: something answered on port 22 at 192.168.112.1, the first address of "
+        "eth0's network 192.168.112.0/20: without an isolated gateway that address is the "
+        "host's own, so a session can reach any host service. Recreate the network with "
+        "isolated gateway mode (Docker 28 or later): the shared one with "
+        f"`{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with `docker compose "
+        "stop worker egress && docker network rm <project>_egress && docker compose up -d` "
+        "once its compose.yaml carries the option "
+        '(docs/operations.md, "Upgrades")'
+    ) in out
+    # One answering gateway is the finding; the check stops there rather than probing on.
+    assert probed == [("192.168.112.1", 22)]
+
+
+def test_validate_reports_the_gateway_canary_refused(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The OK line says what it proved and what it did not: a closed port is refused with or
+    without the option, so only a listening host service tells the two apart."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _gateway(monkeypatch)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] gateway: nothing answered on port 22 at the first address of each attached "
+        "network (192.168.112.1, 192.168.128.1): the host's own without an isolated gateway, "
+        "a container's or nobody's with one -- a canary, not a proof\n"
+    ) in out
+
+
+def test_validate_skips_the_gateway_canary_outside_a_container(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed = _gateway(monkeypatch, inside=False)
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "[ OK ] gateway: skipped outside a container: the host is this process's own\n" in out
+    assert probed == []
 
 
 def test_validate_fails_session_accounts_with_no_credential_in_the_environment(
@@ -4160,7 +4265,7 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "20 checks: 1 failed, 2 warnings" in out
+    assert "21 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
@@ -4249,7 +4354,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
-    assert "20 checks: 1 failed, 2 warnings" in out
+    assert "21 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -4278,7 +4383,7 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     reported = [line for line in out.splitlines() if line.startswith(prefix)]
     assert len(reported) == 1
     assert str(listing) in reported[0]
-    assert "20 checks: 1 failed, 2 warnings" in out
+    assert "21 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
@@ -4298,7 +4403,7 @@ def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
-    assert "20 checks: 1 failed, 2 warnings" in out
+    assert "21 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(

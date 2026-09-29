@@ -19,6 +19,27 @@ a session reads what
 they wrote; without this, a `curl` under `Bash` could send `GH_TOKEN` anywhere, or fetch the
 next page of its own instructions from a host of its choosing.
 
+"No route off the host" is not the same as "no route to the host", and the difference was a
+live hole until 2026-09-29. An `internal` network removes the container's default route, but
+the bridge still carries the host's own address at the network's first address (the `.1`),
+and any host service bound to `0.0.0.0` answers there: a session on the worker's networks
+could open the host's `sshd`. Docker's isolated gateway mode is what closes it: the bridge
+takes no address at all, so the host is simply not on the network, and the first address goes
+to whichever container attaches first, or to nobody. Both the shared network and each
+checkout's `egress` network carry it for both address families --
+`com.docker.network.bridge.gateway_mode_ipv4=isolated` and `..._ipv6=isolated`, the
+`docker network create` line in the README's once-per-host step and `driver_opts` in
+`compose.yaml` -- which is why the Engine floor is 28.0: an older engine either rejects the
+option or, on 25 and 26, drops it without a word. The option cannot be added to a network in
+place; a network created before it is recreated, and [`docs/operations.md`,
+"Upgrades"](operations.md#upgrades) says in what order, since the shared one has the hub's
+database and every worker attached. `validate`'s `gateway` line is the canary: from inside
+the container it tries port 22 at every attached network's first address and warns when
+something answers, because without the option that address is the host's and `sshd` is the
+service nearly every Linux host has there. It is a canary rather than a proof: with the option
+the address is a container's or nobody's, a closed port goes unanswered either way, and a host
+with no `sshd` passes whether or not it is isolated.
+
 The shipped list is what the workflow itself needs and nothing else:
 
 | Host | Reached by |

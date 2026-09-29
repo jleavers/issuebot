@@ -1556,7 +1556,7 @@ reach. Both themes' marks and text are held to WCAG contrast floors by
 
 ## `issuebot.cli`
 
-argparse; `validate` (eighteen checks: the `workflow` check naming the
+argparse; `validate` (twenty-one checks: the `workflow` check naming the
 overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
 overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
 App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
@@ -1604,6 +1604,13 @@ which warns rather than fails (under compose it means the shared network was cre
 `--internal`; on the host an operator's own proxy is entitled to sit beside a working
 route). With no proxy configured at all it warns that egress is unbounded, as it warns about
 an unset `agent.run_as`,
+a `gateway` check beside it, the other half of "no route off the host" (2026-09-29): an
+`internal` network still carries the host's own address at its first address, so from inside
+the container `gateway_candidates` reads every attached network off `/proc/net/route` (host
+byte order; default, host and gatewayed routes excluded) and `_host_port_open` tries port 22 at
+each first address, warning when something answers and naming the isolated-gateway recipe --
+a canary rather than a proof, since with the option that address is a container's or nobody's
+and a closed port is refused either way, and skipped outside a container,
 a `database.url` check that connects and
 reports the server and schema versions (behind warns, ahead or unreachable fails),
 a `github.status` check that reads githubstatus.com through the `_github_status` seam and
