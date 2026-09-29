@@ -309,33 +309,48 @@ def _visible_body(issue: Issue) -> str:
 
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 _GH_SPAN = re.compile(r"`gh [^`\n]*`")
-_FENCE = re.compile(r"^(`{3,}|~{3,})[^\n]*\n(.*?)^\1[ \t]*$", re.DOTALL | re.MULTILINE)
+_CONTINUATION = re.compile(r"\\[ \t]*\n[ \t]*")
+_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
 _UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
 _WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
 _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 
 
 def _gh_commands(rendered: str) -> list[str]:
-    """Backticked ``gh`` spans, and lines starting ``gh `` inside fenced code blocks."""
-    commands: list[str] = []
-    for fence in _FENCE.finditer(rendered):
-        commands.extend(
-            line.strip() for line in fence.group(2).splitlines() if line.strip().startswith("gh ")
-        )
-    commands.extend(match.strip("`") for match in _GH_SPAN.findall(_FENCE.sub("", rendered)))
-    return commands
+    """Every candidate command: backticked ``gh`` spans, and each line that starts ``gh ``
+    (after indentation and an optional ``$ ``), whether or not a fence was detected around it,
+    with ``\\``-continued lines joined. No text is removed first, so a fence that pairs badly
+    cannot hide a span."""
+    text = _CONTINUATION.sub(" ", rendered)
+    found = [match.strip("`") for match in _GH_SPAN.findall(text)]
+    for line in text.splitlines():
+        stripped = line.strip().removeprefix("$ ").strip()
+        if stripped.startswith("gh "):
+            found.append(stripped)
+    return list(dict.fromkeys(found))
 
 
-def _tokens(command: str) -> list[str]:
+def _segments(command: str) -> list[list[str]]:
+    """The command's simple commands, split on ``;``, ``&&``, ``||``, ``|`` and ``&`` outside
+    quotes, each as its tokens; only those that start with ``gh`` are kept."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
     try:
-        return shlex.split(command)
+        tokens = list(lexer)
     except ValueError:
-        return command.split()
+        tokens = command.split()
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment[:1] == ["gh"]]
 
 
 def _uses_unfiltered_flag(tokens: list[str]) -> bool:
     for index, token in enumerate(tokens):
-        if token in ("-c", "--comments"):
+        if token.split("=", 1)[0] in ("-c", "--comments"):
             return True
         if token == "--json" and index + 1 < len(tokens):
             fields = tokens[index + 1]
@@ -353,16 +368,14 @@ def _is_write(tokens: list[str]) -> bool:
     thread back, so the read filter has nothing to say about it."""
     if tokens[:2] != ["gh", "api"]:
         return False
+    method = ""
     for index, token in enumerate(tokens):
         if token in ("-X", "--method") and index + 1 < len(tokens):
             method = tokens[index + 1]
         elif token.startswith("-X") and len(token) > 2:
             method = token[2:]
-        else:
-            continue
-        if method.upper() in _WRITE_METHODS:
-            return True
-    return False
+    # The last value wins, as pflag has it: ``-X POST -X GET`` is a read.
+    return method.upper() in _WRITE_METHODS
 
 
 def _is_workpad_read(tokens: list[str]) -> bool:
@@ -393,7 +406,9 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     workpad's one read by id (``issues/comments/<id> --jq .body``, #77): neither sweeps a thread.
 
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
-    guarantee: prose that tells the agent to fetch comments some other way is beyond it.
+    guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
+    commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the offending
+    segment is what is reported.
     ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
     shipped prompt and a deployment's prompt are held to one rule.
     """
@@ -401,16 +416,17 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     required = f'select((.author_association | IN({associations})) and .user.login != "{login}")'
     gaps: list[str] = []
     for command in _gh_commands(rendered):
-        tokens = _tokens(command)
-        if _uses_unfiltered_flag(tokens):
-            gaps.append(command)
-            continue
-        if "/comments" not in command and "/reviews" not in command:
-            continue
-        if _is_write(tokens) or _is_workpad_read(tokens):
-            continue
-        if required not in command:
-            gaps.append(command)
+        for tokens in _segments(command):
+            joined = shlex.join(tokens)
+            if _uses_unfiltered_flag(tokens):
+                gaps.append(joined)
+                continue
+            if "/comments" not in joined and "/reviews" not in joined:
+                continue
+            if _is_write(tokens) or _is_workpad_read(tokens):
+                continue
+            if not any(required in token for token in tokens):
+                gaps.append(joined)
     return gaps
 
 
