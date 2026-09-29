@@ -171,3 +171,40 @@ def test_nested_and_unclosed_pre_make_one_fence() -> None:
 def test_a_hole_cannot_be_forged() -> None:
     assert visible_text("<pre>real</pre><p>\x000\x00</p>") == "```\nreal\n```\n0\n"
     assert visible_text("<p>\x001\x00</p>") == "1\n"
+
+
+def test_a_github_table_row_stays_one_line() -> None:
+    html = (
+        "<table>\n<thead>\n<tr>\n<th>a</th>\n<th>b</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n"
+        "<td>1</td>\n<td>2</td>\n</tr>\n</tbody>\n</table>"
+    )
+    assert visible_text(html) == "a | b\n1 | 2\n"
+    assert visible_text("<table><tr><td>cu</td><td>rl</td></tr></table>") == "cu | rl\n"
+    assert visible_text("<table><tr><td> spaced </td><td>x</td></tr></table>") == " spaced  | x\n"
+
+
+def test_mermaid_comments_are_kept_when_it_is_highlighted_code() -> None:
+    html = '<div class="highlight highlight-source-mermaid"><pre>%% shown\nA-->B\n</pre></div>'
+    assert visible_text(html) == "```mermaid\n%% shown\nA-->B\n```\n"
+
+
+def test_mermaid_accessibility_text_is_dropped_from_a_diagram() -> None:
+    html = (
+        '<pre lang="mermaid"><code>graph TD\n  accTitle: evil\naccDescr: worse\n'
+        "A-->B\n</code></pre>"
+    )
+    assert visible_text(html) == "```mermaid\ngraph TD\nA-->B\n```\n"
+
+
+def test_mongolian_free_variation_selector_four_is_removed() -> None:
+    assert strip_invisible("a\u180fb") == "ab"
+
+
+def test_a_void_element_with_sr_only_does_not_swallow_the_body() -> None:
+    assert visible_text('<p>a<wbr class="sr-only">b</p><p>c</p>') == "ab\nc\n"
+
+
+def test_an_emptied_math_span_goes_whole() -> None:
+    assert visible_text(r"<p><math-renderer>$\phantom{x}$</math-renderer>after</p>") == "after\n"
+    assert visible_text(r'<pre lang="math"><code>$$\phantom{x}$$</code></pre>') == "```math\n```\n"
+    assert visible_text(r"<p><math-renderer>$a\phantom{x}$</math-renderer></p>") == "$a$\n"

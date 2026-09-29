@@ -9,7 +9,8 @@ own renderer. So this module does not render Markdown. It takes ``bodyHTML``, th
 HTML the page was built from, and turns it back into text: text nodes only, so attribute
 text (``alt``, ``title``) is not text; ``<pre>`` back to a fence (long enough that no line
 inside can close it) with the language from GitHub's ``highlight-source-*`` class; ``<code>``
-to backticks; ``<del>`` to ``~~``; ``<a>`` to ``[text](href)``; block elements to line breaks
+to backticks; ``<del>``, ``<s>`` and ``<strike>`` to ``~~``;
+``<a>`` to ``[text](href)``; block elements to line breaks
 and table cells to `` | ``; the content of ``<script>``, ``<style>``, ``<template>``, ``<rp>``
 and ``sr-only`` elements dropped; ``<img>`` rendered as nothing. Then the characters that
 print as nothing go: Unicode format characters, variation selectors, fillers, C0 and C1
@@ -41,13 +42,17 @@ _BLOCK = frozenset(
 _DROPPED = frozenset({"script", "style", "template", "rp"})
 _STRIKE = frozenset({"del", "s", "strike"})
 _CELL = frozenset({"td", "th"})
-_SELF_CLOSING_OK = frozenset({"br", "input", "hr"})
+_VOID = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param"}
+    | {"source", "track", "wbr"}
+)
 _SPECIAL_LANGUAGES = frozenset({"mermaid", "math", "geojson", "topojson", "stl"})
 _LANGUAGE = re.compile(r"highlight-(?:source|text)-([A-Za-z0-9_+-]+)")
 _PHANTOM = re.compile(r"\\[hv]?phantom\s*\{[^{}]*\}")
 _VARIATION = frozenset(range(0xFE00, 0xFE10)) | frozenset(range(0xE0100, 0xE01F0))
 _BLANKS = frozenset({0x34F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5})
-_BLANKS |= frozenset(range(0x180B, 0x180E))
+_BLANKS |= frozenset(range(0x180B, 0x1810))
+_MATH_SPAN = re.compile(r"(\$\$?)([^$]+)\1")
 _HOLE = re.compile(r"\x00(\d+)\x00")
 
 
@@ -62,6 +67,18 @@ def strip_invisible(text: str) -> str:
         and not (ord(c) < 0x20 and c not in "\t\n")
         and not (0x7F <= ord(c) <= 0x9F)
     )
+
+
+def _unphantom(text: str) -> str:
+    """``text`` without ``\\phantom{...}``; a math span it leaves empty goes whole."""
+
+    def span(m: re.Match[str]) -> str:
+        cleaned = _PHANTOM.sub("", m.group(2))
+        if cleaned != m.group(2) and not cleaned.strip():
+            return ""  # `$$` left behind would read as a display-math delimiter
+        return f"{m.group(1)}{cleaned}{m.group(1)}"
+
+    return _PHANTOM.sub("", _MATH_SPAN.sub(span, text))
 
 
 def _newlines(text: str) -> str:
@@ -82,6 +99,9 @@ class _ToText(HTMLParser):
         self._pre = 0
         self._pre_buf: list[str] = []
         self._pre_lang = ""
+        self._renderer = False  # the fence language came from lang=, not from the class
+        self._table = 0
+        self._cell = False
         self._dropped = 0
         self._hidden: tuple[str, int] | None = None  # (tag, depth) of an sr-only element
         self._math = 0
@@ -94,11 +114,13 @@ class _ToText(HTMLParser):
 
     def _end_fence(self) -> None:
         content = "".join(self._pre_buf)
-        if self._pre_lang == "mermaid":
+        if self._renderer and self._pre_lang == "mermaid":
+            # Drawn as a diagram: comments and accessibility text are not on the picture.
+            hidden = ("%%", "accTitle:", "accDescr:")
             lines = content.split("\n")
-            content = "\n".join(x for x in lines if not x.lstrip().startswith("%%"))
-        elif self._pre_lang == "math":
-            content = _PHANTOM.sub("", content)
+            content = "\n".join(x for x in lines if not x.lstrip().startswith(hidden))
+        elif self._renderer and self._pre_lang == "math":
+            content = _unphantom(content)
         if content and not content.endswith("\n"):
             content += "\n"
         longest = max((len(run) for run in re.findall(r"`+", content)), default=0)
@@ -125,7 +147,7 @@ class _ToText(HTMLParser):
         if self._dropped:
             return
         classes = (a.get("class") or "").split()
-        if "sr-only" in classes and tag not in {"br", "img", "input", "hr"}:
+        if "sr-only" in classes and tag not in _VOID:
             self._hidden = (tag, 1)
             return
         if tag == "div":
@@ -135,7 +157,8 @@ class _ToText(HTMLParser):
         if tag == "pre":
             if not self._pre:
                 lang = a.get("lang")
-                self._pre_lang = lang if lang in _SPECIAL_LANGUAGES else (self._language or "")
+                self._renderer = lang in _SPECIAL_LANGUAGES
+                self._pre_lang = lang if self._renderer else (self._language or "")
             self._pre += 1
             return
         if self._pre:
@@ -157,7 +180,11 @@ class _ToText(HTMLParser):
         elif tag == "tr":
             self._first_cell = True
             self.parts.append("\n")
+        elif tag == "table":
+            self._table += 1
+            self.parts.append("\n")
         elif tag in _CELL:
+            self._cell = True
             if not self._first_cell:
                 self.parts.append(" | ")
             self._first_cell = False
@@ -194,6 +221,11 @@ class _ToText(HTMLParser):
             if href and text.strip() and href != text.strip():
                 del self.parts[start:]
                 self.parts.append(f"[{text}]({href})")
+        elif tag == "table":
+            self._table = max(0, self._table - 1)
+            self.parts.append("\n")
+        elif tag in _CELL:
+            self._cell = False
         elif tag == "div":
             self._language = None
             self.parts.append("\n")
@@ -201,8 +233,10 @@ class _ToText(HTMLParser):
             self.parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # A self-closed <rp/> or <pre/> has no end tag to balance it: only true voids count.
-        if tag in _SELF_CLOSING_OK:
+        # GitHub re-serialises bodyHTML with explicit end tags, so <x/> never arrives from it;
+        # HTML5 itself ignores the slash on a non-void element. Were one to arrive it would
+        # open a drop or a fence nothing closes, so only the true voids are honoured.
+        if tag in _VOID:
             self.handle_starttag(tag, attrs)
 
     def handle_data(self, data: str) -> None:
@@ -210,8 +244,10 @@ class _ToText(HTMLParser):
             return
         # Stripped here, so no C0 control (the NUL of a fence's hole) can arrive in the text.
         data = _clean(data)
+        if self._table and not self._cell and not self._pre and not data.strip():
+            return  # the newlines cmark puts between cells and rows
         if self._math and not self._pre:
-            data = _PHANTOM.sub("", data)
+            data = _unphantom(data)
         self._out(data)
 
     def handle_comment(self, data: str) -> None:
