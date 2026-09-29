@@ -1250,13 +1250,17 @@ def _prompt_check(workflow: Workflow) -> Check:
     passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
     text is scanned with the same ``unfiltered_comment_reads`` the shipped one is held to, and
     over the same product of contexts that test renders -- a linked PR or none, rework or not,
-    a first or a later attempt, a workpad or none, self-review on or off, and the continuation
-    -- because a template branches on every one of those, and the rework branch is exactly
-    where a prompt reads the review it is answering (#250): one render at the defaults would
-    pass a read that sits inside ``{% if rework %}``. The gaps are the union over every
-    variant, in first-appearance order and de-duplicated, so a read reached by several
-    variants is counted once. Every render sits inside the ``try``: a template error in any
-    branch is reported as a failure the way it always was.
+    a first or a later attempt, a workpad or none, self-review on or off -- because a template
+    branches on every one of those, and the rework branch is exactly where a prompt reads the
+    review it is answering (#250): one render at the defaults would pass a read that sits
+    inside ``{% if rework %}``. The continuation is rendered too, so the product here is the
+    one the shipped test holds; it is issuebot's own template, not a branch of the body. The
+    gaps are the union over every variant, in first-appearance order and de-duplicated, so a
+    read whose rendered text is identical across variants is counted once, while one that
+    interpolates a variant-dependent value (``gh issue view {{ attempt }} --comments``) counts
+    per distinct rendering -- the count is informational, the first gap is what names the
+    fault. Every render sits inside the ``try``: a template error in any branch is reported
+    as a failure the way it always was.
 
     A gap is a *warning* rather than a failure: an operator's prompt may fetch comments by a
     route the scanner accepts and the filter still be applied, or may not fetch them at all in

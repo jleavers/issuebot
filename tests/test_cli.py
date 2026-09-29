@@ -743,6 +743,26 @@ def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
     ) in out
 
 
+def test_validate_fails_on_a_template_error_inside_a_branch_the_defaults_skip(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Every variant renders inside the ``try``, so an undefined name that only the rework
+    branch reaches is still the failure it would be in a live rework session."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n"
+        "{% if rework %}{{ nope }}{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    assert "[FAIL] prompt: template does not render: 'nope' is undefined" in (
+        capsys.readouterr().out
+    )
+
+
 def test_validate_warns_about_a_read_inside_the_rework_branch(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
