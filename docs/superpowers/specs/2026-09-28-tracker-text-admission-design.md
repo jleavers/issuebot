@@ -1,9 +1,11 @@
 # Tracker text reaches a session only as a maintainer approved it
 
 Date: 2026-09-28
-Status: approved, not yet implemented
+Status: sections 1--3 implemented (#246, #247, #248); section 4 approved 2026-09-29
 Advisory: GHSA-jm8h-q3j6-p8xp (private, filed 2026-09-27 from a sibling deployment's security
-sweep; severity high)
+sweep; severity high; closed 2026-09-29 with the three fixes on `main`) and, for section 4,
+GHSA-f3fm-r55f-2vgm (private, filed 2026-09-29 from the same deployment's pre-publication
+sweep against `3b7b6ad`; severity high)
 
 ## Problem
 
@@ -260,6 +262,71 @@ characters of its incentive.
 Both are warnings, not failures: `run-once` against a personal scratch repository is a
 legitimate use and should not be refused.
 
+### 4. What the approver saw, and nothing the session itself wrote
+
+Added 2026-09-29 for GHSA-f3fm-r55f-2vgm, which found what sections 1--3 leave open on a
+public repository. Two stand-ins for a maintainer's intent were sound while the target was
+private and are not once anyone can open an issue:
+
+- **The label approves what the maintainer saw rendered; the session gets the raw
+  Markdown.** Section 1 pins the bytes as they stood when a person applied `issuebot/todo`,
+  but the person read GitHub's rendered page. An HTML comment is hidden from the page and
+  reaches the prompt intact, inside the `Validation` / `Test Plan` section the workflow tells
+  the session to run. So are Markdown link-reference definitions nothing references, and
+  Unicode format characters. And a body a maintainer read can point at something outside
+  it -- a fork branch, a file, a release asset -- that its author rewrites after approval
+  while the body's edit history stays clean; the egress allow-list keeps that to
+  GitHub-hosted references, which is still a fork branch.
+- **The account issuebot runs as passes section 2's filter.** A dedicated bot account is a
+  `COLLABORATOR`, so a session steered through the first gap can leave comments and reviews
+  on every open issue and pull request, and each later session must address them before
+  review. Section 2 accepted "a session persuading its successor" as the same authority;
+  what it under-weighted is persistence and spread from one injection. The workpad is
+  excluded by id; nothing else the account writes is. (An issue the account files is not the
+  same vector: it still needs a human's `issuebot/todo` before any session acts on it.)
+
+**Invariant, tightened.** A session treats tracker text as a request only when it is what a
+human maintainer wrote or approved *as they saw it*: not bytes the rendered page hid, not
+something the text points at that can change after approval, and not the session account's
+own output.
+
+**Fix shape, one pull request.**
+
+1. **The body a session gets is the body the approver saw.** A pure `visible_text(markdown)`
+   in `agent/visible.py`, applied by `issue_variables` to the title and body before they go
+   into the envelope, removes what GitHub renders as nothing: HTML comments; link-reference
+   definitions (`[label]: target`) that no reference in the text uses; and Unicode format
+   characters (category `Cf`: zero-width joiners and spaces, direction marks, the BOM). It is
+   fence-aware -- an HTML comment inside a fenced block or an inline code span *is* rendered,
+   so those stay. What it deliberately leaves, and the docs say so: a collapsed `<details>`
+   block (its summary line is visible and a reader can expand it) and length (a long body was
+   on the page). GraphQL's `bodyText` is the rendered text and was rejected because it
+   flattens code fences, where the steps live. The prompt's paragraph after the description
+   says the text is as it renders, and that what the page hides is not here.
+2. **A reference the body makes is followed only if pinned.** A ground rule in
+   `WORKFLOW.md`: a step that fetches something the description points at is followed only
+   when the reference is pinned by content -- a commit SHA, a digest -- and a branch name or a
+   URL whose content can change after approval is a request to note in the workpad, not a
+   step to run. A prompt rule, not code: egress already refuses everything but GitHub.
+3. **The session's own account is not a maintainer.** `PromptContext` gains `login`, the
+   account the session acts as (`adapter.own_login()`, which `run_session` and `run-once`
+   both have; `validate`'s sample context uses a placeholder). Step 6's four filters and the
+   quarantine list become `select(.author_association | IN("OWNER","MEMBER","COLLABORATOR")
+   and .user.login != "{{ login }}")`, and Ground rule 7 says text the account itself wrote
+   -- comments, reviews -- is agent output, not a request. The workpad's by-id calls are
+   unchanged.
+4. **`validate` checks the prompt in force**, which is also #250. The `prompt` check renders
+   the merged template already; it gains the scan `tests/test_workflow_default.py` makes over
+   the shipped prompt: every `gh` command touching `/comments` or `/reviews` carries the
+   association filter *and* the own-login exclusion, or is one of the workpad's by-id calls;
+   a warning names the first command that does not, and a warning when `--comments` or
+   `--json reviews`/`--json comments` survives. A warning, since a replaced prompt is the
+   operator's, but they are told it has no comment barrier.
+
+Not configurable, as before. Accepted residual: a collapsed `<details>` block, which the
+docs name; and the model's obedience to the reference rule, which is the same class as
+every other prompt rule.
+
 ## Testing
 
 - `tests/test_orchestrator_approval.py`: the pure decision -- approved; edited by the approver;
@@ -277,6 +344,14 @@ legitimate use and should not be refused.
   comment-fetching command in the shipped workflow carries the association filter.
 - `tests/test_cli.py`: the two new checks, warn and ok.
 - `tests/test_doc_pointers.py` and `tests/test_readme_bounds.py` cover the prose.
+- Section 4: `tests/test_agent_visible.py` (each hidden class removed; a comment inside a
+  fence and inside an inline code span kept; a comment straddling lines; a referenced link
+  definition kept and an unreferenced one removed; an all-hidden body renders empty);
+  `tests/test_agent_prompt.py` (the title and body variables carry the visible text; the
+  `login` variable); `tests/test_workflow_default.py` (the login in every filter; the
+  ground rules' phrases; the every-command scan requiring both halves);
+  `tests/test_cli.py` (the `prompt` check warns on an overlay prompt lacking either half and
+  passes on the shipped one).
 
 ## Out of scope
 
