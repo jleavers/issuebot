@@ -309,7 +309,6 @@ def _visible_body(issue: Issue) -> str:
 
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 _GH_SPAN = re.compile(r"`gh [^`\n]*`")
-_CONTINUATION = re.compile(r"\\[ \t]*\n[ \t]*")
 _SEPARATOR_CHARS = frozenset(";&|")
 _QUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
 _SHORT_C = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
@@ -318,17 +317,56 @@ _WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
 _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 
 
+def _command_line(line: str) -> str:
+    """A line as a shell prompt would show it: indentation, blockquote markers and ``$ `` gone."""
+    return _QUOTE_PREFIX.sub("", line.strip()).removeprefix("$ ").strip()
+
+
+def _substitutions(text: str) -> list[str]:
+    """The body of each ``$(gh ...)``, found by walking to its matching ``)`` outside quotes."""
+    bodies: list[str] = []
+    for start in re.finditer(r"\$\(\s*(?=gh )", text):
+        depth, quote = 1, ""
+        for end in range(start.end(), len(text)):
+            char = text[end]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    bodies.append(text[start.end() : end])
+                    break
+    return bodies
+
+
 def _gh_commands(rendered: str) -> list[str]:
-    """Every candidate command: backticked ``gh`` spans, and each line that starts ``gh ``
-    (after indentation, blockquote markers and an optional ``$ ``), whether or not a fence was
-    detected around it, with ``\\``-continued lines joined. No text is removed first, so a
-    fence that pairs badly cannot hide a span."""
-    text = _CONTINUATION.sub(" ", rendered)
-    found = [match.strip("`") for match in _GH_SPAN.findall(text)]
-    for line in text.splitlines():
-        stripped = _QUOTE_PREFIX.sub("", line.strip()).removeprefix("$ ").strip()
-        if stripped.startswith("gh "):
-            found.append(stripped)
+    """Every candidate command: backticked ``gh`` spans, each line that starts ``gh `` (after
+    indentation, blockquote markers and an optional ``$ ``) whether or not a fence was detected
+    around it, and the body of every ``$(gh ...)`` wherever it sits. A ``\\``-continued line is
+    joined to the next only when it is itself a ``gh`` line, so a prose line ending in a hard
+    break does not swallow a command. No text is removed first, so a fence that pairs badly
+    cannot hide a span."""
+    found = [match.strip("`") for match in _GH_SPAN.findall(rendered)]
+    lines = rendered.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        while (
+            _command_line(line).startswith("gh ")
+            and line.rstrip().endswith("\\")
+            and index < len(lines)
+        ):
+            line = line.rstrip()[:-1] + " " + lines[index].strip()
+            index += 1
+        if _command_line(line).startswith("gh "):
+            found.append(_command_line(line))
+    found.extend(_substitutions(rendered))
     return list(dict.fromkeys(found))
 
 
@@ -369,9 +407,13 @@ def _segments(command: str) -> list[list[str]] | None:
 
 
 def _uses_unfiltered_flag(tokens: list[str]) -> bool:
+    """``--comments`` anywhere; ``-c`` (alone or in a short cluster) only on ``gh issue view`` and
+    ``gh pr view``, where it is ``--comments`` (``gh label create -c`` is a colour); and
+    ``--json`` with a field that carries comments or reviews."""
+    views_comments = tokens[1:3] in (["issue", "view"], ["pr", "view"])
     for index, token in enumerate(tokens):
         name = token.split("=", 1)[0]
-        if name == "--comments" or _SHORT_C.match(name):
+        if name == "--comments" or (views_comments and _SHORT_C.match(name)):
             return True
         if token == "--json" and index + 1 < len(tokens):
             fields = tokens[index + 1]
@@ -382,6 +424,18 @@ def _uses_unfiltered_flag(tokens: list[str]) -> bool:
         if _UNFILTERED_FIELDS.intersection(fields.split(",")):
             return True
     return False
+
+
+def _jq_program(tokens: list[str]) -> str:
+    """The value of the last ``--jq``/``-q`` (either spelling, ``=`` or separate): the program
+    ``gh`` actually runs. The filter must be in this, not merely somewhere in the command."""
+    program = ""
+    for index, token in enumerate(tokens):
+        if token in ("--jq", "-q") and index + 1 < len(tokens):
+            program = tokens[index + 1]
+        elif token.startswith(("--jq=", "-q=")):
+            program = token.split("=", 1)[1]
+    return program
 
 
 def _is_write(tokens: list[str]) -> bool:
@@ -447,7 +501,9 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     for command in _gh_commands(rendered):
         segments = _segments(command)
         if segments is None:
-            if any(mark in command for mark in ("/comments", "/reviews", "--comments", "--json")):
+            if _uses_unfiltered_flag(re.split(r"[\s;&|]+", command)) or any(
+                mark in command for mark in ("/comments", "/reviews", "--comments", "--json")
+            ):
                 gaps.append(command)
             continue
         for tokens in segments:
@@ -459,7 +515,7 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
                 continue
             if not _substitutes(tokens) and (_is_write(tokens) or _is_workpad_read(tokens)):
                 continue
-            if not any(required in token for token in tokens):
+            if required not in _jq_program(tokens):
                 gaps.append(joined)
     return gaps
 

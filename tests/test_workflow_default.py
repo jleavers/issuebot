@@ -860,7 +860,9 @@ def test_the_scan_holds_against_the_shell_forms_that_hid_a_read() -> None:
     write = "gh api -X POST repos/o/r/issues/2/comments -f body=hi"
     # `#` inside a word is not a comment.
     hashed = "gh issue view https://github.com/o/r/issues/1#issuecomment-5 --comments"
-    assert len(gaps(f"`{hashed}`")) == 1
+    assert gaps(f"`{hashed}`") == [
+        "gh issue view 'https://github.com/o/r/issues/1#issuecomment-5' --comments"
+    ]
     assert len(gaps("`gh pr view https://github.com/o/r/pull/1#discussion_r5 -c`")) == 1
     assert gaps(f"`gh api -X POST repos/o/r/issues/2/comments -f body=see#1; {READ}`") == [READ]
     # `|&` and other separators made only of ; & |.
@@ -889,3 +891,33 @@ def test_the_scan_holds_against_the_shell_forms_that_hid_a_read() -> None:
     assert gaps("`gh pr view 1 -cR o/r`") == ["gh pr view 1 -cR o/r"]
     assert gaps(f"> {READ}\n") == [READ]
     assert gaps(f"> > {READ}\n") == [READ]
+
+
+def test_the_scan_holds_against_comments_substitutions_and_hard_breaks() -> None:
+    def gaps(text: str) -> list[str]:
+        return unfiltered_comment_reads(text, LOGIN)
+
+    # The filter must be the last --jq program's, not any token: a trailing shell comment, an
+    # `-f` field, or an earlier --jq carrying it does not count.
+    comment = f"gh api repos/o/r/issues/1/comments --jq '.[].body' # '{FILTER}'"
+    assert gaps(f"`{comment}`") != []
+    assert gaps(f"`gh api repos/o/r/issues/1/comments --jq '.[].body' -f 'x={FILTER}'`") != []
+    assert gaps(f"`gh api repos/o/r/issues/1/comments --jq '{FILTER}' --jq '.[].body'`") != []
+    assert gaps(f"`gh api repos/o/r/issues/1/comments -q '.[].body' -q='{FILTER}'`") == []
+    assert gaps(f"`gh api repos/o/r/issues/1/comments --jq='{FILTER}'`") == []
+    # A substitution in a segment that is not led by gh.
+    post = "gh api -X POST repos/o/r/issues/1/comments -f body=hi"
+    assert gaps(f'`{post}; echo "$({READ})"`') != []
+    assert (
+        gaps("`gh api -X POST repos/o/r/issues/1/comments -f body=hi; echo $(" + READ + ")`") != []
+    )
+    assert gaps(f"`X=$({READ})`") == [READ]
+    assert gaps(f"`echo $(gh api repos/o/r/issues/1/comments --jq '.[] | {FILTER}')`") == []
+    # The unparseable-quoting fallback still knows the -c family.
+    assert gaps("`gh issue view 1 -c; echo $'it\\'s'`") != []
+    assert gaps("`gh pr view 1 -cR o/r -t $'it\\'s'`") != []
+    # -c is a colour outside `issue view` / `pr view`.
+    assert gaps("`gh label create bug -c FF0000`") == []
+    # A hard-break backslash at the end of a prose line does not join the next command line.
+    assert gaps(f"Run this:\\\n{READ}\n") == [READ]
+    assert gaps("Run this:\\\ngh pr view 1 --comments\n") == ["gh pr view 1 --comments"]
