@@ -341,6 +341,10 @@ def _substitutions(text: str) -> list[str]:
                 if depth == 0:
                     bodies.append(text[start.end() : end])
                     break
+        else:
+            # Never closed (a quote swallowed the `)`): the rest of the line is the body, so
+            # it fails closed through the fallback rather than vanishing.
+            bodies.append(text[start.end() :].split("\n", 1)[0])
     return bodies
 
 
@@ -362,7 +366,7 @@ def _gh_commands(rendered: str) -> list[str]:
             and line.rstrip().endswith("\\")
             and index < len(lines)
         ):
-            line = line.rstrip()[:-1] + " " + lines[index].strip()
+            line = line.rstrip()[:-1] + " " + _command_line(lines[index])
             index += 1
         if _command_line(line).startswith("gh "):
             found.append(_command_line(line))
@@ -426,6 +430,17 @@ def _uses_unfiltered_flag(tokens: list[str]) -> bool:
     return False
 
 
+def _fallback_flag(command: str) -> bool:
+    """The flag check for a command whose quoting did not parse: split on ``;``, ``&`` and ``|``
+    first, and check each piece from its first ``gh`` word, so a later command is not read as
+    an argument of the first."""
+    for piece in re.split(r"[;&|]+", command):
+        words = piece.split()
+        if "gh" in words and _uses_unfiltered_flag(words[words.index("gh") :]):
+            return True
+    return False
+
+
 def _jq_program(tokens: list[str]) -> str:
     """The value of the last ``--jq``/``-q`` (either spelling, ``=`` or separate): the program
     ``gh`` actually runs. The filter must be in this, not merely somewhere in the command."""
@@ -435,6 +450,8 @@ def _jq_program(tokens: list[str]) -> str:
             program = tokens[index + 1]
         elif token.startswith(("--jq=", "-q=")):
             program = token.split("=", 1)[1]
+        elif token.startswith("-q") and len(token) > 2:
+            program = token[2:]
     return program
 
 
@@ -461,19 +478,27 @@ def _substitutes(tokens: list[str]) -> bool:
     return any("$(" in token or "`" in token for token in tokens)
 
 
-def _is_workpad_read(tokens: list[str]) -> bool:
+def _is_workpad_read(tokens: list[str], workpad_id: int | None = None) -> bool:
     """``gh api repos/<o>/<r>/issues/comments/<id> --jq .body``, optionally redirected to a
     file, and nothing else: the one read of a single comment by id that the workpad section
-    makes, spelled with the document's own ``<id>`` placeholder."""
+    makes, spelled with the document's own ``<id>`` placeholder or, when the caller knows it,
+    with the workpad's own id."""
     if len(tokens) < 5 or tokens[:2] != ["gh", "api"]:
         return False
-    if not _WORKPAD_READ.fullmatch(tokens[2]) or tokens[3:5] != ["--jq", ".body"]:
+    path = (
+        re.sub(rf"/comments/{workpad_id}$", "/comments/<id>", tokens[2])
+        if workpad_id
+        else tokens[2]
+    )
+    if not _WORKPAD_READ.fullmatch(path) or tokens[3:5] != ["--jq", ".body"]:
         return False
     rest = tokens[5:]
     return rest == [] or (len(rest) == 2 and rest[0] == ">")
 
 
-def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
+def unfiltered_comment_reads(
+    rendered: str, login: str, *, workpad_id: int | None = None
+) -> list[str]:
     """Every ``gh`` command in a rendered prompt that reads ``/comments`` or ``/reviews``
     without the one conjunctive filter, or that uses ``-c``, ``--comments`` or ``--json`` with
     ``comments``, ``reviews`` or ``latestReviews``; ``[]`` when the prompt is clean.
@@ -486,7 +511,8 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     ``|`` binds loosest, so without them ``.user`` is read from the association string and the
     call errors. A negated, ``or``-joined or wrong-login filter is flagged, because it is a
     different string. Exempt are ``gh api`` writes (``-X POST``, ``PATCH``, ``DELETE``) and the
-    workpad's one read by id (``issues/comments/<id> --jq .body``, #77): neither sweeps a thread.
+    workpad's one read by id (``issues/comments/<id> --jq .body``, #77, or with ``workpad_id`` the
+    rendered id itself and no other): neither sweeps a thread.
 
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
     guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
@@ -501,7 +527,7 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     for command in _gh_commands(rendered):
         segments = _segments(command)
         if segments is None:
-            if _uses_unfiltered_flag(re.split(r"[\s;&|]+", command)) or any(
+            if _fallback_flag(command) or any(
                 mark in command for mark in ("/comments", "/reviews", "--comments", "--json")
             ):
                 gaps.append(command)
@@ -513,7 +539,9 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
                 continue
             if "/comments" not in joined and "/reviews" not in joined:
                 continue
-            if not _substitutes(tokens) and (_is_write(tokens) or _is_workpad_read(tokens)):
+            if not _substitutes(tokens) and (
+                _is_write(tokens) or _is_workpad_read(tokens, workpad_id)
+            ):
                 continue
             if required not in _jq_program(tokens):
                 gaps.append(joined)

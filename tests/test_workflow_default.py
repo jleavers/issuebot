@@ -921,3 +921,30 @@ def test_the_scan_holds_against_comments_substitutions_and_hard_breaks() -> None
     # A hard-break backslash at the end of a prose line does not join the next command line.
     assert gaps(f"Run this:\\\n{READ}\n") == [READ]
     assert gaps("Run this:\\\ngh pr view 1 --comments\n") == ["gh pr view 1 --comments"]
+
+
+def test_the_scan_holds_against_attached_q_unclosed_walks_and_later_flags() -> None:
+    def gaps(text: str) -> list[str]:
+        return unfiltered_comment_reads(text, LOGIN)
+
+    # -qVALUE is `-q` with a value, and the last program wins.
+    base = f"gh api repos/o/r/issues/1/comments --jq '{FILTER}'"
+    assert gaps(f"`{base} -q.[].body`") != []
+    assert gaps(f"`{base} -q'.[].body'`") != []
+    # A `$(gh ...)` whose `)` is swallowed by a quote runs to the end of the line and fails closed.
+    unclosed = (
+        "gh api -X POST repos/o/r/issues/1/comments -f body=hi; echo "
+        "\"$(gh api repos/o/r/issues/1/comments --jq .[].body -H $'X: it\\'s')\""
+    )
+    assert gaps(f"`{unclosed}`") != []
+    # The fallback reads every command of a chain, not only the first.
+    assert gaps("`gh auth status; gh issue view 1 -c -t $'it\\'s'`") != []
+    # The workpad's own id, when given, is exempt; any other bare id is not.
+    read = "gh api repos/o/r/issues/comments/1002 --jq .body"
+    assert unfiltered_comment_reads(f"`{read}`", LOGIN, workpad_id=1002) == []
+    assert unfiltered_comment_reads(f"`{read}`", LOGIN, workpad_id=7) == [read]
+    assert unfiltered_comment_reads(f"`{read}`", LOGIN) == [read]
+    # A continued line reports without its blockquote marker.
+    assert gaps("> gh api \\\n> repos/o/r/issues/1/comments\n") == [
+        "gh api repos/o/r/issues/1/comments"
+    ]

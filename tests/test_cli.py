@@ -743,6 +743,25 @@ def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
     ) in out
 
 
+def test_validate_accepts_the_workpad_read_by_its_rendered_id(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """A prompt that reads the workpad as ``issues/comments/{{ workpad.id }}`` renders a real
+    id; that read is the workpad's own and is not a gap."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}."
+        "{% if workpad %} Read it: "
+        "`gh api repos/o/r/issues/comments/{{ workpad.id }} --jq .body`.{% endif %}",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] prompt:" in capsys.readouterr().out
+
+
 def test_validate_fails_on_a_template_error_inside_a_branch_the_defaults_skip(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

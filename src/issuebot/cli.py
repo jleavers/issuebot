@@ -1302,7 +1302,11 @@ def _prompt_check(workflow: Workflow) -> Check:
         return Check("prompt", "fail", exc.message)
     gaps = list(
         dict.fromkeys(
-            gap for rendered in renders for gap in unfiltered_comment_reads(rendered, SAMPLE_LOGIN)
+            gap
+            for rendered in renders
+            for gap in unfiltered_comment_reads(
+                rendered, SAMPLE_LOGIN, workpad_id=_SAMPLE_WORKPAD.id
+            )
         )
     )
     if gaps:
