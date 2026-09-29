@@ -48,7 +48,9 @@ _COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 def render_body_html(body: str | None) -> str | None:
     """A minimal stand-in for GitHub's render (GHSA-f3fm-r55f-2vgm): paragraphs and fenced
     code, everything else escaped, HTML comments dropped. Enough for the hermetic suite to
-    exercise the same path production takes; the real renderer is GitHub's."""
+    exercise the same path production takes; the real renderer is GitHub's. Limits: fences are
+    split before comments are dropped, so a fence inside a comment surfaces, and ``~~~`` fences
+    are prose; both err toward revealing."""
     if body is None:
         return None
     parts: list[str] = []

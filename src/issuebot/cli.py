@@ -1254,6 +1254,7 @@ def _sample_context(settings: Settings) -> PromptContext:
         number=1,
         title="Sample issue",
         body="Sample description.",
+        body_html='<p dir="auto">Sample description.</p>',
         author="sample-user",
         github_state="open",
         state=StateLabel.IN_PROGRESS,
@@ -1270,6 +1271,7 @@ def _sample_context(settings: Settings) -> PromptContext:
     return PromptContext(
         issue=issue,
         repo=settings.github.repo,
+        login="sample-bot",
         labels=settings.github.labels,
         attempt=1,
         turn_number=1,
@@ -1537,12 +1539,14 @@ async def _run_once(
         # The preview shows what the session's first turn would get, workpad included (#77).
         try:
             workpad = await adapter.find_workpad_comment(number)
+            login = await adapter.own_login()
         except GitHubError as exc:
             print(f"[FAIL] workpad: {exc}")
             return 1
         context = PromptContext(
             issue=issue,
             repo=settings.github.repo,
+            login=login,
             labels=settings.github.labels,
             attempt=attempt,
             turn_number=1,

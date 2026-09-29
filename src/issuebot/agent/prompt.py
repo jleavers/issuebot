@@ -254,6 +254,10 @@ class PromptContext:
 
     issue: Issue
     repo: str
+    # The GitHub account the session acts as (``adapter.own_login()``): issuebot's own value,
+    # rendered bare like ``repo``. The workflow's comment fetches leave this account's own
+    # text out, whatever its association (GHSA-f3fm-r55f-2vgm).
+    login: str
     labels: GitHubLabels
     attempt: int
     turn_number: int
@@ -273,6 +277,7 @@ class PromptContext:
         return {
             "issue": issue_variables(self.issue),
             "repo": self.repo,
+            "login": self.login,
             "repo_instructions": [
                 instruction_variables(file, self.repo) for file in self.repo_instructions
             ],
@@ -293,11 +298,48 @@ class PromptContext:
 def _visible_body(issue: Issue) -> str:
     """The description as its approver saw it; only called when ``issue.body`` is not ``None``."""
     if issue.body_html is None:
-        # Test-only: the normaliser refuses a body with no bodyHTML, so production never gets
-        # here; an Issue built by hand without one falls back to the raw body, stripped.
-        assert issue.body is not None
-        return strip_invisible(issue.body)
+        # Fail closed: the normaliser refuses a body with no bodyHTML, so production never gets
+        # here, and a raw body is exactly what the reader did not see.
+        raise AgentError(
+            "prompt_error", f"issue #{issue.number} has a body but no rendered bodyHTML"
+        )
     return visible_text(issue.body_html)
+
+
+MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+_GH_COMMAND = re.compile(r"`gh [^`]*`")
+_ASSOCIATION_FILTER = 'select(.author_association | IN("OWNER","MEMBER","COLLABORATOR")'
+_OWN_LOGIN_EXCLUSION = re.compile(r'\.user\.login != "[^"]+"')
+_UNFILTERED_FLAGS = ("--comments", "--json reviews", "--json comments")
+_WORKPAD_BY_ID = re.compile(r"issues/comments/<?\w+>?|-X POST [^ ]*/issues/[^/ ]+/comments")
+
+
+def unfiltered_comment_reads(rendered: str) -> list[str]:
+    """Every backticked ``gh`` command in a rendered prompt that reads ``/comments`` or
+    ``/reviews`` without both the association filter and the own-login exclusion, or that uses
+    ``--comments``, ``--json reviews`` or ``--json comments``; ``[]`` when the prompt is clean.
+
+    Both halves are needed: the association filter keeps strangers' text out
+    (GHSA-jm8h-q3j6-p8xp), and the exclusion keeps the session's own account out, since a
+    dedicated bot is a ``COLLABORATOR`` and would otherwise pass the filter with its own
+    comments on other issues (GHSA-f3fm-r55f-2vgm). The workpad's by-id calls
+    (``issues/comments/<id>``; ``-X POST .../issues/N/comments``) are exempt (#77): they read
+    or write one comment issuebot itself made and never sweep a thread.
+    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use this, so
+    the shipped prompt and a deployment's prompt are held to one rule.
+    """
+    gaps: list[str] = []
+    for command in _GH_COMMAND.findall(rendered):
+        if any(flag in command for flag in _UNFILTERED_FLAGS):
+            gaps.append(command)
+            continue
+        if "/comments" not in command and "/reviews" not in command:
+            continue
+        if _WORKPAD_BY_ID.search(command):
+            continue
+        if _ASSOCIATION_FILTER not in command or not _OWN_LOGIN_EXCLUSION.search(command):
+            gaps.append(command)
+    return gaps
 
 
 def issue_variables(issue: Issue) -> dict[str, Any]:

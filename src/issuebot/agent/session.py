@@ -337,6 +337,13 @@ async def _turn_loop(
     # before_run hook, and handed to every turn. Nothing the session prints moves it.
     run_timeout_s = settings.agent.run_timeout_ms / 1000
     deadline = state.started + run_timeout_s
+    # The account the session acts as, once: the workflow's comment fetches leave its own text
+    # out (GHSA-f3fm-r55f-2vgm), and it does not change between turns.
+    try:
+        login = await adapter.own_login()
+    except GitHubError as exc:
+        state.fail("github_error", f"could not read the account's login: {exc}")
+        return
     for turn_number in range(1, max_turns + 1):
         if time.monotonic() >= deadline:
             state.fail(
@@ -358,6 +365,7 @@ async def _turn_loop(
         context = PromptContext(
             issue=state.issue,
             repo=settings.github.repo,
+            login=login,
             labels=settings.github.labels,
             attempt=state.attempt,
             turn_number=turn_number,

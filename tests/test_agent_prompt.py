@@ -6,6 +6,7 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -56,6 +57,7 @@ def context(issue: Issue, **overrides: object) -> PromptContext:
         "max_turns": 5,
         "rework": False,
         "self_review": True,
+        "login": "issuebot",
     }
     fields.update(overrides)
     return PromptContext(**fields)  # type: ignore[arg-type]
@@ -668,3 +670,21 @@ def test_a_body_whose_page_was_empty_renders_as_no_description(
     assert not issue_variables(issue)[
         "body"
     ]  # so `{% if issue.body %}` says "No description provided."
+
+
+def test_the_login_is_the_sessions_own_value(make_issue: Callable[..., Issue]) -> None:
+    rendered = PromptRenderer("acting as {{ login }}").render(
+        context(make_issue(), login="issuebot-agent-1")
+    )
+    assert rendered == "acting as issuebot-agent-1"
+
+
+def test_the_body_is_the_render_not_the_raw_text(make_issue: Callable[..., Issue]) -> None:
+    issue = make_issue(body="raw", body_html='<p dir="auto">rendered</p>')
+    assert issue_variables(issue)["body"].text == "rendered\n"
+
+
+def test_a_body_with_no_rendered_html_is_refused(make_issue: Callable[..., Issue]) -> None:
+    issue = replace(make_issue(body="raw"), body_html=None)
+    with pytest.raises(AgentError, match="has a body but no rendered bodyHTML"):
+        issue_variables(issue)
