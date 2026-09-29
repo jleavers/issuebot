@@ -11,6 +11,7 @@ from jinja2 import Environment, StrictUndefined, Template, TemplateError
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.instructions import RepositoryFile
+from issuebot.agent.visible import strip_invisible, visible_text
 from issuebot.config import GitHubLabels
 from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
 
@@ -289,6 +290,16 @@ class PromptContext:
         }
 
 
+def _visible_body(issue: Issue) -> str:
+    """The description as its approver saw it; only called when ``issue.body`` is not ``None``."""
+    if issue.body_html is None:
+        # Test-only: the normaliser refuses a body with no bodyHTML, so production never gets
+        # here; an Issue built by hand without one falls back to the raw body, stripped.
+        assert issue.body is not None
+        return strip_invisible(issue.body)
+    return visible_text(issue.body_html)
+
+
 def issue_variables(issue: Issue) -> dict[str, Any]:
     """The issue as plain values: roles and datetimes as strings, the linked PR as ``pr``.
 
@@ -303,6 +314,11 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
     guard keeps working. The title, body and author envelopes carry the issue author's
     association (``unknown`` when GitHub recorded none); labels, assignees and instruction
     files carry no author and so carry no association either.
+
+    The body is the text of GitHub's own render of it (``Issue.body_html``, through
+    ``visible_text``), applied here once and nowhere else, since the pass is not idempotent; the
+    title has its invisible characters stripped. What the rendered page hid from the human who
+    approved the text is therefore not in the prompt (GHSA-f3fm-r55f-2vgm).
     """
     number = issue.number
     association = issue.author_association or UNKNOWN_ASSOCIATION
@@ -311,14 +327,14 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
         "identifier": issue.identifier,
         "number": number,
         "title": GitHubText(
-            issue.title,
+            strip_invisible(issue.title),
             source=f"issue #{number} title",
             author=issue.author,
             association=association,
         ),
         "body": (
             GitHubText(
-                issue.body,
+                _visible_body(issue),
                 source=f"issue #{number} description",
                 author=issue.author,
                 association=association,

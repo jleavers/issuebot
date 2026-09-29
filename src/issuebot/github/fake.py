@@ -1,6 +1,8 @@
 """In-memory GitHubAdapter with GitHub-like semantics and helpers for tests."""
 
 import copy
+import html
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -35,6 +37,35 @@ from issuebot.github.state import (
 from issuebot.invocation import run_hint
 
 _PR_STATE_UPPER: dict[PrState, str] = {"open": "OPEN", "closed": "CLOSED", "merged": "MERGED"}
+
+
+_FENCE = re.compile(
+    r"^```[ \t]*([^\s`]*)[^\n]*\n(.*?)(?:^```[ \t]*$\n?|\Z)", re.DOTALL | re.MULTILINE
+)
+_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
+
+def render_body_html(body: str | None) -> str | None:
+    """A minimal stand-in for GitHub's render (GHSA-f3fm-r55f-2vgm): paragraphs and fenced
+    code, everything else escaped, HTML comments dropped. Enough for the hermetic suite to
+    exercise the same path production takes; the real renderer is GitHub's."""
+    if body is None:
+        return None
+    parts: list[str] = []
+
+    def prose(text: str) -> None:
+        for paragraph in re.split(r"\n\s*\n", _COMMENT.sub("", text)):
+            if paragraph.strip():
+                parts.append(f'<p dir="auto">{html.escape(paragraph.strip())}</p>')
+
+    position = 0
+    for match in _FENCE.finditer(body):
+        prose(body[position : match.start()])
+        lang = f' lang="{html.escape(match.group(1))}"' if match.group(1) else ""
+        parts.append(f"<pre{lang}><code>{html.escape(match.group(2))}</code></pre>")
+        position = match.end()
+    prose(body[position:])
+    return "\n".join(parts) + "\n" if parts else ""
 
 
 @dataclass
@@ -496,6 +527,7 @@ class FakeGitHub:
             "number": record.number,
             "title": record.title,
             "body": record.body,
+            "bodyHTML": render_body_html(record.body),
             "author": {"login": record.author} if record.author is not None else None,
             "state": "OPEN" if record.state == "open" else "CLOSED",
             "url": self._issue_url(record.number),

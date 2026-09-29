@@ -62,6 +62,9 @@ def issue_from_node(
     closed_at = optional_timestamp(node.get("closedAt"))
 
     body = node.get("body")
+    body_html = node.get("bodyHTML")
+    if isinstance(body, str) and body and not isinstance(body_html, str):
+        raise GitHubError("response", f"malformed issue record #{number}: body without bodyHTML")
     all_labels = _label_names(node.get("labels"))
     state_labels = tuple(
         name
@@ -78,6 +81,7 @@ def issue_from_node(
         number=number,
         title=title,
         body=body if isinstance(body, str) and body else None,
+        body_html=body_html if isinstance(body, str) and body else None,
         author=_login(node.get("author")),
         github_state=github_state,
         state=state,

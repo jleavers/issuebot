@@ -1,5 +1,6 @@
 """Shared pytest fixtures."""
 
+import html
 import os
 import uuid
 from collections.abc import Callable, Iterator
@@ -159,7 +160,12 @@ def no_ansi_colour(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def make_issue() -> Callable[..., Issue]:
-    """Build a consistent Issue; pass field overrides as keyword arguments."""
+    """Build a consistent Issue; pass field overrides as keyword arguments.
+
+    A ``body`` given without ``body_html`` gets ``<p dir="auto">`` + the escaped body + ``</p>``
+    (``None`` for a ``None`` body), so a test that sets a body renders it through the same
+    ``bodyHTML`` path production takes; pass ``body_html`` to say what the page showed.
+    """
 
     def factory(**overrides: Any) -> Issue:
         fields: dict[str, Any] = {
@@ -182,6 +188,11 @@ def make_issue() -> Callable[..., Issue]:
             "dispatchable": True,
         }
         fields.update(overrides)
+        body = fields["body"]
+        if "body_html" not in fields:
+            fields["body_html"] = (
+                None if body is None else '<p dir="auto">' + html.escape(body) + "</p>"
+            )
         return Issue(**fields)
 
     return factory

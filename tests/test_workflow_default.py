@@ -538,6 +538,10 @@ def test_the_description_is_the_text_a_human_approved(make_issue: Callable[..., 
     assert "as they stood when a human applied the label that handed you this issue" in text
     assert "handed back to a human before any session sees it" in text
     assert "the text above is the approved text" in text
+    assert (
+        "as GitHub renders them: what the page hides -- an HTML comment, a link definition "
+        "nothing uses, a character that prints as nothing -- is not here" in text
+    )
 
 
 def test_after_create_unshallows_a_shallow_clone() -> None:
