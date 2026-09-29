@@ -177,8 +177,8 @@ rather than visual order; a `geojson`, `topojson` or `stl` block keeps its sourc
 a fence, though the page draws a map or a model and never shows the text, since a GIS or 3D
 report needs its source; and text hidden inside a mermaid diagram or a math expression is
 stripped best-effort (`%%` comments and accessibility titles, `\phantom{}`) rather than
-proven gone, as is text nested three or more levels deep in `<sub>` or `<sup>`, whose 75%
-font-size compounds to nothing on the page. The conversion runs exactly once, on the render and never on its own output,
+proven gone, as is text nested three or more levels deep in the elements whose font size
+compounds when nested (`sub`, `sup`, `small`, `code`, `tt`), which is below a pixel on the page. The conversion runs exactly once, on the render and never on its own output,
 because it is not idempotent: a literal `<!-- x -->` the page *did* show is text after one
 pass and a comment to drop after a second. What the body points at is a different question
 from what it says: a branch, a tag or a URL is followed only when it is pinned by content -- a
@@ -201,7 +201,9 @@ maintainer shows what they are answering -- and only the rule that follows, that
 "is still its original author's", stands between it and the session.
 
 The session's own account is the other half of that filter: every fetch also selects
-`.user.login != "<login>"`, the `{{ login }}` the prompt renders, since a dedicated bot is a
+`.user.login != "<login>"` (except on an admin account, where the term is off: see
+[The account a session acts as](#the-account-a-session-acts-as)), the `{{ login }}` the prompt
+renders, since a dedicated bot is a
 collaborator and its own comments and reviews would otherwise come back to it, and to every
 session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
 comment read in the prompt in force lacks either half, which is what a prompt that replaces
@@ -216,7 +218,8 @@ deployment that wants narrower admission narrows the organisation, not the filte
 are fixed by design (`docs/superpowers/specs/2026-09-28-tracker-text-admission-design.md`,
 §2). The account issuebot runs as is at least a collaborator -- the owner, on a maintainer's
 own token -- so the association alone would admit its own comments, and the login exclusion
-above is what keeps them out; the workpad, the one text of its own a session reads, it
+above is what keeps them out, except on an admin account, where the exclusion is off and they
+come back as requests ([The account a session acts as](#the-account-a-session-acts-as)); the workpad, the one text of its own a session reads, it
 reads by id (#77).
 
 What was dropped is listed by author and URL under `Quarantined` in the workpad, and a

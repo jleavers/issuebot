@@ -12,8 +12,9 @@ inside can close it) with the language from GitHub's ``highlight-source-*`` clas
 to backticks; ``<del>``, ``<s>`` and ``<strike>`` to ``~~``;
 ``<a>`` to ``[text](href)``; block elements to line breaks
 and table cells to `` | ``; the content of ``<script>``, ``<style>``, ``<template>``, ``<rp>``
-and ``sr-only`` elements dropped, as is text nested three or more levels deep in ``<sub>``
-and ``<sup>``, whose 75% font-size compounds to nothing; ``<img>`` rendered as nothing. Then
+and ``sr-only`` elements dropped, as is text nested three or more levels deep in the elements
+whose font size compounds when nested (``sub``, ``sup``, ``small``, ``code``, ``tt``), which is
+below a pixel on the page; ``<img>`` rendered as nothing. Then
 the characters that print as nothing go: Unicode format characters, variation selectors,
 fillers, C0 and C1 controls other than tab and newline.
 
@@ -43,11 +44,11 @@ _BLOCK = frozenset(
 _DROPPED = frozenset({"script", "style", "template", "rp"})
 _STRIKE = frozenset({"del", "s", "strike"})
 _CELL = frozenset({"td", "th"})
-_SMALL = frozenset({"sub", "sup"})
+_SMALL = frozenset({"sub", "sup", "small", "code", "tt"})
 _SMALL_LIMIT = 3
-"""GitHub sets ``sub, sup { font-size: 75% }`` and it compounds, so text nested this deep is
-below a pixel on the page: one level is footnote and formula markup, two is rare, three has no
-honest use."""
+"""Elements whose font size compounds when nested: ``sub`` and ``sup`` (75% each), ``small``
+(90%) and ``code`` and ``tt`` (85%). Text nested this deep is below a pixel on the page: one
+level is ordinary markup (``<pre><code>`` is one), two is rare, three has no honest use."""
 _VOID = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param"}
     | {"source", "track", "wbr"}
@@ -112,7 +113,7 @@ class _ToText(HTMLParser):
         self._dropped = 0
         self._hidden: tuple[str, int] | None = None  # (tag, depth) of an sr-only element
         self._math = 0
-        self._small = 0  # open <sub>/<sup> depth: each nests at 75% font-size
+        self._small = 0  # open depth of the elements in _SMALL
         self._first_cell = True
         self._language: str | None = None
         self._link: list[tuple[str | None, int]] = []  # (href, index into parts)

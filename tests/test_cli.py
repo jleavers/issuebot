@@ -2618,6 +2618,28 @@ def test_run_once_show_prompt_names_a_login_failure(
     assert "[FAIL] login:" in capsys.readouterr().out
 
 
+def test_run_once_show_prompt_names_a_repository_role_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    own_login = fake_github.own_login
+
+    async def then_fail_the_role() -> str:
+        login = await own_login()
+        fake_github.fail_next("transport")
+        return login
+
+    fake_github.own_login = then_fail_the_role  # type: ignore[method-assign]
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] repository role:" in capsys.readouterr().out
+
+
 def test_run_once_show_prompt_carries_the_workspaces_instruction_files(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
