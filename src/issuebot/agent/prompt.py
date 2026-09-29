@@ -310,7 +310,9 @@ def _visible_body(issue: Issue) -> str:
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 _GH_SPAN = re.compile(r"`gh [^`\n]*`")
 _CONTINUATION = re.compile(r"\\[ \t]*\n[ \t]*")
-_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
+_SEPARATOR_CHARS = frozenset(";&|")
+_QUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
+_SHORT_C = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
 _UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
 _WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
 _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
@@ -318,39 +320,58 @@ _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 
 def _gh_commands(rendered: str) -> list[str]:
     """Every candidate command: backticked ``gh`` spans, and each line that starts ``gh ``
-    (after indentation and an optional ``$ ``), whether or not a fence was detected around it,
-    with ``\\``-continued lines joined. No text is removed first, so a fence that pairs badly
-    cannot hide a span."""
+    (after indentation, blockquote markers and an optional ``$ ``), whether or not a fence was
+    detected around it, with ``\\``-continued lines joined. No text is removed first, so a
+    fence that pairs badly cannot hide a span."""
     text = _CONTINUATION.sub(" ", rendered)
     found = [match.strip("`") for match in _GH_SPAN.findall(text)]
     for line in text.splitlines():
-        stripped = line.strip().removeprefix("$ ").strip()
+        stripped = _QUOTE_PREFIX.sub("", line.strip()).removeprefix("$ ").strip()
         if stripped.startswith("gh "):
             found.append(stripped)
     return list(dict.fromkeys(found))
 
 
-def _segments(command: str) -> list[list[str]]:
-    """The command's simple commands, split on ``;``, ``&&``, ``||``, ``|`` and ``&`` outside
-    quotes, each as its tokens; only those that start with ``gh`` are kept."""
+def _segments(command: str) -> list[list[str]] | None:
+    """The command's simple commands, each as the tokens from its first ``gh`` onward, or
+    ``None`` when the shell quoting does not parse (the caller fails closed).
+
+    Tokenised with ``shlex`` in posix mode with ``#`` *not* a comment (bash starts one only at
+    a word's start, shlex would cut ``issues/1#issuecomment-5`` short), and split outside
+    quotes on any token made only of ``;``, ``&`` and ``|`` (``;``, ``&&``, ``||``, ``|``,
+    ``|&``, ``&``). A segment led by ``(``, ``{`` or ``!``, or by a wrapper such as ``xargs``,
+    ``env`` or ``sudo``, is scanned from its first ``gh`` token, so a group or a wrapper does not
+    hide the command. It does not expand anything: a ``$(...)`` inside a word stays one word
+    with its text, which is why a write carrying one is never exempt.
+    """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
-        tokens = command.split()
-    segments: list[list[str]] = [[]]
+        return None
+    groups: list[list[str]] = [[]]
     for token in tokens:
-        if token in _SEPARATORS:
-            segments.append([])
+        if token and set(token) <= _SEPARATOR_CHARS:
+            groups.append([])
         else:
-            segments[-1].append(token)
-    return [segment for segment in segments if segment[:1] == ["gh"]]
+            groups[-1].append(token)
+    segments: list[list[str]] = []
+    for group in groups:
+        while group and group[0] in ("(", "{", "!"):
+            group = group[1:]
+        if group:
+            group = [group[0].lstrip("({"), *group[1:]]
+        if "gh" in group:
+            segments.append(group[group.index("gh") :])
+    return segments
 
 
 def _uses_unfiltered_flag(tokens: list[str]) -> bool:
     for index, token in enumerate(tokens):
-        if token.split("=", 1)[0] in ("-c", "--comments"):
+        name = token.split("=", 1)[0]
+        if name == "--comments" or _SHORT_C.match(name):
             return True
         if token == "--json" and index + 1 < len(tokens):
             fields = tokens[index + 1]
@@ -372,10 +393,18 @@ def _is_write(tokens: list[str]) -> bool:
     for index, token in enumerate(tokens):
         if token in ("-X", "--method") and index + 1 < len(tokens):
             method = tokens[index + 1]
+        elif token.startswith(("--method=", "-X=")):
+            method = token.split("=", 1)[1]
         elif token.startswith("-X") and len(token) > 2:
             method = token[2:]
     # The last value wins, as pflag has it: ``-X POST -X GET`` is a read.
     return method.upper() in _WRITE_METHODS
+
+
+def _substitutes(tokens: list[str]) -> bool:
+    """A word that runs another command (``$(...)``, backticks): its output is not the
+    write's or the read's own, so nothing is exempt on the strength of the outer command."""
+    return any("$(" in token or "`" in token for token in tokens)
 
 
 def _is_workpad_read(tokens: list[str]) -> bool:
@@ -416,14 +445,19 @@ def unfiltered_comment_reads(rendered: str, login: str) -> list[str]:
     required = f'select((.author_association | IN({associations})) and .user.login != "{login}")'
     gaps: list[str] = []
     for command in _gh_commands(rendered):
-        for tokens in _segments(command):
+        segments = _segments(command)
+        if segments is None:
+            if any(mark in command for mark in ("/comments", "/reviews", "--comments", "--json")):
+                gaps.append(command)
+            continue
+        for tokens in segments:
             joined = shlex.join(tokens)
             if _uses_unfiltered_flag(tokens):
                 gaps.append(joined)
                 continue
             if "/comments" not in joined and "/reviews" not in joined:
                 continue
-            if _is_write(tokens) or _is_workpad_read(tokens):
+            if not _substitutes(tokens) and (_is_write(tokens) or _is_workpad_read(tokens)):
                 continue
             if not any(required in token for token in tokens):
                 gaps.append(joined)

@@ -851,3 +851,41 @@ def test_the_scan_survives_fences_that_pair_badly_and_chained_commands() -> None
         "gh api -X POST -X GET repos/o/r/issues/1/comments"
     ]
     assert gaps("`gh api -X GET -X POST repos/o/r/issues/1/comments`") == []
+
+
+def test_the_scan_holds_against_the_shell_forms_that_hid_a_read() -> None:
+    def gaps(text: str) -> list[str]:
+        return unfiltered_comment_reads(text, LOGIN)
+
+    write = "gh api -X POST repos/o/r/issues/2/comments -f body=hi"
+    # `#` inside a word is not a comment.
+    hashed = "gh issue view https://github.com/o/r/issues/1#issuecomment-5 --comments"
+    assert len(gaps(f"`{hashed}`")) == 1
+    assert len(gaps("`gh pr view https://github.com/o/r/pull/1#discussion_r5 -c`")) == 1
+    assert gaps(f"`gh api -X POST repos/o/r/issues/2/comments -f body=see#1; {READ}`") == [READ]
+    # `|&` and other separators made only of ; & |.
+    assert gaps(f"`{write} |& {READ}`") == [READ]
+    # Command substitution inside a write is never exempt.
+    quoted = f'gh api -X POST repos/o/r/issues/2/comments -f body="$({READ})"'
+    assert gaps(f"`{quoted}`") != []
+    assert gaps(f"`gh api -X POST repos/o/r/issues/2/comments -f body=$({READ})`") != []
+    # Unparseable quoting fails closed, whole.
+    broken = f"{write.replace('body=hi', "body=$'it\\'s'")}; {READ}"
+    assert gaps(f"`{broken}`") == [broken]
+    # Groups, negation and wrappers do not hide the command.
+    assert gaps(f"`{write}; ({READ})`") != []
+    assert gaps(f"`{write}; {{ {READ}; }}`") != []
+    assert gaps(f"`{write}; ! {READ}`") != []
+    piped = (
+        "gh api repos/o/r/issues/comments/<id> --jq .body | xargs -I{} gh api "
+        "repos/o/r/issues/{}/comments --jq '.[].body'"
+    )
+    assert gaps(f"`{piped}`") != []
+    # Both `=` forms of the method flags; the last value still wins.
+    assert gaps("`gh api -X POST --method=GET repos/o/r/issues/1/comments --jq .x`") != []
+    assert gaps("`gh api -X POST -X=GET repos/o/r/issues/1/comments --jq .x`") != []
+    assert gaps("`gh api --method=GET -X POST repos/o/r/issues/1/comments -f a=b`") == []
+    # A short-flag cluster carrying `c`, and a blockquoted command line.
+    assert gaps("`gh pr view 1 -cR o/r`") == ["gh pr view 1 -cR o/r"]
+    assert gaps(f"> {READ}\n") == [READ]
+    assert gaps(f"> > {READ}\n") == [READ]
