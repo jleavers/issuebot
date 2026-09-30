@@ -811,6 +811,11 @@ def test_the_scan_on_an_admin_render_requires_the_association_half_alone() -> No
     assert unfiltered_comment_reads(f"`{read} '.[].body'`", "issuebot", admin=True) != []
     negated = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not))'
     assert unfiltered_comment_reads(f"`{read} '.[] | {negated} | .body'`", "issuebot", admin=True)
+    # The outer spelling of the same negation, which is the shape the `Quarantined` fetch has:
+    # the association is in it and it reads the text the barrier drops.
+    outer = f"{association} | not)"
+    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot", admin=True)
+    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot")
     joined = f'{association} or .user.login == "issuebot")'
     assert unfiltered_comment_reads(f"`{read} '.[] | {joined} | .body'`", "issuebot", admin=True)
     anyone = f"{association} or true)"
