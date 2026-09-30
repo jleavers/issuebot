@@ -236,7 +236,14 @@ renders, since a dedicated bot is a
 collaborator and its own comments and reviews would otherwise come back to it, and to every
 session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
 comment read in the prompt in force lacks either half, which is what a prompt that replaces
-the shipped one loses (#250).
+the shipped one loses (#250). It warns as well when a read *carries* both halves without
+applying them: the filter has to be the `--jq` program's first stage, after an optional `.[]`,
+with only a projection after it, because a stage that follows a filter can undo it -- `select`
+emits nothing for a record it drops and jq's `//` yields its right-hand side when its left
+emits nothing, so `.[] | <the whole filter> // .body` prints the bodies of exactly the authors
+the filter exists to drop (#258). A read that wraps the filtered stream instead
+(`[.[] | select(...)]`) is warned about too, since the check cannot tell that continuation from
+the other one; keeping the read's own program plain is what clears it.
 
 `author_association` is GitHub's own word for the author's *relationship* to the repository,
 not a permission check: `OWNER` is the repository's owner; `MEMBER` is a member of the owning

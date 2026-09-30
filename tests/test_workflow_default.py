@@ -999,8 +999,8 @@ def test_the_filter_must_be_applied_and_not_merely_carried() -> None:
     # The filter must be the whole stage, not a prefix or a suffix of one.
     assert gaps(f".[] | {FILTER} and false") != []
     assert gaps(f".[] | [{FILTER}]") != []
-    # A `|` inside a string does not split a stage, so such a stage is judged whole.
     assert gaps(f'.[] | {FILTER} | {{body: "a|b"}}') != []
+    # A `|` inside a string, escaped quote and all, does not split a stage: it is judged whole.
     assert _jq_stages(r'.[] | select(.body == "a\"|b") | .x') == [
         ".[]",
         r'select(.body == "a\"|b")',

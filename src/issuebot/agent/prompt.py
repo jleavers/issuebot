@@ -329,12 +329,13 @@ _JQ_ITERATION = frozenset({".[]", ".[]?"})
 # emit another output. A dotted path, or an object construction of keys and dotted paths --
 # ``{id, author: .user.login, body}``, jq's shorthand ``{id}`` included. Every value is a path,
 # so a bare word cannot sit where jq would resolve it as a builtin (``{a: env}`` dumps the
-# environment, ``{a: recurse}`` emits many outputs per input), and no parentheses, ``|`` or
-# ``/`` can appear at all, so no ``//``.
+# environment, ``{a: recurse}`` emits many outputs per input), and outside a quoted key no
+# parentheses, ``|`` or ``/`` can appear, so no ``//``. Inside one they may: a quoted key is a
+# jq string, which ``_jq_stages`` reads no bracket or pipe out of either.
 _JQ_PATH = r"\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
 _JQ_KEY = r'(?:[A-Za-z_]\w*|"[^"\\]*")'
 _JQ_FIELD = rf"{_JQ_KEY}(?:\s*:\s*{_JQ_PATH})?"
-_JQ_PROJECTION = re.compile(rf"{_JQ_PATH}|\{{\s*(?:{_JQ_FIELD}(?:\s*,\s*{_JQ_FIELD})*\s*)?\}}")
+_JQ_PROJECTION = re.compile(rf"(?:{_JQ_PATH}|\{{\s*(?:{_JQ_FIELD}(?:\s*,\s*{_JQ_FIELD})*\s*)?\}})")
 _JQ_OPENERS, _JQ_CLOSERS = "([{", ")]}"
 
 
@@ -478,13 +479,16 @@ def _jq_program(tokens: list[str]) -> str:
 
 def _jq_stages(program: str) -> list[str] | None:
     """The program's top-level stages, each stripped, split on the ``|`` that jq pipes with;
-    ``None`` when a quote is left open or a bracket unclosed (the caller fails closed).
+    ``None`` when a quote is left open, a bracket unclosed, or a closer has nothing open (the
+    caller fails closed).
 
     Only a ``|`` outside every quote and every ``(``, ``[`` and ``{`` splits, so the one in
     ``select((.author_association | IN(...)) and ...)`` stays inside its own stage, as does one
     inside a string, escaped quote and all. Nothing else is parsed: openers and closers are
-    counted rather than paired, so ``{a: .b)`` is "balanced" here, and a stage is the text
-    between two top-level pipes whatever it would do -- which is the caller's question.
+    counted rather than paired, so ``{a: .b)`` is "balanced" here; a ``'`` opens a string,
+    though jq has no single-quoted strings, so a program carrying an apostrophe fails closed
+    rather than being read; and a stage is the text between two top-level pipes whatever it
+    would do -- which is the caller's question.
     """
     stages: list[str] = [""]
     depth = 0
@@ -521,8 +525,9 @@ def _filter_applies(program: str, accepted: tuple[str, ...]) -> bool:
     """Whether one of the ``accepted`` filters *applies* to every record ``program`` can emit:
     it is the program's first stage, after an optional ``.[]``, matched whole, and every stage
     after it is a projection. More than one filter may be accepted because more than one
-    barrier can be the right one for a render: the conjunctive filter, and on an admin account
-    the association half alone (#252).
+    barrier can be the right one for a render: the conjunctive filter, and the association half
+    alone on an admin render (#252), which ``tests/test_workflow_default.py`` checks that
+    render against. Every caller here passes one.
 
     Carrying a filter is not applying one, because a stage after it decides whether it held:
     ``select`` emits nothing for a record it drops, and jq's ``//`` yields its right-hand side

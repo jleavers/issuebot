@@ -1377,8 +1377,9 @@ def _prompt_check(workflow: Workflow) -> Check:
     false positive -- the account changes and the exclusion stops matching -- which is why the
     text says the exclusion must name ``{{ login }}``. One that carries them somewhere other
     than as the program's first stage, or continues past them, is flagged on a different
-    footing (#258): a stage after the filter can undo it -- ``// .body`` re-emits exactly the
-    records it dropped -- and the scan cannot tell such a stage from a harmless one, so it
+    footing (#258): a stage after the filter can undo it -- ``// .body`` prints the bodies of
+    exactly the records it dropped -- and the scan cannot tell such a stage from a harmless
+    one, so it
     reports both and the text says where the filter must sit. A program that wraps a filtered
     read (``[.[] | select(...)]``, ``map(select(...))``) is therefore warned about while its
     barrier holds, and keeping the read's own program plain is what clears it. What the check
