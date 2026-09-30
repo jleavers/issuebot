@@ -45,6 +45,15 @@ nearly every Linux host has there. Something answering warns; an unanswered port
 an OK, since a closed port goes unanswered with the option and without it, and an isolated
 network nobody else has joined yet has no PTR either.
 
+The PTR is asked only where `/etc/resolv.conf` names `127.0.0.11`, because the proof is in who
+answered: another runtime's resolver -- Kubernetes' cluster DNS, or a host's own reached through
+a bind-mounted file -- is answering a different question, and its name would be read as an
+isolation it never claimed. One residue is left even so. The embedded resolver *forwards* what
+it has no record for, so an upstream that serves reverse zones covering the daemon's address
+pools could put a name on a plain bridge's own address, and the line would call that network
+isolated. The canary is what covers it on such a host, as it did before, and CI asserts the
+negative half -- a plain bridge's first address has no PTR -- on the engine it runs on.
+
 Neither question is what CI asks. Reading the option back out of a network would pass against
 an engine that accepted it and ignored it, so the `docker` job proves the property instead: it
 puts a listener on the runner at `0.0.0.0`, and asks a container on a plain `internal` network,

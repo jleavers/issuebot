@@ -374,9 +374,15 @@ jobs:
                   sys.exit("the listener did not answer at a plain bridge's first address")
               if named:
                   sys.exit(f"a plain bridge's own address has a PTR: {'; '.join(named)}")
-          elif reached:
-              sys.exit(f"a session reached a service on the runner at {', '.join(reached)}")
+          elif expect == "closed":
+              if reached:
+                  sys.exit(f"a session reached a service on the runner at {', '.join(reached)}")
+          else:
+              # Never silently: a typo falling through to the weaker arm is a proof that stopped
+              # proving anything and said nothing about it.
+              sys.exit(f"unknown expectation {expect!r}")
           PROBE
+          # World-readable, because the containers below read it as an unprivileged account.
           chmod 0644 /tmp/gateway-probe.py
           # A plain listener: the probe opens a connection and closes it without a request, which
           # the server logs and survives, so one of these serves every probe below.
@@ -384,6 +390,13 @@ jobs:
           listener=$!
           trap 'kill "$listener" 2>/dev/null || true; docker network rm ci-gateway-plain > /dev/null 2>&1 || true' EXIT
           for _ in $(seq 50); do
+            # A listener that died -- the port already taken, most likely -- is reported now,
+            # with its own stderr, rather than as a bare curl failure a hundred seconds later.
+            if ! kill -0 "$listener" 2>/dev/null; then
+              echo "the listener exited before it answered" >&2
+              cat /tmp/gateway-listener.log >&2
+              exit 1
+            fi
             if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/"; then break; fi
             sleep 0.2
           done
@@ -395,14 +408,22 @@ jobs:
           # And the session, on the shared `issuebot-internal` and the project's own `egress`.
           docker compose run --rm --no-deps --user agent -v /tmp/gateway-probe.py:/probe.py:ro \
             --entrypoint /app/.venv/bin/python worker /probe.py "$port" closed
+          # And it was still listening while that ran, so "nothing answered" is about the route
+          # rather than about a server that had gone away between the two probes.
+          curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$port/"
           # `validate`'s reading of the same two networks, which is what an operator sees: the
           # PTR resolves, so the line is a proof rather than the canary's "nothing answered".
           # The exit code is not this step's business -- a session in CI has no GitHub token and
           # no Claude credential -- so the line is grepped for, and printed when it is missing.
           docker compose run --rm --no-deps --user agent worker validate \
             > /tmp/gateway-validate.txt 2>&1 || true
-          if ! grep -q '^\[ OK \] gateway: .* is isolated (first address is ' /tmp/gateway-validate.txt; then
-            echo "validate did not report the worker's networks isolated" >&2
+          # Both directions, since the line names one clause per network: at least one network
+          # has to be reported isolated, and *no* network may be left to the canary -- a grep
+          # for the first alone would pass on a line that proved `egress` and hedged about
+          # `issuebot-internal`, which is exactly the shape a broken shared network produces.
+          if ! grep -q '^\[ OK \] gateway: .* is isolated (first address is ' /tmp/gateway-validate.txt \
+             || grep -q '^\[ OK \] gateway: .*canary, not a proof' /tmp/gateway-validate.txt; then
+            echo "validate did not report both of the worker's networks isolated" >&2
             cat /tmp/gateway-validate.txt >&2
             exit 1
           fi

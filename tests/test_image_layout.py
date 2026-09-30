@@ -607,6 +607,14 @@ def test_ci_proves_a_session_cannot_reach_the_runner_itself() -> None:
         "grep -q '^\\[ OK \\] gateway: .* is isolated (first address is ' "
         "/tmp/gateway-validate.txt" in CI
     )
+    # Both directions: the line carries one clause per network, so a grep for the isolated
+    # wording alone would pass on a detail that proved `egress` and hedged about the shared
+    # network -- which is the shape a shared network created without the options produces.
+    assert "grep -q '^\\[ OK \\] gateway: .*canary, not a proof' /tmp/gateway-validate.txt" in CI
+    # A typo'd expectation falls into no arm at all, rather than into the weaker one.
+    assert 'sys.exit(f"unknown expectation {expect!r}")' in CI
+    # And the listener is known to be alive on both sides of the probe that must not reach it.
+    assert "the listener exited before it answered" in CI
 
 
 def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> None:

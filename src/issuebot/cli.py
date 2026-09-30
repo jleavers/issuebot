@@ -1108,22 +1108,44 @@ def _host_port_open(address: str, port: int, *, timeout_s: float) -> bool:
 # else entirely rather than a budget anything is expected to use: `gethostbyaddr` takes no
 # timeout of its own, and one line of `validate` cannot be allowed to hang the eight after it.
 _GATEWAY_PTR_TIMEOUT_S = 2.0
+# Docker's embedded DNS, at the same address in every container the daemon starts.
+_EMBEDDED_RESOLVER = "127.0.0.11"
+
+
+def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) -> bool:
+    """Whether this container's resolver is Docker's own embedded DNS.
+
+    A PTR at a network's first address is a proof of isolation only because of *who* answers
+    it: ``127.0.0.11`` serves the daemon's record for a *container's* address, and has none for
+    a bridge's. Any other resolver -- Kubernetes' cluster DNS, or a host's own reached through a
+    bind-mounted ``resolv.conf`` -- is answering a different question, and its name would be
+    read here as an isolation it never claimed. So the lookup is asked only where that file
+    names it, and every other runtime keeps the canary alone.
+    """
+    try:
+        lines = resolv_conf.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(line.split()[:2] == ["nameserver", _EMBEDDED_RESOLVER] for line in lines)
 
 
 def _reverse_lookup(address: str) -> str | None:
     """The name the resolver gives ``address``, or None when nothing does.
 
-    Run in a thread this waits on, for the reason ``_probe_status_page`` is: the deadline is the
-    only one there is. The thread is left to finish on its own -- it writes nothing.
+    Run in a thread this waits on, for the reason ``_probe_status_page`` is: ``gethostbyaddr``
+    takes no timeout of its own, so the deadline is the only one there is. The thread is left to
+    finish -- it writes nothing, and the caller has its answer -- though the executor's own
+    ``atexit`` hook joins it, so a resolver that never replies delays the *exit* of a `validate`
+    whose lines have all printed. Better than holding the lines themselves.
     """
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gateway-ptr")
     try:
         answer = executor.submit(socket.gethostbyaddr, address).result(
             timeout=_GATEWAY_PTR_TIMEOUT_S
         )
-    except OSError, TimeoutError:
-        # herror (no PTR for it), gaierror (no resolver to ask) and the deadline all mean the
-        # same thing here: nobody claimed the address.
+    except OSError:
+        # `herror` (no PTR for it), `gaierror` (no resolver to ask) and `TimeoutError` (the
+        # deadline, and an `OSError` subclass) all mean one thing: nobody claimed the address.
         return None
     finally:
         executor.shutdown(wait=False)
@@ -1142,10 +1164,15 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     * **Who owns the first address?** ``127.0.0.11`` is Docker's embedded DNS, and it answers a
       PTR for a *container's* address alone. On an isolated network the first address went to
       whichever container attached first, so the lookup comes back ``<container>.<network>``; on
-      a plain one that address is the bridge's -- the host's own -- which the resolver knows
-      nothing about, and the lookup fails. A name is therefore a proof rather than a canary, and
-      the common case has one, since the worker's own networks carry the proxy and the hub's
-      database. It costs about 30 ms.
+      a plain one that address is the bridge's -- the host's own -- which the resolver has no
+      record of, and the lookup fails. A name is therefore a proof rather than a canary, and the
+      common case has one, since the worker's own networks carry the proxy and the hub's
+      database. It costs about 30 ms, and it is asked only where ``resolv.conf`` names that
+      resolver (``_embedded_resolver_configured``), since the proof is in who answered. The
+      residue is a name the embedded resolver did not have and *forwarded*: an upstream that
+      serves reverse zones for the daemon's address pools could put a name on a plain bridge's
+      own address, which would read here as isolation. CI's control asserts the negative half
+      on the engine it runs on; an operator's host is the canary's to cover.
 
     * **Does a host service answer there?** The canary, and what is left when the PTR does not:
       an isolated network nobody else has joined yet fails the lookup too, so the honest reading
@@ -1163,12 +1190,16 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     candidates = gateway_candidates(route_table)
     if not candidates:
         return Check(subject, "ok", "no attached network found in the route table")
-    findings: list[str] = []
-    unproved = False
+    # Proved first and unproved after, whatever order the route table lists them in, so that
+    # the hedge below lands on the clauses it is about: appended to a detail that ends in a
+    # proved network, it would read as doubt about the one network there is no doubt over.
+    proved: list[str] = []
+    unproved: list[str] = []
+    embedded = _embedded_resolver_configured()
     for interface, address, network in candidates:
-        name = _reverse_lookup(address)
+        name = _reverse_lookup(address) if embedded else None
         if name is not None:
-            findings.append(
+            proved.append(
                 f"{interface}'s network {network} at {address} is isolated "
                 f"(first address is {name}'s)"
             )
@@ -1186,17 +1217,23 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
                 "docker compose up -d` once its compose.yaml carries the option "
                 '(docs/operations.md, "Upgrades")',
             )
-        unproved = True
-        findings.append(
+        unproved.append(
             f"nothing answered on port {GATEWAY_CANARY_PORT} at {address}, the first address "
             f"of {interface}'s network {network}"
         )
-    detail = "; ".join(findings)
-    if unproved:
+    detail = "; ".join(proved + unproved)
+    if unproved and embedded:
         detail += (
             " -- an address no PTR claims is the host's own without an isolated gateway, a "
             "container's or nobody's with one, and a closed port is refused either way: a "
             "canary, not a proof"
+        )
+    elif unproved:
+        detail += (
+            f" -- no PTR was asked, since this container's resolver is not Docker's "
+            f"{_EMBEDDED_RESOLVER} and another's answer would say nothing about the bridge; an "
+            "unanswered port is refused with an isolated gateway and without one: a canary, "
+            "not a proof"
         )
     return Check(subject, "ok", detail)
 
