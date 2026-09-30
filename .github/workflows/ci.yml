@@ -66,11 +66,7 @@ jobs:
           # the isolated gateway options (2026-09-29) are what leave it no way *onto* the
           # host either, since an internal bridge otherwise still carries the host's own
           # address. Engine 28.0 or later accepts them; the README's floor says so.
-          # TEMPORARY, reverted in the next commit: #251's acceptance criterion is that
-          # the runtime step below fails when the shared network is created without the
-          # isolated options, so for this one run it is. The recipe is unchanged:
-          # docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
-          docker network create --internal issuebot-internal
+          docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated -o com.docker.network.bridge.gateway_mode_ipv6=isolated issuebot-internal
           for profiles in hub worker hub,worker; do
             # Both directions (#78): without the store's password nothing configures -- the
             # refusal is the invariant, so a default creeping back in fails the PR -- and with
