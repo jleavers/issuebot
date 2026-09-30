@@ -711,6 +711,187 @@ def test_validate_empty_prompt_warns(
     assert "[WARN] prompt: body is empty" in capsys.readouterr().out
 
 
+def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#250, GHSA-f3fm-r55f-2vgm: an overlay that replaces the prompt keeps whatever Step 6 it
+    had, and nothing else says it has no comment barrier.
+
+    The second command carries the *old* filter, the association alone with no own-account
+    exclusion, so it is a gap too: the count is 2, and the first reported is the ``--comments``
+    one because spans are found in document order.
+    """
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}. Then "
+        "`gh pr view 1 --comments` and "
+        "`gh api repos/o/r/pulls/1/reviews --jq '.[] | select(.author_association | "
+        'IN("OWNER","MEMBER","COLLABORATOR")) | {id}\'`.',
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 2 comment reads lack the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 1 --comments`: a prompt that replaces "
+        "the shipped one has no comment barrier unless it carries Step 6's commands "
+        '(docs/security-model.md, "The text a session acts on")'
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login"
+    ) in out
+
+
+def test_validate_accepts_the_workpad_read_by_its_rendered_id(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """A prompt that reads the workpad as ``issues/comments/{{ workpad.id }}`` renders a real
+    id; that read is the workpad's own and is not a gap."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}."
+        "{% if workpad %} Read it: "
+        "`gh api repos/o/r/issues/comments/{{ workpad.id }} --jq .body`.{% endif %}",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] prompt:" in capsys.readouterr().out
+
+
+def test_validate_fails_on_a_template_error_inside_a_branch_the_defaults_skip(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Every variant renders inside the ``try``, so an undefined name that only the rework
+    branch reaches is still the failure it would be in a live rework session."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n"
+        "{% if rework %}{{ nope }}{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    assert "[FAIL] prompt: template does not render: 'nope' is undefined" in (
+        capsys.readouterr().out
+    )
+
+
+def test_validate_warns_about_a_read_inside_the_rework_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#250's scenario is a prompt that reads the review it is answering, and that read sits
+    inside ``{% if rework %}``: one render at the defaults would never see it."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if rework %}\n"
+        "Read the review: `gh pr view {{ issue.number }} --comments`\n{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 1 --comments`: " in out
+    )
+
+
+def test_validate_warns_about_a_read_inside_the_linked_pr_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The same read under ``{% if issue.pr %}``: the sample context has no PR by default, and
+    the check renders the variant that has one. Reached by sixteen variants, counted once."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if issue.pr %}\n"
+        "Read the review: `gh pr view {{ issue.pr.number }} --comments`\n{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh pr view 2 --comments`: " in out
+    )
+
+
+def test_validate_warns_about_a_literal_login_in_the_exclusion(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """Both halves present, but the exclusion names a login rather than ``{{ login }}``: right
+    until the account changes, so the warning says which half is the problem."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}, then "
+        "`gh api repos/o/r/issues/1/comments --jq '.[] | select((.author_association | "
+        'IN("OWNER","MEMBER","COLLABORATOR")) and .user.login != "my-bot") | .body\'`.',
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] prompt: renders, but 1 comment read lacks" in out
+    assert (
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
+    )
+
+
+def test_validate_warns_in_the_singular_about_one_unfiltered_comment_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}, then "
+        "`gh api repos/o/r/issues/1/comments --jq '.[].body'`.",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq '.[].body'`: "
+        "a prompt that replaces the shipped one has no comment barrier unless it carries "
+        "Step 6's commands "
+        '(docs/security-model.md, "The text a session acts on")'
+        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
+    )
+
+
+def test_validate_passes_the_shipped_prompt(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The shipped prompt is held to the same scan as a deployment's (#250), and it passes.
+
+    Through a copy in ``tmp_path`` rather than ``configs/WORKFLOW.md`` in place, for the reason
+    ``tests/test_workflow_default.py::load`` passes ``overlay=False``: a developer's own
+    ``configs/WORKFLOW.local.md`` would otherwise be what this test validated.
+    """
+    shipped = Path(__file__).parent.parent / "configs" / "WORKFLOW.md"
+    path = _write(tmp_path, shipped.read_text(encoding="utf-8"))
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] prompt: " in capsys.readouterr().out
+
+
 def test_validate_configured_database_and_slack(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1581,7 +1762,9 @@ def test_validate_warns_when_the_tokens_account_administers_the_repository(
     out = capsys.readouterr().out
     assert (
         "[WARN] github.token account: issuebot administers example/repo, and the session holds "
-        "the token: a session can bypass or rewrite the branch ruleset. Run as a dedicated "
+        "the token: a session can bypass or rewrite the branch ruleset, and its own comments "
+        "and reviews come back to it as requests, since the prompt's own-account exclusion is "
+        "off for an admin. Run as a dedicated "
         'account with write access (docs/security-model.md, "The account a session acts as")'
     ) in out
 
@@ -2406,9 +2589,55 @@ def test_run_once_show_prompt_has_no_side_effects(
     assert [name for name, _ in fake_github.calls] == [
         "fetch_issues_by_ids",
         "find_workpad_comment",
+        "own_login",
+        "repo_info",
     ]
     assert fake_github.issue(42).state is StateLabel.TODO
     assert not (tmp_path / "ws").exists()
+
+
+def test_run_once_show_prompt_names_a_login_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    find_workpad = fake_github.find_workpad_comment
+
+    async def then_fail_the_login(number: int) -> object:
+        comment = await find_workpad(number)
+        fake_github.fail_next("transport")
+        return comment
+
+    fake_github.find_workpad_comment = then_fail_the_login  # type: ignore[method-assign]
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] login:" in capsys.readouterr().out
+
+
+def test_run_once_show_prompt_names_a_repository_role_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/todo",), number=42)
+    own_login = fake_github.own_login
+
+    async def then_fail_the_role() -> str:
+        login = await own_login()
+        fake_github.fail_next("transport")
+        return login
+
+    fake_github.own_login = then_fail_the_role  # type: ignore[method-assign]
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--workflow", str(path), "--show-prompt"]) == 1
+    assert "[FAIL] repository role:" in capsys.readouterr().out
 
 
 def test_run_once_show_prompt_carries_the_workspaces_instruction_files(

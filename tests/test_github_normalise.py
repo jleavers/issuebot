@@ -20,6 +20,7 @@ def node(**overrides: Any) -> dict[str, Any]:
         "number": 42,
         "title": "Add retry backoff",
         "body": "We need exponential backoff.",
+        "bodyHTML": '<p dir="auto">We need exponential backoff.</p>',
         "author": {"login": "reporter"},
         "state": "OPEN",
         "url": "https://github.com/example/repo/issues/42",
@@ -337,3 +338,25 @@ def test_author_association_is_none_when_the_node_has_none() -> None:
 )
 def test_is_workpad_body(body: str | None, expected: bool) -> None:
     assert is_workpad_body(body) is expected
+
+
+def test_body_html_is_carried_and_required_beside_a_body() -> None:
+    issue = issue_from_node(
+        {**node(), "body": "Do X", "bodyHTML": '<p dir="auto">Do X</p>'},
+        repo=REPO,
+        labels=LABELS,
+        login="bot",
+    )
+    assert issue.body_html == '<p dir="auto">Do X</p>'
+    assert (
+        issue_from_node(
+            {**node(), "body": None, "bodyHTML": ""}, repo=REPO, labels=LABELS, login="bot"
+        ).body_html
+        is None
+    )
+    with pytest.raises(GitHubError) as excinfo:
+        issue_from_node(
+            {**node(), "body": "Do X", "bodyHTML": None}, repo=REPO, labels=LABELS, login="bot"
+        )
+    assert excinfo.value.category == "response"
+    assert "bodyHTML" in str(excinfo.value)

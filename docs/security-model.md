@@ -162,6 +162,32 @@ counts on any issue, so a session holding the token can approve another issue fo
 successor. Nothing is stored, so a restart cannot reset it: re-approval is a maintainer
 applying `issuebot/todo` again.
 
+The label approved the *page*, though, and a raw Markdown body carries text the page never
+showed (GHSA-f3fm-r55f-2vgm): an HTML comment, a link-reference definition nothing uses, a
+Unicode format character, a `<script>`, `<style>` or `<template>` element, whatever GitHub's
+sanitiser drops. So the session is handed the description as GitHub rendered it: the issues
+query asks for `bodyHTML`, GitHub's own sanitised render, and `agent/visible.py` turns that
+back into text with the standard library's HTML parser -- text nodes only, so no attribute
+text; fenced code from `<pre>`, with its language; inline code; a link as its text with the
+`href` beside it; table cells; task-list boxes -- and a record with a body and no render is
+refused rather than rendered raw. What is left in is left in knowingly. A collapsed `<details>` block keeps its
+content, since it is one click away for the approver and hiding it from the session would
+hide a legitimate reproduction; length is not bounded; a `dir="rtl"` span reads in logical
+rather than visual order; a `geojson`, `topojson` or `stl` block keeps its source verbatim in
+a fence, though the page draws a map or a model and never shows the text, since a GIS or 3D
+report needs its source; and text hidden inside a mermaid diagram or a math expression is
+stripped best-effort (`%%` comments and accessibility titles, `\phantom{}`) rather than
+proven gone, as is text nested three or more levels deep in the elements whose font size
+compounds when nested (`sub`, `sup`, `small`, `code`, `tt`), which is below a pixel on the page. The conversion runs exactly once, on the render and never on its own output,
+because it is not idempotent: a literal `<!-- x -->` the page *did* show is text after one
+pass and a comment to drop after a second. What the body points at is a different question
+from what it says: a branch, a tag or a URL is followed only when it is pinned by content -- a
+full commit SHA, or a digest checked before use -- since what was approved is the text and
+not what sits at the other end of a link (Ground rule 8), and egress bounds the rest to
+GitHub-hosted references. And one thing none of this covers: a session holding `gh` can still
+ask for the raw body itself (`gh issue view --json body`), and only the workflow's own words
+say not to.
+
 Comments are the other text a session reads, and on a public repository anyone can leave one
 on an issue in `issuebot/review` or `issuebot/rework`. The barrier is in the commands the
 workflow hands out -- every fetch is a `gh api --jq` that selects `OWNER`, `MEMBER` or
@@ -174,6 +200,15 @@ the quarantined author's own text into the context by design, too -- quoting is 
 maintainer shows what they are answering -- and only the rule that follows, that such text
 "is still its original author's", stands between it and the session.
 
+The session's own account is the other half of that filter: every fetch also selects
+`.user.login != "<login>"` (except on an admin account, where the term is off: see
+[The account a session acts as](#the-account-a-session-acts-as)), the `{{ login }}` the prompt
+renders, since a dedicated bot is a
+collaborator and its own comments and reviews would otherwise come back to it, and to every
+session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
+comment read in the prompt in force lacks either half, which is what a prompt that replaces
+the shipped one loses (#250).
+
 `author_association` is GitHub's own word for the author's *relationship* to the repository,
 not a permission check: `OWNER` is the repository's owner; `MEMBER` is a member of the owning
 organisation, whether or not they hold any permission on this particular repository;
@@ -182,8 +217,10 @@ organisation-owned repository the filter admits every member of that organisatio
 deployment that wants narrower admission narrows the organisation, not the filter -- the three
 are fixed by design (`docs/superpowers/specs/2026-09-28-tracker-text-admission-design.md`,
 §2). The account issuebot runs as is at least a collaborator -- the owner, on a maintainer's
-own token -- so its own comments pass: a session persuading its successor holds the same
-authority, not more, which is the line #77 drew for the workpad.
+own token -- so the association alone would admit its own comments, and the login exclusion
+above is what keeps them out, except on an admin account, where the exclusion is off and they
+come back as requests ([The account a session acts as](#the-account-a-session-acts-as)); the workpad, the one text of its own a session reads, it
+reads by id (#77).
 
 What was dropped is listed by author and URL under `Quarantined` in the workpad, and a
 maintainer adopts one of those requests by replying to it. A reply adopts only what its own
@@ -209,6 +246,13 @@ the repository. If that account is yours, a persuaded session can merge its own 
 past the review rule, or push to the default branch, with your authority
 (GHSA-jm8h-q3j6-p8xp). So the identity a session acts as must be one that cannot merge work
 no human approved, its own or anyone else's, and `validate` reads two things about yours.
+
+The same account is the one the prompt's comment reads leave out: text it wrote itself is agent
+output, so Step 6 excludes its login. On an admin account that exclusion is off, since the
+account is then the maintainer and excluding it would leave a rework none of their review
+feedback; its own comments and reviews therefore come back to it as requests. That is the same
+degraded posture as labels above, where an admin token's own label counts on any issue, and one
+more reason for a bot account.
 
 `github.token account` reads the account's role on the repository, and warns when that role
 is admin, since an admin can bypass or rewrite the rule below. `github.branch rules`

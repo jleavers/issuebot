@@ -393,3 +393,13 @@ async def test_approval_evidence_records_labels_edits_and_renames() -> None:
     assert fake.issue(42).body == "edited" and fake.issue(42).title == "Renamed"
     assert await fake.own_login() == "bot"
     assert await fake.count_own_label_additions(42, "issuebot/in-progress") == 1
+
+
+def test_the_fake_renders_a_minimal_body_html() -> None:
+    fake = FakeGitHub(GitHubSettings(repo="example/repo"))
+    fake.add_issue("T", body="Do X <b>.\n\n```sh\nuv run pytest\n```\n<!-- hidden -->\n", number=1)
+    assert fake.issue(1).body_html == (
+        '<p dir="auto">Do X &lt;b&gt;.</p>\n<pre lang="sh"><code>uv run pytest\n</code></pre>\n'
+    )
+    fake.add_issue("U", body=None, number=2)
+    assert fake.issue(2).body_html is None

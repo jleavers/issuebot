@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import ipaddress
+import itertools
 import os
 import shutil
 import signal
@@ -49,6 +50,7 @@ from issuebot.agent.accounts import (
     settings_with_run_as,
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
+from issuebot.agent.prompt import unfiltered_comment_reads
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
@@ -92,10 +94,13 @@ from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
 from issuebot.egress import serve as serve_egress
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import (
+    WORKPAD_MARKER,
+    Comment,
     GhCliAdapter,
     GitHubAdapter,
     GitHubError,
     Issue,
+    LinkedPr,
     RepoInfo,
     StateLabel,
     fetch_status_summary,
@@ -490,8 +495,9 @@ def _token_account_check(login: str | None, info: RepoInfo) -> Check:
             "github.token account",
             "warn",
             f"{who} administers {info.full_name}, and the session holds the token: a session "
-            "can bypass or rewrite the branch ruleset. Run as a dedicated account with write "
-            f"access ({IDENTITY_DOC})",
+            "can bypass or rewrite the branch ruleset, and its own comments and reviews come back "
+            "to it as requests, since the prompt's own-account exclusion is off for an admin. "
+            f"Run as a dedicated account with write access ({IDENTITY_DOC})",
         )
     return Check("github.token account", "ok", f"{who} does not administer {info.full_name}")
 
@@ -1233,19 +1239,119 @@ def _slack_check(settings: Settings, *, probe: bool) -> Check:
     return Check(subject, status, detail)
 
 
+# The login ``_sample_context`` renders, and so the one ``unfiltered_comment_reads`` must be
+# handed: the own-account exclusion is a string comparison against exactly this name.
+SAMPLE_LOGIN = "sample-bot"
+
+
 def _prompt_check(workflow: Workflow) -> Check:
+    """The prompt in force renders, and its ``gh`` comment reads carry the barrier (#250).
+
+    An overlay that replaces the prompt keeps whatever Step 6 it had, so the shipped prompt
+    passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
+    text is scanned with the same ``unfiltered_comment_reads`` the shipped one is held to, and
+    over the same product of contexts that test renders -- a linked PR or none, rework or not,
+    a first or a later attempt, a workpad or none, self-review on or off -- because a template
+    branches on every one of those, and the rework branch is exactly where a prompt reads the
+    review it is answering (#250): one render at the defaults would pass a read that sits
+    inside ``{% if rework %}``. The continuation is rendered too, so the product here is the
+    one the shipped test holds; it is issuebot's own template, not a branch of the body. The
+    gaps are the union over every variant, in first-appearance order and de-duplicated, so a
+    read whose rendered text is identical across variants is counted once, while one that
+    interpolates a variant-dependent value (``gh issue view {{ attempt }} --comments``) counts
+    per distinct rendering -- the count is informational, the first gap is what names the
+    fault. Every render sits inside the ``try``: a template error in any branch is reported
+    as a failure the way it always was.
+
+    A gap is a *warning* rather than a failure: an operator's prompt may fetch comments by a
+    route the scanner accepts and the filter still be applied, or may not fetch them at all in
+    prose the scanner cannot read, and ``validate`` cannot tell the two apart. A command
+    carrying both halves with a literal login is flagged too, and is a real fault rather than a
+    false positive -- the account changes and the exclusion stops matching -- which is why the
+    text says the exclusion must name ``{{ login }}``. What it can do is say which command it
+    found, how many, and name the document that says what the barrier is.
+    """
     body = workflow.prompt_template
     if not body:
         return Check("prompt", "warn", "body is empty")
+    settings = workflow.config
     try:
-        PromptRenderer(body).render(_sample_context(workflow.config))
+        renderer = PromptRenderer(body)
+        renders = [
+            renderer.render(
+                _sample_context(
+                    settings,
+                    linked_pr=linked_pr,
+                    rework=rework,
+                    attempt=attempt,
+                    workpad=workpad,
+                    self_review=self_review,
+                )
+            )
+            for linked_pr, rework, attempt, workpad, self_review in itertools.product(
+                (None, _SAMPLE_PR), (False, True), (1, 2), (None, _SAMPLE_WORKPAD), (False, True)
+            )
+        ]
+        renders.append(
+            renderer.render_continuation(
+                _sample_context(
+                    settings, linked_pr=_SAMPLE_PR, turn_number=3, workpad=_SAMPLE_WORKPAD
+                )
+            )
+        )
     except AgentError as exc:
         return Check("prompt", "fail", exc.message)
+    gaps = list(
+        dict.fromkeys(
+            gap
+            for rendered in renders
+            for gap in unfiltered_comment_reads(
+                rendered, SAMPLE_LOGIN, workpad_id=_SAMPLE_WORKPAD.id
+            )
+        )
+    )
+    if gaps:
+        noun = "comment read lacks" if len(gaps) == 1 else "comment reads lack"
+        return Check(
+            "prompt",
+            "warn",
+            f"renders, but {len(gaps)} {noun} the maintainer filter or the own-account "
+            f"exclusion, the first `{gaps[0]}`: a prompt that replaces the shipped one has no "
+            "comment barrier unless it carries Step 6's commands "
+            '(docs/security-model.md, "The text a session acts on")'
+            ", and the own-account exclusion must name `{{ login }}` rather than a literal login",
+        )
     return Check("prompt", "ok", f"{len(body)} characters, renders")
 
 
-def _sample_context(settings: Settings) -> PromptContext:
-    """A plausible in-progress issue so validate can render the template end to end."""
+_SAMPLE_PR = LinkedPr(
+    number=2, url="https://github.com/example/repo/pull/2", state="open", merged_at=None
+)
+_SAMPLE_WORKPAD = Comment(
+    id=987654321,  # distinctive, so a literal id in an example cannot collide with the exemption
+    body=f"{WORKPAD_MARKER}\n",
+    url="https://github.com/example/repo/issues/1#issuecomment-987654321",
+    author=SAMPLE_LOGIN,
+    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+)
+
+
+def _sample_context(
+    settings: Settings,
+    *,
+    linked_pr: LinkedPr | None = None,
+    rework: bool = False,
+    attempt: int = 1,
+    turn_number: int = 1,
+    workpad: Comment | None = None,
+    self_review: bool | None = None,
+) -> PromptContext:
+    """A plausible in-progress issue so validate can render the template end to end.
+
+    The keywords are the branches a template takes; ``_prompt_check`` renders their product.
+    ``self_review`` is the workflow's own setting unless overridden.
+    """
     now = datetime.now(UTC)
     label = settings.github.labels.in_progress.lower()
     issue = Issue(
@@ -1254,6 +1360,7 @@ def _sample_context(settings: Settings) -> PromptContext:
         number=1,
         title="Sample issue",
         body="Sample description.",
+        body_html='<p dir="auto">Sample description.</p>',
         author="sample-user",
         github_state="open",
         state=StateLabel.IN_PROGRESS,
@@ -1264,18 +1371,21 @@ def _sample_context(settings: Settings) -> PromptContext:
         created_at=now,
         updated_at=now,
         closed_at=None,
-        linked_pr=None,
+        linked_pr=linked_pr,
         dispatchable=True,
     )
     return PromptContext(
         issue=issue,
         repo=settings.github.repo,
+        login=SAMPLE_LOGIN,
+        admin=False,
         labels=settings.github.labels,
-        attempt=1,
-        turn_number=1,
+        attempt=attempt,
+        turn_number=turn_number,
         max_turns=settings.agent.max_turns,
-        rework=False,
-        self_review=settings.agent.self_review,
+        rework=rework,
+        self_review=settings.agent.self_review if self_review is None else self_review,
+        workpad=workpad,
         repo_instructions=(
             RepositoryFile(
                 path="CLAUDE.md",
@@ -1540,9 +1650,21 @@ async def _run_once(
         except GitHubError as exc:
             print(f"[FAIL] workpad: {exc}")
             return 1
+        try:
+            login = await adapter.own_login()
+        except GitHubError as exc:
+            print(f"[FAIL] login: {exc}")
+            return 1
+        try:
+            admin = (await adapter.repo_info()).admin
+        except GitHubError as exc:
+            print(f"[FAIL] repository role: {exc}")
+            return 1
         context = PromptContext(
             issue=issue,
             repo=settings.github.repo,
+            login=login,
+            admin=admin,
             labels=settings.github.labels,
             attempt=attempt,
             turn_number=1,

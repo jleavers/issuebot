@@ -502,10 +502,55 @@ async def test_refresh_failure_is_github_error(tmp_path: Path) -> None:
     assert result.turns == 1
 
 
+async def test_login_failure_is_github_error(tmp_path: Path) -> None:
+    """The workflow's comment fetches exclude the session's own account, so no login, no run."""
+    h = Harness(tmp_path)
+    own_login = h.github.own_login
+
+    async def failing() -> str:
+        h.github.fail_next("transport")
+        return await own_login()
+
+    h.github.own_login = failing  # type: ignore[method-assign]
+    result = await h.run(ScriptedRunner())
+    assert result.outcome == "failed"
+    assert result.error_category == "github_error"
+    assert result.error is not None
+    assert "could not read the account's login" in result.error
+    assert result.turns == 0
+
+
+async def test_role_failure_is_github_error(tmp_path: Path) -> None:
+    """Whether the account administers the repository decides the prompt's own-account
+    exclusion, so an unreadable role fails the run rather than guessing."""
+    h = Harness(tmp_path)
+    own_login = h.github.own_login
+
+    async def then_fail_the_role() -> str:
+        login = await own_login()
+        h.github.fail_next("transport")
+        return login
+
+    h.github.own_login = then_fail_the_role  # type: ignore[method-assign]
+    result = await h.run(ScriptedRunner())
+    assert result.outcome == "failed"
+    assert result.error_category == "github_error"
+    assert result.error is not None
+    assert "could not read the account's repository role" in result.error
+    assert result.turns == 0
+
+
 async def test_workpad_lookup_failure_is_github_error(tmp_path: Path) -> None:
     """The prompt is not rendered without the workpad: the agent would open a second one."""
     h = Harness(tmp_path)
-    h.github.fail_next("transport")
+    repo_info = h.github.repo_info
+
+    async def then_fail_the_lookup() -> object:
+        info = await repo_info()
+        h.github.fail_next("transport")
+        return info
+
+    h.github.repo_info = then_fail_the_lookup  # type: ignore[method-assign]
     result = await h.run(ScriptedRunner())
     assert result.outcome == "failed"
     assert result.error_category == "github_error"

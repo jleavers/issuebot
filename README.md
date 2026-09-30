@@ -413,7 +413,9 @@ the logs on your terminal.
   worker's account added, which nothing edits away -- not from the workpad, whose body the
   session rewrites. That history is GitHub's word on *who* added the label, so if the token
   is your own login rather than a bot account's, a rework you set by hand is counted as a
-  bounce as well; a dedicated account keeps the two apart.
+  bounce as well; a dedicated account keeps the two apart. The same goes for the session's own
+  comments: on an admin token the prompt's own-account exclusion is off, so they come back to it
+  as requests, the degraded posture the labels have too.
 - **Accept "no fault found".** A session that reproduces the reported defect and does not see
   it hands the issue back with `issuebot/review`, the `issuebot/no-fault` marker and the
   evidence in the workpad, and opens no pull request. Read the evidence and close the issue:
@@ -503,8 +505,10 @@ Leave the prompt below the front matter as it is for your first runs. It tells t
 the labels, the single "workpad" comment it keeps on the issue, the `issuebot/<number>-<slug>`
 branch, the PR with `Closes #<number>`, the self-review and the sweep of PR comments and
 checks it must clear before handing the issue to review. The variables it can use are
-`issue`, `repo`, `labels`, `workpad_marker`, `workpad`, `attempt`, `turn_number`, `max_turns`,
-`rework` and `self_review`. `workpad` is the workpad comment as issuebot resolved it before the
+`issue`, `repo`, `login`, `labels`, `workpad_marker`, `workpad`, `attempt`, `turn_number`,
+`max_turns`, `rework` and `self_review`. `login` is the GitHub account the session acts as,
+rendered bare like `repo`; the prompt's comment reads leave that account's own text out with
+it. `workpad` is the workpad comment as issuebot resolved it before the
 turn (`workpad.id`, `workpad.url`), or none: issuebot picks the comment by who wrote it, the
 account it runs as, so a comment by anyone else that opens with the same first line is not the
 workpad and the agent is never pointed at it. The same rule picks the issue's pull request:
@@ -520,7 +524,11 @@ what the tags mean; a template cannot hand that text over bare, and a copy of th
 drops the rule still ships the envelope. Each `<github-text>` tag names its `source`, `author`
 and, for the issue's own text, the author's `association` (GitHub's `OWNER`, `COLLABORATOR`,
 `NONE`, ...). String filters act on the envelope, one that cuts a tag (`truncate`) fails the
-render, and `issue.body.text` is the raw value for a template that wants it.
+render, and `issue.body.text` is the same rendered text without its envelope, for a template that wants it. `issue.body` is
+the description as GitHub renders it, not the Markdown: an HTML comment, a link definition
+nothing uses and anything else the page did not show are gone, since the person who approved
+the text never saw them ([The text a session acts
+on](docs/security-model.md#the-text-a-session-acts-on)).
 `repo_instructions` is the clone's own `CLAUDE.md` and `AGENTS.md` (`path`, `text`, `size`,
 `truncated`), read by issuebot from the root of the clone before the first turn and enveloped
 the same way, with the source naming the file and the author "whoever can merge to" the

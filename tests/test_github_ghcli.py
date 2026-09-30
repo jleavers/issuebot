@@ -124,6 +124,8 @@ async def test_fetch_by_states_paginates_merges_and_sorts() -> None:
     assert not any(arg.startswith("cursor=") for arg in first)
     assert "cursor=Y3Vyc29yOjI=" in runner.argv(1)
     by_number = {issue.number: issue for issue in issues}
+    assert "bodyHTML" in ISSUE_FIELDS
+    assert by_number[42].body_html is not None
     assert by_number[43].state is None  # todo + in-progress from the second query is a conflict
     assert by_number[43].linked_pr is not None and by_number[43].linked_pr.number == 51
     assert by_number[42].identifier == "repo-42"
@@ -219,6 +221,7 @@ def _issues_page(number: int, *, end_cursor: str | None) -> str:
         "number": number,
         "title": "t",
         "body": "b",
+        "bodyHTML": '<p dir="auto">b</p>',
         "state": "OPEN",
         "url": f"https://example/{number}",
         "createdAt": "2026-01-01T00:00:00Z",

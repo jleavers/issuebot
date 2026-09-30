@@ -2,6 +2,7 @@
 
 import html
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from jinja2 import Environment, StrictUndefined, Template, TemplateError
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.instructions import RepositoryFile
+from issuebot.agent.visible import strip_invisible, visible_text
 from issuebot.config import GitHubLabels
 from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
 
@@ -109,9 +111,10 @@ class GitHubText(str):
     the envelope rather than raising; one that cuts a tag is caught by ``PromptRenderer``,
     which refuses an output whose envelopes do not pair up. A tag inside the text is
     neutralised, so the text cannot end its own envelope. Truthiness is the text's, so
-    ``{% if issue.body %}`` still guards a missing body. ``text`` is the raw value, which a
-    template only reaches by naming it (``issue.body.text``); ``| striptags`` is not that, since
-    it unescapes the neutralised tag back into a real one and the render is then refused.
+    ``{% if issue.body %}`` still guards a missing body. ``text`` is the same rendered text
+    without its envelope, which a template only reaches by naming it (``issue.body.text``);
+    ``| striptags`` is not that, since it unescapes the neutralised tag back into a real one and
+    the render is then refused.
     """
 
     text: str
@@ -253,6 +256,15 @@ class PromptContext:
 
     issue: Issue
     repo: str
+    # The GitHub account the session acts as (``adapter.own_login()``): issuebot's own value,
+    # rendered bare like ``repo``. The workflow's comment fetches leave this account's own
+    # text out, whatever its association (GHSA-f3fm-r55f-2vgm).
+    login: str
+    # Whether that account administers the repository (``repo_info().admin``), the same fact
+    # ``own_labels_approve`` reads for labels: on an admin's own token the account *is* the
+    # maintainer, so excluding its login would leave no maintainer text at all, and the
+    # workflow drops the exclusion (and says so) when this is true.
+    admin: bool
     labels: GitHubLabels
     attempt: int
     turn_number: int
@@ -272,6 +284,8 @@ class PromptContext:
         return {
             "issue": issue_variables(self.issue),
             "repo": self.repo,
+            "login": self.login,
+            "admin": self.admin,
             "repo_instructions": [
                 instruction_variables(file, self.repo) for file in self.repo_instructions
             ],
@@ -289,6 +303,258 @@ class PromptContext:
         }
 
 
+def _visible_body(issue: Issue) -> str:
+    """The description as its approver saw it; only called when ``issue.body`` is not ``None``."""
+    if issue.body_html is None:
+        # Fail closed: the normaliser refuses a body with no bodyHTML, so production never gets
+        # here, and a raw body is exactly what the reader did not see.
+        raise AgentError(
+            "prompt_error", f"issue #{issue.number} has a body but no rendered bodyHTML"
+        )
+    return visible_text(issue.body_html)
+
+
+MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+_GH_SPAN = re.compile(r"`gh [^`\n]*`")
+_SEPARATOR_CHARS = frozenset(";&|")
+_QUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
+_SHORT_C = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
+_UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
+_WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
+_WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
+
+
+def _command_line(line: str) -> str:
+    """A line as a shell prompt would show it: indentation, blockquote markers and ``$ `` gone."""
+    return _QUOTE_PREFIX.sub("", line.strip()).removeprefix("$ ").strip()
+
+
+def _substitutions(text: str) -> list[str]:
+    """The body of each ``$(gh ...)``, found by walking to its matching ``)`` outside quotes."""
+    bodies: list[str] = []
+    for start in re.finditer(r"\$\(\s*(?=gh )", text):
+        depth, quote = 1, ""
+        for end in range(start.end(), len(text)):
+            char = text[end]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    bodies.append(text[start.end() : end])
+                    break
+        else:
+            # Never closed (a quote swallowed the `)`): the rest of the line is the body, so
+            # it fails closed through the fallback rather than vanishing.
+            bodies.append(text[start.end() :].split("\n", 1)[0])
+    return bodies
+
+
+def _gh_commands(rendered: str) -> list[str]:
+    """Every candidate command: backticked ``gh`` spans, each line that starts ``gh `` (after
+    indentation, blockquote markers and an optional ``$ ``) whether or not a fence was detected
+    around it, and the body of every ``$(gh ...)`` wherever it sits. A ``\\``-continued line is
+    joined to the next only when it is itself a ``gh`` line, so a prose line ending in a hard
+    break does not swallow a command. No text is removed first, so a fence that pairs badly
+    cannot hide a span."""
+    found = [match.strip("`") for match in _GH_SPAN.findall(rendered)]
+    lines = rendered.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        while (
+            _command_line(line).startswith("gh ")
+            and line.rstrip().endswith("\\")
+            and index < len(lines)
+        ):
+            line = line.rstrip()[:-1] + " " + _command_line(lines[index])
+            index += 1
+        if _command_line(line).startswith("gh "):
+            found.append(_command_line(line))
+    found.extend(_substitutions(rendered))
+    return list(dict.fromkeys(found))
+
+
+def _segments(command: str) -> list[list[str]] | None:
+    """The command's simple commands, each as the tokens from its first ``gh`` onward, or
+    ``None`` when the shell quoting does not parse (the caller fails closed).
+
+    Tokenised with ``shlex`` in posix mode with ``#`` *not* a comment (bash starts one only at
+    a word's start, shlex would cut ``issues/1#issuecomment-5`` short), and split outside
+    quotes on any token made only of ``;``, ``&`` and ``|`` (``;``, ``&&``, ``||``, ``|``,
+    ``|&``, ``&``). A segment led by ``(``, ``{`` or ``!``, or by a wrapper such as ``xargs``,
+    ``env`` or ``sudo``, is scanned from its first ``gh`` token, so a group or a wrapper does not
+    hide the command. It does not expand anything: a ``$(...)`` inside a word stays one word
+    with its text, which is why a write carrying one is never exempt.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    groups: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= _SEPARATOR_CHARS:
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    segments: list[list[str]] = []
+    for group in groups:
+        while group and group[0] in ("(", "{", "!"):
+            group = group[1:]
+        if group:
+            group = [group[0].lstrip("({"), *group[1:]]
+        if "gh" in group:
+            segments.append(group[group.index("gh") :])
+    return segments
+
+
+def _uses_unfiltered_flag(tokens: list[str]) -> bool:
+    """``--comments`` anywhere; ``-c`` (alone or in a short cluster) only on ``gh issue view`` and
+    ``gh pr view``, where it is ``--comments`` (``gh label create -c`` is a colour); and
+    ``--json`` with a field that carries comments or reviews."""
+    views_comments = tokens[1:3] in (["issue", "view"], ["pr", "view"])
+    for index, token in enumerate(tokens):
+        name = token.split("=", 1)[0]
+        if name == "--comments" or (views_comments and _SHORT_C.match(name)):
+            return True
+        if token == "--json" and index + 1 < len(tokens):
+            fields = tokens[index + 1]
+        elif token.startswith("--json="):
+            fields = token.removeprefix("--json=")
+        else:
+            continue
+        if _UNFILTERED_FIELDS.intersection(fields.split(",")):
+            return True
+    return False
+
+
+def _fallback_flag(command: str) -> bool:
+    """The flag check for a command whose quoting did not parse: split on ``;``, ``&`` and ``|``
+    first, and check each piece from its first ``gh`` word, so a later command is not read as
+    an argument of the first."""
+    for piece in re.split(r"[;&|]+", command):
+        words = piece.split()
+        if "gh" in words and _uses_unfiltered_flag(words[words.index("gh") :]):
+            return True
+    return False
+
+
+def _jq_program(tokens: list[str]) -> str:
+    """The value of the last ``--jq``/``-q`` (either spelling, ``=`` or separate): the program
+    ``gh`` actually runs. The filter must be in this, not merely somewhere in the command."""
+    program = ""
+    for index, token in enumerate(tokens):
+        if token in ("--jq", "-q") and index + 1 < len(tokens):
+            program = tokens[index + 1]
+        elif token.startswith(("--jq=", "-q=")):
+            program = token.split("=", 1)[1]
+        elif token.startswith("-q") and len(token) > 2:
+            program = token[2:]
+    return program
+
+
+def _is_write(tokens: list[str]) -> bool:
+    """A ``gh api`` call with a write method: it posts or edits one comment and never reads a
+    thread back, so the read filter has nothing to say about it."""
+    if tokens[:2] != ["gh", "api"]:
+        return False
+    method = ""
+    for index, token in enumerate(tokens):
+        if token in ("-X", "--method") and index + 1 < len(tokens):
+            method = tokens[index + 1]
+        elif token.startswith(("--method=", "-X=")):
+            method = token.split("=", 1)[1]
+        elif token.startswith("-X") and len(token) > 2:
+            method = token[2:]
+    # The last value wins, as pflag has it: ``-X POST -X GET`` is a read.
+    return method.upper() in _WRITE_METHODS
+
+
+def _substitutes(tokens: list[str]) -> bool:
+    """A word that runs another command (``$(...)``, backticks): its output is not the
+    write's or the read's own, so nothing is exempt on the strength of the outer command."""
+    return any("$(" in token or "`" in token for token in tokens)
+
+
+def _is_workpad_read(tokens: list[str], workpad_id: int | None = None) -> bool:
+    """``gh api repos/<o>/<r>/issues/comments/<id> --jq .body``, optionally redirected to a
+    file, and nothing else: the one read of a single comment by id that the workpad section
+    makes, spelled with the document's own ``<id>`` placeholder or, when the caller knows it,
+    with the workpad's own id."""
+    if len(tokens) < 5 or tokens[:2] != ["gh", "api"]:
+        return False
+    path = (
+        re.sub(rf"/comments/{workpad_id}$", "/comments/<id>", tokens[2])
+        if workpad_id
+        else tokens[2]
+    )
+    if not _WORKPAD_READ.fullmatch(path) or tokens[3:5] != ["--jq", ".body"]:
+        return False
+    rest = tokens[5:]
+    return rest == [] or (len(rest) == 2 and rest[0] == ">")
+
+
+def unfiltered_comment_reads(
+    rendered: str, login: str, *, workpad_id: int | None = None
+) -> list[str]:
+    """Every ``gh`` command in a rendered prompt that reads ``/comments`` or ``/reviews``
+    without the one conjunctive filter, or that uses ``-c``, ``--comments`` or ``--json`` with
+    ``comments``, ``reviews`` or ``latestReviews``; ``[]`` when the prompt is clean.
+
+    The filter is ``select((.author_association | IN(<maintainer associations>)) and
+    .user.login != "<login>")``. Both halves are needed: the association keeps strangers' text
+    out (GHSA-jm8h-q3j6-p8xp), and the exclusion keeps the session's own account out, since a
+    dedicated bot is a ``COLLABORATOR`` and would otherwise pass the association with its own
+    comments on other issues (GHSA-f3fm-r55f-2vgm). The parentheses are load-bearing: jq's
+    ``|`` binds loosest, so without them ``.user`` is read from the association string and the
+    call errors. A negated, ``or``-joined or wrong-login filter is flagged, because it is a
+    different string. Exempt are ``gh api`` writes (``-X POST``, ``PATCH``, ``DELETE``) and the
+    workpad's one read by id (``issues/comments/<id> --jq .body``, #77, or with ``workpad_id`` the
+    rendered id itself and no other): neither sweeps a thread.
+
+    This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
+    guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
+    commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the offending
+    segment is what is reported.
+    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
+    shipped prompt and a deployment's prompt are held to one rule.
+    """
+    associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
+    required = f'select((.author_association | IN({associations})) and .user.login != "{login}")'
+    gaps: list[str] = []
+    for command in _gh_commands(rendered):
+        segments = _segments(command)
+        if segments is None:
+            if _fallback_flag(command) or any(
+                mark in command for mark in ("/comments", "/reviews", "--comments", "--json")
+            ):
+                gaps.append(command)
+            continue
+        for tokens in segments:
+            joined = shlex.join(tokens)
+            if _uses_unfiltered_flag(tokens):
+                gaps.append(joined)
+                continue
+            if "/comments" not in joined and "/reviews" not in joined:
+                continue
+            if not _substitutes(tokens) and (
+                _is_write(tokens) or _is_workpad_read(tokens, workpad_id)
+            ):
+                continue
+            if required not in _jq_program(tokens):
+                gaps.append(joined)
+    return gaps
+
+
 def issue_variables(issue: Issue) -> dict[str, Any]:
     """The issue as plain values: roles and datetimes as strings, the linked PR as ``pr``.
 
@@ -303,6 +569,11 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
     guard keeps working. The title, body and author envelopes carry the issue author's
     association (``unknown`` when GitHub recorded none); labels, assignees and instruction
     files carry no author and so carry no association either.
+
+    The body is the text of GitHub's own render of it (``Issue.body_html``, through
+    ``visible_text``), applied here once and nowhere else, since the pass is not idempotent; the
+    title has its invisible characters stripped. What the rendered page hid from the human who
+    approved the text is therefore not in the prompt (GHSA-f3fm-r55f-2vgm).
     """
     number = issue.number
     association = issue.author_association or UNKNOWN_ASSOCIATION
@@ -311,14 +582,14 @@ def issue_variables(issue: Issue) -> dict[str, Any]:
         "identifier": issue.identifier,
         "number": number,
         "title": GitHubText(
-            issue.title,
+            strip_invisible(issue.title),
             source=f"issue #{number} title",
             author=issue.author,
             association=association,
         ),
         "body": (
             GitHubText(
-                issue.body,
+                _visible_body(issue),
                 source=f"issue #{number} description",
                 author=issue.author,
                 association=association,
