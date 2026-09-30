@@ -1636,13 +1636,20 @@ a `gateway` check beside it, the other half of "no route off the host" (2026-09-
 `internal` network still carries the host's own address at its first address, so from inside
 the container `gateway_candidates` reads every attached network off `/proc/net/route` (host
 byte order; default, host and gatewayed routes excluded) and each first address is asked two
-questions (#251): `_reverse_lookup` asks Docker's embedded resolver for a PTR -- under a thread
-deadline, because `gethostbyaddr` has none of its own and one line cannot hang the eight after
-it -- and a name, which the resolver gives a container's address and not a bridge's, proves the
-host is not on that network, the common case since the proxy and the hub's database hold those
-addresses; without one `_host_port_open` tries port 22, warning when something answers and
-naming the isolated-gateway recipe, and reporting an unanswered port as the canary it is, since
-a closed port is refused with the option and without it. Skipped outside a container, where the
+questions (#251, #260), *both* of them. `_embedded_ptr` builds a PTR query and sends it to
+`127.0.0.11:53` itself -- no DNS dependency and no stub, so the answer has to be the daemon's
+rather than whatever NSS assembled out of `/etc/hosts` first, the deadline is the socket's own,
+and `NXDOMAIN`, a truncated reply, a reply to another question and a malformed one are each
+told apart from a name (`_dns_read_name` follows compression pointers, backwards only) -- and a
+name, which the resolver holds for a container's address and not for a bridge's, says the host
+is not on that network, the common case since the proxy and the hub's database hold those
+addresses. `_host_port_open` then tries port 22 whether or not a name came back, warning when
+something answers and naming the isolated-gateway recipe, and reporting an unanswered port as
+the canary it is, since a closed port is refused with the option and without it. The canary
+runs beside the name rather than instead of it because the embedded resolver relays what it has
+no record for, and the `AA` bit #260 proposed as the discriminator cannot be one: Docker sets it
+on nothing, its own records included (`_embedded_ptr`'s docstring carries the measurement), so
+requiring it would reject the proofs. Skipped outside a container, where the
 host is this process's own and a PTR would be somebody else's resolver answering; CI proves the
 same property at runtime, with a listener on the runner that a session must not reach,
 a `database.url` check that connects and

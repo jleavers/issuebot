@@ -34,34 +34,48 @@ option or, on 25 and 26, drops it without a word. The option cannot be added to 
 place; a network created before it is recreated, and [`docs/operations.md`,
 "Upgrades"](operations.md#upgrades) says in what order, since the shared one has the hub's
 database and every worker attached. `validate`'s `gateway` line asks two questions of every
-attached network's first address, from inside the container. The first is a PTR through
-Docker's embedded resolver at `127.0.0.11`, which answers for a *container's* address and not
-for a bridge's: a name -- `<container>.<network>` -- says the first address belongs to a
-container, so the host is not on that network, and that is a proof rather than a canary. It
-costs about 30 ms, and the common case has one, since the worker's networks carry the proxy
-and the hub's database. The second is the canary, and what is left when no name comes back:
-port 22, because without the option that address is the host's and `sshd` is the service
-nearly every Linux host has there. Something answering warns; an unanswered port is still only
-an OK, since a closed port goes unanswered with the option and without it, and an isolated
-network nobody else has joined yet has no PTR either.
+attached network's first address, from inside the container, and it asks *both* of every
+network. The first is a PTR, put to Docker's embedded resolver at `127.0.0.11` as a DNS query
+the check builds and sends itself: the daemon answers out of its own table for a *container's*
+address and has no record for a bridge's, so a name -- `<container>.<network>` -- says the
+first address belongs to a container and the host is not on that network. It costs about 30 ms,
+and the common case has one, since the worker's networks carry the proxy and the hub's
+database. The second is the canary: port 22, because without the option that address is the
+host's and `sshd` is the service nearly every Linux host has there. Something answering warns;
+an unanswered port is still only an OK, since a closed port goes unanswered with the option and
+without it, and an isolated network nobody else has joined yet has no PTR either.
 
-The PTR is asked only where `/etc/resolv.conf` names `127.0.0.11`, because the proof is in who
-answered: another runtime's resolver -- Kubernetes' cluster DNS, or a host's own reached through
-a bind-mounted file -- is answering a different question, and its name would be read as an
-isolation it never claimed. One residue is left even so. The embedded resolver *forwards* what
-it has no record for, so an upstream that serves reverse zones covering the daemon's address
-pools could put a name on a plain bridge's own address, and the line would call that network
-isolated. And the canary does not cover that host: a network the PTR proved is not probed on
-port 22 at all, so a forwarded name suppresses the very warning that would have fired there
-before this check existed. That is the one case where reading the first address through DNS is
-a step backwards, it cannot be closed from inside the container with a stub-resolver lookup,
-and [#260](https://github.com/jleavers/issuebot/issues/260) is the fix: Docker's embedded
-server sets the `AA` bit on its own records and not on what it forwards, so a PTR query sent
-to `127.0.0.11` directly can tell the two apart and fall back to the canary for a relayed
-answer. Until then, an operator whose site serves reverse zones over `172.16.0.0/12` or the
-`192.168.0.0/16` blocks Docker falls back to should read the *name* in the line and check it
-is a container's. CI asserts the negative half -- a plain bridge's first address yields no
-proof -- on the engine it runs on.
+The PTR is asked only where `/etc/resolv.conf` names `127.0.0.11`. That file is the daemon's
+own statement that it started this container and pointed it at its embedded server, and without
+it something else bound to a loopback address in another runtime -- Kubernetes' cluster DNS, a
+host's own reached through a bind-mounted file -- would be taken for the daemon's table and its
+name read as an isolation it never claimed.
+
+A name is not a proof on its own, and that is why the canary runs beside it rather than instead
+of it. The embedded resolver *forwards* what it has no record for, so an upstream that serves
+reverse zones covering the daemon's address pools -- `172.16.0.0/12`, and the `192.168.0.0/16`
+blocks Docker falls back to -- can put a name on a plain bridge's own address.
+[#260](https://github.com/jleavers/issuebot/issues/260) proposed reading the `AA` bit to tell a
+relayed answer from the resolver's own, and the wire says that cannot be done: Docker sets `AA`
+on *nothing*. A PTR for the first address of an attached network, held by a container and so
+answerable only out of the daemon's table, comes back `AA=0 RA=1 RCODE=0` -- the header a
+relayed answer would carry too -- because moby's `libnetwork/resolver.go` builds every local
+answer with `createRespMsg`, which sets `RecursionAvailable` and never `Authoritative`. Gating
+on `AA` would reject the daemon's own records and leave every network unproved.
+
+What #260 closed is the consequence rather than the cause. Until it, a network the PTR named
+was not probed on port 22 at all, so a forwarded name suppressed the very warning that would
+have fired there before the PTR existed -- which left exactly that host worse off than it had
+been. Now the canary runs whatever DNS said: a relayed name costs an operator a name they
+should not believe, never a warning they should have had, and where the two disagree the
+warning wins and says which reading it cannot settle. An operator whose site serves those
+reverse zones should still read the *name* in the line and check it is a container's. Asking
+the resolver directly buys the rest: the answer has to be the resolver's rather than whatever
+`getaddrinfo`'s NSS stack assembled -- `/etc/hosts` is read before DNS, so a line there could
+name a bridge's address and be believed -- and `NXDOMAIN`, a truncated reply, a reply to
+another question and one that is not a DNS message are each told apart from a name instead of
+collapsing into one `herror`. CI asserts the negative half -- a plain bridge's first address
+yields no proof -- on the engine it runs on.
 
 Neither question is what CI asks. Reading the option back out of a network would pass against
 an engine that accepted it and ignored it, so the `docker` job proves the property instead: it
