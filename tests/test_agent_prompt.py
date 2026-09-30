@@ -805,10 +805,16 @@ def test_the_scan_on_an_admin_render_requires_the_association_half_alone() -> No
     assert (
         unfiltered_comment_reads(f"`{read} '.[] | {both} | .body'`", "issuebot", admin=True) == []
     )
-    # What the admin mode does not relax: no filter at all, a negated one, and the flag family.
+    # What the admin mode does not relax: no filter at all, a negated one, a disjunctive one
+    # that carries the association and admits everyone anyway, and the flag family. The two
+    # accepted filters are matched whole, which is what keeps the disjunctive one a gap.
     assert unfiltered_comment_reads(f"`{read} '.[].body'`", "issuebot", admin=True) != []
     negated = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not))'
     assert unfiltered_comment_reads(f"`{read} '.[] | {negated} | .body'`", "issuebot", admin=True)
+    joined = f'{association} or .user.login == "issuebot")'
+    assert unfiltered_comment_reads(f"`{read} '.[] | {joined} | .body'`", "issuebot", admin=True)
+    anyone = f"{association} or true)"
+    assert unfiltered_comment_reads(f"`{read} '.[] | {anyone} | .body'`", "issuebot", admin=True)
     assert unfiltered_comment_reads("`gh pr view 1 --comments`", "issuebot", admin=True) != []
     # And a write is still exempt, admin or not.
     assert (

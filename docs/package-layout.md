@@ -692,9 +692,12 @@ login's exclusion, and each `--comments` or `--json comments`/`reviews`, exempti
 writes and the workpad's one read by id; a lint and not a guarantee, since prose can ask for
 a fetch it cannot see, and shared by `tests/test_workflow_default.py` and `validate` so the
 shipped prompt and a deployment's are held to one rule. `admin=True` requires the association
-half alone, as a prefix of the filter (#252): that is the render where the workflow drops the
-exclusion, so requiring it would flag the shipped prompt rather than an operator's fault,
-while a negated `IN(...) | not` is still a gap. `PromptVariant`, `PROMPT_VARIANT_AXES`,
+half alone (#252): that is the render where the workflow drops the exclusion, so requiring it
+would flag the shipped prompt rather than an operator's fault. Either whole filter satisfies
+it -- the one that branch renders or the conjunctive one, an admin prompt that keeps the
+exclusion being no worse -- and whole rather than as a prefix, so a negated `IN(...) | not` and
+a disjunctive `(...) or .user.login == "<login>"` are gaps on an admin render as much as on
+the other. `PromptVariant`, `PROMPT_VARIANT_AXES`,
 `prompt_variants()` and `render_variants(renderer, context_factory)` are the product both of
 those scan over, spelled once (#252): the axes are a declared table -- a linked PR or none,
 rework, attempt, workpad, self-review and admin, so sixty-four renders -- plus

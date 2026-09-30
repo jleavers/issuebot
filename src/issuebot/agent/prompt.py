@@ -523,13 +523,17 @@ def unfiltered_comment_reads(
     workpad's one read by id (``issues/comments/<id> --jq .body``, #77, or with ``workpad_id`` the
     rendered id itself and no other): neither sweeps a thread.
 
-    ``admin`` scans the render of an *admin* account, where only the association half is
+    ``admin`` scans the render of an *admin* account, where the association half alone is
     required (#252). On an admin's own token the account is the maintainer, so excluding its
     login would leave a rework none of the feedback it is answering, and the shipped programs
     drop that half in ``{% if not admin %}``; requiring it here would flag the shipped prompt
     rather than an operator's fault. What is still required is the association, which is the
-    half that keeps a stranger's text out, and it is required as a *prefix* of the filter, so
-    an admin render carrying both halves passes too and a negated ``IN(...) | not`` does not.
+    half that keeps a stranger's text out, and either whole filter satisfies it: the one that
+    branch renders, ``select((.author_association | IN(...)))``, or the conjunctive one, since
+    an admin prompt that keeps the exclusion anyway is no worse. Both are matched whole rather
+    than as a prefix, so the sentence above holds on an admin render too -- ``select((...) or
+    .user.login == "<login>")`` carries the association and is still a gap, because a filter
+    that admits anyone is not the barrier however it opens.
 
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
     guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
@@ -540,9 +544,10 @@ def unfiltered_comment_reads(
     held to one rule.
     """
     associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
-    required = f"select((.author_association | IN({associations}))"
-    if not admin:
-        required += f' and .user.login != "{login}")'
+    association = f"select((.author_association | IN({associations}))"
+    required = (f'{association} and .user.login != "{login}")',)
+    if admin:
+        required = (f"{association})", *required)
     gaps: list[str] = []
     for command in _gh_commands(rendered):
         segments = _segments(command)
@@ -563,7 +568,8 @@ def unfiltered_comment_reads(
                 _is_write(tokens) or _is_workpad_read(tokens, workpad_id)
             ):
                 continue
-            if required not in _jq_program(tokens):
+            program = _jq_program(tokens)
+            if not any(filter_ in program for filter_ in required):
                 gaps.append(joined)
     return gaps
 
