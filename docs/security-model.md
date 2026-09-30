@@ -33,12 +33,23 @@ checkout's `egress` network carry it for both address families --
 option or, on 25 and 26, drops it without a word. The option cannot be added to a network in
 place; a network created before it is recreated, and [`docs/operations.md`,
 "Upgrades"](operations.md#upgrades) says in what order, since the shared one has the hub's
-database and every worker attached. `validate`'s `gateway` line is the canary: from inside
-the container it tries port 22 at every attached network's first address and warns when
-something answers, because without the option that address is the host's and `sshd` is the
-service nearly every Linux host has there. It is a canary rather than a proof: with the option
-the address is a container's or nobody's, a closed port goes unanswered either way, and a host
-with no `sshd` passes whether or not it is isolated.
+database and every worker attached. `validate`'s `gateway` line asks two questions of every
+attached network's first address, from inside the container. The first is a PTR through
+Docker's embedded resolver at `127.0.0.11`, which answers for a *container's* address and not
+for a bridge's: a name -- `<container>.<network>` -- says the first address belongs to a
+container, so the host is not on that network, and that is a proof rather than a canary. It
+costs about 30 ms, and the common case has one, since the worker's networks carry the proxy
+and the hub's database. The second is the canary, and what is left when no name comes back:
+port 22, because without the option that address is the host's and `sshd` is the service
+nearly every Linux host has there. Something answering warns; an unanswered port is still only
+an OK, since a closed port goes unanswered with the option and without it, and an isolated
+network nobody else has joined yet has no PTR either.
+
+Neither question is what CI asks. Reading the option back out of a network would pass against
+an engine that accepted it and ignored it, so the `docker` job proves the property instead: it
+puts a listener on the runner at `0.0.0.0`, and asks a container on a plain `internal` network,
+where the listener must answer at the first address, and a session on the worker's own
+networks, where it must not.
 
 The shipped list is what the workflow itself needs and nothing else:
 

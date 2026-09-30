@@ -314,6 +314,98 @@ jobs:
             # And the hub database, the one thing the internal network is there to carry.
             /app/.venv/bin/python -c "import socket; socket.create_connection((\"db\", 5432), 10).close()"
           '
+      # The other half of the same bound (#251). The step above proves a session cannot leave
+      # the host; this one proves it cannot reach the host itself. `--internal` removes the
+      # default route and nothing else: the bridge still carries the host's own address at the
+      # network's first address, and anything on the runner bound to 0.0.0.0 answers there.
+      # Isolated gateway mode gives the bridge no address at all -- and that is invisible to
+      # `compose config`, so `tests/test_image_layout.py` can only pin the option as a string in
+      # this file and the README, which a future engine that accepts it and ignores it would
+      # satisfy exactly. The proof has to be a listener on the runner and a connection that does
+      # not arrive, on the engine the runner is actually using.
+      #
+      # Asked twice, because a connection that fails says nothing about why it failed. The
+      # control is a container on a plain bridge network, where the listener *must* answer at
+      # the first address and the PTR must *not* resolve -- without it this step would pass just
+      # as well against a listener that was never up, or a probe that could not connect to
+      # anything. Then the session, on the worker's two networks, where neither may happen.
+      #
+      # The probe is the shipped `gateway_candidates`, so what is asked about is the address
+      # `validate` asks about rather than a number written out here, and the last line is
+      # `validate`'s own `gateway` line, read out of a real session: the PTR half of the check
+      # (#251) run against Docker's embedded resolver rather than a stub.
+      - name: a session cannot reach a service on the runner itself
+        env:
+          COMPOSE_PROJECT_NAME: ci
+          COMPOSE_PROFILES: hub,worker
+          ISSUEBOT_DB_PASSWORD: ci-only
+          ISSUEBOT_WEB_PASSWORD: ci-only
+        run: |
+          port=34567
+          cat > /tmp/gateway-probe.py <<'PROBE'
+          import socket
+          import sys
+          from pathlib import Path
+
+          from issuebot.cli import gateway_candidates
+
+          port, expect = int(sys.argv[1]), sys.argv[2]
+          candidates = gateway_candidates(Path("/proc/net/route").read_text(encoding="ascii"))
+          if not candidates:
+              sys.exit("no attached network in the route table: this probe would prove nothing")
+          reached, named = [], []
+          for interface, address, network in candidates:
+              try:
+                  name = socket.gethostbyaddr(address)[0]
+              except OSError:
+                  name = None
+              try:
+                  with socket.create_connection((address, port), timeout=5):
+                      answered = True
+              except OSError:
+                  answered = False
+              print(f"{interface} {network}: {address} answered={answered} ptr={name}")
+              if answered:
+                  reached.append(address)
+              if name is not None:
+                  named.append(f"{address} is {name}")
+          if expect == "open":
+              if not reached:
+                  sys.exit("the listener did not answer at a plain bridge's first address")
+              if named:
+                  sys.exit(f"a plain bridge's own address has a PTR: {'; '.join(named)}")
+          elif reached:
+              sys.exit(f"a session reached a service on the runner at {', '.join(reached)}")
+          PROBE
+          chmod 0644 /tmp/gateway-probe.py
+          # A plain listener: the probe opens a connection and closes it without a request, which
+          # the server logs and survives, so one of these serves every probe below.
+          python3 -m http.server "$port" --bind 0.0.0.0 > /tmp/gateway-listener.log 2>&1 &
+          listener=$!
+          trap 'kill "$listener" 2>/dev/null || true; docker network rm ci-gateway-plain > /dev/null 2>&1 || true' EXIT
+          for _ in $(seq 50); do
+            if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/"; then break; fi
+            sleep 0.2
+          done
+          curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$port/"
+          # The control: a network created the way the README's step 1 says not to.
+          docker network create --internal ci-gateway-plain
+          docker run --rm --network ci-gateway-plain -v /tmp/gateway-probe.py:/probe.py:ro \
+            --entrypoint /app/.venv/bin/python issuebot:ci /probe.py "$port" open
+          # And the session, on the shared `issuebot-internal` and the project's own `egress`.
+          docker compose run --rm --no-deps --user agent -v /tmp/gateway-probe.py:/probe.py:ro \
+            --entrypoint /app/.venv/bin/python worker /probe.py "$port" closed
+          # `validate`'s reading of the same two networks, which is what an operator sees: the
+          # PTR resolves, so the line is a proof rather than the canary's "nothing answered".
+          # The exit code is not this step's business -- a session in CI has no GitHub token and
+          # no Claude credential -- so the line is grepped for, and printed when it is missing.
+          docker compose run --rm --no-deps --user agent worker validate \
+            > /tmp/gateway-validate.txt 2>&1 || true
+          if ! grep -q '^\[ OK \] gateway: .* is isolated (first address is ' /tmp/gateway-validate.txt; then
+            echo "validate did not report the worker's networks isolated" >&2
+            cat /tmp/gateway-validate.txt >&2
+            exit 1
+          fi
       # Always, so a failing assertion above still gives the runner its stack back and the next
       # step a clean project, rather than leaving both to the job's own teardown.
       - name: tear the worker-profile stack down

@@ -581,6 +581,34 @@ def test_ci_proves_a_session_reaches_github_and_nothing_else() -> None:
     assert "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz" in CI
 
 
+def test_ci_proves_a_session_cannot_reach_the_runner_itself() -> None:
+    """The runtime half of the isolated gateway (#251). Every other assertion about it in this
+    module is a string -- the option in `compose.yaml`, the recipe in the README and in `CI` --
+    and an engine that accepted the option and ignored it would satisfy all of them while
+    leaving the host at the first address of both of the worker's networks. So CI puts a
+    listener on the runner and asks two containers about it.
+    """
+    assert 'python3 -m http.server "$port" --bind 0.0.0.0' in CI
+    # The control is a network created the way the README's step 1 says not to -- `--internal`
+    # and no gateway mode -- so the one thing that differs from the worker's networks is the
+    # option under test. Without it, a probe that could not connect to anything would pass.
+    assert "docker network create --internal ci-gateway-plain" in CI
+    assert re.search(r"--network ci-gateway-plain .*\n.*/probe\.py \"\$port\" open", CI)
+    assert re.search(r"docker compose run .*--user agent .*\n.*/probe\.py \"\$port\" closed", CI)
+    assert "the listener did not answer at a plain bridge's first address" in CI
+    assert "a plain bridge's own address has a PTR" in CI
+    assert "a session reached a service on the runner at" in CI
+    # The probe asks about the address `validate` asks about, rather than one written out here.
+    assert "from issuebot.cli import gateway_candidates" in CI
+    # And the PTR half of the check is read off a real session against Docker's own resolver,
+    # not a stub: `validate`'s `gateway` line has to be the proof rather than the canary.
+    assert "docker compose run --rm --no-deps --user agent worker validate" in CI
+    assert (
+        "grep -q '^\\[ OK \\] gateway: .* is isolated (first address is ' "
+        "/tmp/gateway-validate.txt" in CI
+    )
+
+
 def test_ci_proves_the_dashboards_account_the_way_it_proves_the_sessions() -> None:
     assert "--user web --entrypoint sudo issuebot:ci -n -u agent id -u" in CI
     assert "--user agent --entrypoint sudo issuebot:ci -n -u agent id -u" in CI

@@ -1103,18 +1103,59 @@ def _host_port_open(address: str, port: int, *, timeout_s: float) -> bool:
         return False
 
 
+# What one PTR may spend. Docker's embedded resolver answers off the daemon's own table in a
+# millisecond or two, so this is a ceiling for a container whose `resolv.conf` points somewhere
+# else entirely rather than a budget anything is expected to use: `gethostbyaddr` takes no
+# timeout of its own, and one line of `validate` cannot be allowed to hang the eight after it.
+_GATEWAY_PTR_TIMEOUT_S = 2.0
+
+
+def _reverse_lookup(address: str) -> str | None:
+    """The name the resolver gives ``address``, or None when nothing does.
+
+    Run in a thread this waits on, for the reason ``_probe_status_page`` is: the deadline is the
+    only one there is. The thread is left to finish on its own -- it writes nothing.
+    """
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gateway-ptr")
+    try:
+        answer = executor.submit(socket.gethostbyaddr, address).result(
+            timeout=_GATEWAY_PTR_TIMEOUT_S
+        )
+    except OSError, TimeoutError:
+        # herror (no PTR for it), gaierror (no resolver to ask) and the deadline all mean the
+        # same thing here: nobody claimed the address.
+        return None
+    finally:
+        executor.shutdown(wait=False)
+    return answer[0]
+
+
 def _gateway_check(*, inside: bool, route_table: str) -> Check:
     """The other half of "no route off the host": whether the host itself answers a session.
 
     An ``internal`` network removes the container's default route and nothing else -- the
     bridge still carries the host's own address at the network's first address, and a host
-    service bound to ``0.0.0.0`` answers there. Docker's isolated gateway mode gives the
-    bridge no address at all, and this line is its canary: from inside the container, try
-    the host's sshd at every attached network's first address. A canary rather than a proof,
-    since with the option that address is a container's or nobody's and a closed port is
-    refused either way; a warning rather than a failure, because a host running an
-    operator's own isolation is entitled to answer differently; and skipped outside a
-    container, where the host is this process's own.
+    service bound to ``0.0.0.0`` answers there. Docker's isolated gateway mode gives the bridge
+    no address at all. Two questions tell the two apart, asked of each attached network in turn,
+    and they are graded differently because only one of them is an answer.
+
+    * **Who owns the first address?** ``127.0.0.11`` is Docker's embedded DNS, and it answers a
+      PTR for a *container's* address alone. On an isolated network the first address went to
+      whichever container attached first, so the lookup comes back ``<container>.<network>``; on
+      a plain one that address is the bridge's -- the host's own -- which the resolver knows
+      nothing about, and the lookup fails. A name is therefore a proof rather than a canary, and
+      the common case has one, since the worker's own networks carry the proxy and the hub's
+      database. It costs about 30 ms.
+
+    * **Does a host service answer there?** The canary, and what is left when the PTR does not:
+      an isolated network nobody else has joined yet fails the lookup too, so the honest reading
+      of no name is "unproved" rather than "plain". A warning rather than a failure, because a
+      host running an operator's own isolation is entitled to answer differently; and an
+      unanswered port is still only an OK, since a closed port is refused with the option and
+      without it.
+
+    Both are skipped outside a container, where the host is this process's own -- and where the
+    PTR would be somebody else's resolver answering rather than the daemon's.
     """
     subject = "gateway"
     if not inside:
@@ -1122,7 +1163,16 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     candidates = gateway_candidates(route_table)
     if not candidates:
         return Check(subject, "ok", "no attached network found in the route table")
+    findings: list[str] = []
+    unproved = False
     for interface, address, network in candidates:
+        name = _reverse_lookup(address)
+        if name is not None:
+            findings.append(
+                f"{interface}'s network {network} at {address} is isolated "
+                f"(first address is {name}'s)"
+            )
+            continue
         if _host_port_open(address, GATEWAY_CANARY_PORT, timeout_s=_GATEWAY_PROBE_TIMEOUT_S):
             return Check(
                 subject,
@@ -1136,14 +1186,19 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
                 "docker compose up -d` once its compose.yaml carries the option "
                 '(docs/operations.md, "Upgrades")',
             )
-    addresses = ", ".join(address for _interface, address, _network in candidates)
-    return Check(
-        subject,
-        "ok",
-        f"nothing answered on port {GATEWAY_CANARY_PORT} at the first address of each attached "
-        f"network ({addresses}): the host's own without an isolated gateway, a container's or "
-        "nobody's with one -- a canary, not a proof",
-    )
+        unproved = True
+        findings.append(
+            f"nothing answered on port {GATEWAY_CANARY_PORT} at {address}, the first address "
+            f"of {interface}'s network {network}"
+        )
+    detail = "; ".join(findings)
+    if unproved:
+        detail += (
+            " -- an address no PTR claims is the host's own without an isolated gateway, a "
+            "container's or nobody's with one, and a closed port is refused either way: a "
+            "canary, not a proof"
+        )
+    return Check(subject, "ok", detail)
 
 
 def _github_status_check() -> Check:
