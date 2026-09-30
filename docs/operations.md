@@ -418,8 +418,15 @@ docker compose up -d --force-recreate           # hub first, then every other ch
 docker compose run --rm worker validate         # the `gateway` line, in each
 ```
 
-Until that is done every worker's `validate` warns on its `gateway` line, and the host is as
-reachable as it was; the warning is what says which.
+The `gateway` line carries one clause per attached network, and what says the recreation took
+is `... is isolated (first address is <container>'s)` for every one of them: the first address
+answered a PTR, so it belongs to a container and the bridge -- the host -- is not on that
+network. A clause left to the canary (`nothing answered on port 22 at ...`, and the line ends
+`a canary, not a proof`) is a network that was *not* recreated, or one no other container has
+joined yet; the line says which network by name, and `docker network inspect` says which of the
+two it is. Do not read the absence of a `[WARN]` as success: the warning fires only where a
+host service is listening at that address, so a host with no `sshd` produces an `[ OK ]` line
+either way, which is the gap the PTR was added to close.
 
 **With more than one checkout, that recipe is not the one to repeat per deployment.** They are
 clones of the same repository against one store, and a migration applied by whichever you upgrade

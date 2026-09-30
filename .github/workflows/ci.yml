@@ -347,7 +347,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          from issuebot.cli import gateway_candidates
+          from issuebot.cli import _reverse_lookup, gateway_candidates
 
           port, expect = int(sys.argv[1]), sys.argv[2]
           candidates = gateway_candidates(Path("/proc/net/route").read_text(encoding="ascii"))
@@ -355,10 +355,11 @@ jobs:
               sys.exit("no attached network in the route table: this probe would prove nothing")
           reached, named = [], []
           for interface, address, network in candidates:
-              try:
-                  name = socket.gethostbyaddr(address)[0]
-              except OSError:
-                  name = None
+              # The shipped lookup, for the reason `gateway_candidates` is the shipped one:
+              # what CI asks is what `validate` asks, and it carries the deadline a bare
+              # `gethostbyaddr` has none of -- a resolver that never answers fails this step
+              # rather than hanging the job until its own timeout.
+              name = _reverse_lookup(address)
               try:
                   with socket.create_connection((address, port), timeout=5):
                       answered = True
@@ -423,7 +424,8 @@ jobs:
           # `issuebot-internal`, which is exactly the shape a broken shared network produces.
           if ! grep -q '^\[ OK \] gateway: .* is isolated (first address is ' /tmp/gateway-validate.txt \
              || grep -q '^\[ OK \] gateway: .*canary, not a proof' /tmp/gateway-validate.txt; then
-            echo "validate did not report both of the worker's networks isolated" >&2
+            echo "validate did not report both of the worker's networks isolated -- the shared" >&2
+            echo "network was created without the options, or no other container holds a first address" >&2
             cat /tmp/gateway-validate.txt >&2
             exit 1
           fi

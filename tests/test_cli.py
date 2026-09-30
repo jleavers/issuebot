@@ -4454,6 +4454,30 @@ def test_validate_warns_when_the_hosts_sshd_answers_at_a_gateway(
     assert probed == [("192.168.112.1", 22)]
 
 
+def test_validate_names_the_network_it_proved_beside_the_one_that_answered(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The warning ends the check, but not the reading: the operator is about to recreate a
+    network and has to know which of the two it is, so what was proved before the answer is
+    still in the line."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, _looked_up = _gateway(
+        monkeypatch,
+        names={"192.168.112.1": "issuebot-db-1.issuebot-internal"},
+        open_at="192.168.128.1",
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
+        "address is issuebot-db-1.issuebot-internal's) -- but something answered on port 22 at "
+        "192.168.128.1, the first address of eth1's network 192.168.128.0/20: without an "
+        "isolated gateway that address is the host's own"
+    ) in out
+    # The proved network was not probed; the one that answered ended the check.
+    assert probed == [("192.168.128.1", 22)]
+
+
 def test_validate_reports_the_gateway_canary_refused(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
 ) -> None:
@@ -4554,6 +4578,12 @@ def test_the_embedded_resolver_is_recognised_by_resolv_conf(tmp_path: Path) -> N
     # Not a substring match: the address has to be the whole of a `nameserver` line's argument.
     host.write_text("nameserver 10.0.0.53\nsearch corp.example\n# nameserver 127.0.0.11\n")
     assert _embedded_resolver_configured(host) is False
+    # And the *first* `nameserver` line, since that is the one glibc asks: a file listing
+    # somebody else first would otherwise gate the lookup on Docker while somebody else
+    # answered it. Docker writes exactly one line, which is what makes the strict reading free.
+    ordered = tmp_path / "ordered-resolv.conf"
+    ordered.write_text("search corp.example\nnameserver 10.0.0.53\nnameserver 127.0.0.11\n")
+    assert _embedded_resolver_configured(ordered) is False
     assert _embedded_resolver_configured(tmp_path / "absent") is False
 
 

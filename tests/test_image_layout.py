@@ -598,8 +598,10 @@ def test_ci_proves_a_session_cannot_reach_the_runner_itself() -> None:
     assert "the listener did not answer at a plain bridge's first address" in CI
     assert "a plain bridge's own address has a PTR" in CI
     assert "a session reached a service on the runner at" in CI
-    # The probe asks about the address `validate` asks about, rather than one written out here.
-    assert "from issuebot.cli import gateway_candidates" in CI
+    # The probe asks about the address `validate` asks about, and asks it the way `validate`
+    # does: the shipped lookup carries the deadline a bare `gethostbyaddr` has none of.
+    assert "from issuebot.cli import _reverse_lookup, gateway_candidates" in CI
+    assert "name = _reverse_lookup(address)" in CI
     # And the PTR half of the check is read off a real session against Docker's own resolver,
     # not a stub: `validate`'s `gateway` line has to be the proof rather than the canary.
     assert "docker compose run --rm --no-deps --user agent worker validate" in CI

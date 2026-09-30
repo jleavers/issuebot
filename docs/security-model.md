@@ -51,8 +51,17 @@ a bind-mounted file -- is answering a different question, and its name would be 
 isolation it never claimed. One residue is left even so. The embedded resolver *forwards* what
 it has no record for, so an upstream that serves reverse zones covering the daemon's address
 pools could put a name on a plain bridge's own address, and the line would call that network
-isolated. The canary is what covers it on such a host, as it did before, and CI asserts the
-negative half -- a plain bridge's first address has no PTR -- on the engine it runs on.
+isolated. And the canary does not cover that host: a network the PTR proved is not probed on
+port 22 at all, so a forwarded name suppresses the very warning that would have fired there
+before this check existed. That is the one case where reading the first address through DNS is
+a step backwards, it cannot be closed from inside the container with a stub-resolver lookup,
+and [#260](https://github.com/jleavers/issuebot/issues/260) is the fix: Docker's embedded
+server sets the `AA` bit on its own records and not on what it forwards, so a PTR query sent
+to `127.0.0.11` directly can tell the two apart and fall back to the canary for a relayed
+answer. Until then, an operator whose site serves reverse zones over `172.16.0.0/12` or the
+`192.168.0.0/16` blocks Docker falls back to should read the *name* in the line and check it
+is a container's. CI asserts the negative half -- a plain bridge's first address yields no
+proof -- on the engine it runs on.
 
 Neither question is what CI asks. Reading the option back out of a network would pass against
 an engine that accepted it and ignored it, so the `docker` job proves the property instead: it

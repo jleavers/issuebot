@@ -1121,12 +1121,20 @@ def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) 
     bind-mounted ``resolv.conf`` -- is answering a different question, and its name would be
     read here as an isolation it never claimed. So the lookup is asked only where that file
     names it, and every other runtime keeps the canary alone.
+
+    The *first* ``nameserver`` line, not any of them: glibc asks them in order, so a file
+    listing another resolver first would gate the lookup on Docker while somebody else
+    answered it. Docker writes exactly one, which is what makes the strict reading free.
     """
     try:
         lines = resolv_conf.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    return any(line.split()[:2] == ["nameserver", _EMBEDDED_RESOLVER] for line in lines)
+    for line in lines:
+        fields = line.split()
+        if fields[:1] == ["nameserver"]:
+            return fields[:2] == ["nameserver", _EMBEDDED_RESOLVER]
+    return False
 
 
 def _reverse_lookup(address: str) -> str | None:
@@ -1171,8 +1179,11 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
       resolver (``_embedded_resolver_configured``), since the proof is in who answered. The
       residue is a name the embedded resolver did not have and *forwarded*: an upstream that
       serves reverse zones for the daemon's address pools could put a name on a plain bridge's
-      own address, which would read here as isolation. CI's control asserts the negative half
-      on the engine it runs on; an operator's host is the canary's to cover.
+      own address, which would read here as isolation -- and, since a proved network is not
+      probed, would suppress the canary that used to warn there. The canary does not cover that
+      host, and saying it does would be worse than the gap itself; #260 is the fix, an ``AA``
+      bit on a query sent to the resolver directly telling its own records from what it relays.
+      CI's control asserts the negative half on the engine it runs on.
 
     * **Does a host service answer there?** The canary, and what is left when the PTR does not:
       an isolated network nobody else has joined yet fails the lookup too, so the honest reading
@@ -1205,11 +1216,15 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
             )
             continue
         if _host_port_open(address, GATEWAY_CANARY_PORT, timeout_s=_GATEWAY_PROBE_TIMEOUT_S):
+            # Whatever was proved before this still belongs in the line: the operator is about
+            # to recreate a network, and needs to know which of them it is.
+            so_far = f"{'; '.join(proved)} -- but " if proved else ""
             return Check(
                 subject,
                 "warn",
-                f"something answered on port {GATEWAY_CANARY_PORT} at {address}, the first "
-                f"address of {interface}'s network {network}: without an isolated gateway that "
+                f"{so_far}something answered on port {GATEWAY_CANARY_PORT} at {address}, the "
+                f"first address of {interface}'s network {network}: without an isolated "
+                f"gateway that "
                 "address is the host's own, so a session can reach any host service. Recreate "
                 "the network with isolated gateway mode (Docker 28 or later): the shared one "
                 f"with `{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with "
