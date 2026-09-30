@@ -2,6 +2,7 @@
 
 import itertools
 import re
+import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from issuebot.agent.prompt import (
     GITHUB_TEXT_TAG,
     PromptContext,
     PromptRenderer,
+    _filter_applies,
+    _jq_program,
     unfiltered_comment_reads,
 )
 from issuebot.config import Workflow, load_workflow
@@ -952,6 +955,64 @@ def test_the_scan_holds_against_attached_q_unclosed_walks_and_later_flags() -> N
     ]
 
 
+def test_the_filter_must_be_applied_and_not_merely_carried() -> None:
+    """#258: containment was not application. `select` emits nothing for a record it drops and
+    jq's `//` yields its right-hand side when its left emits nothing, so a program carrying the
+    whole filter can still print the bodies it dropped. Confirmed against `gh`'s own jq, which
+    is what runs these programs:
+
+        $ gh api repos/jleavers/issuebot --jq '[{author_association:"NONE",
+          user:{login:"stranger"},body:"STRANGER BODY LEAKED"}] | .[] | <the filter> // .body'
+        STRANGER BODY LEAKED
+
+    So the rule is where the filter sits: first stage after an optional `.[]`, matched whole,
+    with a projection and nothing else after it."""
+
+    def read(program: str) -> str:
+        return f"`gh api repos/o/r/issues/1/comments --jq '{program}'`"
+
+    def gaps(program: str) -> list[str]:
+        return unfiltered_comment_reads(read(program), LOGIN)
+
+    # Applied: the shipped shape, its two other projections, a bare path, and no projection at
+    # all -- with or without the `.[]` the filter would otherwise test the array through.
+    assert gaps(f".[] | {FILTER} | {{id, author: .user.login, url: .html_url, body}}") == []
+    assert (
+        gaps(f".[] | {FILTER} | {{id, association: .author_association, path, line, body}}") == []
+    )
+    assert gaps(f".[] | {FILTER} | {{id, state, body}}") == []
+    assert gaps(f".[] | {FILTER} | .body") == []
+    assert gaps(f".[] | {FILTER} | {{id}} | .id") == []
+    assert gaps(f".[]? | {FILTER}") == []
+    assert gaps(FILTER) == []
+    # Carried but not applied: the trailing alternative the issue names, a second `select`, a
+    # walk, a comma, an unrestricted projection, and the filter behind a leak of its own input.
+    leaky = f".[] | {FILTER} // .body"
+    assert gaps(leaky) == [f"gh api repos/o/r/issues/1/comments --jq '{leaky}'"]
+    assert gaps(f".[] | {FILTER} | (select(false) // .body)") != []
+    assert gaps(f".[] | {FILTER} | .. | strings") != []
+    assert gaps(f".[] | {FILTER} | .body, .user.login") != []
+    assert gaps(f".[] | {FILTER} | {{body: (.body // .user.login)}}") != []
+    assert gaps(f".[] | (.body, {FILTER})") != []
+    assert gaps(f".[] | {FILTER} // .body | {{id, body}}") != []
+    # The filter must be the whole stage, not a prefix or a suffix of one.
+    assert gaps(f".[] | {FILTER} and false") != []
+    assert gaps(f".[] | [{FILTER}]") != []
+    # A `|` inside a string does not split a stage, so such a stage is judged whole.
+    assert gaps(f'.[] | {FILTER} | {{body: "a|b"}}') != []
+    # Brackets or quotes that do not balance fail closed.
+    assert gaps(f".[] | {FILTER} | (.body") != []
+    assert gaps(f".[] | {FILTER} | .body)") != []
+    assert gaps(f'.[] | {FILTER} | "unclosed') != []
+    # An exemption is still the command's shape: a write and the workpad's read by id are not
+    # reads of a thread, whatever their program says.
+    write = f"gh api -X POST repos/o/r/issues/1/comments -f body=hi --jq '.[] | {FILTER} // .body'"
+    assert unfiltered_comment_reads(f"`{write}`", LOGIN) == []
+    assert (
+        unfiltered_comment_reads("`gh api repos/o/r/issues/comments/<id> --jq .body`", LOGIN) == []
+    )
+
+
 def test_on_an_admin_account_the_own_login_exclusion_is_off(
     make_issue: Callable[..., Issue],
 ) -> None:
@@ -967,4 +1028,11 @@ def test_on_an_admin_account_the_own_login_exclusion_is_off(
     assert "is also a repository admin, so its comments and reviews are read like any" in text
     assert "agent output, not a request, whatever their association" not in text
     # The scan is for the non-admin prompt, which is what validate renders.
-    assert unfiltered_comment_reads(text, "issuebot-agent-1") != []
+    gaps = unfiltered_comment_reads(text, "issuebot-agent-1")
+    assert len(gaps) == 4
+    # #258: what those four drop is the login half, by design, and nothing else. Each still
+    # *applies* the association half -- first stage after `.[]`, a projection after it -- so the
+    # admin render is clean against the association-alone filter, which is the one a scan of an
+    # admin render requires (#252), and the position rule is not what would stand in its way.
+    association = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")))'
+    assert all(_filter_applies(_jq_program(shlex.split(gap)), (association,)) for gap in gaps)

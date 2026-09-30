@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.agent.prompt import PromptContext, PromptRenderer
+from issuebot.agent.prompt import PromptContext, PromptRenderer, unfiltered_comment_reads
 from issuebot.config import load_workflow
 from issuebot.github.models import Issue, LinkedPr, StateLabel
 
@@ -106,6 +106,34 @@ def test_the_five_step_6_programs_run_and_filter(make_issue: Callable[..., Issue
         assert results[0]["body"] == "body 1"
     quarantine = _run(programs[4])
     assert quarantine == [{"author": "mallory", "association": "NONE", "url": "u3"}]
+
+
+def test_a_trailing_alternative_undoes_the_filter_it_carries(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """#258, the premise a containment scan could not see, run rather than read off the manual.
+
+    ``select`` emits *nothing* for a record it drops, and jq's ``//`` yields its right-hand side
+    when its left yields no output, so a program carrying the whole filter and continuing
+    ``// .body`` prints the bodies of exactly the authors the filter exists to drop: the
+    stranger's and the session's own. That is why the scan now asks where the filter sits.
+    """
+    # The first Step 6 program without its projection: `.[] | select(<the whole filter>)`.
+    filtered = _programs(_rendered(make_issue))[0].rsplit(" | ", 1)[0]
+    assert filtered.endswith(f'.user.login != "{LOGIN}")')
+    assert _run(filtered) == [PAGE[0]]
+
+    leaky = f"{filtered} // .body"
+    done = subprocess.run(
+        ["jq", "-c", leaky], input=json.dumps(PAGE), capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    emitted = [json.loads(line) for line in done.stdout.splitlines()]
+    # The maintainer's record, then the two bodies the filter dropped.
+    assert emitted == [PAGE[0], "body 2", "body 3"]
+    # And the scan reports it, filter and all (tests/test_workflow_default.py has the shapes).
+    command = f"`gh api repos/o/r/issues/1/comments --jq '{leaky}'`"
+    assert unfiltered_comment_reads(command, LOGIN) != []
 
 
 def test_on_an_admin_account_the_own_row_is_kept(make_issue: Callable[..., Issue]) -> None:

@@ -1375,8 +1375,11 @@ def _prompt_check(workflow: Workflow) -> Check:
     prose the scanner cannot read, and ``validate`` cannot tell the two apart. A command
     carrying both halves with a literal login is flagged too, and is a real fault rather than a
     false positive -- the account changes and the exclusion stops matching -- which is why the
-    text says the exclusion must name ``{{ login }}``. What it can do is say which command it
-    found, how many, and name the document that says what the barrier is.
+    text says the exclusion must name ``{{ login }}``. So is one that carries them somewhere
+    other than as the program's first stage, or continues past them (#258), which is why the
+    text says where the filter must sit: a program that drops a record and then re-emits it is
+    not filtered, whatever it contains. What it can do is say which command it found, how many,
+    and name the document that says what the barrier is.
     """
     body = workflow.prompt_template
     if not body:
@@ -1418,15 +1421,16 @@ def _prompt_check(workflow: Workflow) -> Check:
         )
     )
     if gaps:
-        noun = "comment read lacks" if len(gaps) == 1 else "comment reads lack"
+        noun = "comment read does not" if len(gaps) == 1 else "comment reads do not"
         return Check(
             "prompt",
             "warn",
-            f"renders, but {len(gaps)} {noun} the maintainer filter or the own-account "
+            f"renders, but {len(gaps)} {noun} apply the maintainer filter and the own-account "
             f"exclusion, the first `{gaps[0]}`: a prompt that replaces the shipped one has no "
             "comment barrier unless it carries Step 6's commands "
             '(docs/security-model.md, "The text a session acts on")'
-            ", and the own-account exclusion must name `{{ login }}` rather than a literal login",
+            ", the own-account exclusion must name `{{ login }}` rather than a literal login, and "
+            "the filter must be the `--jq` program's first stage with only a projection after it",
         )
     return Check("prompt", "ok", f"{len(body)} characters, renders")
 

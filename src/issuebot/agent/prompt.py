@@ -322,6 +322,20 @@ _SHORT_C = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
 _UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
 _WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
 _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
+# What a comment read's ``--jq`` program may open with before the filter: jq's array
+# iteration, or nothing, in which case the filter tests the array itself and emits nothing.
+_JQ_ITERATION = frozenset({".[]", ".[]?"})
+# What may follow the filter: a projection of a record it let through, and nothing that could
+# emit one it dropped. A dotted path, or an object construction whose body is names, paths,
+# strings and separators -- no parentheses, no ``|`` and no ``/``, so no ``//``.
+_JQ_PROJECTION = re.compile(
+    r"""
+    \.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*   # .body, .user.login
+    |\{[\w\s.,:"'-]*\}                   # {id, author: .user.login, body}
+    """,
+    re.VERBOSE,
+)
+_JQ_OPENERS, _JQ_CLOSERS = "([{", ")]}"
 
 
 def _command_line(line: str) -> str:
@@ -462,6 +476,68 @@ def _jq_program(tokens: list[str]) -> str:
     return program
 
 
+def _jq_stages(program: str) -> list[str] | None:
+    """The program's top-level stages, split on the ``|`` jq pipes with, each stripped; ``None``
+    when its quotes or brackets do not balance (the caller fails closed).
+
+    Only a ``|`` outside every quote and every ``(``, ``[`` and ``{`` splits, so the one in
+    ``select((.author_association | IN(...)) and ...)`` stays inside its own stage, as does one
+    inside a string. Nothing else is parsed: a stage is the text between two such pipes, and
+    what it would do is the caller's question.
+    """
+    stages: list[str] = [""]
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in program:
+        if quote:
+            stages[-1] += char
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in _JQ_OPENERS:
+            depth += 1
+        elif char in _JQ_CLOSERS:
+            depth -= 1
+            if depth < 0:
+                return None
+        elif char == "|" and depth == 0:
+            stages.append("")
+            continue
+        stages[-1] += char
+    if quote or depth:
+        return None
+    return [stage.strip() for stage in stages]
+
+
+def _filter_applies(program: str, accepted: tuple[str, ...]) -> bool:
+    """Whether one of the ``accepted`` filters *applies* to every record ``program`` can emit:
+    it is the program's first stage, after an optional ``.[]``, matched whole, and every stage
+    after it is a projection.
+
+    Carrying a filter is not applying one, because a stage after it decides whether it held:
+    ``select`` emits nothing for a record it drops, and jq's ``//`` yields its right-hand side
+    when its left emits nothing, so ``<filter> // .body`` prints the bodies of exactly the
+    authors the filter exists to drop (#258). A further ``select``, an extra stage, or a program
+    whose quoting does not balance is refused for the same reason: what such a stage emits is
+    past what this can see, so it is not accepted.
+    """
+    stages = _jq_stages(program)
+    if stages is None:
+        return False
+    if stages and stages[0] in _JQ_ITERATION:
+        stages = stages[1:]
+    if not stages or stages[0] not in accepted:
+        return False
+    return all(_JQ_PROJECTION.fullmatch(stage) for stage in stages[1:])
+
+
 def _is_write(tokens: list[str]) -> bool:
     """A ``gh api`` call with a write method: it posts or edits one comment and never reads a
     thread back, so the read filter has nothing to say about it."""
@@ -517,19 +593,33 @@ def unfiltered_comment_reads(
     comments on other issues (GHSA-f3fm-r55f-2vgm). The parentheses are load-bearing: jq's
     ``|`` binds loosest, so without them ``.user`` is read from the association string and the
     call errors. A negated, ``or``-joined or wrong-login filter is flagged, because it is a
-    different string. Exempt are ``gh api`` writes (``-X POST``, ``PATCH``, ``DELETE``) and the
-    workpad's one read by id (``issues/comments/<id> --jq .body``, #77, or with ``workpad_id`` the
-    rendered id itself and no other): neither sweeps a thread.
+    different string. Where the filter *sits* is the rule and not whether it is present
+    (#258): it must be the program's first stage, after an optional ``.[]``, matched whole, and
+    every stage after it a projection -- a dotted path such as ``.body``, or an object
+    construction such as ``{id, author: .user.login, body}``. Carrying a filter is not applying
+    one, because a stage after it decides whether it held: ``select`` emits nothing for a record
+    it drops and jq's ``//`` yields its right-hand side when its left emits nothing, so
+    ``.[] | <the whole filter> // .body`` prints the bodies of exactly the authors the filter
+    exists to drop, which ``gh``'s own jq -- the one that runs these programs -- confirms. A
+    trailing alternative, a further ``select`` and any other stage are all reported, since what
+    such a stage emits is past what this can read. Exempt are ``gh api`` writes (``-X POST``,
+    ``PATCH``, ``DELETE``) and the workpad's one read by id (``issues/comments/<id> --jq
+    .body``, #77, or with ``workpad_id`` the rendered id itself and no other): neither sweeps a
+    thread.
 
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
-    guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
-    commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the offending
-    segment is what is reported.
+    guarantee, and the new rule does not make it one. Prose that tells the agent to fetch
+    comments some other way is still beyond it; so is what a record the filter *let through*
+    carries, since the rule is about which records a program can emit and not about which of
+    their fields it prints; and a projection is recognised by its shape rather than parsed, so
+    the two forms above are the whole of what is accepted and a program needing more than them
+    is reported rather than read further. Chained commands (``;``, ``&&``, ``||``, ``|``) are
+    scanned segment by segment, and the offending segment is what is reported.
     ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
     shipped prompt and a deployment's prompt are held to one rule.
     """
     associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
-    required = f'select((.author_association | IN({associations})) and .user.login != "{login}")'
+    accepted = (f'select((.author_association | IN({associations})) and .user.login != "{login}")',)
     gaps: list[str] = []
     for command in _gh_commands(rendered):
         segments = _segments(command)
@@ -550,7 +640,7 @@ def unfiltered_comment_reads(
                 _is_write(tokens) or _is_workpad_read(tokens, workpad_id)
             ):
                 continue
-            if required not in _jq_program(tokens):
+            if not _filter_applies(_jq_program(tokens), accepted):
                 gaps.append(joined)
     return gaps
 
