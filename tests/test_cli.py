@@ -20,11 +20,12 @@ import pytest
 from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__, cli
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
-from issuebot.agent.prompt import prompt_variants
+from issuebot.agent.prompt import PROMPT_VARIANT_AXES, PromptContext, prompt_variants
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
     ISOLATED_NETWORK_RECIPE,
+    SAMPLE_LOGIN,
     StatsView,
     _deployment_scrubber,
     _sample_context,
@@ -885,37 +886,50 @@ def test_validate_accepts_the_association_half_alone_in_the_admin_branch(
     assert "[WARN] prompt: renders, but 1 comment read lacks" in capsys.readouterr().out
 
 
+# What each axis of the shared product looks like once `_sample_context` has turned it into a
+# context: the mapping is `validate`'s, since the samples are. Keyed by axis name so that an
+# axis added to `PROMPT_VARIANT_AXES` with no entry here fails the test below rather than
+# quietly going unasserted.
+AXIS_IN_CONTEXT: dict[str, Callable[[PromptContext], bool | int]] = {
+    "linked_pr": lambda sample: sample.issue.linked_pr is not None,
+    "rework": lambda sample: sample.rework,
+    "attempt": lambda sample: sample.attempt,
+    "workpad": lambda sample: sample.workpad is not None,
+    "self_review": lambda sample: sample.self_review,
+    "admin": lambda sample: sample.admin,
+}
+
+
 def test_the_sample_context_carries_every_axis_of_the_shared_product(
     tmp_path: Path,
 ) -> None:
     """#252: `validate` renders the product `render_variants` spells, and this is the mapping
     from its axes onto validate's own samples -- an axis the factory ignored would render a
-    branch nothing else reaches, which is the fault the shared product exists to prevent."""
+    branch nothing else reaches, which is the fault the shared product exists to prevent.
+
+    Two ways that fails: an axis with no entry above, and an axis whose value never reaches
+    the context, which shows up as a render that does not vary with it.
+    """
     settings = load_workflow(
         _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody.\n"), environ={"GH_TOKEN": "t"}
     ).config
-    seen: set[tuple[bool, bool, int, bool, bool, bool, int]] = set()
-    for variant in prompt_variants():
+    assert set(AXIS_IN_CONTEXT) == {name for name, _ in PROMPT_VARIANT_AXES}
+
+    variants = prompt_variants()
+    for variant in variants:
         sample = _sample_context(settings, variant)
-        assert (sample.issue.linked_pr is not None) is variant.linked_pr
-        assert (sample.workpad is not None) is variant.workpad
-        assert sample.rework is variant.rework
-        assert sample.self_review is variant.self_review
-        assert sample.admin is variant.admin
-        assert sample.attempt == variant.attempt
+        for name, in_context in AXIS_IN_CONTEXT.items():
+            assert in_context(sample) == getattr(variant, name), name
         assert sample.turn_number == variant.turn_number
-        seen.add(
-            (
-                variant.linked_pr,
-                variant.rework,
-                variant.attempt,
-                variant.workpad,
-                variant.self_review,
-                variant.admin,
-                variant.turn_number,
-            )
-        )
-    assert len(seen) == 64 + 1  # the product, and the continuation's later turn
+        assert sample.login == SAMPLE_LOGIN
+    # And every value of every axis is actually reached, so no axis is pinned to one half.
+    for name, values in PROMPT_VARIANT_AXES:
+        reached = {
+            AXIS_IN_CONTEXT[name](_sample_context(settings, variant))
+            for variant in variants
+            if not variant.continuation
+        }
+        assert reached == set(values), name
 
 
 def test_validate_warns_about_a_literal_login_in_the_exclusion(

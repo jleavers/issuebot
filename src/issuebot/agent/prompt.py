@@ -538,7 +538,9 @@ def unfiltered_comment_reads(
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
     guarantee: prose that tells the agent to fetch comments some other way is beyond it. Chained
     commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the offending
-    segment is what is reported.
+    segment is what is reported. A filter is looked for *within* the ``--jq`` program rather
+    than against the whole of it, so a program that carries one and then re-emits the stream
+    it dropped passes -- the lint's own bound, and #258.
     ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, over the
     one product ``render_variants`` spells, so the shipped prompt and a deployment's prompt are
     held to one rule.

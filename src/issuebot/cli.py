@@ -1340,6 +1340,11 @@ def _sample_context(settings: Settings, variant: PromptVariant = DISPATCH_VARIAN
     booleans become the samples above: ``_SAMPLE_PR`` and ``_SAMPLE_WORKPAD``, or ``None``. The
     axes themselves live in ``issuebot.agent.prompt`` so that the shipped test renders the same
     product (#252); the default variant is the state an issue is dispatched in.
+
+    ``self_review`` is the variant's rather than ``agent.self_review``, which it was before the
+    product was shared: both values are an axis, so the deployment's own setting is one of the
+    renders either way, and following the setting would leave the other half of the axis
+    rendered under a context that contradicts it.
     """
     now = datetime.now(UTC)
     linked_pr = _SAMPLE_PR if variant.linked_pr else None
