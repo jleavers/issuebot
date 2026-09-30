@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -28,6 +28,8 @@ from issuebot.cli import (
     SAMPLE_LOGIN,
     StatsView,
     _deployment_scrubber,
+    _embedded_resolver_configured,
+    _reverse_lookup,
     _sample_context,
     _turn_capture,
     _with_uid,
@@ -4465,20 +4467,66 @@ def test_gateway_candidates_are_the_first_address_of_each_attached_network() -> 
 
 
 def _gateway(
-    monkeypatch: pytest.MonkeyPatch, *, inside: bool = True, open_at: str | None = None
-) -> list[tuple[str, int]]:
-    """Put `validate` inside a container with ROUTE_TABLE's networks; `open_at` is the gateway
-    whose sshd answers, or None for none. Returns the (address, port) pairs probed."""
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inside: bool = True,
+    open_at: str | None = None,
+    names: Mapping[str, str] | None = None,
+    embedded: bool = True,
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Put `validate` inside a container with ROUTE_TABLE's networks.
+
+    `open_at` is the gateway whose sshd answers, or None for none; `names` is what the embedded
+    resolver gives back per address, empty by default (no network proved); `embedded` is
+    whether this container's resolver is Docker's at all. Returns the (address, port) pairs
+    probed and the addresses looked up, in the order each was asked.
+    """
     probed: list[tuple[str, int]] = []
+    looked_up: list[str] = []
+    names = names or {}
 
     def port_open(address: str, port: int, *, timeout_s: float) -> bool:
         probed.append((address, port))
         return address == open_at
 
+    def reverse_lookup(address: str) -> str | None:
+        looked_up.append(address)
+        return names.get(address)
+
     monkeypatch.setattr("issuebot.cli.in_container", lambda: inside)
     monkeypatch.setattr("issuebot.cli._read_route_table", lambda: ROUTE_TABLE)
     monkeypatch.setattr("issuebot.cli._host_port_open", port_open)
-    return probed
+    monkeypatch.setattr("issuebot.cli._reverse_lookup", reverse_lookup)
+    monkeypatch.setattr("issuebot.cli._embedded_resolver_configured", lambda: embedded)
+    return probed, looked_up
+
+
+def test_validate_reports_the_gateway_isolated_when_the_ptr_resolves(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The discriminator the canary is not (#251). Docker's embedded DNS answers a PTR for a
+    container's address and not for the bridge's, so a name at the first address says the host
+    is not on that network -- a proof rather than "nobody answered on 22"."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, looked_up = _gateway(
+        monkeypatch,
+        names={
+            "192.168.112.1": "issuebot-db-1.issuebot-internal",
+            "192.168.128.1": "ci-egress-1.ci_egress",
+        },
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
+        "address is issuebot-db-1.issuebot-internal's); eth1's network 192.168.128.0/20 at "
+        "192.168.128.1 is isolated (first address is ci-egress-1.ci_egress's)\n"
+    ) in out
+    # Nothing is hedged when every network is proved, and a proved one is not probed on 22:
+    # the lookup has already answered the question the canary could only guess at.
+    assert "canary" not in out
+    assert probed == []
+    assert looked_up == ["192.168.112.1", "192.168.128.1"]
 
 
 def test_validate_warns_when_the_hosts_sshd_answers_at_a_gateway(
@@ -4488,7 +4536,7 @@ def test_validate_warns_when_the_hosts_sshd_answers_at_a_gateway(
     session on the worker's networks could open the host's sshd. Isolated gateway mode is the
     fix, and the warning names it."""
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
-    probed = _gateway(monkeypatch, open_at="192.168.112.1")
+    probed, looked_up = _gateway(monkeypatch, open_at="192.168.112.1")
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert (
@@ -4501,35 +4549,196 @@ def test_validate_warns_when_the_hosts_sshd_answers_at_a_gateway(
         "once its compose.yaml carries the option "
         '(docs/operations.md, "Upgrades")'
     ) in out
-    # One answering gateway is the finding; the check stops there rather than probing on.
+    # The PTR is asked first and answers nothing, so the canary runs; one answering gateway is
+    # the finding, and the check stops there rather than probing on.
+    assert looked_up == ["192.168.112.1"]
     assert probed == [("192.168.112.1", 22)]
+
+
+def test_validate_names_the_network_it_proved_beside_the_one_that_answered(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The warning ends the check, but not the reading: the operator is about to recreate a
+    network and has to know which of the two it is, so what was proved before the answer is
+    still in the line."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, _looked_up = _gateway(
+        monkeypatch,
+        names={"192.168.112.1": "issuebot-db-1.issuebot-internal"},
+        open_at="192.168.128.1",
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
+        "address is issuebot-db-1.issuebot-internal's) -- but something answered on port 22 at "
+        "192.168.128.1, the first address of eth1's network 192.168.128.0/20: without an "
+        "isolated gateway that address is the host's own"
+    ) in out
+    # The proved network was not probed; the one that answered ended the check.
+    assert probed == [("192.168.128.1", 22)]
 
 
 def test_validate_reports_the_gateway_canary_refused(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
 ) -> None:
-    """The OK line says what it proved and what it did not: a closed port is refused with or
-    without the option, so only a listening host service tells the two apart."""
+    """No PTR and no answer on 22 is the honest third outcome, not a proof: an isolated network
+    nobody else has joined yet looks exactly like a plain one whose host runs no sshd."""
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
-    _gateway(monkeypatch)
+    probed, looked_up = _gateway(monkeypatch)
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[ OK ] gateway: nothing answered on port 22 at the first address of each attached "
-        "network (192.168.112.1, 192.168.128.1): the host's own without an isolated gateway, "
-        "a container's or nobody's with one -- a canary, not a proof\n"
+        "[ OK ] gateway: nothing answered on port 22 at 192.168.112.1, the first address of "
+        "eth0's network 192.168.112.0/20; nothing answered on port 22 at 192.168.128.1, the "
+        "first address of eth1's network 192.168.128.0/20 -- an address no PTR claims is the "
+        "host's own without an isolated gateway, a container's or nobody's with one, and a "
+        "closed port is refused either way: a canary, not a proof\n"
     ) in out
+    assert looked_up == ["192.168.112.1", "192.168.128.1"]
+    assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
+
+
+def test_validate_keeps_the_canary_for_the_network_the_ptr_did_not_prove(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The mixed case, which is the one a checkout hits first: the shared network carries the
+    hub's database and resolves, the checkout's own `egress` has only this container on it yet
+    and does not. Each network is reported as what it is, and the hedge covers the second."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, _looked_up = _gateway(
+        monkeypatch, names={"192.168.112.1": "issuebot-db-1.issuebot-internal"}
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
+        "address is issuebot-db-1.issuebot-internal's); nothing answered on port 22 at "
+        "192.168.128.1, the first address of eth1's network 192.168.128.0/20 -- an address no "
+        "PTR claims is the host's own"
+    ) in out
+    assert "a canary, not a proof\n" in out
+    # Only the unproved one is probed.
+    assert probed == [("192.168.128.1", 22)]
+
+
+def test_validate_reports_the_proved_networks_before_the_hedge_about_the_others(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The mixed case the other way round, which is a worker-only checkout whose hub is in
+    another one: the *shared* network is the unproved one and the checkout's own `egress`
+    carries the proxy. The hedge is about the networks no PTR claimed, so the proved ones are
+    reported first whatever order the route table lists them in -- appended to a detail ending
+    in a proved network it would read as doubt about the one network there is none over."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    _gateway(monkeypatch, names={"192.168.128.1": "ci-egress-1.ci_egress"})
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] gateway: eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first "
+        "address is ci-egress-1.ci_egress's); nothing answered on port 22 at 192.168.112.1, "
+        "the first address of eth0's network 192.168.112.0/20 -- an address no PTR claims is "
+        "the host's own"
+    ) in out
+
+
+def test_validate_asks_no_ptr_where_the_resolver_is_not_dockers(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The PTR is a proof because of *who* answered it. A container whose `resolv.conf` does
+    not name `127.0.0.11` -- Kubernetes' cluster DNS, a bind-mounted host resolver -- is
+    answering a different question, and a name from it would be read as an isolation it never
+    claimed. So it is not asked, and the canary is the whole of the line."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, looked_up = _gateway(
+        monkeypatch,
+        embedded=False,
+        names={"192.168.112.1": "somebody-elses.answer", "192.168.128.1": "and.another"},
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert "is isolated (first address is" not in out
+    assert (
+        "-- no PTR was asked, since this container's resolver is not Docker's 127.0.0.11 and "
+        "another's answer would say nothing about the bridge; an unanswered port is refused "
+        "with an isolated gateway and without one: a canary, not a proof\n"
+    ) in out
+    assert looked_up == []
+    assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
+
+
+def test_the_embedded_resolver_is_recognised_by_resolv_conf(tmp_path: Path) -> None:
+    """The file Docker writes names `127.0.0.11` on a `nameserver` line of its own; anything
+    else, and a file that cannot be read at all, is somebody else's resolver."""
+    docker = tmp_path / "docker-resolv.conf"
+    docker.write_text(
+        "# Generated by Docker Engine.\nnameserver 127.0.0.11\noptions edns0 ndots:0\n"
+    )
+    assert _embedded_resolver_configured(docker) is True
+    host = tmp_path / "host-resolv.conf"
+    # Not a substring match: the address has to be the whole of a `nameserver` line's argument.
+    host.write_text("nameserver 10.0.0.53\nsearch corp.example\n# nameserver 127.0.0.11\n")
+    assert _embedded_resolver_configured(host) is False
+    # And the *first* `nameserver` line, since that is the one glibc asks: a file listing
+    # somebody else first would otherwise gate the lookup on Docker while somebody else
+    # answered it. Docker writes exactly one line, which is what makes the strict reading free.
+    ordered = tmp_path / "ordered-resolv.conf"
+    ordered.write_text("search corp.example\nnameserver 10.0.0.53\nnameserver 127.0.0.11\n")
+    assert _embedded_resolver_configured(ordered) is False
+    assert _embedded_resolver_configured(tmp_path / "absent") is False
 
 
 def test_validate_skips_the_gateway_canary_outside_a_container(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
 ) -> None:
+    """Neither question is asked: the host is this process's own, and a PTR answered by
+    whatever resolver the host happens to use is not the daemon's."""
     monkeypatch.setenv("GH_TOKEN", "secret-token-value")
-    probed = _gateway(monkeypatch, inside=False)
+    probed, looked_up = _gateway(monkeypatch, inside=False)
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] gateway: skipped outside a container: the host is this process's own\n" in out
     assert probed == []
+    assert looked_up == []
+
+
+def test_reverse_lookup_is_none_when_nothing_claims_the_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every way the lookup can fail reads the same: nobody claimed it. `herror` is the PTR
+    Docker's resolver has no answer for -- the plain-network case -- and the deadline is the
+    container whose `resolv.conf` points at something that will not answer at all, which
+    `gethostbyaddr` has no timeout of its own for."""
+    monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", lambda _a: ("db.ci_egress", [], []))
+    assert _reverse_lookup("192.168.112.1") == "db.ci_egress"
+
+    for error in (socket.herror("1", "Unknown host"), socket.gaierror("no resolver")):
+
+        def raise_it(_address: str, exc: OSError = error) -> tuple[str, list[str], list[str]]:
+            raise exc
+
+        monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", raise_it)
+        assert _reverse_lookup("192.168.112.1") is None
+
+    # The deadline, and the thread released the moment it has been measured: the executor's own
+    # `atexit` hook joins its workers, so a test that left one sleeping would be paid for at the
+    # end of every `pytest` run rather than here.
+    released = threading.Event()
+
+    def never_answers(_address: str) -> tuple[str, list[str], list[str]]:
+        assert released.wait(30), "the lookup thread was never released"
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", never_answers)
+    monkeypatch.setattr("issuebot.cli._GATEWAY_PTR_TIMEOUT_S", 0.05)
+    started = time.monotonic()
+    try:
+        assert _reverse_lookup("192.168.112.1") is None
+        # It returns rather than waiting the thread out, which is the whole point of the
+        # deadline: the eight checks after this one still run.
+        assert time.monotonic() - started < 5
+    finally:
+        released.set()
 
 
 def test_validate_fails_session_accounts_with_no_credential_in_the_environment(

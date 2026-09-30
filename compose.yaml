@@ -309,7 +309,9 @@ networks:
     # address at all, so joining this network reaches the proxy and nothing else; both
     # families, since a daemon that gives new networks IPv6 puts the host at that gateway
     # too. The shared `issuebot-internal` is created with the same options by hand in the
-    # README's once-per-host step, and `validate`'s `gateway` line is the canary for both. A
+    # README's once-per-host step. `validate`'s `gateway` line reads both: a PTR at the first
+    # address through Docker's embedded resolver, which names the container holding it when the
+    # gateway is isolated, and the port-22 canary for a network no PTR claims. A
     # network created before this option is recreated by the next `up` when compose 2.31 or
     # later created it (the options are part of the config hash it compares, and it stops the
     # attached services itself); one without that label is removed by hand first, as the

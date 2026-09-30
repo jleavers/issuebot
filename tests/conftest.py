@@ -79,15 +79,24 @@ def no_gateway_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """``validate``'s ``gateway`` canary reads the real route table and opens real sockets
     when a test puts the constant above at a real directory (the compose-wording tests do),
     which is a connection to whatever sits at the LAN's ``.1`` -- and the suite is hermetic.
-    A test about the canary itself overrides both seams the way ``_gateway`` in the CLI tests
-    does; every other test sees no network and a probe that is never reached.
+    A test about the check itself overrides every seam the way ``_gateway`` in the CLI tests
+    does; every other test sees no network, a probe that is never reached and a resolver
+    that is never asked.
     """
 
     def never(address: str, port: int, *, timeout_s: float) -> bool:
         raise AssertionError(f"the gateway canary probed {address}:{port} in a hermetic test")
 
+    def never_resolve(address: str) -> str | None:
+        raise AssertionError(f"the gateway check looked {address} up in a hermetic test")
+
     monkeypatch.setattr("issuebot.cli._read_route_table", lambda: "")
     monkeypatch.setattr("issuebot.cli._host_port_open", never)
+    # The PTR seam #251 added is stubbed for the same reason and not because the empty route
+    # table happens to reach neither: a test that supplies a route table without going through
+    # the CLI tests' `_gateway` helper would otherwise put a real query on the wire.
+    monkeypatch.setattr("issuebot.cli._reverse_lookup", never_resolve)
+    monkeypatch.setattr("issuebot.cli._embedded_resolver_configured", lambda: False)
 
 
 @pytest.fixture(autouse=True)
