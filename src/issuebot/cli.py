@@ -50,7 +50,6 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import (
-    DISPATCH_VARIANT,
     PromptVariant,
     render_variants,
     unfiltered_comment_reads,
@@ -1333,7 +1332,7 @@ _SAMPLE_WORKPAD = Comment(
 )
 
 
-def _sample_context(settings: Settings, variant: PromptVariant = DISPATCH_VARIANT) -> PromptContext:
+def _sample_context(settings: Settings, variant: PromptVariant) -> PromptContext:
     """A plausible in-progress issue so validate can render the template end to end.
 
     ``variant`` is one point of the product ``render_variants`` yields, and this is where its
@@ -1343,8 +1342,10 @@ def _sample_context(settings: Settings, variant: PromptVariant = DISPATCH_VARIAN
 
     ``self_review`` is the variant's rather than ``agent.self_review``, which it was before the
     product was shared: both values are an axis, so the deployment's own setting is one of the
-    renders either way, and following the setting would leave the other half of the axis
-    rendered under a context that contradicts it.
+    body renders either way, and following the setting would leave the other half of the axis
+    rendered under a context that contradicts it. The continuation render takes the variant's
+    ``False`` rather than the setting, which nothing can see: ``CONTINUATION_TEMPLATE`` branches
+    on neither ``self_review`` nor ``admin``.
     """
     now = datetime.now(UTC)
     linked_pr = _SAMPLE_PR if variant.linked_pr else None

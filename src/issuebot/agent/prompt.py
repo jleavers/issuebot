@@ -540,7 +540,9 @@ def unfiltered_comment_reads(
     commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the offending
     segment is what is reported. A filter is looked for *within* the ``--jq`` program rather
     than against the whole of it, so a program that carries one and then re-emits the stream
-    it dropped passes -- the lint's own bound, and #258.
+    it dropped passes -- the lint's own bound, and #258. A span is a command only if it opens
+    ``gh``, so the shipped workflow's ``Quarantined`` fetch, written as the ``--jq`` program to
+    substitute into the four calls above it, is outside this entirely.
     ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, over the
     one product ``render_variants`` spells, so the shipped prompt and a deployment's prompt are
     held to one rule.
@@ -760,8 +762,8 @@ class PromptVariant:
 DISPATCH_VARIANT = PromptVariant()
 """The state an issue is dispatched in: a first attempt, no pull request, no workpad yet.
 
-One point of the product below, and the default a caller building a single sample context
-takes; every field of ``PromptVariant`` defaults to it.
+One point of the product below, and what every field of ``PromptVariant`` defaults to, so a
+render of this variant alone is the one render the check used to make before #252.
 """
 
 

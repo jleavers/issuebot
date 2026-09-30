@@ -908,7 +908,7 @@ def test_the_sample_context_carries_every_axis_of_the_shared_product(
     branch nothing else reaches, which is the fault the shared product exists to prevent.
 
     Two ways that fails: an axis with no entry above, and an axis whose value never reaches
-    the context, which shows up as a render that does not vary with it.
+    the context, which shows up as a context that does not vary with it.
     """
     settings = load_workflow(
         _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody.\n"), environ={"GH_TOKEN": "t"}
@@ -922,14 +922,9 @@ def test_the_sample_context_carries_every_axis_of_the_shared_product(
             assert in_context(sample) == getattr(variant, name), name
         assert sample.turn_number == variant.turn_number
         assert sample.login == SAMPLE_LOGIN
-    # And every value of every axis is actually reached, so no axis is pinned to one half.
-    for name, values in PROMPT_VARIANT_AXES:
-        reached = {
-            AXIS_IN_CONTEXT[name](_sample_context(settings, variant))
-            for variant in variants
-            if not variant.continuation
-        }
-        assert reached == set(values), name
+    # Both values of every axis are reached, which is the product's own guarantee rather than
+    # this mapping's: `test_the_product_is_every_combination_of_the_axes_plus_the_continuation`.
+    assert len(variants) == 64 + 1
 
 
 def test_validate_warns_about_a_literal_login_in_the_exclusion(

@@ -809,17 +809,29 @@ def test_the_scan_on_an_admin_render_requires_the_association_half_alone() -> No
     # that carries the association and admits everyone anyway, and the flag family. The two
     # accepted filters are matched whole, which is what keeps the disjunctive one a gap.
     assert unfiltered_comment_reads(f"`{read} '.[].body'`", "issuebot", admin=True) != []
+    # `| not` inside the inner parens, which is how the workflow's `Quarantined` fetch spells
+    # it: the association is in it and it reads exactly the text the barrier drops. (That fetch
+    # is not itself scanned -- its backticked span opens `--jq`, not `gh` -- so this is the
+    # shape rather than the command.)
     negated = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not))'
-    assert unfiltered_comment_reads(f"`{read} '.[] | {negated} | .body'`", "issuebot", admin=True)
-    # The outer spelling of the same negation, which is the shape the `Quarantined` fetch has:
-    # the association is in it and it reads the text the barrier drops.
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {negated} | .body'`", "issuebot", admin=True)
+        != []
+    )
+    # And outside them, which nothing renders but is the same read.
     outer = f"{association} | not)"
-    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot", admin=True)
-    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot")
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot", admin=True) != []
+    )
+    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot") != []
     joined = f'{association} or .user.login == "issuebot")'
-    assert unfiltered_comment_reads(f"`{read} '.[] | {joined} | .body'`", "issuebot", admin=True)
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {joined} | .body'`", "issuebot", admin=True) != []
+    )
     anyone = f"{association} or true)"
-    assert unfiltered_comment_reads(f"`{read} '.[] | {anyone} | .body'`", "issuebot", admin=True)
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {anyone} | .body'`", "issuebot", admin=True) != []
+    )
     assert unfiltered_comment_reads("`gh pr view 1 --comments`", "issuebot", admin=True) != []
     # And a write is still exempt, admin or not.
     assert (
