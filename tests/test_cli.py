@@ -20,12 +20,14 @@ import pytest
 from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__, cli
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
+from issuebot.agent.prompt import prompt_variants
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
     ISOLATED_NETWORK_RECIPE,
     StatsView,
     _deployment_scrubber,
+    _sample_context,
     _turn_capture,
     _with_uid,
     gateway_candidates,
@@ -811,7 +813,7 @@ def test_validate_warns_about_a_read_inside_the_linked_pr_branch(
     executables: object,
 ) -> None:
     """The same read under ``{% if issue.pr %}``: the sample context has no PR by default, and
-    the check renders the variant that has one. Reached by sixteen variants, counted once."""
+    the check renders the variant that has one. Reached by thirty-two variants, counted once."""
     path = _write(
         tmp_path,
         "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if issue.pr %}\n"
@@ -824,6 +826,96 @@ def test_validate_warns_about_a_read_inside_the_linked_pr_branch(
         "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
         "own-account exclusion, the first `gh pr view 2 --comments`: " in out
     )
+
+
+def test_validate_warns_about_a_read_inside_the_admin_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """#252: the login exclusion is off for an admin account, so the shipped programs wrap it
+    in ``{% if not admin %}`` -- and a read an operator puts inside ``{% if admin %}`` went
+    unscanned while the check rendered the non-admin half alone."""
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n{% if admin %}\n"
+        "Read the feedback: `gh api repos/o/r/issues/1/comments --jq '.[].body'`\n{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
+        "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq "
+        "'.[].body'`: " in out
+    )
+
+
+def test_validate_accepts_the_association_half_alone_in_the_admin_branch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    """The other side of #252: an admin render carries no own-account exclusion by design, so
+    requiring it there would flag every prompt that follows the shipped one, this one included.
+
+    The same command outside the branch, where the render is non-admin, is a gap -- the second
+    fetch below -- so what passes is the admin render and not the scan going quiet.
+    """
+    association = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR"))'
+    path = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}.\n"
+        "{% if admin %}\nRead the feedback: "
+        f"`gh api repos/o/r/issues/1/comments --jq '.[] | {association}) | .body'`\n"
+        "{% endif %}\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] prompt:" in capsys.readouterr().out
+
+    unguarded = _write(
+        tmp_path,
+        "---\ngithub:\n  repo: o/r\n---\nWork issue {{ issue.number }}. Read the feedback: "
+        f"`gh api repos/o/r/issues/1/comments --jq '.[] | {association}) | .body'`\n",
+    )
+    assert main(["validate", "--workflow", str(unguarded)]) == 0
+    assert "[WARN] prompt: renders, but 1 comment read lacks" in capsys.readouterr().out
+
+
+def test_the_sample_context_carries_every_axis_of_the_shared_product(
+    tmp_path: Path,
+) -> None:
+    """#252: `validate` renders the product `render_variants` spells, and this is the mapping
+    from its axes onto validate's own samples -- an axis the factory ignored would render a
+    branch nothing else reaches, which is the fault the shared product exists to prevent."""
+    settings = load_workflow(
+        _write(tmp_path, "---\ngithub:\n  repo: o/r\n---\nBody.\n"), environ={"GH_TOKEN": "t"}
+    ).config
+    seen: set[tuple[bool, bool, int, bool, bool, bool, int]] = set()
+    for variant in prompt_variants():
+        sample = _sample_context(settings, variant)
+        assert (sample.issue.linked_pr is not None) is variant.linked_pr
+        assert (sample.workpad is not None) is variant.workpad
+        assert sample.rework is variant.rework
+        assert sample.self_review is variant.self_review
+        assert sample.admin is variant.admin
+        assert sample.attempt == variant.attempt
+        assert sample.turn_number == variant.turn_number
+        seen.add(
+            (
+                variant.linked_pr,
+                variant.rework,
+                variant.attempt,
+                variant.workpad,
+                variant.self_review,
+                variant.admin,
+                variant.turn_number,
+            )
+        )
+    assert len(seen) == 64 + 1  # the product, and the continuation's later turn
 
 
 def test_validate_warns_about_a_literal_login_in_the_exclusion(

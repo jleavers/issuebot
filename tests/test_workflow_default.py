@@ -1,6 +1,5 @@
 """The committed configs/WORKFLOW.md loads and renders."""
 
-import itertools
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -11,6 +10,8 @@ from issuebot.agent.prompt import (
     GITHUB_TEXT_TAG,
     PromptContext,
     PromptRenderer,
+    PromptVariant,
+    render_variants,
     unfiltered_comment_reads,
 )
 from issuebot.config import Workflow, load_workflow
@@ -672,49 +673,70 @@ def test_the_admission_rule_is_a_ground_rule(make_issue: Callable[..., Issue]) -
     ) in text
 
 
+def variant_context(
+    workflow: Workflow, make_issue: Callable[..., Issue], variant: PromptVariant
+) -> PromptContext:
+    """One point of the shared product as this file's own samples (#252): `render_variants`
+    carries the axes, and a caller decides which PR and which workpad they stand for."""
+    issue = dispatched(make_issue, linked_pr=PR) if variant.linked_pr else dispatched(make_issue)
+    return context(
+        workflow,
+        issue,
+        rework=variant.rework,
+        attempt=variant.attempt,
+        workpad=WORKPAD if variant.workpad else None,
+        self_review=variant.self_review,
+        admin=variant.admin,
+        turn_number=variant.turn_number,
+    )
+
+
 def test_every_comment_or_review_read_carries_the_filter(
     make_issue: Callable[..., Issue],
 ) -> None:
     """GHSA-jm8h-q3j6-p8xp: the four-command test above pins the shipped text of the fetches
     Step 6 and the Rework context name today; this one scans every rendered `gh` command in
     every render variant instead, so it fails if an unfiltered `gh api .../comments` or
-    `.../reviews` is added anywhere in the template, named or not."""
+    `.../reviews` is added anywhere in the template, named or not.
+
+    The variants come from `render_variants`, which `validate`'s `prompt` check calls too, so
+    the product is spelled once and an axis added to it reaches both (#252). An admin render
+    carries no own-account exclusion -- the workflow drops it in `{% if not admin %}` -- so it
+    is scanned for the association half alone, which is what `validate` does with it.
+    """
     workflow = load()
     renderer = PromptRenderer(workflow.prompt_template)
-    fresh = dispatched(make_issue)
-    with_pr = dispatched(make_issue, linked_pr=PR)
-
-    renders: list[str] = []
-    for issue, rework, attempt, workpad, self_review in itertools.product(
-        (fresh, with_pr), (False, True), (1, 2), (None, WORKPAD), (False, True)
-    ):
-        renders.append(
-            renderer.render(
-                context(
-                    workflow,
-                    issue,
-                    rework=rework,
-                    attempt=attempt,
-                    workpad=workpad,
-                    self_review=self_review,
-                )
-            )
-        )
-    renders.append(
-        renderer.render_continuation(context(workflow, with_pr, turn_number=3, workpad=WORKPAD))
+    renders = render_variants(
+        renderer, lambda variant: variant_context(workflow, make_issue, variant)
     )
 
-    for text in renders:
-        assert unfiltered_comment_reads(text, "issuebot-agent-1") == []
+    for variant, text in renders:
+        assert unfiltered_comment_reads(text, "issuebot-agent-1", admin=variant.admin) == []
     # Negative control: the scan is only worth anything if it can fail.
     leaky = PromptRenderer(
         workflow.prompt_template + "\n`gh api repos/{{ repo }}/issues/1/comments --jq '.[].body'`\n"
-    ).render(context(workflow, with_pr))
+    ).render(variant_context(workflow, make_issue, PromptVariant(linked_pr=True)))
     assert len(unfiltered_comment_reads(leaky, "issuebot-agent-1")) == 1
-    checked = sum(len(re.findall(r"/comments|/reviews", text)) for text in renders)
-    # 32 render variants (2 PR states x 2 rework x 2 attempt x 2 workpad x 2 self_review) plus
-    # the continuation render, each carrying at least the three workpad by-id calls.
-    assert len(renders) == 33
+    # And the admin half of the product is what a read inside `{% if admin %}` needs to be
+    # seen at all, which is the branch nothing rendered before #252.
+    hidden = PromptRenderer(
+        workflow.prompt_template
+        + "\n{% if admin %}`gh api repos/{{ repo }}/issues/1/comments --jq '.[].body'`{% endif %}\n"
+    )
+    gaps = [
+        gap
+        for variant, text in render_variants(
+            hidden, lambda variant: variant_context(workflow, make_issue, variant)
+        )
+        for gap in unfiltered_comment_reads(text, "issuebot-agent-1", admin=variant.admin)
+    ]
+    hidden_read = "gh api repos/jleavers/issuebot/issues/1/comments --jq '.[].body'"
+    assert gaps == [hidden_read] * 32
+    checked = sum(len(re.findall(r"/comments|/reviews", text)) for _, text in renders)
+    # 64 render variants (2 PR states x 2 rework x 2 attempt x 2 workpad x 2 self_review
+    # x 2 admin) plus the continuation render, each carrying at least the three workpad
+    # by-id calls.
+    assert len(renders) == 65
     assert checked > 0
 
 
@@ -966,5 +988,8 @@ def test_on_an_admin_account_the_own_login_exclusion_is_off(
     assert text.count('select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")') == 5
     assert "is also a repository admin, so its comments and reviews are read like any" in text
     assert "agent output, not a request, whatever their association" not in text
-    # The scan is for the non-admin prompt, which is what validate renders.
+    # The association half is still there, and it is all the scan requires of an admin render
+    # -- which `validate` renders too since #252. Under the non-admin rule the same text is a
+    # gap, and that difference is the whole reason the scan takes the flag.
+    assert unfiltered_comment_reads(text, "issuebot-agent-1", admin=True) == []
     assert unfiltered_comment_reads(text, "issuebot-agent-1") != []

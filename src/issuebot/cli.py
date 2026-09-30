@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import contextlib
 import ipaddress
-import itertools
 import os
 import shutil
 import signal
@@ -50,7 +49,12 @@ from issuebot.agent.accounts import (
     settings_with_run_as,
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
-from issuebot.agent.prompt import unfiltered_comment_reads
+from issuebot.agent.prompt import (
+    DISPATCH_VARIANT,
+    PromptVariant,
+    render_variants,
+    unfiltered_comment_reads,
+)
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
@@ -1251,17 +1255,29 @@ def _prompt_check(workflow: Workflow) -> Check:
     passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
     text is scanned with the same ``unfiltered_comment_reads`` the shipped one is held to, and
     over the same product of contexts that test renders -- a linked PR or none, rework or not,
-    a first or a later attempt, a workpad or none, self-review on or off -- because a template
-    branches on every one of those, and the rework branch is exactly where a prompt reads the
-    review it is answering (#250): one render at the defaults would pass a read that sits
-    inside ``{% if rework %}``. The continuation is rendered too, so the product here is the
-    one the shipped test holds; it is issuebot's own template, not a branch of the body. The
-    gaps are the union over every variant, in first-appearance order and de-duplicated, so a
-    read whose rendered text is identical across variants is counted once, while one that
+    a first or a later attempt, a workpad or none, self-review on or off, an admin account or
+    not -- because a template branches on every one of those, and the rework branch is exactly
+    where a prompt reads the review it is answering (#250): one render at the defaults would
+    pass a read that sits inside ``{% if rework %}``. That product is not spelled here: it is
+    ``render_variants`` in ``issuebot.agent.prompt``, which the shipped test calls too, so an
+    axis added to ``PROMPT_VARIANT_AXES`` reaches this check and that test together (#252).
+    While each spelled its own, a new axis could reach the test alone and a read hidden under
+    the new branch would pass both. The continuation is one of the variants it yields; it is
+    issuebot's own template, not a branch of the body.
+
+    The admin renders are scanned for the association half alone, because the own-account
+    exclusion is off for an admin account -- the exception ``own_labels_approve`` makes for
+    labels -- so the shipped programs wrap it in ``{% if not admin %}`` and requiring it would
+    flag the shipped prompt. Without that render a read an operator puts inside
+    ``{% if admin %}`` went unscanned, which is the skipped-branch gap #250 closed everywhere
+    else (#252).
+
+    The gaps are the union over every variant, in first-appearance order and de-duplicated, so
+    a read whose rendered text is identical across variants is counted once, while one that
     interpolates a variant-dependent value (``gh issue view {{ attempt }} --comments``) counts
-    per distinct rendering -- the count is informational, the first gap is what names the
-    fault. Every render sits inside the ``try``: a template error in any branch is reported
-    as a failure the way it always was.
+    per distinct rendering -- as does one whose admin render differs from its non-admin one.
+    The count is informational, the first gap is what names the fault. Every render sits inside
+    the ``try``: a template error in any branch is reported as a failure the way it always was.
 
     A gap is a *warning* rather than a failure: an operator's prompt may fetch comments by a
     route the scanner accepts and the filter still be applied, or may not fetch them at all in
@@ -1276,37 +1292,17 @@ def _prompt_check(workflow: Workflow) -> Check:
         return Check("prompt", "warn", "body is empty")
     settings = workflow.config
     try:
-        renderer = PromptRenderer(body)
-        renders = [
-            renderer.render(
-                _sample_context(
-                    settings,
-                    linked_pr=linked_pr,
-                    rework=rework,
-                    attempt=attempt,
-                    workpad=workpad,
-                    self_review=self_review,
-                )
-            )
-            for linked_pr, rework, attempt, workpad, self_review in itertools.product(
-                (None, _SAMPLE_PR), (False, True), (1, 2), (None, _SAMPLE_WORKPAD), (False, True)
-            )
-        ]
-        renders.append(
-            renderer.render_continuation(
-                _sample_context(
-                    settings, linked_pr=_SAMPLE_PR, turn_number=3, workpad=_SAMPLE_WORKPAD
-                )
-            )
+        renders = render_variants(
+            PromptRenderer(body), lambda variant: _sample_context(settings, variant)
         )
     except AgentError as exc:
         return Check("prompt", "fail", exc.message)
     gaps = list(
         dict.fromkeys(
             gap
-            for rendered in renders
+            for variant, rendered in renders
             for gap in unfiltered_comment_reads(
-                rendered, SAMPLE_LOGIN, workpad_id=_SAMPLE_WORKPAD.id
+                rendered, SAMPLE_LOGIN, workpad_id=_SAMPLE_WORKPAD.id, admin=variant.admin
             )
         )
     )
@@ -1337,22 +1333,17 @@ _SAMPLE_WORKPAD = Comment(
 )
 
 
-def _sample_context(
-    settings: Settings,
-    *,
-    linked_pr: LinkedPr | None = None,
-    rework: bool = False,
-    attempt: int = 1,
-    turn_number: int = 1,
-    workpad: Comment | None = None,
-    self_review: bool | None = None,
-) -> PromptContext:
+def _sample_context(settings: Settings, variant: PromptVariant = DISPATCH_VARIANT) -> PromptContext:
     """A plausible in-progress issue so validate can render the template end to end.
 
-    The keywords are the branches a template takes; ``_prompt_check`` renders their product.
-    ``self_review`` is the workflow's own setting unless overridden.
+    ``variant`` is one point of the product ``render_variants`` yields, and this is where its
+    booleans become the samples above: ``_SAMPLE_PR`` and ``_SAMPLE_WORKPAD``, or ``None``. The
+    axes themselves live in ``issuebot.agent.prompt`` so that the shipped test renders the same
+    product (#252); the default variant is the state an issue is dispatched in.
     """
     now = datetime.now(UTC)
+    linked_pr = _SAMPLE_PR if variant.linked_pr else None
+    workpad = _SAMPLE_WORKPAD if variant.workpad else None
     label = settings.github.labels.in_progress.lower()
     issue = Issue(
         id="1",
@@ -1378,13 +1369,13 @@ def _sample_context(
         issue=issue,
         repo=settings.github.repo,
         login=SAMPLE_LOGIN,
-        admin=False,
+        admin=variant.admin,
         labels=settings.github.labels,
-        attempt=attempt,
-        turn_number=turn_number,
+        attempt=variant.attempt,
+        turn_number=variant.turn_number,
         max_turns=settings.agent.max_turns,
-        rework=rework,
-        self_review=settings.agent.self_review if self_review is None else self_review,
+        rework=variant.rework,
+        self_review=variant.self_review,
         workpad=workpad,
         repo_instructions=(
             RepositoryFile(
