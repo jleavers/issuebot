@@ -33,12 +33,41 @@ checkout's `egress` network carry it for both address families --
 option or, on 25 and 26, drops it without a word. The option cannot be added to a network in
 place; a network created before it is recreated, and [`docs/operations.md`,
 "Upgrades"](operations.md#upgrades) says in what order, since the shared one has the hub's
-database and every worker attached. `validate`'s `gateway` line is the canary: from inside
-the container it tries port 22 at every attached network's first address and warns when
-something answers, because without the option that address is the host's and `sshd` is the
-service nearly every Linux host has there. It is a canary rather than a proof: with the option
-the address is a container's or nobody's, a closed port goes unanswered either way, and a host
-with no `sshd` passes whether or not it is isolated.
+database and every worker attached. `validate`'s `gateway` line asks two questions of every
+attached network's first address, from inside the container. The first is a PTR through
+Docker's embedded resolver at `127.0.0.11`, which answers for a *container's* address and not
+for a bridge's: a name -- `<container>.<network>` -- says the first address belongs to a
+container, so the host is not on that network, and that is a proof rather than a canary. It
+costs about 30 ms, and the common case has one, since the worker's networks carry the proxy
+and the hub's database. The second is the canary, and what is left when no name comes back:
+port 22, because without the option that address is the host's and `sshd` is the service
+nearly every Linux host has there. Something answering warns; an unanswered port is still only
+an OK, since a closed port goes unanswered with the option and without it, and an isolated
+network nobody else has joined yet has no PTR either.
+
+The PTR is asked only where `/etc/resolv.conf` names `127.0.0.11`, because the proof is in who
+answered: another runtime's resolver -- Kubernetes' cluster DNS, or a host's own reached through
+a bind-mounted file -- is answering a different question, and its name would be read as an
+isolation it never claimed. One residue is left even so. The embedded resolver *forwards* what
+it has no record for, so an upstream that serves reverse zones covering the daemon's address
+pools could put a name on a plain bridge's own address, and the line would call that network
+isolated. And the canary does not cover that host: a network the PTR proved is not probed on
+port 22 at all, so a forwarded name suppresses the very warning that would have fired there
+before this check existed. That is the one case where reading the first address through DNS is
+a step backwards, it cannot be closed from inside the container with a stub-resolver lookup,
+and [#260](https://github.com/jleavers/issuebot/issues/260) is the fix: Docker's embedded
+server sets the `AA` bit on its own records and not on what it forwards, so a PTR query sent
+to `127.0.0.11` directly can tell the two apart and fall back to the canary for a relayed
+answer. Until then, an operator whose site serves reverse zones over `172.16.0.0/12` or the
+`192.168.0.0/16` blocks Docker falls back to should read the *name* in the line and check it
+is a container's. CI asserts the negative half -- a plain bridge's first address yields no
+proof -- on the engine it runs on.
+
+Neither question is what CI asks. Reading the option back out of a network would pass against
+an engine that accepted it and ignored it, so the `docker` job proves the property instead: it
+puts a listener on the runner at `0.0.0.0`, and asks a container on a plain `internal` network,
+where the listener must answer at the first address, and a session on the worker's own
+networks, where it must not.
 
 The shipped list is what the workflow itself needs and nothing else:
 
