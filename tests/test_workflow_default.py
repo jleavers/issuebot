@@ -8,9 +8,11 @@ from pathlib import Path
 from issuebot.agent.instructions import RepositoryFile
 from issuebot.agent.prompt import (
     GITHUB_TEXT_TAG,
+    PROMPT_VARIANT_AXES,
     PromptContext,
     PromptRenderer,
     PromptVariant,
+    prompt_variants,
     render_variants,
     unfiltered_comment_reads,
 )
@@ -689,6 +691,43 @@ def variant_context(
         admin=variant.admin,
         turn_number=variant.turn_number,
     )
+
+
+# What each axis of the shared product looks like once `variant_context` has turned it into a
+# context: the mapping is this file's, since the samples are. `tests/test_cli.py` keeps the
+# same table for `validate`'s samples, and the two exist for one reason (#252): a factory
+# spells the axes by hand, so an axis added to `PROMPT_VARIANT_AXES` that it forgot would
+# double the product here while every new render came out byte-identical to its sibling --
+# the shipped prompt scanned over a branch it never actually took, which is the fault the
+# shared product exists to prevent, arriving from the other side.
+AXIS_IN_CONTEXT: dict[str, Callable[[PromptContext], bool | int]] = {
+    "linked_pr": lambda sample: sample.issue.linked_pr is not None,
+    "rework": lambda sample: sample.rework,
+    "attempt": lambda sample: sample.attempt,
+    "workpad": lambda sample: sample.workpad is not None,
+    "self_review": lambda sample: sample.self_review,
+    "admin": lambda sample: sample.admin,
+}
+
+
+def test_the_variant_context_carries_every_axis_of_the_shared_product(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """#252: this file renders the product `render_variants` spells, and this is the mapping
+    from its axes onto this file's own samples.
+
+    Two ways it fails, as in `tests/test_cli.py`: an axis with no entry above, and an axis
+    whose value never reaches the context, which shows up as a context that does not vary
+    with it.
+    """
+    workflow = load()
+    assert set(AXIS_IN_CONTEXT) == {name for name, _ in PROMPT_VARIANT_AXES}
+
+    for variant in prompt_variants():
+        sample = variant_context(workflow, make_issue, variant)
+        for name, in_context in AXIS_IN_CONTEXT.items():
+            assert in_context(sample) == getattr(variant, name), name
+        assert sample.turn_number == variant.turn_number
 
 
 def test_every_comment_or_review_read_carries_the_filter(

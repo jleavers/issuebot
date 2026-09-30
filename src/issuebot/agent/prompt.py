@@ -548,10 +548,11 @@ def unfiltered_comment_reads(
     held to one rule.
     """
     associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
-    association = f"select((.author_association | IN({associations}))"
-    required = (f'{association} and .user.login != "{login}")',)
-    if admin:
-        required = (f"{association})", *required)
+    # The open `select((...))` half, one paren short so both whole filters can close it.
+    half = f"select((.author_association | IN({associations}))"
+    conjunctive = f'{half} and .user.login != "{login}")'
+    association_only = f"{half})"
+    required = (association_only, conjunctive) if admin else (conjunctive,)
     gaps: list[str] = []
     for command in _gh_commands(rendered):
         segments = _segments(command)

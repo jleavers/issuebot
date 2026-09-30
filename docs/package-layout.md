@@ -684,41 +684,41 @@ session in `session.py` before the turn loop (a failure is `github_error`) and r
 like `repo`, so the workflow's comment reads can leave that account's own text out
 (GHSA-f3fm-r55f-2vgm); `admin` is `repo_info().admin` read beside it (a failure is likewise
 `github_error`), and when true the workflow drops that exclusion, as approval does for labels
-(`own_labels_approve`), because on a maintainer's own token the account is the maintainer. `unfiltered_comment_reads(rendered, login, workpad_id=, admin=)` is the lint
-over a rendered prompt's `gh` commands -- backticked spans and fenced lines, a chain split at
-`;`, `&&`, `||` and `|` and scanned segment by segment -- that reports each read of
-`/comments` or `/reviews` whose last `--jq` program lacks the association filter *and* that
-login's exclusion, and each `--comments` or `--json comments`/`reviews`, exempting `gh api`
-writes and the workpad's one read by id; a lint and not a guarantee, since prose can ask for
-a fetch it cannot see, and shared by `tests/test_workflow_default.py` and `validate` so the
-shipped prompt and a deployment's are held to one rule. `admin=True` requires the association
-half alone (#252): that is the render where the workflow drops the exclusion, so requiring it
-would flag the shipped prompt rather than an operator's fault. Either whole filter satisfies
-it -- the one that branch renders or the conjunctive one, an admin prompt that keeps the
-exclusion being no worse -- and whole rather than as a prefix, so a negated `IN(...) | not` and
-a disjunctive `(...) or .user.login == "<login>"` are gaps on an admin render as much as on
-the other. `PromptVariant`, `PROMPT_VARIANT_AXES`,
-`prompt_variants()` and `render_variants(renderer, context_factory)` are the product both of
-those scan over, spelled once (#252): the axes are a declared table -- a linked PR or none,
-rework, attempt, workpad, self-review and admin, so sixty-four renders -- plus
-`CONTINUATION_VARIANT`, the one continuation render, which is issuebot's own template rather
-than a branch of an operator's body. A variant carries booleans and not samples, and the
-caller's `context_factory` maps them onto its own `Issue` and `Comment`, so `validate` and the
-shipped test share the axes while keeping their fixtures; `DISPATCH_VARIANT` is the point of
-the product an issue is dispatched at. The sharing is the guard, not a convenience: while each
-caller spelled its own product, a new variable a template can branch on could reach the test
-alone, and a comment read hidden under the new branch would pass both it and `validate` --
-which is how the admin branch went unrendered until #252.
-`repo_instructions` (#107, spec `2026-09-14-repository-instructions-design.md`) is the
-clone's `CLAUDE.md` and `AGENTS.md` as `instructions.py` read them after `before_run`, once
-per run (`REPOSITORY_INSTRUCTION_FILES`, a declared list; through `Boundary.read` as the
-`instructions` artefact of `boundary.py`, the session among its writers, since under
-`agent.run_as` the read is the worker's and the clone the session's, so a link, a FIFO or a
-file of anyone else's is refused rather than read; cut at `INSTRUCTION_FILE_LIMIT`, the
-artefact's 128 KiB; never a failure), each a `GitHubText` whose source names
-the file and the repository and whose author is "whoever can merge to" it. That is the
-declared half of the decision; the other half is that `claude.setting_sources` is always
-passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
+(`own_labels_approve`), because on a maintainer's own token the account is the maintainer.
+`unfiltered_comment_reads(rendered, login, workpad_id=, admin=)` is the lint over a rendered
+prompt's `gh` commands -- backticked spans and fenced lines, a chain split at `;`, `&&`, `||`
+and `|` and scanned segment by segment -- that reports each read of `/comments` or `/reviews`
+whose last `--jq` program lacks the association filter *and* that login's exclusion, and each
+`--comments` or `--json comments`/`reviews`, exempting `gh api` writes and the workpad's one
+read by id; a lint and not a guarantee, since prose can ask for a fetch it cannot see, and
+shared by `tests/test_workflow_default.py` and `validate` so the shipped prompt and a
+deployment's are held to one rule. `admin=True` requires the association half alone (#252):
+that is the render where the workflow drops the exclusion, so requiring it would flag the
+shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
+that branch renders or the conjunctive one, an admin prompt that keeps the exclusion being no
+worse -- and whole rather than as a prefix, so a negated `IN(...) | not` and a disjunctive
+`(...) or .user.login == "<login>"` are gaps on an admin render as much as on the other.
+`PromptVariant`, `PROMPT_VARIANT_AXES`, `prompt_variants()` and `render_variants(renderer,
+context_factory)` are the product both of those scan over, spelled once (#252): the axes are
+a declared table -- a linked PR or none, rework, attempt, workpad, self-review and admin, so
+sixty-four renders -- plus `CONTINUATION_VARIANT`, the one continuation render, which is
+issuebot's own template rather than a branch of an operator's body. A variant carries
+booleans and not samples, and the caller's `context_factory` maps them onto its own `Issue`
+and `Comment`, so `validate` and the shipped test share the axes while keeping their
+fixtures; `DISPATCH_VARIANT` is the point of the product an issue is dispatched at. The
+sharing is the guard, not a convenience: while each caller spelled its own product, a new
+variable a template can branch on could reach the test alone, and a comment read hidden under
+the new branch would pass both it and `validate` -- which is how the admin branch went
+unrendered until #252. `repo_instructions` (#107, spec
+`2026-09-14-repository-instructions-design.md`) is the clone's `CLAUDE.md` and `AGENTS.md` as
+`instructions.py` read them after `before_run`, once per run (`REPOSITORY_INSTRUCTION_FILES`,
+a declared list; through `Boundary.read` as the `instructions` artefact of `boundary.py`, the
+session among its writers, since under `agent.run_as` the read is the worker's and the clone
+the session's, so a link, a FIFO or a file of anyone else's is refused rather than read; cut
+at `INSTRUCTION_FILE_LIMIT`, the artefact's 128 KiB; never a failure), each a `GitHubText`
+whose source names the file and the repository and whose author is "whoever can merge to" it.
+That is the declared half of the decision; the other half is that `claude.setting_sources` is
+always passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
 `.claude/` (settings, hooks, skills) or `.mcp.json` as configuration -- measured: under
 claude's default every one of them was in force, a `SessionStart` hook and an MCP server
 included -- unless the operator names `project` or `local`, which
