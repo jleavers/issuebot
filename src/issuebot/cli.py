@@ -1133,6 +1133,12 @@ _DNS_MAX_REPLY = 2048
 # A name may carry 255 octets, so it cannot carry more labels than this however it is encoded
 # -- the bound that stops a malformed message being read forever, beside the one on pointers.
 _DNS_MAX_LABELS = 128
+# What a name has to be made of to be read out into a `validate` line. A PTR answer for one of
+# Docker's address pools can be an *upstream's*, so these octets are a stranger's and they are
+# printed to somebody's terminal: an unrestricted name is a route for an ANSI escape into that
+# line. This is the host-name character set plus the `_` and `.` Docker's own container and
+# network names carry, which every name the daemon writes is inside and nothing else needs.
+_DNS_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) -> bool:
@@ -1215,7 +1221,9 @@ def _dns_read_name(message: bytes, offset: int) -> tuple[str, int]:
         offset += 1
         if length == 0:
             return ".".join(labels), offset if end is None else end
-        if len(labels) >= _DNS_MAX_LABELS or offset + length > len(message):
+        if len(labels) >= _DNS_MAX_LABELS:
+            raise ValueError("a name carries more labels than a name may carry")
+        if offset + length > len(message):
             raise ValueError("a label runs past the end of the message")
         labels.append(message[offset : offset + length].decode("ascii", "replace"))
         offset += length
@@ -1233,8 +1241,26 @@ def _ptr_name(reply: bytes, *, query_id: int, question: str) -> str | None:
 
     ``NXDOMAIN``, ``SERVFAIL``, an empty answer section, an answer about something else and a
     message that is not a DNS message at all therefore all read the same: None, which the check
-    reads as "the daemon's table does not claim this address" and answers with the canary.
+    reads as "the daemon's table does not claim this address" and answers with the canary. That
+    holds for a malformed message too -- ``_dns_read_name`` raises ``ValueError`` on one, and it
+    is caught here rather than left to the caller, so this returns None for every input there
+    is and the next caller inherits no trap.
+
+    One name this does not follow is a ``CNAME``: RFC 2317 delegates a reverse zone smaller
+    than a ``/24`` by pointing at one, and ``gethostbyaddr`` used to chase it. Only a relayed
+    answer can be shaped that way -- the daemon writes the ``PTR`` itself -- so refusing it
+    costs nothing here and is the more conservative reading. A name outside
+    ``_DNS_NAME_CHARS`` is refused for a nearer reason: it is going into a line on somebody's
+    terminal, and where it came from may not be the daemon.
     """
+    try:
+        return _ptr_name_unchecked(reply, query_id=query_id, question=question)
+    except ValueError:
+        return None
+
+
+def _ptr_name_unchecked(reply: bytes, *, query_id: int, question: str) -> str | None:
+    """``_ptr_name`` without its guard: a malformed message raises ``ValueError`` here."""
     if len(reply) < _DNS_HEADER.size:
         return None
     reply_id, flags, qdcount, ancount = _DNS_HEADER.unpack_from(reply)[:4]
@@ -1258,7 +1284,13 @@ def _ptr_name(reply: bytes, *, query_id: int, question: str) -> str | None:
         if offset + rdlength > len(reply):
             return None
         if (rtype, rclass) == (_DNS_TYPE_PTR, _DNS_CLASS_IN) and owner.lower() == asked:
-            return _dns_read_name(reply, offset)[0] or None
+            # Bounded by the record rather than by the message, so a name whose RDLENGTH does
+            # not cover it cannot be finished off the records that follow. The slice keeps
+            # everything *before* the record, which is where a compression pointer points.
+            target = _dns_read_name(reply[: offset + rdlength], offset)[0]
+            if not target or not _DNS_NAME_CHARS.issuperset(target):
+                return None
+            return target
         offset += rdlength
     return None
 
@@ -1318,8 +1350,8 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     An ``internal`` network removes the container's default route and nothing else -- the
     bridge still carries the host's own address at the network's first address, and a host
     service bound to ``0.0.0.0`` answers there. Docker's isolated gateway mode gives the bridge
-    no address at all. Two questions tell the two apart, asked of each attached network in turn,
-    and they are graded differently because only one of them is an answer.
+    no address at all. Two questions are put to each attached network in turn, and since #260
+    both are: neither settles it alone, and what each is worth is below them.
 
     * **Who owns the first address?** ``127.0.0.11`` is Docker's embedded DNS, and it answers a
       PTR out of the daemon's table for a *container's* address alone. On an isolated network
@@ -1329,9 +1361,9 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
       itself (#260), so the answer is the resolver's rather than whatever NSS would have
       assembled, and ``NXDOMAIN``, a reply to another question and a malformed one are each
       told apart from a name. It costs about 30 ms, and it is asked only where ``resolv.conf``
-      names that resolver (``_embedded_resolver_configured``), since the proof is in who
-      answered. The common case has a name, since the worker's own networks carry the proxy
-      and the hub's database.
+      names that resolver (``_embedded_resolver_configured``), since what the name is worth
+      depends on who answered. The common case has a name, since the worker's own networks
+      carry the proxy and the hub's database.
 
     * **Does a host service answer there?** Port 22, on *every* network, named or not (#260):
       without the isolated option that address is the host's, and ``sshd`` is the service
@@ -1361,64 +1393,83 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     candidates = gateway_candidates(route_table)
     if not candidates:
         return Check(subject, "ok", "no attached network found in the route table")
-    # Proved first and unproved after, whatever order the route table lists them in, so that
-    # the hedge below lands on the clauses it is about: appended to a detail that ends in a
-    # proved network, it would read as doubt about the one network there is no doubt over.
-    proved: list[str] = []
-    unproved: list[str] = []
+    # Named first and unnamed after, whatever order the route table lists them in, so that the
+    # hedges below land on the clauses they are about: the canary's, appended to a detail that
+    # ends in a named network, would read as doubt about a network it says nothing of.
+    named: list[str] = []
+    unnamed: list[str] = []
     embedded = _embedded_resolver_configured()
+    recipe = (
+        "recreate the network with isolated gateway mode (Docker 28 or later): the shared one "
+        f"with `{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with `docker "
+        "compose stop worker egress && docker network rm <project>_egress && docker compose "
+        'up -d` once its compose.yaml carries the option (docs/operations.md, "Upgrades")'
+    )
     for interface, address, network in candidates:
         name = _embedded_ptr(address) if embedded else None
         # The canary runs whether or not a name came back (#260): the resolver relays what it
         # has no record for, so a name is not enough to stop asking, and a network that skipped
         # the question was left worse off than it had been before the question existed.
         if _host_port_open(address, GATEWAY_CANARY_PORT, timeout_s=_GATEWAY_PROBE_TIMEOUT_S):
-            # Whatever was proved before this still belongs in the line: the operator is about
+            # Whatever was read before this still belongs in the line: the operator is about
             # to recreate a network, and needs to know which of them it is.
-            so_far = f"{'; '.join(proved)} -- but " if proved else ""
-            # A name *and* an answer on 22 has two readings, and the operator is the only one
-            # who can tell them apart -- so the line names the one that is not obvious.
-            relayed = (
-                f" A PTR names that address {name}, which is not the reassurance it looks: the "
-                "embedded resolver relays what it has no record for, so an upstream serving "
-                "the reverse zones of Docker's address pools names a bridge's own address too. "
-                f"Check whether {name} is a container you recognise."
-                if name is not None
-                else ""
+            so_far = f"{'; '.join(named)} -- but " if named else ""
+            answered = (
+                f"{so_far}something answered on port {GATEWAY_CANARY_PORT} at {address}, the "
+                f"first address of {interface}'s network {network}"
             )
+            if name is None:
+                return Check(
+                    subject,
+                    "warn",
+                    f"{answered}: without an isolated gateway that address is the host's own, "
+                    f"so a session can reach any host service. R{recipe[1:]}",
+                )
+            # A name *and* an answer on 22 has two readings, and the operator is the only one
+            # who can settle which -- so the line puts both, and gates the remedy on the
+            # answer, since the remedy for the wrong one is tearing down a network that carries
+            # the hub's database and every worker attached to it.
             return Check(
                 subject,
                 "warn",
-                f"{so_far}something answered on port {GATEWAY_CANARY_PORT} at {address}, the "
-                f"first address of {interface}'s network {network}: without an isolated "
-                f"gateway that "
-                "address is the host's own, so a session can reach any host service."
-                f"{relayed} Recreate "
-                "the network with isolated gateway mode (Docker 28 or later): the shared one "
-                f"with `{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with "
-                "`docker compose stop worker egress && docker network rm <project>_egress && "
-                "docker compose up -d` once its compose.yaml carries the option "
-                '(docs/operations.md, "Upgrades")',
+                f"{answered}, which a PTR names {name}. Either {name} is a container that "
+                "listens there and the network is isolated, or the embedded resolver relayed "
+                "that name from an upstream serving the reverse zones of Docker's address "
+                "pools, the address is the host's own, and a session can reach any host "
+                f"service. Check whether {name} is a container you recognise (`docker ps`); "
+                f"if it is not, {recipe}",
             )
         if name is not None:
-            proved.append(
+            named.append(
                 f"{interface}'s network {network} at {address} is isolated "
                 f"(first address is {name}'s, and nothing answered there on port "
                 f"{GATEWAY_CANARY_PORT})"
             )
             continue
-        unproved.append(
+        unnamed.append(
             f"nothing answered on port {GATEWAY_CANARY_PORT} at {address}, the first address "
             f"of {interface}'s network {network}"
         )
-    detail = "; ".join(proved + unproved)
-    if unproved and embedded:
+    detail = "; ".join(named + unnamed)
+    if named:
+        # The name is the strongest reading there is and still not a proof on its own: the
+        # resolver relays what it has no record for, so an upstream serving the reverse zones
+        # of Docker's address pools would name a plain bridge's own address too, and a refused
+        # port 22 is refused with an isolated gateway and without one. Said here rather than
+        # left to the docs, because the clause above reads like a conclusion.
+        detail += (
+            " -- a name is the daemon's own record for a container or an upstream's for "
+            "something else, since the embedded resolver relays what it has no record for, and "
+            "the refused port beside it is refused either way: check that each name above is a "
+            "container you recognise"
+        )
+    if unnamed and embedded:
         detail += (
             " -- an address no PTR claims is the host's own without an isolated gateway, a "
             "container's or nobody's with one, and a closed port is refused either way: a "
             "canary, not a proof"
         )
-    elif unproved:
+    elif unnamed:
         detail += (
             f" -- no PTR was asked, since this container's resolver is not Docker's "
             f"{_EMBEDDED_RESOLVER} and another's answer would say nothing about the bridge; an "

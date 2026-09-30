@@ -318,7 +318,7 @@ docker compose run --rm worker labels ensure
 [ OK ] agent.run_as: agent-1 (uid 1011), agent-2 (uid 1012), agent-3 (uid 1013); a pool of 3, one account per concurrent session; each at a uid other than this process's (1000)
 [ OK ] claude.mcp_config: no MCP server configured
 [ OK ] egress: http://egress:3128: egress-probe.invalid refused, api.github.com admitted; no route round it
-[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first address is issuebot-db-1.issuebot-internal's); eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first address is issuebot-egress-1.issuebot_egress's)
+[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22); eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first address is issuebot-egress-1.issuebot_egress's, and nothing answered there on port 22) -- a name is the daemon's own record for a container or an upstream's for something else, since the embedded resolver relays what it has no record for, and the refused port beside it is refused either way: check that each name above is a container you recognise
 [ OK ] gh: /usr/bin/gh
 [ OK ] gh auth: logged in as your-bot
 [ OK ] github.repo access: your-org/your-repo (default branch main)

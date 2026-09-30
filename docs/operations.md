@@ -419,14 +419,22 @@ docker compose run --rm worker validate         # the `gateway` line, in each
 ```
 
 The `gateway` line carries one clause per attached network, and what says the recreation took
-is `... is isolated (first address is <container>'s)` for every one of them: the first address
-answered a PTR, so it belongs to a container and the bridge -- the host -- is not on that
-network. A clause left to the canary (`nothing answered on port 22 at ...`, and the line ends
-`a canary, not a proof`) is a network that was *not* recreated, or one no other container has
-joined yet; the line says which network by name, and `docker network inspect` says which of the
-two it is. Do not read the absence of a `[WARN]` as success: the warning fires only where a
-host service is listening at that address, so a host with no `sshd` produces an `[ OK ]` line
-either way, which is the gap the PTR was added to close.
+is `... is isolated (first address is <container>'s, and nothing answered there on port 22)`
+for every one of them: Docker's embedded resolver answered a PTR for the first address, so it
+belongs to a container and the bridge -- the host -- is not on that network. A clause left to
+the canary (`nothing answered on port 22 at ...`, and the line ends `a canary, not a proof`) is
+a network that was *not* recreated, or one no other container has joined yet; the line says
+which network by name, and `docker network inspect` says which of the two it is.
+
+Read the *names*, and not only the absence of a `[WARN]`. The warning fires where a host
+service is listening at that address, so a host with no `sshd` produces an `[ OK ]` line either
+way; and the resolver relays what it has no record for, so a site whose DNS serves reverse
+zones over `172.16.0.0/12` or the `192.168.0.0/16` blocks Docker falls back to can put a name
+on a plain bridge's own address. The line says so itself, after the clauses. A name you do not
+recognise as a container is the case to check with `docker ps`; a name and an answer on port 22
+together raise the `[WARN]`, which says which of its two readings it cannot settle
+([`docs/security-model.md`, "What a session may
+reach"](security-model.md#what-a-session-may-reach) has the reasoning).
 
 **With more than one checkout, that recipe is not the one to repeat per deployment.** They are
 clones of the same repository against one store, and a migration applied by whichever you upgrade

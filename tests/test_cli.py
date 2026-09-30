@@ -25,11 +25,13 @@ from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceMana
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
+    _DNS_NAME_CHARS,
     ISOLATED_NETWORK_RECIPE,
     StatsView,
     _deployment_scrubber,
     _embedded_ptr,
     _embedded_resolver_configured,
+    _ptr_name,
     _turn_capture,
     _with_uid,
     gateway_candidates,
@@ -4422,9 +4424,17 @@ def test_validate_reports_the_gateway_isolated_when_the_ptr_resolves(
         "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
         "address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22); "
         "eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first address is "
-        "ci-egress-1.ci_egress's, and nothing answered there on port 22)\n"
+        "ci-egress-1.ci_egress's, and nothing answered there on port 22)"
     ) in out
-    # Nothing is hedged when every network is named and every canary is refused.
+    # And the names are hedged, because a name is the strongest reading there is and still not
+    # a proof: the resolver relays what it has no record for. What is *not* said is the
+    # canary's hedge, which is about a network no name was read for and there is none here.
+    assert (
+        " -- a name is the daemon's own record for a container or an upstream's for something "
+        "else, since the embedded resolver relays what it has no record for, and the refused "
+        "port beside it is refused either way: check that each name above is a container you "
+        "recognise\n"
+    ) in out
     assert "canary" not in out
     # Named or not, every network is probed (#260): the resolver relays what it has no record
     # for, so a name cannot be allowed to call the canary off.
@@ -4518,8 +4528,11 @@ def test_validate_keeps_the_canary_for_the_network_the_ptr_did_not_prove(
         "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
         "address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22); "
         "nothing answered on port 22 at 192.168.128.1, the first address of eth1's network "
-        "192.168.128.0/20 -- an address no PTR claims is the host's own"
+        "192.168.128.0/20 -- a name is the daemon's own record for a container or an upstream's "
+        "for something else"
     ) in out
+    # Both hedges, in the order of the clauses they are about: the name's, then the canary's.
+    assert "is a container you recognise -- an address no PTR claims is the host's own" in out
     assert "a canary, not a proof\n" in out
     assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
 
@@ -4540,7 +4553,7 @@ def test_validate_reports_the_proved_networks_before_the_hedge_about_the_others(
         "[ OK ] gateway: eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first "
         "address is ci-egress-1.ci_egress's, and nothing answered there on port 22); nothing "
         "answered on port 22 at 192.168.112.1, the first address of eth0's network "
-        "192.168.112.0/20 -- an address no PTR claims is the host's own"
+        "192.168.112.0/20 -- a name is the daemon's own record"
     ) in out
 
 
@@ -4623,15 +4636,18 @@ def test_validate_still_warns_when_a_named_address_answers_on_22(
     out = capsys.readouterr().out
     assert (
         "[WARN] gateway: something answered on port 22 at 192.168.112.1, the first address of "
-        "eth0's network 192.168.112.0/20: without an isolated gateway that address is the "
-        "host's own, so a session can reach any host service. A PTR names that address "
-        "docker-host.corp.example, which is not the reassurance it looks: the embedded "
-        "resolver relays what it has no record for, so an upstream serving the reverse zones "
-        "of Docker's address pools names a bridge's own address too. Check whether "
-        "docker-host.corp.example is a container you recognise. Recreate the network with "
-        "isolated gateway mode (Docker 28 or later): the shared one with "
-        f"`{ISOLATED_NETWORK_RECIPE}`"
+        "eth0's network 192.168.112.0/20, which a PTR names docker-host.corp.example. Either "
+        "docker-host.corp.example is a container that listens there and the network is "
+        "isolated, or the embedded resolver relayed that name from an upstream serving the "
+        "reverse zones of Docker's address pools, the address is the host's own, and a session "
+        "can reach any host service. Check whether docker-host.corp.example is a container you "
+        "recognise (`docker ps`); if it is not, recreate the network with isolated gateway "
+        f"mode (Docker 28 or later): the shared one with `{ISOLATED_NETWORK_RECIPE}`"
     ) in out
+    # Neither reading is asserted over the other, and the remedy is gated on the one the
+    # operator has to settle: it tears down a network carrying the hub's database and every
+    # worker attached, which is not a thing to do on a name that may be a container's.
+    assert "without an isolated gateway that address is the host's own" not in out
     # The name was read, and it did not call the probe off.
     assert looked_up == ["192.168.112.1"]
     assert probed == [("192.168.112.1", 22)]
@@ -4846,6 +4862,55 @@ def test_no_ptr_is_read_out_of_a_truncated_or_malformed_reply() -> None:
             assert _embedded_ptr("192.168.112.1", resolver=server) is None
 
 
+def test_the_reply_parser_returns_rather_than_raising_on_anything_at_all() -> None:
+    """`_ptr_name` is the one piece of this that reads bytes somebody else wrote, and its
+    contract is that it returns for every input there is. `_embedded_ptr` catches `ValueError`
+    as well, but a parser whose promise is only kept by its caller is a trap for the next one
+    -- so the guard is inside, and this asks it directly rather than through a socket."""
+    question = _PTR_QUESTION
+    query = (
+        struct.pack("!HHHHHH", 0x2A2A, 0x0100, 1, 0, 0, 0)
+        + _wire_name(question)
+        + struct.pack("!HH", 12, 1)
+    )
+    well_formed = _wire_reply(query, records=_wire_record("db.issuebot"))
+    assert _ptr_name(well_formed, query_id=0x2A2A, question=question) == "db.issuebot"
+    # Every prefix of a well-formed reply, which covers a cut in each field of the header, the
+    # question and the answer; then every single-octet corruption of any field at all. None may
+    # raise: a corrupted length is a pointer that loops, a label that runs off the end or a
+    # record that does, and none of those may leave `validate` with eight lines still to print.
+    # What comes back where the corruption landed inside the answer's own RDATA is whatever
+    # those octets spell -- but only ever inside `_DNS_NAME_CHARS`, since the name goes into a
+    # line on somebody's terminal and a PTR for one of Docker's pools may be an upstream's.
+    for cut in range(len(well_formed)):
+        assert _ptr_name(well_formed[:cut], query_id=0x2A2A, question=question) is None
+    for at in range(len(well_formed)):
+        for octet in (0x00, 0x3F, 0xC0, 0xFF):
+            corrupt = well_formed[:at] + bytes([octet]) + well_formed[at + 1 :]
+            name = _ptr_name(corrupt, query_id=0x2A2A, question=question)
+            assert name is None or _DNS_NAME_CHARS.issuperset(name)
+
+
+def test_no_ptr_is_read_out_of_a_name_that_is_not_one() -> None:
+    """A PTR for one of Docker's address pools can be an *upstream's*, and the name goes
+    straight into a `validate` line on somebody's terminal -- so an answer carrying anything
+    outside the host-name character set (plus the `_` and `.` Docker's own names use) is
+    refused rather than printed. An ANSI escape is the shape that matters: printed, it rewrites
+    the line around it, and the line it is in is the one saying whether the host is reachable.
+    """
+    for label in ("\x1b[2K\x1b[1G[ OK ] gateway", "db\x00", "a b", "\x07"):
+        with _resolver_on_loopback(
+            lambda q, name=label: _wire_reply(q, records=_wire_record(name))
+        ) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) is None
+    # And the names Docker does write are inside it.
+    for label in ("issuebot-db-1.issuebot-internal", "ci-egress-1.ci_egress"):
+        with _resolver_on_loopback(
+            lambda q, name=label: _wire_reply(q, records=_wire_record(name))
+        ) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) == label
+
+
 def test_the_ptr_gives_up_on_its_deadline_and_on_a_resolver_that_is_not_there(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4861,10 +4926,12 @@ def test_the_ptr_gives_up_on_its_deadline_and_on_a_resolver_that_is_not_there(
     assert time.monotonic() - started < 5
     assert len(seen) == 1  # it was asked; it simply never answered
 
-    # Nothing bound at all: the port the server above held, now that it is closed.
-    assert _embedded_ptr("192.168.112.1", resolver=server) is None
+    # Nothing bound at all, which is `ECONNREFUSED` on the send or the read. Port 1 rather
+    # than the one the server above just released: that is an ephemeral port, and anything on
+    # the machine could take it between `close()` and this line.
+    assert _embedded_ptr("192.168.112.1", resolver=("127.0.0.1", 1)) is None
     # And an address that is not one never reaches a socket.
-    assert _embedded_ptr("not-an-address", resolver=server) is None
+    assert _embedded_ptr("not-an-address", resolver=("127.0.0.1", 1)) is None
 
 
 def test_validate_fails_session_accounts_with_no_credential_in_the_environment(

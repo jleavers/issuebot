@@ -37,8 +37,9 @@ database and every worker attached. `validate`'s `gateway` line asks two questio
 attached network's first address, from inside the container, and it asks *both* of every
 network. The first is a PTR, put to Docker's embedded resolver at `127.0.0.11` as a DNS query
 the check builds and sends itself: the daemon answers out of its own table for a *container's*
-address and has no record for a bridge's, so a name -- `<container>.<network>` -- says the
-first address belongs to a container and the host is not on that network. It costs about 30 ms,
+address and has no record for a bridge's, so a name -- `<container>.<network>` -- is the
+reading that the first address belongs to a container and the host is not on that network. How
+far it can be trusted is three paragraphs down, and it is not all the way. It costs about 30 ms,
 and the common case has one, since the worker's networks carry the proxy and the hub's
 database. The second is the canary: port 22, because without the option that address is the
 host's and `sshd` is the service nearly every Linux host has there. Something answering warns;
