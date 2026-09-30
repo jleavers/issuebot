@@ -1,16 +1,18 @@
 """Tests for the command-line entry point."""
 
 import asyncio
+import contextlib
 import json
 import os
 import pwd
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -26,8 +28,8 @@ from issuebot.cli import (
     ISOLATED_NETWORK_RECIPE,
     StatsView,
     _deployment_scrubber,
+    _embedded_ptr,
     _embedded_resolver_configured,
-    _reverse_lookup,
     _turn_capture,
     _with_uid,
     gateway_candidates,
@@ -4376,7 +4378,7 @@ def _gateway(
     """Put `validate` inside a container with ROUTE_TABLE's networks.
 
     `open_at` is the gateway whose sshd answers, or None for none; `names` is what the embedded
-    resolver gives back per address, empty by default (no network proved); `embedded` is
+    resolver gives back per address, empty by default (no network named); `embedded` is
     whether this container's resolver is Docker's at all. Returns the (address, port) pairs
     probed and the addresses looked up, in the order each was asked.
     """
@@ -4388,14 +4390,14 @@ def _gateway(
         probed.append((address, port))
         return address == open_at
 
-    def reverse_lookup(address: str) -> str | None:
+    def embedded_ptr(address: str) -> str | None:
         looked_up.append(address)
         return names.get(address)
 
     monkeypatch.setattr("issuebot.cli.in_container", lambda: inside)
     monkeypatch.setattr("issuebot.cli._read_route_table", lambda: ROUTE_TABLE)
     monkeypatch.setattr("issuebot.cli._host_port_open", port_open)
-    monkeypatch.setattr("issuebot.cli._reverse_lookup", reverse_lookup)
+    monkeypatch.setattr("issuebot.cli._embedded_ptr", embedded_ptr)
     monkeypatch.setattr("issuebot.cli._embedded_resolver_configured", lambda: embedded)
     return probed, looked_up
 
@@ -4418,13 +4420,15 @@ def test_validate_reports_the_gateway_isolated_when_the_ptr_resolves(
     out = capsys.readouterr().out
     assert (
         "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
-        "address is issuebot-db-1.issuebot-internal's); eth1's network 192.168.128.0/20 at "
-        "192.168.128.1 is isolated (first address is ci-egress-1.ci_egress's)\n"
+        "address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22); "
+        "eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first address is "
+        "ci-egress-1.ci_egress's, and nothing answered there on port 22)\n"
     ) in out
-    # Nothing is hedged when every network is proved, and a proved one is not probed on 22:
-    # the lookup has already answered the question the canary could only guess at.
+    # Nothing is hedged when every network is named and every canary is refused.
     assert "canary" not in out
-    assert probed == []
+    # Named or not, every network is probed (#260): the resolver relays what it has no record
+    # for, so a name cannot be allowed to call the canary off.
+    assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
     assert looked_up == ["192.168.112.1", "192.168.128.1"]
 
 
@@ -4470,12 +4474,12 @@ def test_validate_names_the_network_it_proved_beside_the_one_that_answered(
     out = capsys.readouterr().out
     assert (
         "[WARN] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
-        "address is issuebot-db-1.issuebot-internal's) -- but something answered on port 22 at "
-        "192.168.128.1, the first address of eth1's network 192.168.128.0/20: without an "
-        "isolated gateway that address is the host's own"
+        "address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22) "
+        "-- but something answered on port 22 at 192.168.128.1, the first address of eth1's "
+        "network 192.168.128.0/20: without an isolated gateway that address is the host's own"
     ) in out
-    # The proved network was not probed; the one that answered ended the check.
-    assert probed == [("192.168.128.1", 22)]
+    # Both were probed, and the one that answered ended the check.
+    assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
 
 
 def test_validate_reports_the_gateway_canary_refused(
@@ -4512,13 +4516,12 @@ def test_validate_keeps_the_canary_for_the_network_the_ptr_did_not_prove(
     out = capsys.readouterr().out
     assert (
         "[ OK ] gateway: eth0's network 192.168.112.0/20 at 192.168.112.1 is isolated (first "
-        "address is issuebot-db-1.issuebot-internal's); nothing answered on port 22 at "
-        "192.168.128.1, the first address of eth1's network 192.168.128.0/20 -- an address no "
-        "PTR claims is the host's own"
+        "address is issuebot-db-1.issuebot-internal's, and nothing answered there on port 22); "
+        "nothing answered on port 22 at 192.168.128.1, the first address of eth1's network "
+        "192.168.128.0/20 -- an address no PTR claims is the host's own"
     ) in out
     assert "a canary, not a proof\n" in out
-    # Only the unproved one is probed.
-    assert probed == [("192.168.128.1", 22)]
+    assert probed == [("192.168.112.1", 22), ("192.168.128.1", 22)]
 
 
 def test_validate_reports_the_proved_networks_before_the_hedge_about_the_others(
@@ -4535,9 +4538,9 @@ def test_validate_reports_the_proved_networks_before_the_hedge_about_the_others(
     out = capsys.readouterr().out
     assert (
         "[ OK ] gateway: eth1's network 192.168.128.0/20 at 192.168.128.1 is isolated (first "
-        "address is ci-egress-1.ci_egress's); nothing answered on port 22 at 192.168.112.1, "
-        "the first address of eth0's network 192.168.112.0/20 -- an address no PTR claims is "
-        "the host's own"
+        "address is ci-egress-1.ci_egress's, and nothing answered there on port 22); nothing "
+        "answered on port 22 at 192.168.112.1, the first address of eth0's network "
+        "192.168.112.0/20 -- an address no PTR claims is the host's own"
     ) in out
 
 
@@ -4601,43 +4604,267 @@ def test_validate_skips_the_gateway_canary_outside_a_container(
     assert looked_up == []
 
 
-def test_reverse_lookup_is_none_when_nothing_claims_the_address(
+def test_validate_still_warns_when_a_named_address_answers_on_22(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    """The residue #260 is about, and the half of it that can be closed. Docker's embedded
+    resolver relays what it has no record for, so an upstream serving the reverse zones of the
+    daemon's address pools names a *plain* bridge's own address -- and before #260 a named
+    network was not probed at all, so that name suppressed the very warning that would have
+    fired there, leaving the host worse off than it had been before the PTR existed. The canary
+    now runs whatever DNS said, and the warning names the reading the operator cannot see."""
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    probed, looked_up = _gateway(
+        monkeypatch,
+        names={"192.168.112.1": "docker-host.corp.example"},
+        open_at="192.168.112.1",
+    )
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[WARN] gateway: something answered on port 22 at 192.168.112.1, the first address of "
+        "eth0's network 192.168.112.0/20: without an isolated gateway that address is the "
+        "host's own, so a session can reach any host service. A PTR names that address "
+        "docker-host.corp.example, which is not the reassurance it looks: the embedded "
+        "resolver relays what it has no record for, so an upstream serving the reverse zones "
+        "of Docker's address pools names a bridge's own address too. Check whether "
+        "docker-host.corp.example is a container you recognise. Recreate the network with "
+        "isolated gateway mode (Docker 28 or later): the shared one with "
+        f"`{ISOLATED_NETWORK_RECIPE}`"
+    ) in out
+    # The name was read, and it did not call the probe off.
+    assert looked_up == ["192.168.112.1"]
+    assert probed == [("192.168.112.1", 22)]
+
+
+# The wire, for the tests below. Everything here is built by hand, the way `_embedded_ptr`
+# builds and reads it by hand: the standard library has no resolver beyond the stub and this
+# repository has no DNS dependency, so a fixture that used one would be proving somebody else's
+# encoder rather than this one's reader.
+_PTR_QUESTION = "1.112.168.192.in-addr.arpa"
+_DNS_NOERROR = 0x8180  # QR, RD copied back, RA -- the flags Docker's own answers carry
+_DNS_AUTHORITATIVE = _DNS_NOERROR | 0x0400
+_DNS_NXDOMAIN = _DNS_NOERROR | 3
+_DNS_SERVFAIL = _DNS_NOERROR | 2
+_DNS_TRUNCATED = _DNS_NOERROR | 0x0200
+# A pointer to offset 12, the question's name: what a resolver compressing an answer's owner
+# name against the question emits, and so the common shape on the wire.
+_OWNER_POINTER = b"\xc0\x0c"
+
+
+def _wire_name(name: str) -> bytes:
+    return b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+
+
+def _wire_record(
+    name: str, *, owner: bytes = _OWNER_POINTER, rtype: int = 12, rclass: int = 1
+) -> bytes:
+    rdata = _wire_name(name)
+    return owner + struct.pack("!HHIH", rtype, rclass, 600, len(rdata)) + rdata
+
+
+def _wire_reply(
+    query: bytes, *, flags: int = _DNS_NOERROR, records: bytes = b"", ancount: int | None = None
+) -> bytes:
+    """A reply to `query`: its identifier and its question section, then `records`."""
+    (query_id,) = struct.unpack_from("!H", query)
+    answers = ancount if ancount is not None else bool(records)
+    return struct.pack("!HHHHHH", query_id, flags, 1, answers, 0, 0) + query[12:] + records
+
+
+@contextlib.contextmanager
+def _resolver_on_loopback(
+    answer: Callable[[bytes], bytes | None],
+) -> Iterator[tuple[tuple[str, int], list[bytes]]]:
+    """A DNS server bound to `127.0.0.1` on a port the kernel picks, and the queries it saw.
+
+    Every test below talks to this and to nothing else: the socket is bound to the loopback
+    address rather than to `0.0.0.0`, so no packet any of them sends can leave the host, and a
+    suite that runs where `127.0.0.11` is a real Docker resolver asks it nothing.
+    """
+    seen: list[bytes] = []
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    # Short, and looped, so the thread notices `stop` rather than being left to the interpreter.
+    server.settimeout(0.05)
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                query, peer = server.recvfrom(4096)
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            seen.append(query)
+            reply = answer(query)
+            if reply is not None:
+                server.sendto(reply, peer)
+
+    thread = threading.Thread(target=serve, name="fake-resolver", daemon=True)
+    thread.start()
+    try:
+        yield server.getsockname(), seen
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_the_ptr_query_asks_one_reversed_question_of_the_resolver() -> None:
+    """What goes out: one question, the address's octets reversed under `in-addr.arpa`, of type
+    PTR and class IN, with recursion desired -- the query a stub would have sent, except that
+    this one is sent to the resolver named rather than to whatever NSS would have chosen."""
+    with _resolver_on_loopback(
+        lambda q: _wire_reply(q, records=_wire_record("issuebot-db-1.issuebot-internal"))
+    ) as (server, seen):
+        assert _embedded_ptr("192.168.112.1", resolver=server) == "issuebot-db-1.issuebot-internal"
+    (query,) = seen
+    query_id, flags, qdcount, ancount, _ns, _ar = struct.unpack_from("!HHHHHH", query)
+    assert (qdcount, ancount) == (1, 0)
+    assert flags == 0x0100  # RD, and nothing else: this is a question, not an answer
+    assert query[12:] == _wire_name(_PTR_QUESTION) + struct.pack("!HH", 12, 1)
+    # The identifier is the query's own, and the reply is matched against it below.
+    assert 0 <= query_id < 1 << 16
+
+
+def test_the_ptr_is_read_whether_or_not_the_answer_claims_authority() -> None:
+    """#260 asked for the `AA` bit as the gate, and the wire says it cannot be one: Docker sets
+    it on nothing, its own records included. Measured against a live daemon's embedded server,
+    a PTR for the first address of an attached network -- held by a container, so answerable
+    only out of the daemon's own table -- comes back `AA=0 RA=1 RCODE=0 AN=1`, which is
+    `_DNS_NOERROR` here; moby's `libnetwork/resolver.go` builds every local answer with
+    `createRespMsg`, which sets `RecursionAvailable` and never `Authoritative`. Requiring `AA`
+    would therefore reject the resolver's own records and leave every network unproved, so both
+    shapes are read, and the canary runs beside the name rather than instead of it."""
+    for flags in (_DNS_NOERROR, _DNS_AUTHORITATIVE):
+        with _resolver_on_loopback(
+            lambda q, f=flags: _wire_reply(q, flags=f, records=_wire_record("db.issuebot"))
+        ) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) == "db.issuebot"
+
+
+def test_the_ptr_reads_an_owner_name_written_out_in_full() -> None:
+    """Compression is optional, and Docker's own answers do not use it -- the owner name is
+    written out beside the identical question. Both shapes have to read the same, since which
+    one arrives is the resolver's choice and not a fact about the address."""
+    with _resolver_on_loopback(
+        lambda q: _wire_reply(
+            q, records=_wire_record("db.issuebot", owner=_wire_name(_PTR_QUESTION))
+        )
+    ) as (server, _seen):
+        assert _embedded_ptr("192.168.112.1", resolver=server) == "db.issuebot"
+
+
+def test_no_ptr_is_read_out_of_a_reply_that_carries_none() -> None:
+    """`NXDOMAIN` is the plain bridge: the daemon has no record for the address, so the
+    resolver forwarded the question and the upstream had none either. `SERVFAIL` is the same
+    question forwarded where nothing answered. An empty answer section, an answer about
+    something else, and an answer of another type are the shapes a reply can take while still
+    claiming success, and none of them is a name for this address."""
+    replies: list[Callable[[bytes], bytes]] = [
+        lambda q: _wire_reply(q, flags=_DNS_NXDOMAIN),
+        lambda q: _wire_reply(q, flags=_DNS_SERVFAIL),
+        lambda q: _wire_reply(q, records=b"", ancount=1),
+        # A PTR, but for a different address than the one asked about.
+        lambda q: _wire_reply(
+            q, records=_wire_record("db.issuebot", owner=_wire_name("9.9.9.9.in-addr.arpa"))
+        ),
+        # The right owner, the wrong type: an A record where a PTR was asked for.
+        lambda q: _wire_reply(q, records=_wire_record("db.issuebot", rtype=1)),
+        # And the wrong class.
+        lambda q: _wire_reply(q, records=_wire_record("db.issuebot", rclass=3)),
+    ]
+    for reply in replies:
+        with _resolver_on_loopback(reply) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) is None
+
+
+def test_no_ptr_is_read_out_of_a_reply_this_did_not_ask_for() -> None:
+    """The identifier and the question echoed back are the whole of what says a reply belongs
+    to this query. A datagram carrying somebody else's identifier, or an answer to another
+    question, is not an answer to this one however well formed it is."""
+
+    def wrong_id(query: bytes) -> bytes:
+        (query_id,) = struct.unpack_from("!H", query)
+        return _wire_reply(
+            struct.pack("!H", query_id ^ 1) + query[2:], records=_wire_record("db.issuebot")
+        )
+
+    def wrong_question(query: bytes) -> bytes:
+        elsewhere = "9.9.9.9.in-addr.arpa"
+        (query_id,) = struct.unpack_from("!H", query)
+        return (
+            struct.pack("!HHHHHH", query_id, _DNS_NOERROR, 1, 1, 0, 0)
+            + _wire_name(elsewhere)
+            + struct.pack("!HH", 12, 1)
+            + _wire_record("db.issuebot", owner=_wire_name(elsewhere))
+        )
+
+    def wrong_qtype(query: bytes) -> bytes:
+        # The question this did ask, but of another type: a reply to some other query.
+        return _wire_reply(
+            query[:12] + _wire_name(_PTR_QUESTION) + struct.pack("!HH", 1, 1),
+            records=_wire_record("db.issuebot"),
+        )
+
+    for reply in (wrong_id, wrong_question, wrong_qtype):
+        with _resolver_on_loopback(reply) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) is None
+
+
+def test_no_ptr_is_read_out_of_a_truncated_or_malformed_reply() -> None:
+    """A PTR answer is a hundred octets or so and a reply to a query sent without EDNS0 may
+    carry 512, so `TC` here is not a resolver that ran out of room: it is a reply that is not
+    the one this asked for, and it is refused rather than retried over TCP. The rest are
+    messages a resolver cannot have written -- cut mid-record, a record whose RDLENGTH runs
+    past the end, a compression pointer that points at itself, and bytes that are not a DNS
+    message at all -- and each has to read as "no name" rather than as a traceback out of a
+    `validate` whose eight remaining lines have not printed yet."""
+    full = _wire_record("db.issuebot")
+    replies: list[Callable[[bytes], bytes]] = [
+        lambda q: _wire_reply(q, flags=_DNS_TRUNCATED, records=full),
+        # Cut inside the answer's fixed fields, and again inside its RDATA.
+        lambda q: _wire_reply(q, records=full)[:-8],
+        lambda q: _wire_reply(q, records=full)[:-2],
+        # An RDLENGTH longer than what follows it.
+        lambda q: _wire_reply(q, records=_OWNER_POINTER + struct.pack("!HHIH", 12, 1, 600, 99)),
+        # An owner name that is a compression pointer to its own offset -- the answer section
+        # begins where the echoed question ends -- which followed would never return. Only a
+        # pointer that goes backwards is read at all.
+        lambda q: _wire_reply(
+            q, records=struct.pack("!H", 0xC000 | len(q)) + struct.pack("!HHIH", 12, 1, 600, 0)
+        ),
+        # A header and nothing else, a fragment of one, and bytes that are not a message.
+        lambda q: q[:12],
+        lambda _q: b"\x00\x01",
+        lambda _q: b"not a dns message at all",
+    ]
+    for reply in replies:
+        with _resolver_on_loopback(reply) as (server, _seen):
+            assert _embedded_ptr("192.168.112.1", resolver=server) is None
+
+
+def test_the_ptr_gives_up_on_its_deadline_and_on_a_resolver_that_is_not_there(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every way the lookup can fail reads the same: nobody claimed it. `herror` is the PTR
-    Docker's resolver has no answer for -- the plain-network case -- and the deadline is the
-    container whose `resolv.conf` points at something that will not answer at all, which
-    `gethostbyaddr` has no timeout of its own for."""
-    monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", lambda _a: ("db.ci_egress", [], []))
-    assert _reverse_lookup("192.168.112.1") == "db.ci_egress"
-
-    for error in (socket.herror("1", "Unknown host"), socket.gaierror("no resolver")):
-
-        def raise_it(_address: str, exc: OSError = error) -> tuple[str, list[str], list[str]]:
-            raise exc
-
-        monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", raise_it)
-        assert _reverse_lookup("192.168.112.1") is None
-
-    # The deadline, and the thread released the moment it has been measured: the executor's own
-    # `atexit` hook joins its workers, so a test that left one sleeping would be paid for at the
-    # end of every `pytest` run rather than here.
-    released = threading.Event()
-
-    def never_answers(_address: str) -> tuple[str, list[str], list[str]]:
-        assert released.wait(30), "the lookup thread was never released"
-        raise AssertionError("unreachable")
-
-    monkeypatch.setattr("issuebot.cli.socket.gethostbyaddr", never_answers)
-    monkeypatch.setattr("issuebot.cli._GATEWAY_PTR_TIMEOUT_S", 0.05)
+    """The deadline is the socket's own now: nothing is handed to a thread, so a resolver that
+    never answers costs this check its timeout and the eight after it nothing. A resolver that
+    is not listening at all is the other end of the same case -- the container whose
+    `resolv.conf` named `127.0.0.11` while no daemon was there to answer -- and both read as no
+    name rather than as an error out of `validate`."""
+    monkeypatch.setattr("issuebot.cli._GATEWAY_PTR_TIMEOUT_S", 0.1)
     started = time.monotonic()
-    try:
-        assert _reverse_lookup("192.168.112.1") is None
-        # It returns rather than waiting the thread out, which is the whole point of the
-        # deadline: the eight checks after this one still run.
-        assert time.monotonic() - started < 5
-    finally:
-        released.set()
+    with _resolver_on_loopback(lambda _q: None) as (server, seen):
+        assert _embedded_ptr("192.168.112.1", resolver=server) is None
+    assert time.monotonic() - started < 5
+    assert len(seen) == 1  # it was asked; it simply never answered
+
+    # Nothing bound at all: the port the server above held, now that it is closed.
+    assert _embedded_ptr("192.168.112.1", resolver=server) is None
+    # And an address that is not one never reaches a socket.
+    assert _embedded_ptr("not-an-address", resolver=server) is None
 
 
 def test_validate_fails_session_accounts_with_no_credential_in_the_environment(

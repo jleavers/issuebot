@@ -94,8 +94,10 @@ def no_gateway_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("issuebot.cli._host_port_open", never)
     # The PTR seam #251 added is stubbed for the same reason and not because the empty route
     # table happens to reach neither: a test that supplies a route table without going through
-    # the CLI tests' `_gateway` helper would otherwise put a real query on the wire.
-    monkeypatch.setattr("issuebot.cli._reverse_lookup", never_resolve)
+    # the CLI tests' `_gateway` helper would otherwise put a real query on the wire -- and
+    # since #260 that query is a datagram this process sends itself, which on a developer's
+    # machine would go to whatever is bound at `127.0.0.11:53` rather than nowhere.
+    monkeypatch.setattr("issuebot.cli._embedded_ptr", never_resolve)
     monkeypatch.setattr("issuebot.cli._embedded_resolver_configured", lambda: False)
 
 

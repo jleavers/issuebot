@@ -6,9 +6,11 @@ import contextlib
 import ipaddress
 import itertools
 import os
+import secrets
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -1104,12 +1106,33 @@ def _host_port_open(address: str, port: int, *, timeout_s: float) -> bool:
 
 
 # What one PTR may spend. Docker's embedded resolver answers off the daemon's own table in a
-# millisecond or two, so this is a ceiling for a container whose `resolv.conf` points somewhere
-# else entirely rather than a budget anything is expected to use: `gethostbyaddr` takes no
-# timeout of its own, and one line of `validate` cannot be allowed to hang the eight after it.
+# millisecond or two, so this is a ceiling for the resolver that does not answer at all --
+# one line of `validate` cannot be allowed to hang the eight after it -- rather than a budget
+# anything is expected to use. Since #260 it is the socket's own deadline: the query is built
+# and sent by this process, so there is no longer a `gethostbyaddr` with no timeout of its own
+# to wrap in a thread the interpreter then joins at exit.
 _GATEWAY_PTR_TIMEOUT_S = 2.0
 # Docker's embedded DNS, at the same address in every container the daemon starts.
 _EMBEDDED_RESOLVER = "127.0.0.11"
+_EMBEDDED_RESOLVER_PORT = 53
+# RFC 1035 section 4, the parts of it one PTR question needs: the twelve-octet header, the
+# flags this reads out of it, and the type and class a PTR question and its answer carry.
+_DNS_HEADER = struct.Struct("!HHHHHH")
+_DNS_RR_FIXED = struct.Struct("!HHIH")  # type, class, TTL, RDLENGTH
+_DNS_QUESTION_FIXED = struct.Struct("!HH")  # QTYPE, QCLASS
+_DNS_QR = 0x8000
+_DNS_TC = 0x0200
+_DNS_RD = 0x0100
+_DNS_RCODE = 0x000F
+_DNS_TYPE_PTR = 12
+_DNS_CLASS_IN = 1
+# The largest reply that is read at all. A PTR answer is a hundred octets or so, and a query
+# sent without EDNS0 may not be answered with more than 512, so nothing a resolver is allowed
+# to send is cut here; the bound is on what a resolver that is not one may.
+_DNS_MAX_REPLY = 2048
+# A name may carry 255 octets, so it cannot carry more labels than this however it is encoded
+# -- the bound that stops a malformed message being read forever, beside the one on pointers.
+_DNS_MAX_LABELS = 128
 
 
 def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) -> bool:
@@ -1121,6 +1144,13 @@ def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) 
     bind-mounted ``resolv.conf`` -- is answering a different question, and its name would be
     read here as an isolation it never claimed. So the lookup is asked only where that file
     names it, and every other runtime keeps the canary alone.
+
+    Since #260 the query goes to ``127.0.0.11:53`` directly rather than through the stub, so
+    this is no longer the thing that decides which resolver answers -- the socket is. It is
+    still what says the resolver at that address is *Docker's*: the file is the daemon's own
+    statement that it started this container and pointed it at its embedded server, and
+    without it something else bound to a loopback address in another runtime would be taken
+    for the daemon's table.
 
     The *first* ``nameserver`` line, not any of them: glibc asks them in order, so a file
     listing another resolver first would gate the lookup on Docker while somebody else
@@ -1137,27 +1167,149 @@ def _embedded_resolver_configured(resolv_conf: Path = Path("/etc/resolv.conf")) 
     return False
 
 
-def _reverse_lookup(address: str) -> str | None:
-    """The name the resolver gives ``address``, or None when nothing does.
+def _dns_encode_name(name: str) -> bytes:
+    """``name`` on the wire: every label length-prefixed, terminated by the root's empty one."""
+    encoded = bytearray()
+    for label in name.split("."):
+        raw = label.encode("ascii")
+        if not 1 <= len(raw) <= 63:
+            raise ValueError(f"{label!r} is not a label of 1 to 63 octets")
+        encoded.append(len(raw))
+        encoded += raw
+    encoded.append(0)
+    return bytes(encoded)
 
-    Run in a thread this waits on, for the reason ``_probe_status_page`` is: ``gethostbyaddr``
-    takes no timeout of its own, so the deadline is the only one there is. The thread is left to
-    finish -- it writes nothing, and the caller has its answer -- though the executor's own
-    ``atexit`` hook joins it, so a resolver that never replies delays the *exit* of a `validate`
-    whose lines have all printed. Better than holding the lines themselves.
+
+def _dns_read_name(message: bytes, offset: int) -> tuple[str, int]:
+    """The name at ``offset``, and the offset in ``message`` just past where it was written.
+
+    Compression (RFC 1035 section 4.1.4) is why this takes the whole message rather than the
+    name: a label sequence may end in a pointer to a name written earlier, and the resolver
+    compresses an answer's owner name against the question's as a matter of course. The offset
+    returned is the one past the *pointer*, not past what it pointed at, so a caller walking
+    the records keeps its place.
+
+    A pointer may only ever point backwards. That is the rule the encoder follows anyway, and
+    refusing anything else is what stops a message that points at itself, or a pair pointing at
+    each other, being followed until the process runs out of stack or of patience. A malformed
+    message raises ``ValueError``, which the caller reads as "no name", never as an answer.
     """
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gateway-ptr")
-    try:
-        answer = executor.submit(socket.gethostbyaddr, address).result(
-            timeout=_GATEWAY_PTR_TIMEOUT_S
-        )
-    except OSError:
-        # `herror` (no PTR for it), `gaierror` (no resolver to ask) and `TimeoutError` (the
-        # deadline, and an `OSError` subclass) all mean one thing: nobody claimed the address.
+    labels: list[str] = []
+    end: int | None = None
+    while True:
+        if offset >= len(message):
+            raise ValueError("a name runs past the end of the message")
+        length = message[offset]
+        if length & 0xC0 == 0xC0:
+            if offset + 1 >= len(message):
+                raise ValueError("a compression pointer runs past the end of the message")
+            target = (length & 0x3F) << 8 | message[offset + 1]
+            if target >= offset:
+                raise ValueError("a compression pointer does not point backwards")
+            if end is None:
+                end = offset + 2
+            offset = target
+            continue
+        if length & 0xC0:
+            raise ValueError("a label carries a reserved type")
+        offset += 1
+        if length == 0:
+            return ".".join(labels), offset if end is None else end
+        if len(labels) >= _DNS_MAX_LABELS or offset + length > len(message):
+            raise ValueError("a label runs past the end of the message")
+        labels.append(message[offset : offset + length].decode("ascii", "replace"))
+        offset += length
+
+
+def _ptr_name(reply: bytes, *, query_id: int, question: str) -> str | None:
+    """The name ``reply`` gives ``question``, or None when it gives none that may be read.
+
+    Everything the wire offers about whether this is an answer to the question asked, and to
+    that question alone, is checked here: the identifier this query was sent with, ``QR``,
+    ``RCODE`` 0, one question that is the one sent, and a ``PTR`` of class ``IN`` in the answer
+    whose owner is the name asked about. A truncated reply (``TC``) is refused rather than
+    retried over TCP -- a PTR answer does not approach 512 octets, so ``TC`` here is not a
+    resolver that ran out of room but a reply that is not the one this asked for.
+
+    ``NXDOMAIN``, ``SERVFAIL``, an empty answer section, an answer about something else and a
+    message that is not a DNS message at all therefore all read the same: None, which the check
+    reads as "the daemon's table does not claim this address" and answers with the canary.
+    """
+    if len(reply) < _DNS_HEADER.size:
         return None
-    finally:
-        executor.shutdown(wait=False)
-    return answer[0]
+    reply_id, flags, qdcount, ancount = _DNS_HEADER.unpack_from(reply)[:4]
+    if reply_id != query_id or not flags & _DNS_QR or flags & _DNS_TC:
+        return None
+    if flags & _DNS_RCODE or qdcount != 1 or ancount < 1:
+        return None
+    asked = question.lower()
+    name, offset = _dns_read_name(reply, _DNS_HEADER.size)
+    if name.lower() != asked or offset + _DNS_QUESTION_FIXED.size > len(reply):
+        return None
+    if _DNS_QUESTION_FIXED.unpack_from(reply, offset) != (_DNS_TYPE_PTR, _DNS_CLASS_IN):
+        return None
+    offset += _DNS_QUESTION_FIXED.size
+    for _ in range(ancount):
+        owner, offset = _dns_read_name(reply, offset)
+        if offset + _DNS_RR_FIXED.size > len(reply):
+            return None
+        rtype, rclass, _ttl, rdlength = _DNS_RR_FIXED.unpack_from(reply, offset)
+        offset += _DNS_RR_FIXED.size
+        if offset + rdlength > len(reply):
+            return None
+        if (rtype, rclass) == (_DNS_TYPE_PTR, _DNS_CLASS_IN) and owner.lower() == asked:
+            return _dns_read_name(reply, offset)[0] or None
+        offset += rdlength
+    return None
+
+
+def _embedded_ptr(address: str, *, resolver: tuple[str, int] | None = None) -> str | None:
+    """The name Docker's embedded resolver holds for ``address``, or None when it holds none.
+
+    One PTR question, built and sent to ``127.0.0.11:53`` by this process (#260) rather than
+    handed to ``gethostbyaddr``. Two things come of asking directly. The answer has to be the
+    resolver's: ``getaddrinfo``'s NSS stack reads ``files`` before ``dns`` on a stock
+    ``nsswitch.conf``, so a line in ``/etc/hosts`` -- which a session's own image, or a
+    ``--add-host``, can put there -- used to be able to name a bridge's address and have it
+    read as an isolation the daemon never claimed. And the reply can be *graded*: the socket
+    carries its own deadline, and ``RCODE``, ``TC`` and the question echoed back are all
+    visible, where the stub collapsed every one of them into one ``herror``.
+
+    What is *not* checked is ``AA``, which #260 asked for, because Docker does not set it.
+    Measured against the daemon's embedded server on a live host: a PTR for the first address
+    of an attached network, held by a container and so answerable only from the daemon's own
+    table, comes back ``AA=0 RA=1 RCODE=0 AN=1`` -- the same flags an answer relayed from
+    upstream would carry. moby's ``libnetwork/resolver.go`` builds every local answer with
+    ``createRespMsg``, which sets ``RecursionAvailable`` and never ``Authoritative``. Gating
+    the proof on ``AA`` would therefore reject the resolver's own records rather than the
+    forwarded ones, and leave every network unproved. The forwarding residue is closed on the
+    other side instead: ``_gateway_check`` runs the port-22 canary on every network, so a
+    relayed name cannot suppress the warning that would otherwise have fired there.
+    """
+    server = resolver if resolver is not None else (_EMBEDDED_RESOLVER, _EMBEDDED_RESOLVER_PORT)
+    query_id = secrets.randbelow(1 << 16)
+    try:
+        question = ipaddress.IPv4Address(address).reverse_pointer
+        query = (
+            _DNS_HEADER.pack(query_id, _DNS_RD, 1, 0, 0, 0)
+            + _dns_encode_name(question)
+            + _DNS_QUESTION_FIXED.pack(_DNS_TYPE_PTR, _DNS_CLASS_IN)
+        )
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(_GATEWAY_PTR_TIMEOUT_S)
+            # Connected, so the kernel delivers only what the resolver this asked sent back:
+            # the proof is in who answered, and an unconnected socket would take a datagram
+            # from anything else on the host that saw the query go out.
+            sock.connect(server)
+            sock.send(query)
+            reply = sock.recv(_DNS_MAX_REPLY)
+        return _ptr_name(reply, query_id=query_id, question=question)
+    except OSError, ValueError:
+        # A resolver that is not there (`ECONNREFUSED`), one that never answers (the deadline,
+        # a `TimeoutError` and so an `OSError`), an address that is not one, and a reply that
+        # is not a DNS message all mean the one thing here: nothing in the daemon's own table
+        # claimed this address.
+        return None
 
 
 def _gateway_check(*, inside: bool, route_table: str) -> Check:
@@ -1170,27 +1322,35 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     and they are graded differently because only one of them is an answer.
 
     * **Who owns the first address?** ``127.0.0.11`` is Docker's embedded DNS, and it answers a
-      PTR for a *container's* address alone. On an isolated network the first address went to
-      whichever container attached first, so the lookup comes back ``<container>.<network>``; on
-      a plain one that address is the bridge's -- the host's own -- which the resolver has no
-      record of, and the lookup fails. A name is therefore a proof rather than a canary, and the
-      common case has one, since the worker's own networks carry the proxy and the hub's
-      database. It costs about 30 ms, and it is asked only where ``resolv.conf`` names that
-      resolver (``_embedded_resolver_configured``), since the proof is in who answered. The
-      residue is a name the embedded resolver did not have and *forwarded*: an upstream that
-      serves reverse zones for the daemon's address pools could put a name on a plain bridge's
-      own address, which would read here as isolation -- and, since a proved network is not
-      probed, would suppress the canary that used to warn there. The canary does not cover that
-      host, and saying it does would be worse than the gap itself; #260 is the fix, an ``AA``
-      bit on a query sent to the resolver directly telling its own records from what it relays.
-      CI's control asserts the negative half on the engine it runs on.
+      PTR out of the daemon's table for a *container's* address alone. On an isolated network
+      the first address went to whichever container attached first, so the query comes back
+      ``<container>.<network>``; on a plain one that address is the bridge's -- the host's own
+      -- which the daemon has no record of. ``_embedded_ptr`` sends that query to the resolver
+      itself (#260), so the answer is the resolver's rather than whatever NSS would have
+      assembled, and ``NXDOMAIN``, a reply to another question and a malformed one are each
+      told apart from a name. It costs about 30 ms, and it is asked only where ``resolv.conf``
+      names that resolver (``_embedded_resolver_configured``), since the proof is in who
+      answered. The common case has a name, since the worker's own networks carry the proxy
+      and the hub's database.
 
-    * **Does a host service answer there?** The canary, and what is left when the PTR does not:
-      an isolated network nobody else has joined yet fails the lookup too, so the honest reading
-      of no name is "unproved" rather than "plain". A warning rather than a failure, because a
-      host running an operator's own isolation is entitled to answer differently; and an
-      unanswered port is still only an OK, since a closed port is refused with the option and
-      without it.
+    * **Does a host service answer there?** Port 22, on *every* network, named or not (#260):
+      without the isolated option that address is the host's, and ``sshd`` is the service
+      nearly every Linux host has there. A warning rather than a failure, because a host
+      running an operator's own isolation is entitled to answer differently; and an unanswered
+      port is still only an OK, since a closed port is refused with the option and without it.
+
+    A name alone is not a proof, which is why the canary runs beside one rather than instead of
+    it. The embedded resolver *forwards* what it has no record for, so an upstream serving the
+    reverse zones of the daemon's address pools -- ``172.16.0.0/12``, and the ``192.168.0.0/16``
+    blocks it falls back to -- can put a name on a plain bridge's own address. #260 proposed
+    reading the ``AA`` bit to tell a relayed answer from the resolver's own, and the wire says
+    that cannot be done: Docker sets ``AA`` on nothing, its own records included
+    (``_embedded_ptr`` records the measurement), so the bit would reject the proofs rather than
+    the relays. What is closed instead is the consequence. Before #260 a named network was not
+    probed, so a relayed name suppressed the very warning that would have fired there, which
+    left that host worse off than it had been before the PTR existed; now the canary runs
+    whatever DNS said, and a name that came from upstream costs the operator a name they should
+    not believe rather than a warning they should have had.
 
     Both are skipped outside a container, where the host is this process's own -- and where the
     PTR would be somebody else's resolver answering rather than the daemon's.
@@ -1208,30 +1368,45 @@ def _gateway_check(*, inside: bool, route_table: str) -> Check:
     unproved: list[str] = []
     embedded = _embedded_resolver_configured()
     for interface, address, network in candidates:
-        name = _reverse_lookup(address) if embedded else None
-        if name is not None:
-            proved.append(
-                f"{interface}'s network {network} at {address} is isolated "
-                f"(first address is {name}'s)"
-            )
-            continue
+        name = _embedded_ptr(address) if embedded else None
+        # The canary runs whether or not a name came back (#260): the resolver relays what it
+        # has no record for, so a name is not enough to stop asking, and a network that skipped
+        # the question was left worse off than it had been before the question existed.
         if _host_port_open(address, GATEWAY_CANARY_PORT, timeout_s=_GATEWAY_PROBE_TIMEOUT_S):
             # Whatever was proved before this still belongs in the line: the operator is about
             # to recreate a network, and needs to know which of them it is.
             so_far = f"{'; '.join(proved)} -- but " if proved else ""
+            # A name *and* an answer on 22 has two readings, and the operator is the only one
+            # who can tell them apart -- so the line names the one that is not obvious.
+            relayed = (
+                f" A PTR names that address {name}, which is not the reassurance it looks: the "
+                "embedded resolver relays what it has no record for, so an upstream serving "
+                "the reverse zones of Docker's address pools names a bridge's own address too. "
+                f"Check whether {name} is a container you recognise."
+                if name is not None
+                else ""
+            )
             return Check(
                 subject,
                 "warn",
                 f"{so_far}something answered on port {GATEWAY_CANARY_PORT} at {address}, the "
                 f"first address of {interface}'s network {network}: without an isolated "
                 f"gateway that "
-                "address is the host's own, so a session can reach any host service. Recreate "
+                "address is the host's own, so a session can reach any host service."
+                f"{relayed} Recreate "
                 "the network with isolated gateway mode (Docker 28 or later): the shared one "
                 f"with `{ISOLATED_NETWORK_RECIPE}`, a checkout's own `egress` network with "
                 "`docker compose stop worker egress && docker network rm <project>_egress && "
                 "docker compose up -d` once its compose.yaml carries the option "
                 '(docs/operations.md, "Upgrades")',
             )
+        if name is not None:
+            proved.append(
+                f"{interface}'s network {network} at {address} is isolated "
+                f"(first address is {name}'s, and nothing answered there on port "
+                f"{GATEWAY_CANARY_PORT})"
+            )
+            continue
         unproved.append(
             f"nothing answered on port {GATEWAY_CANARY_PORT} at {address}, the first address "
             f"of {interface}'s network {network}"
