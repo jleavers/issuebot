@@ -1375,11 +1375,15 @@ def _prompt_check(workflow: Workflow) -> Check:
     prose the scanner cannot read, and ``validate`` cannot tell the two apart. A command
     carrying both halves with a literal login is flagged too, and is a real fault rather than a
     false positive -- the account changes and the exclusion stops matching -- which is why the
-    text says the exclusion must name ``{{ login }}``. So is one that carries them somewhere
-    other than as the program's first stage, or continues past them (#258), which is why the
-    text says where the filter must sit: a program that drops a record and then re-emits it is
-    not filtered, whatever it contains. What it can do is say which command it found, how many,
-    and name the document that says what the barrier is.
+    text says the exclusion must name ``{{ login }}``. One that carries them somewhere other
+    than as the program's first stage, or continues past them, is flagged on a different
+    footing (#258): a stage after the filter can undo it -- ``// .body`` re-emits exactly the
+    records it dropped -- and the scan cannot tell such a stage from a harmless one, so it
+    reports both and the text says where the filter must sit. A program that wraps a filtered
+    read (``[.[] | select(...)]``, ``map(select(...))``) is therefore warned about while its
+    barrier holds, and keeping the read's own program plain is what clears it. What the check
+    can do is say which command it found, how many, and name the document that says what the
+    barrier is.
     """
     body = workflow.prompt_template
     if not body:

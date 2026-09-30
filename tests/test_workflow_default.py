@@ -14,6 +14,7 @@ from issuebot.agent.prompt import (
     PromptRenderer,
     _filter_applies,
     _jq_program,
+    _jq_stages,
     unfiltered_comment_reads,
 )
 from issuebot.config import Workflow, load_workflow
@@ -1000,6 +1001,20 @@ def test_the_filter_must_be_applied_and_not_merely_carried() -> None:
     assert gaps(f".[] | [{FILTER}]") != []
     # A `|` inside a string does not split a stage, so such a stage is judged whole.
     assert gaps(f'.[] | {FILTER} | {{body: "a|b"}}') != []
+    assert _jq_stages(r'.[] | select(.body == "a\"|b") | .x') == [
+        ".[]",
+        r'select(.body == "a\"|b")',
+        ".x",
+    ]
+    assert _jq_stages('.[] | "unclosed') is None
+    assert _jq_stages(".[] | (.body") is None
+    assert _jq_stages(".[] | .body)") is None
+    # A projection's values are paths, so a bare word cannot sit where jq resolves a builtin:
+    # `env` dumps the environment and `recurse` emits many outputs for one record.
+    assert gaps(f".[] | {FILTER} | {{a: env}}") != []
+    assert gaps(f".[] | {FILTER} | {{a: recurse}}") != []
+    assert gaps(f".[] | {FILTER} | {{a: .body, b: env}}") != []
+    assert gaps(f'.[] | {FILTER} | {{"quoted key": .body}}') == []
     # Brackets or quotes that do not balance fail closed.
     assert gaps(f".[] | {FILTER} | (.body") != []
     assert gaps(f".[] | {FILTER} | .body)") != []

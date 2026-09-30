@@ -117,6 +117,9 @@ def test_a_trailing_alternative_undoes_the_filter_it_carries(
     when its left yields no output, so a program carrying the whole filter and continuing
     ``// .body`` prints the bodies of exactly the authors the filter exists to drop: the
     stranger's and the session's own. That is why the scan now asks where the filter sits.
+
+    This runs the standalone ``jq`` this module is skipped without; ``gh`` embeds its own, and
+    it emits the same three results for the same page.
     """
     # The first Step 6 program without its projection: `.[] | select(<the whole filter>)`.
     filtered = _programs(_rendered(make_issue))[0].rsplit(" | ", 1)[0]

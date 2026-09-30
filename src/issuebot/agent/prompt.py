@@ -325,16 +325,16 @@ _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 # What a comment read's ``--jq`` program may open with before the filter: jq's array
 # iteration, or nothing, in which case the filter tests the array itself and emits nothing.
 _JQ_ITERATION = frozenset({".[]", ".[]?"})
-# What may follow the filter: a projection of a record it let through, and nothing that could
-# emit one it dropped. A dotted path, or an object construction whose body is names, paths,
-# strings and separators -- no parentheses, no ``|`` and no ``/``, so no ``//``.
-_JQ_PROJECTION = re.compile(
-    r"""
-    \.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*   # .body, .user.login
-    |\{[\w\s.,:"'-]*\}                   # {id, author: .user.login, body}
-    """,
-    re.VERBOSE,
-)
+# What may follow the filter: a projection of the record it let through, and nothing that could
+# emit another output. A dotted path, or an object construction of keys and dotted paths --
+# ``{id, author: .user.login, body}``, jq's shorthand ``{id}`` included. Every value is a path,
+# so a bare word cannot sit where jq would resolve it as a builtin (``{a: env}`` dumps the
+# environment, ``{a: recurse}`` emits many outputs per input), and no parentheses, ``|`` or
+# ``/`` can appear at all, so no ``//``.
+_JQ_PATH = r"\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+_JQ_KEY = r'(?:[A-Za-z_]\w*|"[^"\\]*")'
+_JQ_FIELD = rf"{_JQ_KEY}(?:\s*:\s*{_JQ_PATH})?"
+_JQ_PROJECTION = re.compile(rf"{_JQ_PATH}|\{{\s*(?:{_JQ_FIELD}(?:\s*,\s*{_JQ_FIELD})*\s*)?\}}")
 _JQ_OPENERS, _JQ_CLOSERS = "([{", ")]}"
 
 
@@ -477,13 +477,14 @@ def _jq_program(tokens: list[str]) -> str:
 
 
 def _jq_stages(program: str) -> list[str] | None:
-    """The program's top-level stages, split on the ``|`` jq pipes with, each stripped; ``None``
-    when its quotes or brackets do not balance (the caller fails closed).
+    """The program's top-level stages, each stripped, split on the ``|`` that jq pipes with;
+    ``None`` when a quote is left open or a bracket unclosed (the caller fails closed).
 
     Only a ``|`` outside every quote and every ``(``, ``[`` and ``{`` splits, so the one in
     ``select((.author_association | IN(...)) and ...)`` stays inside its own stage, as does one
-    inside a string. Nothing else is parsed: a stage is the text between two such pipes, and
-    what it would do is the caller's question.
+    inside a string, escaped quote and all. Nothing else is parsed: openers and closers are
+    counted rather than paired, so ``{a: .b)`` is "balanced" here, and a stage is the text
+    between two top-level pipes whatever it would do -- which is the caller's question.
     """
     stages: list[str] = [""]
     depth = 0
@@ -519,7 +520,9 @@ def _jq_stages(program: str) -> list[str] | None:
 def _filter_applies(program: str, accepted: tuple[str, ...]) -> bool:
     """Whether one of the ``accepted`` filters *applies* to every record ``program`` can emit:
     it is the program's first stage, after an optional ``.[]``, matched whole, and every stage
-    after it is a projection.
+    after it is a projection. More than one filter may be accepted because more than one
+    barrier can be the right one for a render: the conjunctive filter, and on an admin account
+    the association half alone (#252).
 
     Carrying a filter is not applying one, because a stage after it decides whether it held:
     ``select`` emits nothing for a record it drops, and jq's ``//`` yields its right-hand side
@@ -613,8 +616,10 @@ def unfiltered_comment_reads(
     carries, since the rule is about which records a program can emit and not about which of
     their fields it prints; and a projection is recognised by its shape rather than parsed, so
     the two forms above are the whole of what is accepted and a program needing more than them
-    is reported rather than read further. Chained commands (``;``, ``&&``, ``||``, ``|``) are
-    scanned segment by segment, and the offending segment is what is reported.
+    is reported rather than read further -- an array-wrapped or ``map``-ed read is a gap here
+    though its barrier holds, and keeping the read's own program plain is what clears it.
+    Chained commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the
+    offending segment is what is reported.
     ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
     shipped prompt and a deployment's prompt are held to one rule.
     """
