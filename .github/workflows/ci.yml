@@ -333,7 +333,9 @@ jobs:
       # The probe is the shipped `gateway_candidates`, so what is asked about is the address
       # `validate` asks about rather than a number written out here, and the last line is
       # `validate`'s own `gateway` line, read out of a real session: the PTR half of the check
-      # (#251) run against Docker's embedded resolver rather than a stub.
+      # (#251, #260) run against Docker's embedded resolver rather than a stub. That half is
+      # only ever proved here -- every test of it builds the wire by hand -- so a daemon whose
+      # answers stopped being readable fails a PR rather than a deployment.
       - name: a session cannot reach a service on the runner itself
         env:
           COMPOSE_PROJECT_NAME: ci
@@ -347,7 +349,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          from issuebot.cli import _reverse_lookup, gateway_candidates
+          from issuebot.cli import _embedded_ptr, gateway_candidates
 
           port, expect = int(sys.argv[1]), sys.argv[2]
           candidates = gateway_candidates(Path("/proc/net/route").read_text(encoding="ascii"))
@@ -356,10 +358,10 @@ jobs:
           reached, named = [], []
           for interface, address, network in candidates:
               # The shipped lookup, for the reason `gateway_candidates` is the shipped one:
-              # what CI asks is what `validate` asks, and it carries the deadline a bare
-              # `gethostbyaddr` has none of -- a resolver that never answers fails this step
-              # rather than hanging the job until its own timeout.
-              name = _reverse_lookup(address)
+              # what CI asks is what `validate` asks. Since #260 it is a PTR query sent to
+              # `127.0.0.11:53` by the check itself, under the socket's own deadline, so a
+              # resolver that never answers fails this step rather than hanging the job.
+              name = _embedded_ptr(address)
               try:
                   with socket.create_connection((address, port), timeout=5):
                       answered = True
