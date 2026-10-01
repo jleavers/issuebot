@@ -1,9 +1,11 @@
 """Prompt rendering: Jinja2 with strict undefined variables, plus the continuation prompt."""
 
 import html
+import itertools
 import re
 import shlex
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -525,9 +527,9 @@ def _filter_applies(program: str, accepted: tuple[str, ...]) -> bool:
     """Whether one of the ``accepted`` filters *applies* to every record ``program`` can emit:
     it is the program's first stage, after an optional ``.[]``, matched whole, and every stage
     after it is a projection. More than one filter may be accepted because more than one
-    barrier can be the right one for a render: the conjunctive filter, and the association half
-    alone on an admin render (#252), which ``tests/test_workflow_default.py`` checks that
-    render against. Every caller here passes one.
+    barrier can be the right one for a render: the conjunctive filter, and, on the render of an
+    admin account, the association half alone beside it (#252), since that render drops the
+    own-account exclusion by design.
 
     Carrying a filter is not applying one, because a stage after it decides whether it held:
     ``select`` emits nothing for a record it drops, and jq's ``//`` yields its right-hand side
@@ -588,7 +590,7 @@ def _is_workpad_read(tokens: list[str], workpad_id: int | None = None) -> bool:
 
 
 def unfiltered_comment_reads(
-    rendered: str, login: str, *, workpad_id: int | None = None
+    rendered: str, login: str, *, workpad_id: int | None = None, admin: bool = False
 ) -> list[str]:
     """Every ``gh`` command in a rendered prompt that reads ``/comments`` or ``/reviews``
     without the one conjunctive filter, or that uses ``-c``, ``--comments`` or ``--json`` with
@@ -615,21 +617,42 @@ def unfiltered_comment_reads(
     .body``, #77, or with ``workpad_id`` the rendered id itself and no other): neither sweeps a
     thread.
 
+    ``admin`` scans the render of an *admin* account, where the association half alone is
+    required (#252). On an admin's own token the account is the maintainer, so excluding its
+    login would leave a rework none of the feedback it is answering, and the shipped programs
+    drop that half in ``{% if not admin %}``; requiring it here would flag the shipped prompt
+    rather than an operator's fault. What is still required is the association, which is the
+    half that keeps a stranger's text out, and either whole filter satisfies it: the one that
+    branch renders, ``select((.author_association | IN(...)))``, or the conjunctive one, since
+    an admin prompt that keeps the exclusion anyway is no worse. Both sit under the position
+    rule above, as a whole first stage rather than a string found anywhere in the program, so
+    the sentences above hold on an admin render too -- ``select((...) or .user.login ==
+    "<login>")`` carries the association and is still a gap, because a filter that admits
+    anyone is not the barrier however it opens, and so is either whole filter followed by
+    ``// .body``.
+
     This is a lint over the prompt's ``gh`` commands (backticked spans and fenced lines), not a
-    guarantee, and the new rule does not make it one. Prose that tells the agent to fetch
+    guarantee, and the position rule does not make it one. Prose that tells the agent to fetch
     comments some other way is still beyond it; so is what a record the filter *let through*
     carries, since the rule is about which records a program can emit and not about which of
     their fields it prints; and a projection is recognised by its shape rather than parsed, so
     the two forms above are the whole of what is accepted and a program needing more than them
     is reported rather than read further -- an array-wrapped or ``map``-ed read is a gap here
-    though its barrier holds, and keeping the read's own program plain is what clears it.
-    Chained commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and the
-    offending segment is what is reported.
-    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, so the
-    shipped prompt and a deployment's prompt are held to one rule.
+    though its barrier holds, and keeping the read's own program plain is what clears it. A span
+    is a command only if it opens ``gh``, so the shipped workflow's ``Quarantined`` fetch,
+    written as the ``--jq`` program to substitute into the four calls above it, is outside this
+    entirely. Chained commands (``;``, ``&&``, ``||``, ``|``) are scanned segment by segment, and
+    the offending segment is what is reported.
+    ``tests/test_workflow_default.py`` and ``validate``'s ``prompt`` check both use it, over the
+    one product ``render_variants`` spells, so the shipped prompt and a deployment's prompt are
+    held to one rule.
     """
     associations = ",".join(f'"{name}"' for name in MAINTAINER_ASSOCIATIONS)
-    accepted = (f'select((.author_association | IN({associations})) and .user.login != "{login}")',)
+    # The open `select((...))` half, one paren short so both whole filters can close it.
+    half = f"select((.author_association | IN({associations}))"
+    conjunctive = f'{half} and .user.login != "{login}")'
+    association_only = f"{half})"
+    accepted = (association_only, conjunctive) if admin else (conjunctive,)
     gaps: list[str] = []
     for command in _gh_commands(rendered):
         segments = _segments(command)
@@ -806,3 +829,102 @@ class PromptRenderer:
         if problem is not None:
             raise AgentError("prompt_error", f"template {problem} (a filter cut a tag?)")
         return rendered
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PromptVariant:
+    """One point of the product ``render_variants`` renders, as the axes rather than as samples.
+
+    The fields are booleans and small integers, not an ``Issue`` or a ``Comment``: the product
+    belongs here, where both callers can share it, while the sample objects a render needs
+    belong to the caller, whose own fixtures they are. ``linked_pr`` and ``workpad`` therefore
+    say *whether* the variant has one, and the caller's ``context_factory`` decides which.
+
+    ``continuation`` is the one variant that is not a point of the product: the continuation
+    prompt is issuebot's own ``CONTINUATION_TEMPLATE``, not a branch of the operator's body, so
+    it is rendered once, at the state a continuation is actually reached in -- a later turn, on
+    an issue that has a pull request and a workpad.
+    """
+
+    linked_pr: bool = False
+    rework: bool = False
+    attempt: int = 1
+    workpad: bool = False
+    self_review: bool = False
+    # Whether the account administers the repository. The workflow drops the own-account
+    # exclusion when it does (``{% if not admin %}``), so a read an operator puts inside
+    # ``{% if admin %}`` is only ever rendered by this half of the axis (#252).
+    admin: bool = False
+    turn_number: int = 1
+    continuation: bool = False
+
+
+DISPATCH_VARIANT = PromptVariant()
+"""The state an issue is dispatched in: a first attempt, no pull request, no workpad yet.
+
+One point of the product below, and what every field of ``PromptVariant`` defaults to, so a
+render of this variant alone is the one render the check used to make before #252.
+"""
+
+
+PROMPT_VARIANT_AXES: tuple[tuple[str, tuple[bool | int, ...]], ...] = (
+    ("linked_pr", (False, True)),
+    ("rework", (False, True)),
+    ("attempt", (1, 2)),
+    ("workpad", (False, True)),
+    ("self_review", (False, True)),
+    ("admin", (False, True)),
+)
+"""The branches a prompt template can take, each with the values a render must cover.
+
+Adding one here adds it to every caller of ``render_variants`` at once, which is the point
+(#252): while ``validate`` and ``tests/test_workflow_default.py`` spelled the product each for
+themselves, a new axis could reach the test alone, and a comment read hidden under the new
+branch would then pass ``validate`` in silence.
+"""
+
+CONTINUATION_VARIANT = PromptVariant(linked_pr=True, workpad=True, turn_number=3, continuation=True)
+"""The continuation render, appended to the product. ``admin`` does not matter to it: the
+template it renders is issuebot's own and takes no branch on the account's role."""
+
+
+def prompt_variants() -> tuple[PromptVariant, ...]:
+    """Every variant a prompt must render: the product of ``PROMPT_VARIANT_AXES``, then the
+    continuation."""
+    names = tuple(name for name, _ in PROMPT_VARIANT_AXES)
+    body = tuple(
+        PromptVariant(**dict(zip(names, values, strict=True)))  # type: ignore[arg-type]
+        for values in itertools.product(*(values for _, values in PROMPT_VARIANT_AXES))
+    )
+    return (*body, CONTINUATION_VARIANT)
+
+
+def render_variants(
+    renderer: PromptRenderer,
+    context_factory: Callable[[PromptVariant], PromptContext],
+) -> list[tuple[PromptVariant, str]]:
+    """Render ``renderer`` once per variant, pairing each render with the variant that made it.
+
+    The one spelling of the product (#252). ``validate``'s ``prompt`` check and
+    ``tests/test_workflow_default.py`` both call this, so the deployment's prompt is scanned
+    over exactly the variants the shipped prompt is, and an axis added to
+    ``PROMPT_VARIANT_AXES`` reaches both without either being edited -- where before each
+    spelled its own ``itertools.product`` and only the test would have gained it.
+
+    ``context_factory`` turns a variant into a context with the caller's own samples; every
+    render is the caller's to scan, and the variant travels with it because what the scan
+    requires depends on it: an admin render carries no own-account exclusion, so it is scanned
+    for the association half alone (``unfiltered_comment_reads(..., admin=True)``).
+
+    An ``AgentError`` from any variant propagates: a template that fails in one branch alone is
+    the fault this is here to find.
+    """
+    return [
+        (
+            variant,
+            renderer.render_continuation(context_factory(variant))
+            if variant.continuation
+            else renderer.render(context_factory(variant)),
+        )
+        for variant in prompt_variants()
+    ]

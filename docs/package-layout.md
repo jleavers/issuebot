@@ -684,32 +684,50 @@ session in `session.py` before the turn loop (a failure is `github_error`) and r
 like `repo`, so the workflow's comment reads can leave that account's own text out
 (GHSA-f3fm-r55f-2vgm); `admin` is `repo_info().admin` read beside it (a failure is likewise
 `github_error`), and when true the workflow drops that exclusion, as approval does for labels
-(`own_labels_approve`), because on a maintainer's own token the account is the maintainer. `unfiltered_comment_reads(rendered, login, workpad_id=)` is the lint
-over a rendered prompt's `gh` commands -- backticked spans and fenced lines, a chain split at
-`;`, `&&`, `||` and `|` and scanned segment by segment -- that reports each read of
-`/comments` or `/reviews` whose last `--jq` program does not *apply* the association filter
-*and* that login's exclusion, and each `--comments` or `--json comments`/`reviews`, exempting
-`gh api` writes and the workpad's one read by id. Applying it is a question of where it sits
-rather than whether it is present (#258): the filter must be the program's first stage, after
-an optional `.[]`, matched whole, and every stage after it a projection -- a dotted path or an
-object construction. Containment was not application, because `select` emits nothing for a
-record it drops and jq's `//` yields its right-hand side when its left emits nothing, so
+(`own_labels_approve`), because on a maintainer's own token the account is the maintainer.
+`unfiltered_comment_reads(rendered, login, workpad_id=, admin=)` is the lint over a rendered
+prompt's `gh` commands -- backticked spans and fenced lines, a chain split at `;`, `&&`, `||`
+and `|` and scanned segment by segment -- that reports each read of `/comments` or `/reviews`
+whose last `--jq` program does not *apply* the association filter *and* that login's
+exclusion, and each `--comments` or `--json comments`/`reviews`, exempting `gh api` writes and
+the workpad's one read by id. Applying it is a question of where it sits rather than whether it
+is present (#258): the filter must be the program's first stage, after an optional `.[]`,
+matched whole, and every stage after it a projection -- a dotted path or an object
+construction. Containment was not application, because `select` emits nothing for a record it
+drops and jq's `//` yields its right-hand side when its left emits nothing, so
 `.[] | <the whole filter> // .body` prints the bodies of exactly the authors the filter exists
 to drop; `tests/test_workflow_jq.py` runs that program under a real jq rather than reading the
-semantics off the manual. Still a lint and not a guarantee, since prose can ask for
-a fetch it cannot see and the rule is about which records a program can emit rather than which
-of their fields it prints, and shared by `tests/test_workflow_default.py` and `validate` so the
-shipped prompt and a deployment's are held to one rule.
-`repo_instructions` (#107, spec `2026-09-14-repository-instructions-design.md`) is the
-clone's `CLAUDE.md` and `AGENTS.md` as `instructions.py` read them after `before_run`, once
-per run (`REPOSITORY_INSTRUCTION_FILES`, a declared list; through `Boundary.read` as the
-`instructions` artefact of `boundary.py`, the session among its writers, since under
-`agent.run_as` the read is the worker's and the clone the session's, so a link, a FIFO or a
-file of anyone else's is refused rather than read; cut at `INSTRUCTION_FILE_LIMIT`, the
-artefact's 128 KiB; never a failure), each a `GitHubText` whose source names
-the file and the repository and whose author is "whoever can merge to" it. That is the
-declared half of the decision; the other half is that `claude.setting_sources` is always
-passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
+semantics off the manual. Still a lint and not a guarantee, since prose can ask for a fetch it
+cannot see and the rule is about which records a program can emit rather than which of their
+fields it prints, and shared by `tests/test_workflow_default.py` and `validate` so the shipped
+prompt and a deployment's are held to one rule. `admin=True` requires the association half alone (#252):
+that is the render where the workflow drops the exclusion, so requiring it would flag the
+shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
+that branch renders or the conjunctive one, an admin prompt that keeps the exclusion being no
+worse -- and in the position above rather than anywhere in the program, so a negated
+`IN(...) | not`, a disjunctive `(...) or .user.login == "<login>"` and a trailing `// .body`
+are gaps on an admin render as much as on the other.
+`PromptVariant`, `PROMPT_VARIANT_AXES`, `prompt_variants()` and `render_variants(renderer,
+context_factory)` are the product both of those scan over, spelled once (#252): the axes are
+a declared table -- a linked PR or none, rework, attempt, workpad, self-review and admin, so
+sixty-four renders -- plus `CONTINUATION_VARIANT`, the one continuation render, which is
+issuebot's own template rather than a branch of an operator's body. A variant carries
+booleans and not samples, and the caller's `context_factory` maps them onto its own `Issue`
+and `Comment`, so `validate` and the shipped test share the axes while keeping their
+fixtures; `DISPATCH_VARIANT` is the point of the product an issue is dispatched at. The
+sharing is the guard, not a convenience: while each caller spelled its own product, a new
+variable a template can branch on could reach the test alone, and a comment read hidden under
+the new branch would pass both it and `validate` -- which is how the admin branch went
+unrendered until #252. `repo_instructions` (#107, spec
+`2026-09-14-repository-instructions-design.md`) is the clone's `CLAUDE.md` and `AGENTS.md` as
+`instructions.py` read them after `before_run`, once per run (`REPOSITORY_INSTRUCTION_FILES`,
+a declared list; through `Boundary.read` as the `instructions` artefact of `boundary.py`, the
+session among its writers, since under `agent.run_as` the read is the worker's and the clone
+the session's, so a link, a FIFO or a file of anyone else's is refused rather than read; cut
+at `INSTRUCTION_FILE_LIMIT`, the artefact's 128 KiB; never a failure), each a `GitHubText`
+whose source names the file and the repository and whose author is "whoever can merge to" it.
+That is the declared half of the decision; the other half is that `claude.setting_sources` is
+always passed and defaults to `[user]`, so `claude -p` never loads the clone's `CLAUDE.md`,
 `.claude/` (settings, hooks, skills) or `.mcp.json` as configuration -- measured: under
 claude's default every one of them was in force, a `SessionStart` hook and an MCP server
 included -- unless the operator names `project` or `local`, which
@@ -1660,13 +1678,18 @@ warns on an incident or on a page that will not answer but can never fail (advis
 human is running this and there is no dispatch to hold), a
 `notifications.slack` check that warns when `SLACK_WEBHOOK_URL` is unset, requires `https`,
 and with `--slack-probe` posts one test message, and a `prompt` check that renders the prompt
-in force over every branch a template takes -- a linked PR or none, rework, attempt, workpad,
-self-review, thirty-two renders and the continuation -- and scans each with
+in force over every branch a template takes -- `render_variants` (`issuebot.agent`) from a
+`_sample_context` per variant, so a linked PR or none, rework, attempt, workpad, self-review
+and admin, sixty-four renders and the continuation -- and scans each with
 `unfiltered_comment_reads` (`issuebot.agent`), warning with the first comment read that
-does not apply the maintainer filter and the own-account exclusion, spells a literal login
+does not apply the maintainer filter or the own-account exclusion, spells a literal login
 where `{{ login }}` belongs, or carries the filter somewhere other than as the `--jq`
 program's first stage and so drops a record and re-emits it (#258), since a replaced prompt is
-the operator's but has no comment barrier without them (#250)),
+the operator's but has no comment barrier without them (#250); the product is the helper's
+rather than this module's so that the shipped test cannot gain an axis this check does not, and
+the admin renders are scanned for the association half alone -- applied in that same first
+stage -- since the workflow drops the exclusion there and a read inside `{% if admin %}` would
+otherwise go unscanned (#252)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
