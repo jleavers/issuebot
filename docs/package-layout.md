@@ -688,16 +688,25 @@ like `repo`, so the workflow's comment reads can leave that account's own text o
 `unfiltered_comment_reads(rendered, login, workpad_id=, admin=)` is the lint over a rendered
 prompt's `gh` commands -- backticked spans and fenced lines, a chain split at `;`, `&&`, `||`
 and `|` and scanned segment by segment -- that reports each read of `/comments` or `/reviews`
-whose last `--jq` program lacks the association filter *and* that login's exclusion, and each
-`--comments` or `--json comments`/`reviews`, exempting `gh api` writes and the workpad's one
-read by id; a lint and not a guarantee, since prose can ask for a fetch it cannot see, and
-shared by `tests/test_workflow_default.py` and `validate` so the shipped prompt and a
-deployment's are held to one rule. `admin=True` requires the association half alone (#252):
-that is the render where the workflow drops the exclusion, so requiring it would flag the
-shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
+whose last `--jq` program does not *apply* the association filter *and* that login's
+exclusion, and each `--comments` or `--json comments`/`reviews`, exempting `gh api` writes and
+the workpad's one read by id. Applying it is a question of where it sits rather than whether it
+is present (#258): the filter must be the program's first stage, after an optional `.[]`,
+matched whole, and every stage after it a projection -- a dotted path or an object
+construction. Containment was not application, because `select` emits nothing for a record it
+drops and jq's `//` yields its right-hand side when its left emits nothing, so
+`.[] | <the whole filter> // .body` prints the bodies of exactly the authors the filter exists
+to drop; `tests/test_workflow_jq.py` runs that program under a real jq rather than reading the
+semantics off the manual. Still a lint and not a guarantee, since prose can ask for a fetch it
+cannot see and the rule is about which records a program can emit rather than which of their
+fields it prints, and shared by `tests/test_workflow_default.py` and `validate` so the shipped
+prompt and a deployment's are held to one rule. `admin=True` requires the association half
+alone (#252): that is the render where the workflow drops the exclusion, so requiring it would
+flag the shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
 that branch renders or the conjunctive one, an admin prompt that keeps the exclusion being no
-worse -- and whole rather than as a prefix, so a negated `IN(...) | not` and a disjunctive
-`(...) or .user.login == "<login>"` are gaps on an admin render as much as on the other.
+worse -- and in the position above rather than anywhere in the program, so a negated
+`IN(...) | not`, a disjunctive `(...) or .user.login == "<login>"` and a trailing `// .body`
+are gaps on an admin render as much as on the other.
 `PromptVariant`, `PROMPT_VARIANT_AXES`, `prompt_variants()` and `render_variants(renderer,
 context_factory)` are the product both of those scan over, spelled once (#252): the axes are
 a declared table -- a linked PR or none, rework, attempt, workpad, self-review and admin, so
@@ -1673,12 +1682,14 @@ in force over every branch a template takes -- `render_variants` (`issuebot.agen
 `_sample_context` per variant, so a linked PR or none, rework, attempt, workpad, self-review
 and admin, sixty-four renders and the continuation -- and scans each with
 `unfiltered_comment_reads` (`issuebot.agent`), warning with the first comment read that
-lacks the maintainer filter or the own-account exclusion, or spells a literal login where
-`{{ login }}` belongs, since a replaced prompt is the operator's but has no comment barrier
-without them (#250); the product is the helper's rather than this module's so that the shipped
-test cannot gain an axis this check does not, and the admin renders are scanned for the
-association half alone, since the workflow drops the exclusion there and a read inside
-`{% if admin %}` would otherwise go unscanned (#252)),
+does not apply the maintainer filter or the own-account exclusion, spells a literal login
+where `{{ login }}` belongs, or carries the filter somewhere other than as the `--jq`
+program's first stage, and so could drop a record and re-emit it (#258), since a replaced prompt is
+the operator's but has no comment barrier without them (#250); the product is the helper's
+rather than this module's so that the shipped test cannot gain an axis this check does not, and
+the admin renders are scanned for the association half alone -- applied in that same first
+stage -- since the workflow drops the exclusion there and a read inside `{% if admin %}` would
+otherwise go unscanned (#252)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,

@@ -740,11 +740,12 @@ def test_validate_warns_when_the_prompt_in_force_reads_comments_unfiltered(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] prompt: renders, but 2 comment reads lack the maintainer filter or the "
-        "own-account exclusion, the first `gh pr view 1 --comments`: a prompt that replaces "
+        "[WARN] prompt: renders, but 2 comment reads do not apply the maintainer filter or "
+        "the own-account exclusion, the first `gh pr view 1 --comments`: a prompt that replaces "
         "the shipped one has no comment barrier unless it carries Step 6's commands "
         '(docs/security-model.md, "The text a session acts on")'
-        ", and the own-account exclusion must name `{{ login }}` rather than a literal login"
+        ", the own-account exclusion must name `{{ login }}` rather than a literal login, and "
+        "the filter must be the `--jq` program's first stage with only a projection after it"
     ) in out
 
 
@@ -804,8 +805,8 @@ def test_validate_warns_about_a_read_inside_the_rework_branch(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
-        "own-account exclusion, the first `gh pr view 1 --comments`: " in out
+        "[WARN] prompt: renders, but 1 comment read does not apply the maintainer filter or "
+        "the own-account exclusion, the first `gh pr view 1 --comments`: " in out
     )
 
 
@@ -826,8 +827,8 @@ def test_validate_warns_about_a_read_inside_the_linked_pr_branch(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
-        "own-account exclusion, the first `gh pr view 2 --comments`: " in out
+        "[WARN] prompt: renders, but 1 comment read does not apply the maintainer filter or "
+        "the own-account exclusion, the first `gh pr view 2 --comments`: " in out
     )
 
 
@@ -849,8 +850,8 @@ def test_validate_warns_about_a_read_inside_the_admin_branch(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
-        "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq "
+        "[WARN] prompt: renders, but 1 comment read does not apply the maintainer filter or "
+        "the own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq "
         "'.[].body'`: " in out
     )
 
@@ -885,7 +886,7 @@ def test_validate_accepts_the_association_half_alone_in_the_admin_branch(
         f"`gh api repos/o/r/issues/1/comments --jq '.[] | {association}) | .body'`\n",
     )
     assert main(["validate", "--workflow", str(unguarded)]) == 0
-    assert "[WARN] prompt: renders, but 1 comment read lacks" in capsys.readouterr().out
+    assert "[WARN] prompt: renders, but 1 comment read does not apply" in capsys.readouterr().out
 
 
 # What each axis of the shared product looks like once `_sample_context` has turned it into a
@@ -946,9 +947,10 @@ def test_validate_warns_about_a_literal_login_in_the_exclusion(
     monkeypatch.setenv("GH_TOKEN", "t")
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "[WARN] prompt: renders, but 1 comment read lacks" in out
+    assert "[WARN] prompt: renders, but 1 comment read does not apply" in out
     assert (
-        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
+        ", the own-account exclusion must name `{{ login }}` rather than a literal login, and "
+        "the filter must be the `--jq` program's first stage with only a projection after it" in out
     )
 
 
@@ -967,12 +969,14 @@ def test_validate_warns_in_the_singular_about_one_unfiltered_comment_read(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[WARN] prompt: renders, but 1 comment read lacks the maintainer filter or the "
-        "own-account exclusion, the first `gh api repos/o/r/issues/1/comments --jq '.[].body'`: "
+        "[WARN] prompt: renders, but 1 comment read does not apply the maintainer filter or "
+        "the own-account exclusion, the first "
+        "`gh api repos/o/r/issues/1/comments --jq '.[].body'`: "
         "a prompt that replaces the shipped one has no comment barrier unless it carries "
         "Step 6's commands "
         '(docs/security-model.md, "The text a session acts on")'
-        ", and the own-account exclusion must name `{{ login }}` rather than a literal login" in out
+        ", the own-account exclusion must name `{{ login }}` rather than a literal login, and "
+        "the filter must be the `--jq` program's first stage with only a projection after it" in out
     )
 
 

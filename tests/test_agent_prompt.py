@@ -840,3 +840,16 @@ def test_the_scan_on_an_admin_render_requires_the_association_half_alone() -> No
         )
         == []
     )
+    # #258 holds over both accepted filters, not just the conjunctive one: the association half
+    # has to be *applied* on an admin render too -- the whole first stage after `.[]`, with only
+    # a projection after it. A trailing alternative is the shape that motivated the rule, and it
+    # leaks a stranger's body on an admin render exactly as it does on the other.
+    for program in (
+        f"'.[] | {association}) // .body'",
+        f"'.[] | {association}) | select(.body) // .body'",
+        f"'.[] | {association}) | .body | select(true)'",
+        f"'.[] | .body | {association})'",
+        f"'[.[] | {association})]'",
+    ):
+        assert unfiltered_comment_reads(f"`{read} {program}`", "issuebot", admin=True) != []
+        assert unfiltered_comment_reads(f"`{read} {program}`", "issuebot") != []

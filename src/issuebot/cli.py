@@ -1355,7 +1355,8 @@ SAMPLE_LOGIN = "sample-bot"
 
 
 def _prompt_check(workflow: Workflow) -> Check:
-    """The prompt in force renders, and its ``gh`` comment reads carry the barrier (#250).
+    """The prompt in force renders, and its ``gh`` comment reads *apply* the barrier (#250,
+    #258: carrying it is not applying it).
 
     An overlay that replaces the prompt keeps whatever Step 6 it had, so the shipped prompt
     passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
@@ -1390,8 +1391,16 @@ def _prompt_check(workflow: Workflow) -> Check:
     prose the scanner cannot read, and ``validate`` cannot tell the two apart. A command
     carrying both halves with a literal login is flagged too, and is a real fault rather than a
     false positive -- the account changes and the exclusion stops matching -- which is why the
-    text says the exclusion must name ``{{ login }}``. What it can do is say which command it
-    found, how many, and name the document that says what the barrier is.
+    text says the exclusion must name ``{{ login }}``. One that carries them somewhere other
+    than as the program's first stage, or continues past them, is flagged on a different
+    footing (#258): a stage after the filter can undo it -- ``// .body`` prints the bodies of
+    exactly the records it dropped -- and the scan cannot tell such a stage from a harmless one,
+    so it reports both and the text says where the filter must sit. On an admin render the half
+    that has to sit there is the association alone, for the reason above. A program that wraps a
+    filtered read (``[.[] | select(...)]``, ``map(select(...))``) is therefore warned about
+    while its barrier holds, and keeping the read's own program plain is what clears it. What
+    the check can do is say which command it found, how many, and name the document that says
+    what the barrier is.
     """
     body = workflow.prompt_template
     if not body:
@@ -1413,15 +1422,16 @@ def _prompt_check(workflow: Workflow) -> Check:
         )
     )
     if gaps:
-        noun = "comment read lacks" if len(gaps) == 1 else "comment reads lack"
+        noun = "comment read does not" if len(gaps) == 1 else "comment reads do not"
         return Check(
             "prompt",
             "warn",
-            f"renders, but {len(gaps)} {noun} the maintainer filter or the own-account "
+            f"renders, but {len(gaps)} {noun} apply the maintainer filter or the own-account "
             f"exclusion, the first `{gaps[0]}`: a prompt that replaces the shipped one has no "
             "comment barrier unless it carries Step 6's commands "
             '(docs/security-model.md, "The text a session acts on")'
-            ", and the own-account exclusion must name `{{ login }}` rather than a literal login",
+            ", the own-account exclusion must name `{{ login }}` rather than a literal login, and "
+            "the filter must be the `--jq` program's first stage with only a projection after it",
         )
     return Check("prompt", "ok", f"{len(body)} characters, renders")
 

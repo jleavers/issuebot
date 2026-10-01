@@ -12,6 +12,7 @@ from issuebot.agent.prompt import (
     PromptContext,
     PromptRenderer,
     PromptVariant,
+    _jq_stages,
     prompt_variants,
     render_variants,
     unfiltered_comment_reads,
@@ -1013,6 +1014,78 @@ def test_the_scan_holds_against_attached_q_unclosed_walks_and_later_flags() -> N
     ]
 
 
+def test_the_filter_must_be_applied_and_not_merely_carried() -> None:
+    """#258: containment was not application. `select` emits nothing for a record it drops and
+    jq's `//` yields its right-hand side when its left emits nothing, so a program carrying the
+    whole filter can still print the bodies it dropped. Confirmed against `gh`'s own jq, which
+    is what runs these programs:
+
+        $ gh api repos/jleavers/issuebot --jq '[{author_association:"NONE",
+          user:{login:"stranger"},body:"STRANGER BODY LEAKED"}] | .[] | <the filter> // .body'
+        STRANGER BODY LEAKED
+
+    So the rule is where the filter sits: first stage after an optional `.[]`, matched whole,
+    with a projection and nothing else after it."""
+
+    def read(program: str) -> str:
+        return f"`gh api repos/o/r/issues/1/comments --jq '{program}'`"
+
+    def gaps(program: str) -> list[str]:
+        return unfiltered_comment_reads(read(program), LOGIN)
+
+    # Applied: the shipped shape, its two other projections, a bare path, and no projection at
+    # all -- with or without the `.[]` the filter would otherwise test the array through.
+    assert gaps(f".[] | {FILTER} | {{id, author: .user.login, url: .html_url, body}}") == []
+    assert (
+        gaps(f".[] | {FILTER} | {{id, association: .author_association, path, line, body}}") == []
+    )
+    assert gaps(f".[] | {FILTER} | {{id, state, body}}") == []
+    assert gaps(f".[] | {FILTER} | .body") == []
+    assert gaps(f".[] | {FILTER} | {{id}} | .id") == []
+    assert gaps(f".[]? | {FILTER}") == []
+    assert gaps(FILTER) == []
+    # Carried but not applied: the trailing alternative the issue names, a second `select`, a
+    # walk, a comma, an unrestricted projection, and the filter behind a leak of its own input.
+    leaky = f".[] | {FILTER} // .body"
+    assert gaps(leaky) == [f"gh api repos/o/r/issues/1/comments --jq '{leaky}'"]
+    assert gaps(f".[] | {FILTER} | (select(false) // .body)") != []
+    assert gaps(f".[] | {FILTER} | .. | strings") != []
+    assert gaps(f".[] | {FILTER} | .body, .user.login") != []
+    assert gaps(f".[] | {FILTER} | {{body: (.body // .user.login)}}") != []
+    assert gaps(f".[] | (.body, {FILTER})") != []
+    assert gaps(f".[] | {FILTER} // .body | {{id, body}}") != []
+    # The filter must be the whole stage, not a prefix or a suffix of one.
+    assert gaps(f".[] | {FILTER} and false") != []
+    assert gaps(f".[] | [{FILTER}]") != []
+    assert gaps(f'.[] | {FILTER} | {{body: "a|b"}}') != []
+    # A `|` inside a string, escaped quote and all, does not split a stage: it is judged whole.
+    assert _jq_stages(r'.[] | select(.body == "a\"|b") | .x') == [
+        ".[]",
+        r'select(.body == "a\"|b")',
+        ".x",
+    ]
+    assert _jq_stages('.[] | "unclosed') is None
+    assert _jq_stages(".[] | (.body") is None
+    assert _jq_stages(".[] | .body)") is None
+    # A projection's values are paths, so a bare word cannot sit where jq resolves a builtin:
+    # `env` dumps the environment and `recurse` emits many outputs for one record.
+    assert gaps(f".[] | {FILTER} | {{a: env}}") != []
+    assert gaps(f".[] | {FILTER} | {{a: recurse}}") != []
+    assert gaps(f".[] | {FILTER} | {{a: .body, b: env}}") != []
+    assert gaps(f'.[] | {FILTER} | {{"quoted key": .body}}') == []
+    # Brackets or quotes that do not balance fail closed.
+    assert gaps(f".[] | {FILTER} | (.body") != []
+    assert gaps(f".[] | {FILTER} | .body)") != []
+    assert gaps(f'.[] | {FILTER} | "unclosed') != []
+    # An exemption is still the command's shape: a write and the workpad's read by id are not
+    # reads of a thread, whatever their program says.
+    write = f"gh api -X POST repos/o/r/issues/1/comments -f body=hi --jq '.[] | {FILTER} // .body'"
+    assert unfiltered_comment_reads(f"`{write}`", LOGIN) == []
+    assert (
+        unfiltered_comment_reads("`gh api repos/o/r/issues/comments/<id> --jq .body`", LOGIN) == []
+    )
+
+
 def test_on_an_admin_account_the_own_login_exclusion_is_off(
     make_issue: Callable[..., Issue],
 ) -> None:
@@ -1028,7 +1101,10 @@ def test_on_an_admin_account_the_own_login_exclusion_is_off(
     assert "is also a repository admin, so its comments and reviews are read like any" in text
     assert "agent output, not a request, whatever their association" not in text
     # The association half is still there, and it is all the scan requires of an admin render
-    # -- which `validate` renders too since #252. Under the non-admin rule the same text is a
-    # gap, and that difference is the whole reason the scan takes the flag.
+    # -- which `validate` renders too since #252. Under #258's position rule that clean verdict
+    # says more than it did: each of these four reads *applies* the association half -- a whole
+    # first stage after `.[]`, with a projection after it -- rather than merely carrying it
+    # somewhere in the program. Under the non-admin rule the same text is a gap, and that
+    # difference is the whole reason the scan takes the flag.
     assert unfiltered_comment_reads(text, "issuebot-agent-1", admin=True) == []
-    assert unfiltered_comment_reads(text, "issuebot-agent-1") != []
+    assert len(unfiltered_comment_reads(text, "issuebot-agent-1")) == 4
