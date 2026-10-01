@@ -700,9 +700,9 @@ to drop; `tests/test_workflow_jq.py` runs that program under a real jq rather th
 semantics off the manual. Still a lint and not a guarantee, since prose can ask for a fetch it
 cannot see and the rule is about which records a program can emit rather than which of their
 fields it prints, and shared by `tests/test_workflow_default.py` and `validate` so the shipped
-prompt and a deployment's are held to one rule. `admin=True` requires the association half alone (#252):
-that is the render where the workflow drops the exclusion, so requiring it would flag the
-shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
+prompt and a deployment's are held to one rule. `admin=True` requires the association half
+alone (#252): that is the render where the workflow drops the exclusion, so requiring it would
+flag the shipped prompt rather than an operator's fault. Either whole filter satisfies it -- the one
 that branch renders or the conjunctive one, an admin prompt that keeps the exclusion being no
 worse -- and in the position above rather than anywhere in the program, so a negated
 `IN(...) | not`, a disjunctive `(...) or .user.login == "<login>"` and a trailing `// .body`
@@ -1684,7 +1684,7 @@ and admin, sixty-four renders and the continuation -- and scans each with
 `unfiltered_comment_reads` (`issuebot.agent`), warning with the first comment read that
 does not apply the maintainer filter or the own-account exclusion, spells a literal login
 where `{{ login }}` belongs, or carries the filter somewhere other than as the `--jq`
-program's first stage and so drops a record and re-emits it (#258), since a replaced prompt is
+program's first stage, and so could drop a record and re-emit it (#258), since a replaced prompt is
 the operator's but has no comment barrier without them (#250); the product is the helper's
 rather than this module's so that the shipped test cannot gain an axis this check does not, and
 the admin renders are scanned for the association half alone -- applied in that same first

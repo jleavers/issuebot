@@ -1107,4 +1107,4 @@ def test_on_an_admin_account_the_own_login_exclusion_is_off(
     # somewhere in the program. Under the non-admin rule the same text is a gap, and that
     # difference is the whole reason the scan takes the flag.
     assert unfiltered_comment_reads(text, "issuebot-agent-1", admin=True) == []
-    assert unfiltered_comment_reads(text, "issuebot-agent-1") != []
+    assert len(unfiltered_comment_reads(text, "issuebot-agent-1")) == 4

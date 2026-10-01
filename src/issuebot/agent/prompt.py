@@ -325,7 +325,9 @@ _UNFILTERED_FIELDS = frozenset({"comments", "reviews", "latestReviews"})
 _WRITE_METHODS = frozenset({"POST", "PATCH", "DELETE"})
 _WORKPAD_READ = re.compile(r"repos/[^/\s]+/[^/\s]+/issues/comments/<id>")
 # What a comment read's ``--jq`` program may open with before the filter: jq's array
-# iteration, or nothing, in which case the filter tests the array itself and emits nothing.
+# iteration, or nothing, in which case the filter reads `.author_association` off the array
+# itself, which jq refuses ("Cannot index array with string"), so the read errors and emits
+# nothing. Either way no record reaches the caller unfiltered, which is the question here.
 _JQ_ITERATION = frozenset({".[]", ".[]?"})
 # What may follow the filter: a projection of the record it let through, and nothing that could
 # emit another output. A dotted path, or an object construction of keys and dotted paths --
@@ -541,7 +543,9 @@ def _filter_applies(program: str, accepted: tuple[str, ...]) -> bool:
     stages = _jq_stages(program)
     if stages is None:
         return False
-    if stages and stages[0] in _JQ_ITERATION:
+    # Never empty: `_jq_stages` returns `[""]` for an empty program, and `""` is in neither
+    # `_JQ_ITERATION` nor `accepted`, so an absent program falls out of the second test.
+    if stages[0] in _JQ_ITERATION:
         stages = stages[1:]
     if not stages or stages[0] not in accepted:
         return False
@@ -593,8 +597,9 @@ def unfiltered_comment_reads(
     rendered: str, login: str, *, workpad_id: int | None = None, admin: bool = False
 ) -> list[str]:
     """Every ``gh`` command in a rendered prompt that reads ``/comments`` or ``/reviews``
-    without the one conjunctive filter, or that uses ``-c``, ``--comments`` or ``--json`` with
-    ``comments``, ``reviews`` or ``latestReviews``; ``[]`` when the prompt is clean.
+    without applying the filter that render requires, or that uses ``-c``, ``--comments`` or
+    ``--json`` with ``comments``, ``reviews`` or ``latestReviews``; ``[]`` when the prompt is
+    clean.
 
     The filter is ``select((.author_association | IN(<maintainer associations>)) and
     .user.login != "<login>")``. Both halves are needed: the association keeps strangers' text

@@ -235,7 +235,8 @@ The session's own account is the other half of that filter: every fetch also sel
 renders, since a dedicated bot is a
 collaborator and its own comments and reviews would otherwise come back to it, and to every
 session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
-comment read in the prompt in force lacks either half, which is what a prompt that replaces
+comment read in the prompt in force does not apply the half it needs, which is what a prompt
+that replaces
 the shipped one loses (#250). It warns as well when a read *carries* the half it needs without
 applying it: the filter has to be the `--jq` program's first stage, after an optional `.[]`,
 with only a projection after it, because a stage that follows a filter can undo it -- `select`

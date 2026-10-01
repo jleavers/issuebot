@@ -1355,7 +1355,8 @@ SAMPLE_LOGIN = "sample-bot"
 
 
 def _prompt_check(workflow: Workflow) -> Check:
-    """The prompt in force renders, and its ``gh`` comment reads carry the barrier (#250).
+    """The prompt in force renders, and its ``gh`` comment reads *apply* the barrier (#250,
+    #258: carrying it is not applying it).
 
     An overlay that replaces the prompt keeps whatever Step 6 it had, so the shipped prompt
     passing ``tests/test_workflow_default.py`` says nothing about the deployment's. The rendered
@@ -1396,11 +1397,10 @@ def _prompt_check(workflow: Workflow) -> Check:
     exactly the records it dropped -- and the scan cannot tell such a stage from a harmless one,
     so it reports both and the text says where the filter must sit. On an admin render the half
     that has to sit there is the association alone, for the reason above. A program that wraps a
-    filtered
-    read (``[.[] | select(...)]``, ``map(select(...))``) is therefore warned about while its
-    barrier holds, and keeping the read's own program plain is what clears it. What the check
-    can do is say which command it found, how many, and name the document that says what the
-    barrier is.
+    filtered read (``[.[] | select(...)]``, ``map(select(...))``) is therefore warned about
+    while its barrier holds, and keeping the read's own program plain is what clears it. What
+    the check can do is say which command it found, how many, and name the document that says
+    what the barrier is.
     """
     body = workflow.prompt_template
     if not body:
