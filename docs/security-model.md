@@ -236,7 +236,10 @@ renders, since a dedicated bot is a
 collaborator and its own comments and reviews would otherwise come back to it, and to every
 session after it, as requests (GHSA-f3fm-r55f-2vgm); `validate`'s `prompt` line warns when a
 comment read in the prompt in force lacks either half, which is what a prompt that replaces
-the shipped one loses (#250).
+the shipped one loses (#250). It renders every branch a prompt can take, the admin one
+included, and holds an admin render to the association half alone, since that is the render
+where the exclusion is off by design -- a read an operator hides inside `{% if admin %}` is
+scanned rather than skipped (#252).
 
 `author_association` is GitHub's own word for the author's *relationship* to the repository,
 not a permission check: `OWNER` is the repository's owner; `MEMBER` is a member of the owning

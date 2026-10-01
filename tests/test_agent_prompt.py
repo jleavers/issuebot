@@ -6,6 +6,7 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import fields as fields_of
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -18,16 +19,23 @@ from issuebot.agent.prompt import (
     _FORMAT_SET,
     _GAP,
     _LESS_THAN,
+    CONTINUATION_VARIANT,
+    DISPATCH_VARIANT,
     GITHUB_TEXT_TAG,
+    PROMPT_VARIANT_AXES,
     UNKNOWN_ASSOCIATION,
     UNKNOWN_AUTHOR,
     GitHubText,
     PromptContext,
     PromptRenderer,
+    PromptVariant,
     check_envelopes,
     instruction_variables,
     issue_variables,
+    prompt_variants,
+    render_variants,
     tag_skeleton,
+    unfiltered_comment_reads,
     workpad_variables,
 )
 from issuebot.config import GitHubLabels
@@ -689,3 +697,146 @@ def test_a_body_with_no_rendered_html_is_refused(make_issue: Callable[..., Issue
     issue = replace(make_issue(body="raw"), body_html=None)
     with pytest.raises(AgentError, match="has a body but no rendered bodyHTML"):
         issue_variables(issue)
+
+
+def variant_context(variant: PromptVariant, make_issue: Callable[..., Issue]) -> PromptContext:
+    """The axes as this file's own samples: what a caller of ``render_variants`` supplies."""
+    return context(
+        make_issue(linked_pr=PR) if variant.linked_pr else make_issue(),
+        rework=variant.rework,
+        attempt=variant.attempt,
+        workpad=WORKPAD if variant.workpad else None,
+        self_review=variant.self_review,
+        admin=variant.admin,
+        turn_number=variant.turn_number,
+    )
+
+
+def test_every_axis_of_the_product_is_a_field_and_every_branching_field_an_axis() -> None:
+    """#252: the axes are a declared table, so a field added to ``PromptVariant`` that nothing
+    varies -- or an axis naming a field that does not exist -- is a silently narrower product.
+
+    ``turn_number`` and ``continuation`` are deliberately not axes: they are the continuation
+    render, which is issuebot's own template rather than a branch of an operator's body.
+    """
+    fields = {field.name for field in fields_of(PromptVariant)}
+    axes = {name for name, _ in PROMPT_VARIANT_AXES}
+    assert axes <= fields
+    assert fields - axes == {"turn_number", "continuation"}
+    assert all(len(values) >= 2 for _, values in PROMPT_VARIANT_AXES)
+
+
+def test_the_product_is_every_combination_of_the_axes_plus_the_continuation() -> None:
+    variants = prompt_variants()
+    body = [variant for variant in variants if not variant.continuation]
+    expected = 1
+    for _, values in PROMPT_VARIANT_AXES:
+        expected *= len(values)
+    assert len(body) == expected == 64
+    assert len(set(body)) == len(body)
+    for name, values in PROMPT_VARIANT_AXES:
+        assert {getattr(variant, name) for variant in body} == set(values)
+    assert DISPATCH_VARIANT in body
+    # The continuation is one render, last, at the state a continuation is reached in.
+    assert [variant for variant in variants if variant.continuation] == [CONTINUATION_VARIANT]
+    assert variants[-1] == CONTINUATION_VARIANT
+    assert (CONTINUATION_VARIANT.linked_pr, CONTINUATION_VARIANT.workpad) == (True, True)
+    assert CONTINUATION_VARIANT.turn_number > 1
+
+
+def test_render_variants_renders_the_body_per_variant_and_the_continuation_once(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """The one spelling of the product (#252): ``validate`` and the shipped workflow test both
+    get their renders here, so an axis added above reaches the two of them together."""
+    renderer = PromptRenderer(
+        "rework={{ rework }} attempt={{ attempt }} admin={{ admin }} "
+        "self_review={{ self_review }} pr={{ issue.pr is not none }} "
+        "workpad={{ workpad is not none }}"
+    )
+    renders = render_variants(renderer, lambda variant: variant_context(variant, make_issue))
+
+    assert [variant for variant, _ in renders] == list(prompt_variants())
+    body = [(variant, text) for variant, text in renders if not variant.continuation]
+    for variant, text in body:
+        assert f"rework={variant.rework}" in text
+        assert f"attempt={variant.attempt}" in text
+        assert f"admin={variant.admin}" in text
+        assert f"self_review={variant.self_review}" in text
+        assert f"pr={variant.linked_pr}" in text
+        assert f"workpad={variant.workpad}" in text
+    # The continuation render is issuebot's own template, not the body above.
+    continuation = renders[-1][1]
+    assert continuation.startswith("Continuation guidance:")
+    assert "continuation turn 3 of 5" in continuation
+    # 64 renders of the body differ in six axes, so the distinct texts are one per variant.
+    assert len({text for _, text in body}) == len(body) == 64
+
+
+def test_render_variants_propagates_a_template_error_from_any_single_branch(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """A read that only one branch renders is the fault the product exists to find, and so is a
+    template error that only one branch reaches: ``validate`` reports it as a failure."""
+    renderer = PromptRenderer("{% if admin %}{{ nope }}{% endif %}")
+    with pytest.raises(AgentError, match="'nope' is undefined"):
+        render_variants(renderer, lambda variant: variant_context(variant, make_issue))
+    # Without the admin axis the same template renders clean, which is the gap #252 closes.
+    assert (
+        PromptRenderer("{% if admin %}{{ nope }}{% endif %}").render(
+            variant_context(DISPATCH_VARIANT, make_issue)
+        )
+        == ""
+    )
+
+
+def test_the_scan_on_an_admin_render_requires_the_association_half_alone() -> None:
+    """#252: the workflow drops the own-account exclusion for an admin account, so requiring it
+    on that render would flag the shipped prompt; the association half is still required."""
+    association = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR"))'
+    both = f'{association} and .user.login != "issuebot")'
+    read = "gh api repos/o/r/issues/1/comments --jq"
+
+    admin_render = f"`{read} '.[] | {association}) | .body'`"
+    assert unfiltered_comment_reads(admin_render, "issuebot", admin=True) == []
+    # The same render is a gap under the non-admin rule, which is what the two modes are for.
+    assert unfiltered_comment_reads(admin_render, "issuebot") != []
+    # An admin render that keeps the exclusion anyway is no worse, so it passes too.
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {both} | .body'`", "issuebot", admin=True) == []
+    )
+    # What the admin mode does not relax: no filter at all, a negated one, a disjunctive one
+    # that carries the association and admits everyone anyway, and the flag family. The two
+    # accepted filters are matched whole, which is what keeps the disjunctive one a gap.
+    assert unfiltered_comment_reads(f"`{read} '.[].body'`", "issuebot", admin=True) != []
+    # `| not` inside the inner parens, which is how the workflow's `Quarantined` fetch spells
+    # it: the association is in it and it reads exactly the text the barrier drops. (That fetch
+    # is not itself scanned -- its backticked span opens `--jq`, not `gh` -- so this is the
+    # shape rather than the command.)
+    negated = 'select((.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not))'
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {negated} | .body'`", "issuebot", admin=True)
+        != []
+    )
+    # And outside them, which nothing renders but is the same read.
+    outer = f"{association} | not)"
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot", admin=True) != []
+    )
+    assert unfiltered_comment_reads(f"`{read} '.[] | {outer} | .body'`", "issuebot") != []
+    joined = f'{association} or .user.login == "issuebot")'
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {joined} | .body'`", "issuebot", admin=True) != []
+    )
+    anyone = f"{association} or true)"
+    assert (
+        unfiltered_comment_reads(f"`{read} '.[] | {anyone} | .body'`", "issuebot", admin=True) != []
+    )
+    assert unfiltered_comment_reads("`gh pr view 1 --comments`", "issuebot", admin=True) != []
+    # And a write is still exempt, admin or not.
+    assert (
+        unfiltered_comment_reads(
+            "`gh api -X POST repos/o/r/issues/1/comments -f body=hi`", "issuebot", admin=True
+        )
+        == []
+    )
