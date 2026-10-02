@@ -215,13 +215,16 @@ def _window_percent(window: dict[str, Any], now: datetime) -> int | None:
     utilization = window.get("utilization")
     if not isinstance(utilization, int | float) or isinstance(utilization, bool):
         return None
-    resets_at = _moment(window.get("resets_at"))
+    resets_at = parse_moment(window.get("resets_at"))
     if resets_at is not None and resets_at <= now:
         return 0
     return round(min(max(float(utilization), 0.0), 1.0) * 100)
 
 
-def _moment(value: object) -> datetime | None:
+def parse_moment(value: object) -> datetime | None:
+    """An ISO 8601 timestamp out of the snapshot's JSON, read as UTC when it names no zone.
+
+    None for anything else."""
     if not isinstance(value, str):
         return None
     try:

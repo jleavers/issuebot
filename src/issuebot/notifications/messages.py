@@ -1,7 +1,8 @@
 """Slack message text for issuebot events: one line of mrkdwn per notifiable kind."""
 
+import math
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 
 from issuebot.config import GitHubLabels
 from issuebot.events import (
@@ -129,3 +130,54 @@ def format_actions_alert(*, account: str, used: int, included: int, resets_on: d
         f":warning: GitHub Actions: {who} has used {used:,} of {included:,} included minutes "
         f"this month ({percent}%); {included - used:,} left until {resets}."
     )
+
+
+# The Claude usage windows by the names claude gives them (`rateLimitType`, `unifiedWindows`).
+_CLAUDE_WINDOWS = {"five_hour": "5-hour", "seven_day": "7-day"}
+
+
+def format_claude_limit_alert(
+    *, window: str | None, percent: int, resets_at: datetime, now: datetime
+) -> str:
+    """The Claude usage line (spec 2026-10-02, claude-limits-alert): below 100 a warning that a
+    window is filling, at 100 a limit that has stopped the board. Times are UTC; a window name
+    claude has not used before is shown as reported, escaped."""
+    when = _utc_moment(resets_at, now)
+    if percent < 100:
+        return (
+            f":warning: Claude: {_claude_window(window, 'window')} is {percent}% used; "
+            f"it resets {when}."
+        )
+    return (
+        f":rotating_light: Claude: {_claude_window(window, 'limit')} is reached; issuebot "
+        f"stops claiming issues until {when} ({_time_until(resets_at, now)})."
+    )
+
+
+def _claude_window(window: str | None, noun: str) -> str:
+    if window in _CLAUDE_WINDOWS:
+        return f"the {_CLAUDE_WINDOWS[window]} usage {noun}"
+    if window:
+        return f"the usage {noun} ({_escape(window)})"
+    return f"the usage {noun}"
+
+
+def _utc_moment(moment: datetime, now: datetime) -> str:
+    """``20:00 UTC`` on today's UTC date, else ``Fri 9 Oct, 05:00 UTC`` (no glibc-only ``%-d``)."""
+    moment, today = moment.astimezone(UTC), now.astimezone(UTC).date()
+    clock = f"{moment:%H:%M} UTC"
+    if moment.date() == today:
+        return clock
+    return f"{moment:%a} {moment.day} {moment:%b}, {clock}"
+
+
+def _time_until(moment: datetime, now: datetime) -> str:
+    """``in 42 min``, ``in 2 h 13 min`` or ``in 6 d 11 h``: minutes rounded up, never negative."""
+    minutes = max(math.ceil((moment - now).total_seconds() / 60), 0)
+    if minutes < 60:
+        return f"in {minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"in {hours} h {minutes} min"
+    days, hours = divmod(hours, 24)
+    return f"in {days} d {hours} h"
