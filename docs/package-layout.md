@@ -1500,8 +1500,9 @@ case-insensitively.
 
 ## `issuebot.web`
 
-the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
-`log`. `app.py`: `create_app(database, *, password, clock=, now=)` (FastAPI; every page and JSON route
+the dashboard, imported by `cli` only; imports `config`, `db`, `github`, `log` and
+`notifications`. `app.py`: `create_app(database, *, password, clock=, now=, actions=)`
+(FastAPI; every page and JSON route
 lives under a repository prefix, since one database now holds every worker's rows —
 `/r/<owner>/<name>/` for the pages, `/api/v1/repos/<owner>/<name>/` for the JSON. Pages:
 `/r/<owner>/<name>/` (dashboard), `/issues[?state=<role>]`, `/issues/<n>`,
@@ -1618,7 +1619,7 @@ data from data attributes on `#chart-config` (`data-stats-url`, `data-chart-wind
 `data-chart-poll-s`). One
 connection per request through `Database.queries()`. Constants, not settings; the web reads
 no `WORKFLOW.md` — everything it shows comes from the database, so `create_app` takes only
-`database` (and the `clock`/`now` test seams).
+`database` (plus the `clock`/`now` test seams and `actions=`, the poller below).
 Light and dark are role tokens in `app.css`, declared once for
 light and twice for dark (`@media (prefers-color-scheme: dark)` for the OS preference,
 `:root[data-theme="dark"]` for the operator's own choice, which wins); `static/theme.js` is

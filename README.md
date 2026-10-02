@@ -259,8 +259,8 @@ values, and optionally `SLACK_WEBHOOK_URL`. On the hub, `ISSUEBOT_GITHUB_BILLING
 `ISSUEBOT_ACTIONS_INCLUDED_MINUTES` add the billing account's [GitHub Actions
 minutes](docs/dashboard.md#github-actions-minutes) to the dashboard: the token is a classic one
 of the account that owns the repositories with only `user` ticked, the narrowest GitHub offers,
-which can also edit that account's profile and read its private email addresses. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only
-matter if 5432 or 8080 is taken on your host.
+which can also edit that account's profile and read its private email addresses.
+`ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is taken on your host.
 
 `ISSUEBOT_DB_PASSWORD` is the password of the PostgreSQL store and the one credential it has,
 so it has no default: `docker compose up` (and `config`) refuse to run the database, the worker
@@ -619,8 +619,12 @@ The CLI reads the environment and not `.env`, so source it first
 such as `~/issuebot-workspaces` (the default `/workspaces` is the Compose volume); the worker
 creates it. `issuebot web` in a second terminal reads `DATABASE_URL` and
 `ISSUEBOT_WEB_PASSWORD`, plus the optional [GitHub Actions
-minutes](docs/dashboard.md#github-actions-minutes) settings, and nothing else, listens on loopback (`--bind 0.0.0.0` to serve a
-network) and asks for the password on every request.
+minutes](docs/dashboard.md#github-actions-minutes) settings, and nothing else, listens on
+loopback (`--bind 0.0.0.0` to serve a network) and asks for the password on every request. A
+web run against a scratch database should blank `ISSUEBOT_GITHUB_BILLING_TOKEN` and
+`SLACK_WEBHOOK_URL` (`ISSUEBOT_GITHUB_BILLING_TOKEN= SLACK_WEBHOOK_URL= uv run issuebot web`),
+since the Actions alert remembers what it has posted in the store it writes, and a second
+store would post the hub's alerts to the channel again.
 
 History is optional: with `DATABASE_URL` set (compose builds it for the worker from
 `ISSUEBOT_DB_PASSWORD`; on the host export

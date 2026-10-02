@@ -471,8 +471,10 @@ compose empties the billing token in the worker's `environment:`, which wins; an
 `gh` as `GH_TOKEN` in the child's environment, never as an argument, and no log line, row, page
 or JSON response carries it: the error the window shows is issuebot's own wording.
 
-Give it an expiry. A lapsed token shows as the window's error and as one
-`actions_minutes_failed` line in the web's log; a new one is an `.env` edit and `docker compose
+Give it an expiry. A token that lapses while the web runs shows as the window's error and as one
+`actions_minutes_failed` line in the web's log. One that has already lapsed when the web starts
+cannot name the account it reads, so nothing is written: the window keeps its last reading,
+ageing, and that log line is what says why. A new one is an `.env` edit and `docker compose
 up -d web`.
 
 ## Checking that the credential took

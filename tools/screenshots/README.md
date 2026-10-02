@@ -25,8 +25,9 @@ docker compose --profile test up -d --wait test-db
 export DATABASE_URL="postgresql://issuebot@127.0.0.1:$(docker compose port test-db 5432 | cut -d: -f2)/issuebot"
 uv run python tools/screenshots/seed.py history
 
-# 2. serve it
-ISSUEBOT_WEB_PASSWORD=screenshot uv run issuebot web --port 8099 &
+# 2. serve it, with the billing token and the webhook blanked: a scratch web must not read
+#    the real account's Actions minutes or post their alerts to the team's channel
+ISSUEBOT_GITHUB_BILLING_TOKEN= SLACK_WEBHOOK_URL= ISSUEBOT_WEB_PASSWORD=screenshot uv run issuebot web --port 8099 &
 
 # 3. capture both images
 uv run --with playwright --with pillow python tools/screenshots/capture.py \

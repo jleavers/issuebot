@@ -246,7 +246,8 @@ about where the content was when it was written.
   there and nowhere else, as is the difference between a check that failed and one Actions
   never ran.
 - `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
-  a browser that will not speak it, the hero's six tiles, the GitHub Actions minutes window and its Slack alert, and what "issues closed" counts.
+  a browser that will not speak it, the hero's six tiles, the GitHub Actions minutes window
+  and its Slack alert, and what "issues closed" counts.
 - `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust
   one -- what it may reach (the egress allow-list and `ISSUEBOT_EGRESS_ALLOW`), one account
   per concurrent session, and checking that the credential took. The reasoning behind those

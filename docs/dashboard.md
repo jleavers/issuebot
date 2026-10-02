@@ -1,9 +1,10 @@
 # The dashboard
 
 `issuebot web` serves the board, the hero statistics and every captured turn, for every
-repository registered in one store. It reads `DATABASE_URL` and `ISSUEBOT_WEB_PASSWORD` and
-nothing else -- no workflow file, no GitHub token -- so it can run somewhere the worker does
-not.
+repository registered in one store. It reads `DATABASE_URL` and `ISSUEBOT_WEB_PASSWORD`, plus
+the optional [GitHub Actions minutes](#github-actions-minutes) settings, and nothing else -- no
+workflow file, and no GitHub token but that billing one -- so it can run somewhere the worker
+does not.
 
 ![The issuebot dashboard: a worker status line, six hero tiles, a table of running agents, the Kanban board of the five label columns, and thirty-day charts, in the dark theme. The data shown is fabricated.](images/dashboard.png)
 
@@ -102,8 +103,10 @@ Three settings in the hub checkout's `.env`, read by `web` alone:
   with only `user` ticked. GitHub's billing endpoints take no fine-grained token and nothing
   narrower, and that scope can also edit the account's profile and read its private email
   addresses, so it goes to the dashboard and never to a worker ([The dashboard's billing
-  token](security-model.md#the-dashboards-billing-token)). Give it an expiry; a lapsed one shows
-  as the window's error.
+  token](security-model.md#the-dashboards-billing-token)). Give it an expiry. One that lapses
+  while `web` runs shows as the window's error; one already lapsed when `web` starts cannot
+  name its account, so nothing is written, the window's last reading ages, and one
+  `actions_minutes_failed` line in the web's log says why.
 - `ISSUEBOT_ACTIONS_INCLUDED_MINUTES`: the plan's monthly allowance, 3000 on GitHub Pro and 2000
   on Free. GitHub's API does not report it. Without it the window is a dash that names it; a
   value that is not a positive whole number stops `issuebot web` from starting.
