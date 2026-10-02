@@ -3207,8 +3207,41 @@ async def test_a_later_refusal_moves_the_hold_s_until_out_and_keeps_its_since(
     assert (second.until, second.window) == (later, "seven_day")
 
 
+async def test_an_earlier_refusal_leaves_the_hold_s_until_and_window_alone(tmp_path: Path) -> None:
+    """A refusal against an earlier reset (the 5-hour) does not pull a later 7-day hold in."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    later = USAGE_RESET + timedelta(days=3)
+    await h.exit(
+        h.run_for(1), **{**USAGE_LIMITED, "usage_reset_at": later, "usage_window": "seven_day"}
+    )
+    await h.tick()
+    await h.exit(h.run_for(2), **USAGE_LIMITED)
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert (hold.until, hold.window) == (later, "seven_day")
+
+
+async def test_an_undated_refusal_keeps_the_hold_s_until_and_window(tmp_path: Path) -> None:
+    """A text-only refusal after a dated one leaves the dated reset and its window in place."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    await h.tick()
+    await h.exit(h.run_for(2), **{**USAGE_LIMITED, "usage_reset_at": None, "usage_window": None})
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert (hold.until, hold.window) == (USAGE_RESET, "five_hour")
+
+
 async def test_a_refusal_claude_did_not_date_names_no_until(tmp_path: Path) -> None:
-    """Review Focus 1: the one-interval fallback moves every time it is taken, so carrying it
+    """The one-interval fallback moves every time it is taken, so carrying it
     would hand the web a fresh key -- and Slack a fresh alert -- every poll interval."""
     h = Harness(tmp_path)
     h.add_issue(1, "todo")

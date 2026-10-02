@@ -174,7 +174,8 @@ def _utc_moment(moment: datetime, now: datetime) -> str:
 
 
 def _time_until(moment: datetime, now: datetime) -> str:
-    """``in 42 min``, ``in 2 h 13 min`` or ``in 6 d 11 h``: minutes rounded up, never negative."""
+    """``in 42 min``, ``in 2 h 13 min`` or ``in 6 d 11 h``: minutes rounded up under a day,
+    dropped from a day on (6 d 11 h 13 min reads ``in 6 d 11 h``), never negative."""
     minutes = max(math.ceil((moment - now).total_seconds() / 60), 0)
     if minutes < 60:
         return f"in {minutes} min"

@@ -32,7 +32,7 @@ async def test_a_claim_inserts_then_raises_and_refuses_an_equal_or_lower_target(
 
 
 async def test_a_window_instance_is_its_window_and_its_reset(db_url: str) -> None:
-    """Review Focus 4's memory: next week, and the other window, start from nothing."""
+    """The alert's memory: next week, and the other window, start from nothing."""
     database = await _database(db_url)
     await database.claim_claude_limit_alert(limit_window=WEEK, resets_at=RESETS, target=90)
     next_week = RESETS + timedelta(days=7)

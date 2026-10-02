@@ -180,7 +180,7 @@ async def test_a_new_week_starts_afresh() -> None:
 
 
 async def test_the_highest_reading_of_one_window_is_the_one_posted() -> None:
-    """Review Focus 2: two workers on one subscription, one fresher than the other."""
+    """Two workers on one subscription, one fresher than the other."""
     store = Store(
         snapshot(rate_limits=limits(seven=0.70, observed_ago=timedelta(days=2))),
         snapshot(rate_limits=limits(seven=0.80)),
@@ -192,7 +192,7 @@ async def test_the_highest_reading_of_one_window_is_the_one_posted() -> None:
 
 
 async def test_an_expired_reading_posts_nothing() -> None:
-    """Review Focus 3: a stopped worker's reading from a window that has since reset."""
+    """A stopped worker's reading from a window that has since reset."""
     stale = limits(seven=0.95, seven_resets_in=timedelta(minutes=-1))
     store, webhook = Store(snapshot(rate_limits=stale)), Webhook()
     await make(store, webhook).poll_once()
@@ -203,7 +203,7 @@ async def test_an_expired_reading_posts_nothing() -> None:
 
 
 async def test_every_worker_on_one_wall_posts_one_hit() -> None:
-    """Review Focus 2: every worker on the subscription is refused against the same reset."""
+    """Every worker on the subscription is refused against the same reset."""
     store = Store(snapshot(dispatch_hold=usage_hold()), snapshot(dispatch_hold=usage_hold()))
     webhook = Webhook()
     await make(store, webhook).poll_once()
@@ -224,7 +224,7 @@ async def test_a_later_wall_posts_again() -> None:
 
 
 async def test_an_expired_or_undated_hold_posts_nothing() -> None:
-    """Review Focus 1 and 3: a hold claude did not date, and one whose window has reopened."""
+    """A hold claude did not date, and one whose window has reopened."""
     store = Store(
         snapshot(dispatch_hold=usage_hold(until=None)),
         snapshot(dispatch_hold=usage_hold(until=NOW - timedelta(minutes=1))),
@@ -283,7 +283,7 @@ async def test_snapshots_it_cannot_read_are_skipped() -> None:
 
 
 async def test_a_restart_posts_nothing_new() -> None:
-    """Review Focus 4: a second process over the same table."""
+    """A second process over the same table."""
     store, webhook = Store(snapshot(rate_limits=limits(seven=0.80))), Webhook()
     await make(store, webhook).poll_once()
     await make(store, webhook).poll_once()
@@ -291,7 +291,10 @@ async def test_a_restart_posts_nothing_new() -> None:
 
 
 async def test_a_dead_webhook_is_retried_only_after_the_backoff() -> None:
-    """Review Focus 5."""
+    """A dead webhook gives its claim back each time and is retried only after the backoff.
+
+    The webhook URL never reaches a log line, and a recovered webhook posts once.
+    """
     store, webhook, clock = Store(snapshot(rate_limits=limits(seven=0.80))), Webhook(500), Clock()
     with capture_logs() as logs:
         watcher = make(store, webhook, clock)

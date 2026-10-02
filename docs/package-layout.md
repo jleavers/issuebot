@@ -1412,13 +1412,14 @@ webhook or allow-list change needs a worker restart.
 
 `format_actions_alert` is the dashboard's low-minutes line, posted by `web.actions` through
 `urllib_post` with a single attempt; the next hourly cycle is the retry. `format_claude_limit_alert` is the Claude usage line: a
-7-day warning or a limit hit (chosen by `hit`), times in UTC.
+warning or a limit hit (chosen by `hit`), times in UTC.
 
 ## `issuebot.db`
 
 the observability store, imported by `cli` and `web`; imports `config`,
 `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`; schema version 4) applied by
+`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`;
+schema version 6) applied by
 `migrate.py` in one transaction
 under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
 files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,

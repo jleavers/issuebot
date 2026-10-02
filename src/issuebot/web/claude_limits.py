@@ -11,7 +11,9 @@ or when a worker holds dispatch because claude refused a turn on usage.
 and the moment it reopens. One subscription reports one reset to every worker, so every worker
 on one wall posts once, and a restart -- which every upgrade is -- finds what was already posted.
 A claim is taken before the post and given back if the post fails; a cancellation (shutdown)
-between the two leaves the claim held, which keeps delivery at most once.
+between the two leaves the claim held, which keeps delivery at most once. So does a release
+that itself fails after a failed post (logged ``claude_limits_alert_failed``, then
+``claude_limits_store_failed``): that threshold is not posted for that window.
 """
 
 import asyncio

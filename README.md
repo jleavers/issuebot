@@ -619,12 +619,14 @@ The CLI reads the environment and not `.env`, so source it first
 such as `~/issuebot-workspaces` (the default `/workspaces` is the Compose volume); the worker
 creates it. `issuebot web` in a second terminal reads `DATABASE_URL` and
 `ISSUEBOT_WEB_PASSWORD`, plus the optional [GitHub Actions
-minutes](docs/dashboard.md#github-actions-minutes) settings, and nothing else, listens on
+minutes](docs/dashboard.md#github-actions-minutes) settings and `SLACK_WEBHOOK_URL`, which
+alone turns on the [Claude usage alert](docs/dashboard.md#claude-usage-alerts), and nothing
+else, listens on
 loopback (`--bind 0.0.0.0` to serve a network) and asks for the password on every request. A
 web run against a scratch database should blank `ISSUEBOT_GITHUB_BILLING_TOKEN` and
 `SLACK_WEBHOOK_URL` (`ISSUEBOT_GITHUB_BILLING_TOKEN= SLACK_WEBHOOK_URL= uv run issuebot web`),
-since the Actions alert remembers what it has posted in the store it writes, and a second
-store would post the hub's alerts to the channel again.
+since the Actions and Claude usage alerts remember what they have posted in the store they
+write, and a second store would post the hub's alerts to the channel again.
 
 History is optional: with `DATABASE_URL` set (compose builds it for the worker from
 `ISSUEBOT_DB_PASSWORD`; on the host export

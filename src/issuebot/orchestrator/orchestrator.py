@@ -752,6 +752,10 @@ class Orchestrator:
         moved *out* only, never in: two sessions can be refused against the same window and
         report it seconds apart, and the later reading is the one to wait for.
 
+        A refusal whose ``rate_limit_event`` names no ``resetsAt`` is dated by the runner at the
+        moment the line was read (``parse_usage_limit``), so its ``until`` is already past and the
+        hub's watcher skips it; only a text-only refusal arrives here with no reset at all.
+
         ``until`` and ``window`` in the snapshot take claude's own reset only, and move out with
         it, so the two always describe the same refusal.
         """
