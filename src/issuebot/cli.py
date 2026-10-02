@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 import uvicorn
 import yaml
+from pydantic import SecretStr
 
 from issuebot import __version__
 from issuebot.agent import (
@@ -136,6 +137,7 @@ from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
 from issuebot.web.actions import ALLOWANCE_ENV, ActionsPoller, ActionsSettings, actions_settings
+from issuebot.web.claude_limits import ClaudeLimitsWatcher, webhook_setting
 
 DEFAULT_WORKFLOW = "configs/WORKFLOW.md"
 
@@ -2471,16 +2473,30 @@ def cmd_web(args: argparse.Namespace) -> int:
         print(f"[FAIL] web: {exc}")
         return 1
     return asyncio.run(
-        _run_web(url, password=password, port=args.port, bind=args.bind, actions=actions)
+        _run_web(
+            url,
+            password=password,
+            port=args.port,
+            bind=args.bind,
+            actions=actions,
+            claude_webhook=webhook_setting(os.environ),
+        )
     )
 
 
 async def _run_web(
-    url: str, *, password: str, port: int, bind: str, actions: ActionsSettings | None = None
+    url: str,
+    *,
+    password: str,
+    port: int,
+    bind: str,
+    actions: ActionsSettings | None = None,
+    claude_webhook: SecretStr | None = None,
 ) -> int:
     """Migrate, build the app and serve it until a stop signal; a failed bind is uvicorn's
     error line and exit 1. The web reads no workflow: everything it shows is in the database,
-    and the Actions minutes poller, when the billing token is set, is what puts them there."""
+    and the Actions minutes poller, when the billing token is set, is what puts them there.
+    The Claude usage watcher runs whenever the webhook is set, token or no token."""
     if not 0 <= port <= 65535:
         print("[FAIL] web: --port must be between 0 and 65535")
         return 1
@@ -2495,15 +2511,20 @@ async def _run_web(
         poller = ActionsPoller(actions, store=database, runner=GhRunner(token=actions.token))
         if actions.included_minutes is None:
             log.warning("actions_minutes_allowance_unset", setting=ALLOWANCE_ENV)
+    watcher = (
+        ClaudeLimitsWatcher(claude_webhook, store=database) if claude_webhook is not None else None
+    )
     log.info(
         "web_started",
         bind=bind,
         port=port,
         database=database.description,
         actions_minutes=poller is not None,
+        claude_limits=watcher is not None,
     )
+    app = create_app(database, password=password, actions=poller, claude_limits=watcher)
     try:
-        await _serve(create_app(database, password=password, actions=poller), host=bind, port=port)
+        await _serve(app, host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
     return 0

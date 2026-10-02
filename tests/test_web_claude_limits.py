@@ -7,14 +7,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from structlog.testing import capture_logs
 
-from fakes.web import NOW, limits, snapshot
+from fakes.database import FakeDatabase
+from fakes.web import NOW, PASSWORD, limits, snapshot
 from issuebot.db import StoreUnavailableError
 from issuebot.db.queries import SnapshotRow
 from issuebot.notifications.slack import PostResult
 from issuebot.orchestrator.state import DispatchHold
+from issuebot.web import create_app
 from issuebot.web.claude_limits import (
     RETRY_BACKOFF_S,
     ClaudeLimitsWatcher,
@@ -349,3 +352,40 @@ async def test_a_database_error_is_logged_and_the_next_cycle_retries() -> None:
         await watcher.stop()
     assert len(webhook.texts) == 1
     assert any(entry["event"] == "claude_limits_store_failed" for entry in logs)
+
+
+# --- the app -----------------------------------------------------------------------------------
+
+
+class Task:
+    def __init__(self, name: str, events: list[str]) -> None:
+        self.name = name
+        self.events = events
+
+    def start(self) -> None:
+        self.events.append(f"start {self.name}")
+
+    async def stop(self) -> None:
+        self.events.append(f"stop {self.name}")
+
+
+def test_the_app_starts_and_stops_both_background_tasks() -> None:
+    events: list[str] = []
+    actions, claude = Task("actions", events), Task("claude", events)
+    app = create_app(FakeDatabase(), password=PASSWORD, actions=actions, claude_limits=claude)  # type: ignore[arg-type]
+    assert app.state.claude_limits is claude
+    with TestClient(app):
+        assert events == ["start actions", "start claude"]
+    assert events == ["start actions", "start claude", "stop claude", "stop actions"]
+
+
+def test_the_watcher_runs_without_the_actions_poller() -> None:
+    events: list[str] = []
+    app = create_app(FakeDatabase(), password=PASSWORD, claude_limits=Task("claude", events))  # type: ignore[arg-type]
+    with TestClient(app):
+        pass
+    assert events == ["start claude", "stop claude"]
+
+
+def test_an_app_without_a_watcher_has_none() -> None:
+    assert create_app(FakeDatabase(), password=PASSWORD).state.claude_limits is None
