@@ -72,6 +72,7 @@ from issuebot.github import (
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
+from issuebot.web.actions import ActionsPoller
 
 SEED_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
@@ -3597,6 +3598,71 @@ def test_web_gates_the_app_with_the_password_from_the_environment(
     assert (
         client.get("/api/v1/repos", headers={"Authorization": f"Basic {token}"}).status_code == 200
     )
+
+
+BILLING_TOKEN = "ghp_" + "b" * 36
+
+
+def test_web_builds_no_actions_poller_without_the_billing_token(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 0
+    ((app, _host, _port),) = fake_serve.calls
+    assert app.state.actions is None  # type: ignore[attr-defined]
+
+
+def test_web_builds_the_actions_poller_from_the_environment(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ISSUEBOT_GITHUB_BILLING_TOKEN", BILLING_TOKEN)
+    monkeypatch.setenv("ISSUEBOT_ACTIONS_INCLUDED_MINUTES", "3000")
+    assert main(["web"]) == 0
+    ((app, _host, _port),) = fake_serve.calls
+    assert isinstance(app.state.actions, ActionsPoller)  # type: ignore[attr-defined]
+    err = capsys.readouterr().err
+    assert "web_started" in err and BILLING_TOKEN not in err
+    assert "actions_minutes_allowance_unset" not in err
+
+
+def test_web_warns_when_the_allowance_is_unset(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ISSUEBOT_GITHUB_BILLING_TOKEN", BILLING_TOKEN)
+    assert main(["web"]) == 0
+    assert "actions_minutes_allowance_unset" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["three thousand", "0", "-5", "3000.5"])
+def test_web_refuses_a_malformed_allowance_before_migrating(
+    value: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ISSUEBOT_ACTIONS_INCLUDED_MINUTES", value)
+    assert main(["web"]) == 1
+    assert capsys.readouterr().out == (
+        "[FAIL] web: ISSUEBOT_ACTIONS_INCLUDED_MINUTES must be a positive whole number of "
+        "minutes, such as 3000\n"
+    )
+    assert fake_serve.calls == [] and fake_database.migrations == 0
 
 
 def test_web_needs_its_password(

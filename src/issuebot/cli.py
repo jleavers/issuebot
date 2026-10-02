@@ -102,6 +102,7 @@ from issuebot.github import (
     WORKPAD_MARKER,
     Comment,
     GhCliAdapter,
+    GhRunner,
     GitHubAdapter,
     GitHubError,
     Issue,
@@ -134,6 +135,7 @@ from issuebot.orchestrator import (
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.web import create_app, dispatch_hold
+from issuebot.web.actions import ALLOWANCE_ENV, ActionsPoller, ActionsSettings, actions_settings
 
 DEFAULT_WORKFLOW = "configs/WORKFLOW.md"
 
@@ -2463,12 +2465,22 @@ def cmd_web(args: argparse.Namespace) -> int:
     if not password:
         print(_WEB_NO_PASSWORD)
         return 1
-    return asyncio.run(_run_web(url, password=password, port=args.port, bind=args.bind))
+    try:
+        actions = actions_settings(os.environ)
+    except ValueError as exc:
+        print(f"[FAIL] web: {exc}")
+        return 1
+    return asyncio.run(
+        _run_web(url, password=password, port=args.port, bind=args.bind, actions=actions)
+    )
 
 
-async def _run_web(url: str, *, password: str, port: int, bind: str) -> int:
+async def _run_web(
+    url: str, *, password: str, port: int, bind: str, actions: ActionsSettings | None = None
+) -> int:
     """Migrate, build the app and serve it until a stop signal; a failed bind is uvicorn's
-    error line and exit 1. The web reads no workflow: everything it shows is in the database."""
+    error line and exit 1. The web reads no workflow: everything it shows is in the database,
+    and the Actions minutes poller, when the billing token is set, is what puts them there."""
     if not 0 <= port <= 65535:
         print("[FAIL] web: --port must be between 0 and 65535")
         return 1
@@ -2477,9 +2489,21 @@ async def _run_web(url: str, *, password: str, port: int, bind: str) -> int:
     except DatabaseError as exc:
         print(f"[FAIL] database: {exc.message}")
         return 1
-    get_logger(__name__).info("web_started", bind=bind, port=port, database=database.description)
+    log = get_logger(__name__)
+    poller = None
+    if actions is not None:
+        poller = ActionsPoller(actions, store=database, runner=GhRunner(token=actions.token))
+        if actions.included_minutes is None:
+            log.warning("actions_minutes_allowance_unset", setting=ALLOWANCE_ENV)
+    log.info(
+        "web_started",
+        bind=bind,
+        port=port,
+        database=database.description,
+        actions_minutes=poller is not None,
+    )
     try:
-        await _serve(create_app(database, password=password), host=bind, port=port)
+        await _serve(create_app(database, password=password, actions=poller), host=bind, port=port)
     except SystemExit as exc:  # uvicorn's startup() exits 3 when the bind fails
         return 1 if exc.code else 0
     return 0
