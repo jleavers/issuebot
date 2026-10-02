@@ -58,6 +58,12 @@ from issuebot.log import get_logger
 #   api.github.com           every `gh api`, `gh issue`, `gh pr` call, the worker's own polls
 #                            among them.
 #   objects.githubusercontent.com   release assets and raw objects `gh` redirects to.
+#   results-receiver.actions.githubusercontent.com, productionresultssa0..19.blob.core.windows.net
+#                            GitHub's Actions results storage, where a job's log actually is
+#                            (`ACTIONS_RESULTS_HOSTS`). Actions read buys `gh run view --log`
+#                            and `.../actions/jobs/<id>/logs` only as a 302 to one of these, so
+#                            without them the API call succeeds, the download is refused here,
+#                            and `gh` reports a bare `Forbidden` that reads as the token's.
 #   www.githubstatus.com     the Statuspage summary `issuebot.github.status` reads to annotate
 #                            a dispatch hold (#88).
 #   hooks.slack.com          the worker's own notifications (`issuebot.notifications`), which
@@ -71,6 +77,16 @@ from issuebot.log import get_logger
 # repository's needs rather than the workflow's, they differ per deployment, and a default
 # that carried them would be a default nobody had chosen. Nor is a telemetry host: the shipped
 # `claude` names none, and one it named would be a name a session could post to.
+#
+# The results storage is GitHub's `GET /meta` list (`domains.actions_inbound.full_domains`),
+# account by account. Not `.blob.core.windows.net`, which GitHub's own runner documentation
+# gives: that is every Azure storage account anyone can create, and so a name a session could
+# post to. If `/meta` grows a twenty-first account, a log stored there is refused until it is
+# added here, and `egress_denied` names it.
+ACTIONS_RESULTS_HOSTS: tuple[str, ...] = (
+    "results-receiver.actions.githubusercontent.com",
+    *(f"productionresultssa{n}.blob.core.windows.net" for n in range(20)),
+)
 DEFAULT_ALLOW: tuple[str, ...] = (
     "api.anthropic.com",
     "platform.claude.com",
@@ -78,6 +94,7 @@ DEFAULT_ALLOW: tuple[str, ...] = (
     "github.com",
     "api.github.com",
     "objects.githubusercontent.com",
+    *ACTIONS_RESULTS_HOSTS,
     "www.githubstatus.com",
     "hooks.slack.com",
 )

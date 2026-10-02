@@ -94,6 +94,7 @@ The shipped list is what the workflow itself needs and nothing else:
 | `github.com` | `gh repo clone`, and every `git fetch`/`push` in a workspace |
 | `api.github.com` | every `gh api`, `gh issue` and `gh pr` call, the worker's polls included |
 | `objects.githubusercontent.com` | release assets and raw objects `gh` redirects to |
+| `results-receiver.actions.githubusercontent.com`, `productionresultssa0` to `productionresultssa19.blob.core.windows.net` | GitHub's Actions results storage, where a CI job's log is: Actions read gets `gh run view --log` only as a redirect to one of these. Listed account by account from GitHub's `GET /meta`, never as `.blob.core.windows.net`, which is every Azure storage account anyone can create |
 | `www.githubstatus.com` | the status page the worker reads to annotate a dispatch hold |
 | `hooks.slack.com` | the worker's own notifications, if `SLACK_WEBHOOK_URL` is set |
 

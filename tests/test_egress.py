@@ -112,17 +112,37 @@ def test_the_default_list_covers_the_workflows_own_needs_and_nothing_else() -> N
     A registry is the *target* repository's need and differs per deployment, so it is the
     operator's (``ISSUEBOT_EGRESS_ALLOW``) and not a default nobody chose.
     """
-    assert DEFAULT_ALLOW == (
+    expected = (
         "api.anthropic.com",
         "platform.claude.com",
         "claude.ai",
         "github.com",
         "api.github.com",
         "objects.githubusercontent.com",
+        "results-receiver.actions.githubusercontent.com",
+        *(f"productionresultssa{n}.blob.core.windows.net" for n in range(20)),
         "www.githubstatus.com",
         "hooks.slack.com",
     )
+    assert expected == DEFAULT_ALLOW
     assert not any("pypi" in name or "npm" in name for name in DEFAULT_ALLOW)
+
+
+def test_a_session_can_follow_a_ci_log_redirect_and_reach_no_other_storage() -> None:
+    """Actions read buys a job's log as a 302 to GitHub's results storage, not the log itself.
+
+    Without these names the API call succeeds and the download is refused here, which `gh`
+    reports as `Get "https://productionresultssa8.blob.core.windows.net/...": Forbidden` -- read
+    by every session that met it as a token permission it did not have. The accounts are named
+    one by one because the domain they live under is every Azure storage account anyone can
+    create, which is a name a session could post to.
+    """
+    rules, _ = allow_rules({})
+    for n in range(20):
+        assert allowed(f"productionresultssa{n}.blob.core.windows.net", 443, rules), n
+    assert allowed("results-receiver.actions.githubusercontent.com", 443, rules)
+    for host in ("blob.core.windows.net", "attacker.blob.core.windows.net"):
+        assert not allowed(host, 443, rules), host
 
 
 def test_the_default_list_carries_every_host_issuebot_itself_reaches() -> None:

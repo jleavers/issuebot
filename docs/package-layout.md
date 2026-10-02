@@ -97,7 +97,10 @@ tools reach and no other (`api.anthropic.com`; `platform.claude.com` and `claude
 `claude` authenticates and *refreshes* the OAuth credential it runs with -- the
 `CLAUDE_CODE_OAUTH_TOKEN` a container session is handed, or the host route's own login -- so a list without them
 works until an access token expires and then fails every session; `github.com`,
-`api.github.com`, `objects.githubusercontent.com`; `www.githubstatus.com` for #88's
+`api.github.com`, `objects.githubusercontent.com`; `ACTIONS_RESULTS_HOSTS`, GitHub's Actions
+results storage named account by account from `GET /meta`, because Actions read buys a job's
+log only as a redirect there, and the domain those accounts live under is every Azure storage
+account anyone can create; `www.githubstatus.com` for #88's
 annotation; `hooks.slack.com`, since `urllib_post` never raises and a refused webhook would
 cost a deployment every notification with only a log line to say so), and the operator
 extends it with
