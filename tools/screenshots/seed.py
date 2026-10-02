@@ -333,6 +333,15 @@ async def main(command: str) -> None:
     database = Database(os.environ["DATABASE_URL"])
     await database.migrate()
     await database.register_repo(REPO, labels=LABELS, workflow_path="/configs/WORKFLOW.md")
+    # The limits tile's Actions window (spec 2026-10-02), for `acme`, the owner of REPO: a
+    # comfortable 58% so the image shows the window without implying an alert.
+    await database.record_actions_reading(
+        account="acme",
+        period=NOW.date().replace(day=1),
+        used_minutes=1740.0,
+        included_minutes=3000,
+        observed_at=NOW - timedelta(minutes=12),
+    )
     store = database.store(LABELS, REPO)
     await store.connect()
     try:
