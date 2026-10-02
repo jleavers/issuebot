@@ -1076,6 +1076,8 @@ def test_dashboard_context_carries_a_held_dispatch() -> None:
         "kind": "auth",
         "reason": "claude authentication unavailable: not logged in",
         "since": (NOW - timedelta(minutes=4)).isoformat(),
+        "until": None,
+        "window": None,
     }
 
 

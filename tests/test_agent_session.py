@@ -29,6 +29,7 @@ from issuebot.github import WORKPAD_MARKER, Comment, FakeGitHub, GhResult, GitHu
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="workspaces need bash and git")
 
+USAGE_RESET = datetime(2026, 9, 22, 12, 30, tzinfo=UTC)
 TEMPLATE = "Task {{ issue.identifier }} turn {{ turn_number }} attempt {{ attempt }}"
 
 
@@ -109,6 +110,8 @@ class ScriptedRunner:
             error=f"injected {category}" if failed else None,
             stdout_path=log_dir / f"turn-{turn_number}.jsonl",
             stderr_path=log_dir / f"turn-{turn_number}.stderr.log",
+            usage_reset_at=USAGE_RESET if category == "usage_limited" else None,
+            usage_window="five_hour" if category == "usage_limited" else None,
         )
 
 
@@ -380,6 +383,15 @@ async def test_rework_flag_reaches_the_prompt(tmp_path: Path) -> None:
     runner = ScriptedRunner()
     await h.run(runner, rework=True)
     assert runner.calls[0]["prompt"] == "rework=True"
+
+
+async def test_a_usage_limited_turn_carries_its_window_and_reset_to_the_result(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    result = await h.run(ScriptedRunner("usage_limited"))
+    assert result.error_category == "usage_limited"
+    assert (result.usage_reset_at, result.usage_window) == (USAGE_RESET, "five_hour")
 
 
 async def test_failed_turn_fails_the_run_and_still_runs_after_run(tmp_path: Path) -> None:

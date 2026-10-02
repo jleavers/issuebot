@@ -759,6 +759,9 @@ class TurnResult:
     stderr_path: Path
     # When the refused window reopens, for a ``usage_limited`` turn; None for every other.
     usage_reset_at: datetime | None = None
+    # Which window refused it, as claude names it (``five_hour``, ``seven_day``, ...): what the
+    # hold reports beside the reset. None for every turn that was not refused.
+    usage_window: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -1380,6 +1383,9 @@ class ClaudeRunner:
                 stderr_path=stderr_path,
                 usage_reset_at=(
                     parser.usage_limit.resets_at if parser.usage_limit is not None else None
+                ),
+                usage_window=(
+                    parser.usage_limit.window if parser.usage_limit is not None else None
                 ),
             )
             self._log.info(

@@ -78,6 +78,8 @@ class RunResult:
     # for instead of guessing a backoff. None for every other outcome, and for a refusal that
     # did not say when it reopens.
     usage_reset_at: datetime | None = None
+    # Which window refused it, beside ``usage_reset_at``; None whenever that is.
+    usage_window: str | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -106,6 +108,7 @@ class _State:
     error: str | None = None
     blocker: str | None = None
     usage_reset_at: datetime | None = None
+    usage_window: str | None = None
     workpad: Comment | None = None
 
     def fail(self, category: AgentErrorCategory, message: str | None) -> None:
@@ -156,6 +159,7 @@ class _State:
             final_state=self.issue.state,
             final_issue=self.final_issue,
             usage_reset_at=self.usage_reset_at,
+            usage_window=self.usage_window,
             workspace_path=self.workspace_path,
             log_dir=self.log_dir,
             blocker=self.blocker,
@@ -421,6 +425,7 @@ async def _turn_loop(
                 # Carried through the failure so the orchestrator waits for the window rather
                 # than for a backoff: a `usage_limited` turn knows when it reopens.
                 state.usage_reset_at = turn.usage_reset_at
+                state.usage_window = turn.usage_window
                 state.fail(turn.error_category or "turn_failed", turn.error)
                 return
             # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh

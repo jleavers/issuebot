@@ -33,12 +33,15 @@ class Hold:
     """Why this worker will not claim anything at all, before it reaches the snapshot.
 
     ``kind`` outranks by the order of ``DispatchHoldKind``; ``key`` is what makes two holds
-    the same one when the wording is not, so a hold that lasts keeps its ``since``.
+    the same one when the wording is not, so a hold that lasts keeps its ``since``. ``until``
+    and ``window`` are a usage hold's: the reset claude reported and the window it refused on.
     """
 
     kind: DispatchHoldKind
     reason: str
     key: str | None = None
+    until: datetime | None = None
+    window: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

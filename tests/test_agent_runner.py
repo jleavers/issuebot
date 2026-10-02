@@ -1671,6 +1671,14 @@ def test_the_parser_keeps_a_refusal_beside_the_windows() -> None:
     assert parser.rate_limits.five_hour == RateLimitWindow(utilization=1.0, resets_at=USAGE_RESET)
 
 
+async def test_run_turn_carries_a_refusal_s_window_and_reset(workspace: Path) -> None:
+    """The hold, and the hub's Slack alert after it, are keyed on both (spec 2026-10-02,
+    claude-limits-alert): four workers on one subscription report one reset."""
+    result = await run(runner_for(workspace, scenario="refused"), workspace)
+    assert result.error_category == "usage_limited"
+    assert (result.usage_reset_at, result.usage_window) == (USAGE_RESET, "five_hour")
+
+
 def test_a_refused_turn_is_usage_limited_and_not_a_failed_task() -> None:
     """The whole point: `turn_failed` here spends `agent.max_attempts` on the account's
     window, escalates the issue to a human and tells them nothing they can act on."""

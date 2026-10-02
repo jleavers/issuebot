@@ -772,10 +772,44 @@ def test_dispatch_hold_ignores_a_snapshot_that_names_no_reason() -> None:
         row.data["dispatch_hold"] = value
         assert dispatch_hold(row) is None
     row.data["dispatch_hold"] = {"kind": "auth", "reason": "no login", "since": None}
-    assert dispatch_hold(row) == {"kind": "auth", "reason": "no login", "since": None}
+    assert dispatch_hold(row) == {
+        "kind": "auth",
+        "reason": "no login",
+        "since": None,
+        "until": None,
+        "window": None,
+    }
     # A reason is enough to report; a kind another worker's snapshot does not carry is not.
     row.data["dispatch_hold"] = {"reason": "no login"}
-    assert dispatch_hold(row) == {"kind": "unknown", "reason": "no login", "since": None}
+    assert dispatch_hold(row) == {
+        "kind": "unknown",
+        "reason": "no login",
+        "since": None,
+        "until": None,
+        "window": None,
+    }
+
+
+def test_dispatch_hold_passes_a_usage_hold_s_until_and_window_through() -> None:
+    row = snapshot()
+    row.data["dispatch_hold"] = {
+        "kind": "usage",
+        "reason": "claude usage limit reached: You've hit your session limit",
+        "since": "2026-09-04T11:59:00+00:00",
+        "until": "2026-09-04T14:13:00+00:00",
+        "window": "five_hour",
+    }
+    assert dispatch_hold(row) == {
+        "kind": "usage",
+        "reason": "claude usage limit reached: You've hit your session limit",
+        "since": "2026-09-04T11:59:00+00:00",
+        "until": "2026-09-04T14:13:00+00:00",
+        "window": "five_hour",
+    }
+    row.data["dispatch_hold"]["until"] = 7
+    row.data["dispatch_hold"]["window"] = ["five_hour"]
+    held = dispatch_hold(row)
+    assert held is not None and (held["until"], held["window"]) == (None, None)
 
 
 def test_state_names_the_reason_dispatch_is_held(h: Harness) -> None:
@@ -787,6 +821,8 @@ def test_state_names_the_reason_dispatch_is_held(h: Harness) -> None:
         "kind": "auth",
         "reason": "claude authentication unavailable: not logged in",
         "since": HELD_SINCE.isoformat(),
+        "until": None,
+        "window": None,
     }
 
 

@@ -245,6 +245,11 @@ class DispatchHold:
     kind: DispatchHoldKind
     reason: str
     since: datetime
+    # A usage hold's: the reset claude reported and the window it refused on (spec 2026-10-02,
+    # claude-limits-alert) -- what the hub's web keys its Slack alert on. None on every other
+    # hold, and on a usage hold whose refusal claude did not date.
+    until: datetime | None = None
+    window: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

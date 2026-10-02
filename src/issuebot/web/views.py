@@ -155,10 +155,16 @@ def dispatch_hold(row: SnapshotRow | None) -> dict[str, Any] | None:
     if not isinstance(reason, str) or not reason:
         return None
     kind = hold.get("kind")
+    until = hold.get("until")
+    window = hold.get("window")
     return {
         "kind": kind if isinstance(kind, str) and kind else "unknown",
         "reason": reason,
         "since": hold.get("since"),
+        # A usage hold's reset and window (spec 2026-10-02, claude-limits-alert); None on every
+        # other hold, and on a snapshot written before a worker recorded them.
+        "until": until if isinstance(until, str) else None,
+        "window": window if isinstance(window, str) else None,
     }
 
 

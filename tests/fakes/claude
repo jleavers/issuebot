@@ -154,5 +154,9 @@ if scenario == "orphan":
     if pidfile:
         Path(pidfile).write_text(str(grandchild.pid))
     sys.exit(0)
+if scenario == "refused":
+    # Claude declining the turn because the account's window is spent (#173's incident).
+    replay("refused", delay)
+    sys.exit(1)
 sys.stderr.write(f"unknown CLAUDE_FAKE_SCENARIO {scenario!r}\n")
 sys.exit(3)
