@@ -101,7 +101,7 @@ that memory belong in the same row. It also keeps the tile filled through a rest
 CREATE TABLE actions_minutes (
     account          text PRIMARY KEY,   -- the token's login, as GET /user returned it
     period           date,               -- first day of the month the reading is for
-    used_minutes     numeric,            -- null until the first successful read
+    used_minutes     double precision,   -- null until the first successful read
     included_minutes integer,            -- ISSUEBOT_ACTIONS_INCLUDED_MINUTES at that read
     observed_at      timestamptz,        -- when issuebot read it
     alerted_percent  integer NOT NULL DEFAULT 0,  -- highest threshold posted for `period`
@@ -110,13 +110,12 @@ CREATE TABLE actions_minutes (
 );
 ```
 
-The web has never written a table before (its one write so far is `NOTIFY`), and it never
-migrates: the hub's worker does, as it starts. During an upgrade the two start together, so
-the web can meet a database without the table. Every read and write here treats PostgreSQL's
-`undefined_table` as "not yet": a read returns no row (no window drawn), a write is logged as
-`actions_minutes_unavailable` and the cycle ends -- with no row there is nothing to claim, so
-no alert can be sent twice. The table appears within seconds and the next cycle proceeds.
-Neither path may surface as the dashboard's "database unavailable" banner.
+The web has never written a table before (its one write so far is `NOTIFY`). It does migrate:
+`issuebot web` applies pending migrations before it serves (`_run_web` calls
+`_migrate_database`), so the table exists before the poller's first cycle and before any page
+reads it, and no missing-table handling is needed. A database error during a cycle is logged as
+`actions_minutes_store_failed` and the next cycle retries; with no claim recorded, no alert can
+have been sent twice.
 
 ### 4. The poller: `issuebot.web.actions`
 
@@ -128,7 +127,10 @@ the screenshot server pass). One cycle, then every `POLL_INTERVAL_S` (3,600, a c
    next hour). The login is then kept for the process's life.
 2. `fetch_actions_usage`. On success, upsert the row: `period`, `used_minutes`,
    `included_minutes`, `observed_at`, and clear `error`. A `period` newer than the stored one
-   resets `alerted_percent` to 0 in the same statement. On failure, record `error` and
+   resets `alerted_percent` to 0 in the same statement; a reading for a period *older* than the
+   stored one -- GitHub lagging across a month boundary -- is ignored, so it can neither
+   overwrite the new month nor reset the alert memory and repeat last month's alerts. On
+   failure, record `error` and
    `error_at` and keep the previous reading (inserting a reading-less row if there is none).
 3. After a success, the alert check (section 6).
 
@@ -214,7 +216,7 @@ are both set.
 | Summary fails over a good reading | the reading, tooltip adds the failure | none | once per change |
 | Allowance unset | dash naming the setting | none | at start |
 | Allowance malformed | -- | -- | `issuebot web` refuses to start |
-| Table not migrated yet | none | none | `actions_minutes_unavailable` |
+| Database unreachable during a cycle | pages show the usual database banner | none; the next cycle retries | `actions_minutes_store_failed` |
 | Webhook unset | normal | none | none |
 | Post fails | normal | retried next cycle | `actions_minutes_alert_failed` |
 | New month | 0% until the month's first read; alert memory resets with it | | |
@@ -251,7 +253,7 @@ are both set.
 - `docs/operations.md`, "Checks that never ran": one sentence pointing at the Actions window as
   the first thing to look at.
 - `docs/package-layout.md`: `issuebot.github` (billing), `issuebot.web` (the poller, the window,
-  `create_app`'s new parameter), `issuebot.db` (the table, its tolerance of a missing table),
+  `create_app`'s new parameter), `issuebot.db` (the table and its four writes),
   `issuebot.notifications` (`format_actions_alert`).
 - `CLAUDE.md`: the `issuebot web` line in Commands names the optional billing token. Nothing
   more there; the file has a budget.
@@ -276,7 +278,7 @@ are both set.
   both new keys empty (`tests/test_compose_credentials.py`).
 - `agent_environment` drops `ISSUEBOT_GITHUB_BILLING_TOKEN`.
 - Database (skipped without `DATABASE_URL`): the migration applies; upsert, period reset,
-  claim and release semantics; reads and writes against a database without the table.
+  claim and release semantics; the owner read matching case-insensitively.
 
 ## Out of scope
 
