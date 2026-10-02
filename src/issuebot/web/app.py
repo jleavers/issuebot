@@ -6,7 +6,9 @@ worker's rows. ``/`` redirects to the repository the browser last picked (a cook
 first registered one, and the header's dropdown is how a reader moves between them.
 
 Every request that reads opens one connection through ``Database.queries()`` and closes it when
-the response is built. The app never writes to a table; its one write is ``NOTIFY``. Templates
+the response is built. No request writes to a table -- a request's one write is ``NOTIFY`` --
+and the app's one table write is the Actions minutes poller's, to ``actions_minutes``, when the
+CLI builds one because the billing token is set (``issuebot.web.actions``). Templates
 render with autoescape on and ``StrictUndefined``; every response carries the security headers,
 the one an unhandled exception raises included (#106): the layer that adds them decorates the
 ``send`` channel rather than the response the next layer returns, and answers the exception
@@ -26,7 +28,8 @@ refresh route asks for one thing more, a proof a cross-site page cannot produce.
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
@@ -57,6 +60,7 @@ from issuebot.db import (
 )
 from issuebot.db.queries import IssueRow, RepoRow, RunRow, TurnRow, TurnSummaryRow
 from issuebot.log import get_logger
+from issuebot.web.actions import ActionsPoller
 from issuebot.web.auth import CHALLENGE, credential_matches, presented_password, refresh_refusal
 from issuebot.web.transcript import parse_transcript
 from issuebot.web.views import (
@@ -305,13 +309,30 @@ def create_app(
     password: str,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] = _utcnow,
+    actions: ActionsPoller | None = None,
 ) -> FastAPI:
     """The dashboard app over ``database``, gated by ``password`` (HTTP Basic, any username);
     ``clock`` and ``now`` are seams for tests. An empty password is refused here rather than
-    letting the gate compare against nothing."""
+    letting the gate compare against nothing. ``actions`` is the Actions minutes poller the CLI
+    builds when the billing token is set; it starts and stops with the app."""
     if not password:
         raise ValueError("the dashboard needs a password: export ISSUEBOT_WEB_PASSWORD")
-    app = FastAPI(title="issuebot", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # The Actions minutes poller lives as long as the server does (spec 2026-10-02).
+        if actions is not None:
+            actions.start()
+        try:
+            yield
+        finally:
+            if actions is not None:
+                await actions.stop()
+
+    app = FastAPI(
+        title="issuebot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
+    app.state.actions = actions
     log = get_logger(__name__)
     refreshes: dict[str, _Refresh] = {}
     env = template_environment()
@@ -422,6 +443,7 @@ def create_app(
         runs_7d = await queries.runs_count(timedelta(days=7))
         totals_1d = await queries.run_totals(timedelta(days=1))
         totals_7d = await queries.run_totals(timedelta(days=7))
+        actions_row = await queries.actions_minutes()
         return dashboard_context(
             row,
             groups,
@@ -434,6 +456,7 @@ def create_app(
             totals_7d=totals_7d,
             now=now(),
             labels=scope.labels,
+            actions=actions_row,
         )
 
     async def load_turn(
@@ -606,7 +629,8 @@ def create_app(
         async with database.queries() as queries:
             scope = await load_scope(queries, owner, name)
             row = await scope.queries.snapshot()
-        return JSONResponse(state_document(row, now()))
+            actions_row = await scope.queries.actions_minutes()
+        return JSONResponse(state_document(row, now(), actions=actions_row))
 
     @app.get("/api/v1/repos/{owner}/{name}/issues/{number}")
     async def api_issue(owner: str, name: str, number: int) -> JSONResponse:

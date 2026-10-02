@@ -38,6 +38,7 @@ uv run issuebot refresh              # NOTIFY the repository's channel: its work
                                      #   (at most one refresh-driven tick every 5 s)
 uv run issuebot web [--port N] [--bind HOST]   # the dashboard and the JSON API (needs DATABASE_URL and
                                      #   ISSUEBOT_WEB_PASSWORD, reads no workflow; binds 127.0.0.1 by default)
+                                     #   + the Actions minutes with ISSUEBOT_GITHUB_BILLING_TOKEN, docs/dashboard.md
 uv run issuebot egress [--port N] [--bind HOST]   # the allow-listing CONNECT proxy the worker's egress
                                      #   goes through (#126; reads ISSUEBOT_EGRESS_ALLOW, no workflow,
                                      #   no credential; compose runs it as the `egress` service)
@@ -245,7 +246,8 @@ about where the content was when it was written.
   there and nowhere else, as is the difference between a check that failed and one Actions
   never ran.
 - `docs/dashboard.md`: the web surface -- what it serves, who may read it, the Basic gate and
-  a browser that will not speak it, the hero's six tiles, and what "issues closed" counts.
+  a browser that will not speak it, the hero's six tiles, the GitHub Actions minutes window
+  and its Slack alert, and what "issues closed" counts.
 - `docs/security-model.md`: how a session is bounded, for a reader deciding whether to trust
   one -- what it may reach (the egress allow-list and `ISSUEBOT_EGRESS_ALLOW`), one account
   per concurrent session, and checking that the credential took. The reasoning behind those

@@ -3,7 +3,7 @@
 import re
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 from importlib.resources import files
 from typing import Any
 
@@ -15,6 +15,7 @@ from fakes.web import (
     NOW,
     RUN_ID,
     Harness,
+    actions_row,
     issue_row,
     limits,
     retry_row,
@@ -34,6 +35,8 @@ from issuebot.db import (
 from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
+    actions_document,
+    actions_window,
     age_text,
     compact,
     dashboard_context,
@@ -1027,6 +1030,7 @@ def test_dashboard_context() -> None:
             "value": "\u2014",
             "title": "no reading yet; one arrives while a turn is running",
         },
+        "actions": None,
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
     assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
@@ -1073,3 +1077,129 @@ def test_dashboard_context_carries_a_held_dispatch() -> None:
         "reason": "claude authentication unavailable: not logged in",
         "since": (NOW - timedelta(minutes=4)).isoformat(),
     }
+
+
+# --- the Actions window ------------------------------------------------------------------------
+
+
+def test_a_reading_is_a_percentage_with_the_minutes_in_its_tooltip() -> None:
+    assert actions_window(actions_row(), NOW) == {
+        "value": "77%",
+        "percent": 77,
+        "title": "2,308 of 3,000 min used, 692 left, resets 1 Oct, read 12 min ago",
+    }
+
+
+def test_past_the_allowance_it_reads_full_and_says_by_how_much() -> None:
+    window = actions_window(actions_row(used_minutes=3012.0), NOW)
+    assert window is not None and (window["value"], window["percent"]) == ("100%", 100)
+    assert window["title"] == (
+        "3,012 of 3,000 min used, 12 min over the included 3,000, resets 1 Oct, read 12 min ago"
+    )
+
+
+def test_a_reading_from_last_month_reads_empty_until_this_month_s_first() -> None:
+    row = actions_row(period=date(2026, 8, 1), observed_at=NOW - timedelta(days=4))
+    assert actions_window(row, NOW) == {
+        "value": "0%",
+        "percent": 0,
+        "title": "0 of 3,000 min used, 3,000 left, resets 1 Oct, read 4 d ago",
+    }
+
+
+def test_without_an_allowance_it_is_a_dash_that_names_the_setting() -> None:
+    window = actions_window(actions_row(included_minutes=None), NOW)
+    assert window is not None and (window["value"], window["percent"]) == ("—", None)
+    assert window["title"].startswith("2,308 min used this month; set ")
+    assert "ISSUEBOT_ACTIONS_INCLUDED_MINUTES" in window["title"]
+
+
+def test_without_an_allowance_a_failed_refresh_still_says_so() -> None:
+    row = actions_row(
+        included_minutes=None,
+        error="GitHub could not be reached",
+        error_at=NOW - timedelta(minutes=3),
+    )
+    window = actions_window(row, NOW)
+    assert window is not None and window["value"] == "—"
+    assert "ISSUEBOT_ACTIONS_INCLUDED_MINUTES" in window["title"]
+    assert window["title"].endswith("; last refresh failed 3 min ago: GitHub could not be reached")
+
+
+def test_an_error_with_no_reading_is_a_dash_whose_tooltip_is_the_error() -> None:
+    row = actions_row(
+        period=None,
+        used_minutes=None,
+        observed_at=None,
+        error="token rejected: it may have expired or been revoked",
+        error_at=NOW - timedelta(minutes=3),
+    )
+    assert actions_window(row, NOW) == {
+        "value": "—",
+        "percent": None,
+        "title": "token rejected: it may have expired or been revoked",
+    }
+
+
+def test_a_failed_refresh_keeps_the_figure_and_says_so() -> None:
+    row = actions_row(error="GitHub could not be reached", error_at=NOW - timedelta(minutes=3))
+    window = actions_window(row, NOW)
+    assert window is not None and window["value"] == "77%"
+    assert window["title"].endswith("; last refresh failed 3 min ago: GitHub could not be reached")
+
+
+def test_no_row_draws_no_window_and_no_document() -> None:
+    assert actions_window(None, NOW) is None and actions_document(None, NOW) is None
+
+
+def test_the_document_carries_the_figures() -> None:
+    assert actions_document(actions_row(), NOW) == {
+        "account": "example",
+        "period": "2026-09",
+        "used_minutes": 2308,
+        "included_minutes": 3000,
+        "remaining_minutes": 692,
+        "percent": 77,
+        "resets_at": "2026-10-01T00:00:00+00:00",
+        "observed_at": (NOW - timedelta(minutes=12)).isoformat(),
+        "error": None,
+        "error_at": None,
+    }
+
+
+def test_a_rolled_over_document_is_this_month_with_nothing_used() -> None:
+    document = actions_document(actions_row(period=date(2026, 8, 1)), NOW)
+    assert document is not None
+    assert (document["period"], document["used_minutes"], document["percent"]) == ("2026-09", 0, 0)
+
+
+def test_the_limits_tile_gains_an_actions_window_on_the_owner_s_repository(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(rate_limits=limits())
+    h.queries.actions_rows = [actions_row()]
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
+    assert section.count('<div class="window"') == 13
+    assert section.count('<div class="span">Actions</div>') == 1
+    assert 'value="77" max="100"' in section
+    assert 'title="2,308 of 3,000 min used, 692 left, resets 1 Oct, read 12 min ago"' in section
+
+
+def test_another_owner_s_repository_draws_no_actions_window(h: Harness) -> None:
+    h.register("acme/frontend")
+    h.queries.actions_rows = [actions_row()]
+    section = hero(html(h.client.get("/r/acme/frontend/partials/dashboard")))
+    assert "Actions" not in section and section.count('<div class="window"') == 12
+
+
+def test_the_actions_window_follows_n_a_claude_windows(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(credential="api_key", rate_limits=limits())
+    h.queries.actions_rows = [actions_row()]
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
+    assert section.count(">N/A<") == 2
+    assert section.count('<div class="span">Actions</div>') == 1
+
+
+def test_an_actions_dash_draws_no_meter(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(credential="api_key")
+    h.queries.actions_rows = [actions_row(included_minutes=None)]
+    section = hero(html(h.client.get(f"{BASE}/partials/dashboard")))
+    assert 'class="meter"' not in section and section.count(">—<") == 1

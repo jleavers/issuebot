@@ -1,5 +1,7 @@
 """Tests for the Slack message text."""
 
+from datetime import date
+
 import pytest
 
 from issuebot.config import GitHubLabels
@@ -15,6 +17,7 @@ from issuebot.events import (
     StateChanged,
 )
 from issuebot.notifications import format_duration, format_event, issue_link, pr_link
+from issuebot.notifications.messages import format_actions_alert
 
 REPO = "example/repo"
 LABELS = GitHubLabels()
@@ -239,3 +242,31 @@ def test_notification_sent_and_bare_events_are_not_formatted() -> None:
     )
     assert fmt(sent) is None
     assert fmt(Event()) is None
+
+
+def test_an_actions_alert_below_the_allowance_says_what_is_left() -> None:
+    text = format_actions_alert(
+        account="jleavers", used=2308, included=3000, resets_on=date(2026, 11, 1)
+    )
+    assert text == (
+        ":warning: GitHub Actions: jleavers has used 2,308 of 3,000 included minutes this "
+        "month (77%); 692 left until 1 Nov."
+    )
+
+
+def test_an_actions_alert_at_the_allowance_says_what_happens_next() -> None:
+    text = format_actions_alert(
+        account="jleavers", used=3012, included=3000, resets_on=date(2026, 11, 1)
+    )
+    assert text == (
+        ":rotating_light: GitHub Actions: jleavers has used all 3,000 included minutes this "
+        "month (3,012 used). Runs in private repositories are now billed or refused, depending "
+        "on the account's budget, until 1 Nov."
+    )
+
+
+def test_an_actions_alert_escapes_the_account() -> None:
+    text = format_actions_alert(
+        account="<!channel>", used=1, included=4, resets_on=date(2026, 11, 1)
+    )
+    assert "<!channel>" not in text and "&lt;!channel&gt;" in text

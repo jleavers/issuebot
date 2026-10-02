@@ -451,6 +451,32 @@ writes such a workflow outright, and without it any existing workflow that runs 
 code -- the session's code, on its branch -- with a `pull-requests: write` token reaches the
 same setting.
 
+## The dashboard's billing token
+
+The hub's `web` may hold one GitHub credential, for the limits tile's [GitHub Actions
+minutes](dashboard.md#github-actions-minutes): `ISSUEBOT_GITHUB_BILLING_TOKEN`, a classic token
+of the account that owns the repositories, with the `user` scope and nothing else. It is not a
+deployment's token. A deployment's bot account cannot read its owner's billing at all, and the
+billing endpoints take no fine-grained token, so this is a second token of the *owner's*. It
+reaches no repository, but it can edit the owner's profile, read their private email addresses,
+follow and unfollow, and read their billing.
+
+So it lives where no session does. The web runs no session, answers only behind HTTP Basic on a
+loopback-published port, and already holds the database DSN. The worker's container is where a
+hostile issue's session runs, and keeping the owner's credentials out of it is why each
+deployment acts as its own bot account ([The account a session acts
+as](#the-account-a-session-acts-as)). The worker loads the whole `.env` through `env_file`, so
+compose empties the billing token in the worker's `environment:`, which wins; and
+`agent_environment`'s allow-list would not pass it to a session in any case. The token travels to
+`gh` as `GH_TOKEN` in the child's environment, never as an argument, and no log line, row, page
+or JSON response carries it: the error the window shows is issuebot's own wording.
+
+Give it an expiry. A token that lapses while the web runs shows as the window's error and as one
+`actions_minutes_failed` line in the web's log. One that has already lapsed when the web starts
+cannot name the account it reads, so nothing is written: the window keeps its last reading,
+ageing, and that log line is what says why. A new one is an `.env` edit and `docker compose
+up -d web`.
+
 ## Checking that the credential took
 
 `validate`'s `claude auth` line is the answer: it asks `claude` which credential it would

@@ -255,8 +255,12 @@ cp .env.example .env
 
 Fill in `.env`: `GH_TOKEN`, one of `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`,
 `ISSUEBOT_DB_PASSWORD`, `ISSUEBOT_WEB_PASSWORD`, the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
-values, and optionally `SLACK_WEBHOOK_URL`. `ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only
-matter if 5432 or 8080 is taken on your host.
+values, and optionally `SLACK_WEBHOOK_URL`. On the hub, `ISSUEBOT_GITHUB_BILLING_TOKEN` and
+`ISSUEBOT_ACTIONS_INCLUDED_MINUTES` add the billing account's [GitHub Actions
+minutes](docs/dashboard.md#github-actions-minutes) to the dashboard: the token is a classic one
+of the account that owns the repositories with only `user` ticked, the narrowest GitHub offers,
+which can also edit that account's profile and read its private email addresses.
+`ISSUEBOT_DB_PORT` and `ISSUEBOT_WEB_PORT` only matter if 5432 or 8080 is taken on your host.
 
 `ISSUEBOT_DB_PASSWORD` is the password of the PostgreSQL store and the one credential it has,
 so it has no default: `docker compose up` (and `config`) refuse to run the database, the worker
@@ -614,8 +618,13 @@ The CLI reads the environment and not `.env`, so source it first
 (`set -a && . ./.env && set +a`), and point `workspace.root` at a directory you can write,
 such as `~/issuebot-workspaces` (the default `/workspaces` is the Compose volume); the worker
 creates it. `issuebot web` in a second terminal reads `DATABASE_URL` and
-`ISSUEBOT_WEB_PASSWORD` and nothing else, listens on loopback (`--bind 0.0.0.0` to serve a
-network) and asks for the password on every request.
+`ISSUEBOT_WEB_PASSWORD`, plus the optional [GitHub Actions
+minutes](docs/dashboard.md#github-actions-minutes) settings, and nothing else, listens on
+loopback (`--bind 0.0.0.0` to serve a network) and asks for the password on every request. A
+web run against a scratch database should blank `ISSUEBOT_GITHUB_BILLING_TOKEN` and
+`SLACK_WEBHOOK_URL` (`ISSUEBOT_GITHUB_BILLING_TOKEN= SLACK_WEBHOOK_URL= uv run issuebot web`),
+since the Actions alert remembers what it has posted in the store it writes, and a second
+store would post the hub's alerts to the channel again.
 
 History is optional: with `DATABASE_URL` set (compose builds it for the worker from
 `ISSUEBOT_DB_PASSWORD`; on the host export
@@ -648,7 +657,9 @@ Slack notifications are optional: export `SLACK_WEBHOOK_URL` (an incoming webhoo
 `https://hooks.slack.com/services/...`) and choose the event kinds in `WORKFLOW.md` under
 `notifications.slack.events` (default `state_changed` and `blocked`; add `run_ended` for a
 line per run with its cost). The worker reads both at start, so changing either needs a
-restart; `validate` warns while the variable is unset.
+restart; `validate` warns while the variable is unset. On the hub the `web` service reads
+`SLACK_WEBHOOK_URL` too, to post the [GitHub Actions
+minutes](docs/dashboard.md#github-actions-minutes) alert.
 
 The design lives in [`docs/superpowers/specs/`](docs/superpowers/specs/); start with
 the phased design, then the per-phase specs and plans. A bare `#135` anywhere in these

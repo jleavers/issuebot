@@ -24,6 +24,8 @@ _ENV_VARS = (
     "GH_TOKEN",
     "DATABASE_URL",
     "SLACK_WEBHOOK_URL",
+    "ISSUEBOT_GITHUB_BILLING_TOKEN",
+    "ISSUEBOT_ACTIONS_INCLUDED_MINUTES",
     "ISSUEBOT_WORKSPACE_ROOT",
     "ISSUEBOT_WORKFLOW",
     # ``ISSUEBOT_AGENT_USER`` is the operator's own override, which a host or a container may

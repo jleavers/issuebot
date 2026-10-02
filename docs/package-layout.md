@@ -242,6 +242,13 @@ is total in both directions -- `http`/`https` only, a 5 s timeout, a bounded rea
 anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
 `github` dispatch hold and `validate`'s `github.status` check.
 
+`billing.py`: the dashboard's Actions minutes reads, made with the billing token through any
+`GhRunnerLike` -- `fetch_login`, `fetch_actions_usage`, `parse_summary` (period from
+`timePeriod`; `grossQuantity` summed over the items whose unit is minutes, which is the figure
+the billing page shows), `next_period`, and `describe_failure`, issuebot's own words for a
+failure, since `gh`'s stderr never reaches a page. `errors.categorise` is the stderr
+classification it shares with `ghcli`.
+
 ## `issuebot.agent`
 
 `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
@@ -1389,7 +1396,7 @@ network rather than GitHub's.
 
 ## `issuebot.notifications`
 
-the Slack sink, imported by `cli` only. `messages.py` (pure):
+the Slack sink, imported by `cli`, and by `web` for one message. `messages.py` (pure):
 `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
 by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
 `urllib` in `asyncio.to_thread`, never raises, errors pass through `redact`), `PostResult`,
@@ -1400,6 +1407,9 @@ and enqueues, cap 100; one drain task started by `start(bus)` posts with three a
 10 s). A drain timeout cancels the task, but a post already in the worker thread finishes
 its own socket timeout first, so exit can take up to 20 s. Constants, not settings. A
 webhook or allow-list change needs a worker restart.
+
+`format_actions_alert` is the dashboard's low-minutes line, posted by `web.actions` through
+`urllib_post` with a single attempt; the next hourly cycle is the retry.
 
 ## `issuebot.db`
 
@@ -1481,10 +1491,18 @@ change needs a restart. Tests: `db_url` (conftest) creates a schema per test and
 `DATABASE_URL`; the sink and listener tests use fakes; `tests/fakes/database.py` is the
 `FakeDatabase` the CLI and web tests share, with a separate `FakeRepoQueries`.
 
+`0005_actions_minutes.sql` and `actions.py`: one row per billing account, written only by the
+web's poller. `Database.record_actions_reading` ignores a reading for an older month (GitHub
+lagging across a boundary) and resets `alerted_percent` on a new one; `record_actions_error`
+keeps the reading; `claim_actions_alert`/`release_actions_alert` are the alert's
+claim-then-post. `RepoQueries.actions_minutes()` reads the repository owner's row,
+case-insensitively.
+
 ## `issuebot.web`
 
-the dashboard, imported by `cli` only; imports `config`, `db`, `github` and
-`log`. `app.py`: `create_app(database, *, password, clock=, now=)` (FastAPI; every page and JSON route
+the dashboard, imported by `cli` only; imports `config`, `db`, `github`, `log` and
+`notifications`. `app.py`: `create_app(database, *, password, clock=, now=, actions=)`
+(FastAPI; every page and JSON route
 lives under a repository prefix, since one database now holds every worker's rows —
 `/r/<owner>/<name>/` for the pages, `/api/v1/repos/<owner>/<name>/` for the JSON. Pages:
 `/r/<owner>/<name>/` (dashboard), `/issues[?state=<role>]`, `/issues/<n>`,
@@ -1601,7 +1619,7 @@ data from data attributes on `#chart-config` (`data-stats-url`, `data-chart-wind
 `data-chart-poll-s`). One
 connection per request through `Database.queries()`. Constants, not settings; the web reads
 no `WORKFLOW.md` — everything it shows comes from the database, so `create_app` takes only
-`database` (and the `clock`/`now` test seams).
+`database` (plus the `clock`/`now` test seams and `actions=`, the poller below).
 Light and dark are role tokens in `app.css`, declared once for
 light and twice for dark (`@media (prefers-color-scheme: dark)` for the OS preference,
 `:root[data-theme="dark"]` for the operator's own choice, which wins); `static/theme.js` is
@@ -1610,6 +1628,12 @@ choice in `localStorage` (`issuebot-theme`; storing nothing keeps the OS in char
 fires `issuebot:themechange`, which `app.js` uses to repaint the canvas the tokens cannot
 reach. Both themes' marks and text are held to WCAG contrast floors by
 `tests/test_web_theme.py`.
+
+`actions.py`: `actions_settings` (the three environment variables; a malformed allowance
+raises, so `issuebot web` refuses to start), `ActionsPoller` (hourly; `create_app(actions=)`
+starts and stops it with the lifespan), `alert_threshold` over `THRESHOLDS` (75, 90, 100).
+`views.actions_document`/`actions_window` draw the limits tile's third window and `/state`'s
+`actions_minutes` from the row.
 
 ## `issuebot.cli`
 

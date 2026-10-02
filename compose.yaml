@@ -138,6 +138,11 @@ services:
       # The directory below is what is mounted; this names the file inside it. Keep the two
       # in step if you rename either.
       ISSUEBOT_WORKFLOW: /configs/WORKFLOW.md
+      # The billing account's token is the dashboard's alone (docs/security-model.md). env_file
+      # above loads the whole .env, which in a hub checkout holds it, so it is emptied here --
+      # environment wins over env_file -- and the owner's credential never sits in the
+      # container where sessions run.
+      ISSUEBOT_GITHUB_BILLING_TOKEN: ""
       # The one way off the host, for the worker and -- through `agent_environment`'s
       # pass-through -- for every session and every hook (#126). Both cases of each name on
       # purpose: curl deliberately ignores an upper-case `HTTP_PROXY`, since a CGI script's
@@ -238,8 +243,9 @@ services:
     build: .
     profiles: ["hub"]
     networks: [issuebot]
-    # The dashboard and the JSON API for every repository on this database. Reads nothing but
-    # DATABASE_URL and its own password; no workflow, no GitHub, Claude or Slack credential.
+    # The dashboard and the JSON API for every repository on this database. Reads DATABASE_URL,
+    # its own password and, when the hub sets them, the GitHub Actions minutes settings below;
+    # no workflow and no Claude credential.
     # 0.0.0.0 is the container's every interface, which is the only way the published port
     # below reaches it; the CLI's own default is loopback.
     command: ["web", "--bind", "0.0.0.0", "--port", "8080"]
@@ -260,6 +266,13 @@ services:
       # secret it never uses. The app refuses to start without it ([FAIL] web: not
       # configured), and restart: unless-stopped shows that in `docker compose ps`.
       ISSUEBOT_WEB_PASSWORD: ${ISSUEBOT_WEB_PASSWORD:-}
+      # The dashboard's GitHub Actions minutes (docs/dashboard.md): the billing account's own
+      # classic token with only the `user` scope, its plan's monthly allowance, and the webhook
+      # the low-minutes alert posts to. Optional pass-throughs like the password above; with no
+      # token the web polls nothing and the limits tile keeps its two Claude windows.
+      ISSUEBOT_GITHUB_BILLING_TOKEN: ${ISSUEBOT_GITHUB_BILLING_TOKEN:-}
+      ISSUEBOT_ACTIONS_INCLUDED_MINUTES: ${ISSUEBOT_ACTIONS_INCLUDED_MINUTES:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     ports:
       # Published on loopback: the credential is the gate, and the host's loopback keeps the
       # LAN from even asking. Override the host port with ISSUEBOT_WEB_PORT in the project

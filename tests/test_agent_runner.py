@@ -386,6 +386,11 @@ def test_the_overridden_model_reaches_argv(tmp_path: Path) -> None:
     assert argv[argv.index("--model") + 1] == "fable"
 
 
+def test_agent_environment_never_carries_the_dashboard_s_billing_token() -> None:
+    parent = {"PATH": "/usr/bin", "ISSUEBOT_GITHUB_BILLING_TOKEN": "ghp_" + "c" * 36}
+    assert "ISSUEBOT_GITHUB_BILLING_TOKEN" not in agent_environment(parent, token=None)
+
+
 def test_agent_environment_passes_only_the_allowed_names() -> None:
     parent = {
         "PATH": "/usr/bin",

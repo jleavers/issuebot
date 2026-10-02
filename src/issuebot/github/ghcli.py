@@ -1,13 +1,18 @@
 """GitHubAdapter backed by the gh CLI: GraphQL for reads, gh subcommands for writes."""
 
 import json
-import re
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from issuebot.config import GitHubLabels, GitHubSettings
-from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
+from issuebot.github.errors import (
+    RATE_LIMITED,
+    ErrorCategory,
+    GitHubError,
+    PageCeilingError,
+    categorise,
+)
 from issuebot.github.models import (
     ApprovalEvidence,
     AuthStatus,
@@ -167,19 +172,6 @@ def by_ids_query(numbers: Sequence[int]) -> str:
         "  }\n"
         "}\n" + ISSUE_FIELDS
     )
-
-
-_RATE_LIMITED = re.compile(r"http 429|rate limit|secondary rate")
-_ERROR_RULES: tuple[tuple[ErrorCategory, re.Pattern[str]], ...] = (
-    ("auth", re.compile(r"http 401|bad credentials|authentication|gh auth login")),
-    ("not_found", re.compile(r"http 404|could not resolve to|\bnot found\b")),
-    ("rate_limited", _RATE_LIMITED),
-    (
-        "transport",
-        re.compile(r"http 5\d\d|connection|could not resolve host|timeout|\btls\b|dial tcp"),
-    ),
-    ("auth", re.compile(r"http 403")),
-)
 
 
 class GhCliAdapter:
@@ -840,7 +832,7 @@ class GhCliAdapter:
             return
         # The message as well as the type: the budget has run out with every poll categorised
         # `response`, so the type is not the one way GitHub says it (2026-09-24).
-        if "RATE_LIMITED" in types or _RATE_LIMITED.search(messages.lower()):
+        if "RATE_LIMITED" in types or RATE_LIMITED.search(messages.lower()):
             raise GitHubError("rate_limited", messages, exit_code=result.returncode, stderr=stderr)
         category: ErrorCategory = "not_found" if types == {"NOT_FOUND"} else "response"
         raise GitHubError(category, messages, exit_code=result.returncode, stderr=stderr)
@@ -855,15 +847,7 @@ class GhCliAdapter:
         stderr = self._redact(result.stderr)
         first_line = next((line for line in stderr.splitlines() if line.strip()), "").strip()
         message = first_line or f"gh exited with status {result.returncode}"
-        category: ErrorCategory = "status"
-        if result.returncode == 4:
-            category = "auth"
-        else:
-            lowered = stderr.lower()
-            for candidate, pattern in _ERROR_RULES:
-                if pattern.search(lowered):
-                    category = candidate
-                    break
+        category = categorise(result.returncode, stderr)
         self._log.warning(
             "gh_failed", category=category, exit_code=result.returncode, message=message
         )
