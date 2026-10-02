@@ -82,12 +82,16 @@ snapshot:
 
 - `UsageLimit.window` travels beside `usage_reset_at`, as `usage_window: str | None`: from the
   runner's turn result, through the session state and `RunResult`, to `_usage_limited`.
-- The orchestrator keeps it beside `_usage_reset_at` (as `_usage_window`; the latest refusal's
-  window wins, as its reason does). `Hold` (`orchestrator/admission.py`) and `DispatchHold`
-  (`orchestrator/state.py`) gain `until: datetime | None = None` and
-  `window: str | None = None`, set only for the usage hold, from `_usage_reset_at` and
-  `_usage_window`. A hold that lasts keeps its `since`, as it does today, and takes the newer
-  `until` and `window` along with its newer reason.
+- The orchestrator keeps, beside `_usage_reset_at`, the reset claude reported
+  (`_usage_until`) and the window that came with it (`_usage_window`). `_usage_until` takes only
+  a reset claude reported, never the one-interval fallback a refusal without one is given: that
+  fallback moves every time it is taken, and carrying it would hand the web a fresh key -- and
+  Slack a fresh alert -- every poll interval. It moves out only, as `_usage_reset_at` does, and
+  the window moves with it, so `until` and `window` always describe the same refusal. `Hold`
+  (`orchestrator/admission.py`) and `DispatchHold` (`orchestrator/state.py`) gain
+  `until: datetime | None = None` and `window: str | None = None`, set only for the usage hold,
+  from `_usage_until` and `_usage_window`. A hold that lasts keeps its `since`, as it does
+  today, and takes the newer `until` and `window` along with its newer reason.
 - The snapshot's `dispatch_hold` therefore carries `until` and `window` with no change to how
   it is written. `views.dispatch_hold` passes them through when present, so `/api/v1/state`
   carries them too; older snapshots without them read as before.
@@ -140,7 +144,8 @@ poller, built by the CLI whenever `SLACK_WEBHOOK_URL` is set. One cycle at start
    `("seven_day", resets_at)` at it and post the warning if the claim wrote.
 3. **Hits.** For each usage hold whose `until` is still in the future, claim
    `(window or "unknown", until)` at 100 and post the hit if the claim wrote. A hold without
-   `until` -- a worker not yet upgraded -- is skipped.
+   `until` -- a worker not yet upgraded, or a refusal claude did not date -- is skipped. A 7-day
+   warning whose reset is also a 7-day hit in the same cycle is skipped: the hit says more.
 4. **Posting** is one attempt through `notifications.slack.urllib_post`, which never raises and
    keeps the URL out of every error. A failed post logs `claude_limits_alert_failed`, releases
    the claim, and holds further posting for that key for `RETRY_BACKOFF_S` (900, a constant,
@@ -183,8 +188,9 @@ times; the window name is escaped like every other free text posted.
 - `docs/dashboard.md`: a short section beside "GitHub Actions minutes" on the Claude limits
   alert -- what posts and when, that it needs only the webhook, and that readings only move
   while issuebot runs turns.
-- `docs/operations.md`: in the usage-limit recovery, one sentence that Slack now says when a
-  limit stops the board and when it lifts.
+- `docs/operations.md`: a short `### A spent Claude usage window` under "When things go wrong"
+  -- the usage hold has no operator text yet -- saying what the worker does, what
+  `issuebot status` shows, that the hold lifts on its own, and that Slack now says when.
 - `README.md`: the sentence saying the hub's `web` reads `SLACK_WEBHOOK_URL` for the Actions
   alert covers the Claude alert too.
 - `docs/package-layout.md`: short additions for `orchestrator` (the hold's `until` and
@@ -197,7 +203,8 @@ times; the window name is escaped like every other free text posted.
 ### 8. Testing
 
 - Worker: a refusal's `rateLimitType` reaches `RunResult.usage_window`; the usage hold in the
-  snapshot carries `until` and `window`; a second refusal with a later reset moves `until` out
+  snapshot carries `until` and `window`; a refusal claude did not date leaves `until` empty; a
+  second refusal with a later reset moves `until` out
   and keeps `since`; `views.dispatch_hold` passes the two through and tolerates their absence.
 - `web.claude_limits`, with fake queries, store and poster: 75 then 90 post once each; a jump
   posts 90 alone; a new `resets_at` starts afresh; expired readings and holds are ignored; the
