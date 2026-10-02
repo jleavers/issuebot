@@ -1,6 +1,7 @@
 """Slack message text for issuebot events: one line of mrkdwn per notifiable kind."""
 
 import re
+from datetime import date
 
 from issuebot.config import GitHubLabels
 from issuebot.events import (
@@ -111,3 +112,20 @@ def _run_ended(event: RunEnded, issue: str) -> str:
     word = _OUTCOME_WORDS.get(event.outcome, event.outcome)
     detail = f": {_escape(event.error)}" if event.error else ""
     return f":x: {issue} run {word}{detail} ({stats})"
+
+
+def format_actions_alert(*, account: str, used: int, included: int, resets_on: date) -> str:
+    """The dashboard's low-minutes line (spec 2026-10-02): whole minutes, one mrkdwn line."""
+    who = _escape(account)
+    resets = f"{resets_on.day} {resets_on:%b}"
+    if used >= included:
+        return (
+            f":rotating_light: GitHub Actions: {who} has used all {included:,} included minutes "
+            f"this month ({used:,} used). Runs in private repositories are now billed or "
+            f"refused, depending on the account's budget, until {resets}."
+        )
+    percent = round(used / included * 100)
+    return (
+        f":warning: GitHub Actions: {who} has used {used:,} of {included:,} included minutes "
+        f"this month ({percent}%); {included - used:,} left until {resets}."
+    )

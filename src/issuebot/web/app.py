@@ -26,7 +26,8 @@ refresh route asks for one thing more, a proof a cross-site page cannot produce.
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
@@ -57,6 +58,7 @@ from issuebot.db import (
 )
 from issuebot.db.queries import IssueRow, RepoRow, RunRow, TurnRow, TurnSummaryRow
 from issuebot.log import get_logger
+from issuebot.web.actions import ActionsPoller
 from issuebot.web.auth import CHALLENGE, credential_matches, presented_password, refresh_refusal
 from issuebot.web.transcript import parse_transcript
 from issuebot.web.views import (
@@ -305,13 +307,30 @@ def create_app(
     password: str,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] = _utcnow,
+    actions: ActionsPoller | None = None,
 ) -> FastAPI:
     """The dashboard app over ``database``, gated by ``password`` (HTTP Basic, any username);
     ``clock`` and ``now`` are seams for tests. An empty password is refused here rather than
-    letting the gate compare against nothing."""
+    letting the gate compare against nothing. ``actions`` is the Actions minutes poller the CLI
+    builds when the billing token is set; it starts and stops with the app."""
     if not password:
         raise ValueError("the dashboard needs a password: export ISSUEBOT_WEB_PASSWORD")
-    app = FastAPI(title="issuebot", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # The Actions minutes poller lives as long as the server does (spec 2026-10-02).
+        if actions is not None:
+            actions.start()
+        try:
+            yield
+        finally:
+            if actions is not None:
+                await actions.stop()
+
+    app = FastAPI(
+        title="issuebot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
+    app.state.actions = actions
     log = get_logger(__name__)
     refreshes: dict[str, _Refresh] = {}
     env = template_environment()
