@@ -78,6 +78,8 @@ new one, so it reads 0% rather than repeating a figure that stopped being true a
 Each window's tooltip carries the reset time and how old the reading is. The worker reads its
 last reading back out of the stored snapshot when it starts, so a restart — which is how it is
 deployed — does not blank the tile until the next dispatch.
+With `SLACK_WEBHOOK_URL` set, the hub also posts to Slack as the 7-day window fills and when
+either window stops the board ([Claude usage alerts](#claude-usage-alerts)).
 
 The cost tile is labelled for what is being spent, from the same `claude auth status` probe the
 worker runs at startup: `cost (effort)` on a subscription, where there is no per-token charge
@@ -125,6 +127,29 @@ first thing to check when no window appears.
 The reading is kept in the `actions_minutes` table, so it survives a restart and an alert is
 never posted twice. To take the window away, remove the token, restart `web`, and delete the
 row: `docker compose exec db psql -U issuebot -c 'DELETE FROM actions_minutes'`.
+
+## Claude usage alerts
+
+With `SLACK_WEBHOOK_URL` in the hub checkout's `.env` -- the webhook the [GitHub Actions
+minutes](#github-actions-minutes) alert uses, and nothing else; no token is needed -- the hub's
+`web` reads every worker's snapshot once a minute and posts to Slack:
+
+- when the 7-day window reaches 75%, and again at 90%, once each per week:
+  `:warning: Claude: the 7-day usage window is 77% used; it resets Fri 9 Oct, 05:00 UTC.`
+- when claude refuses a turn because a window is spent and a worker stops claiming issues, once
+  for that window however many workers hit it:
+  `:rotating_light: Claude: the 5-hour usage limit is reached; issuebot stops claiming issues
+  until 20:00 UTC (in 2 h 13 min).`
+
+The 5-hour window has no warnings, since it resets several times a day, and there is no message
+when work resumes: the hit already says when. A refusal claude gave no reset time for posts
+nothing, since there is no time to name. The hit comes only from a worker's hold: a 7-day
+reading at 100% with no hold still posts the 90% warning, worded "100% used". Times are UTC. A
+reading only moves while one of issuebot's own turns is running, so use from interactive Claude
+sessions on the same subscription shows at issuebot's next turn, not before. What has been posted
+is kept in the `claude_limit_alerts` table, one row per window and reset time, so a restart of
+`web` never posts an alert twice, and a failed post is tried again after fifteen minutes.
+`notifications.slack.events` does not govern it: that list is the worker's.
 
 ## What "issues closed" counts
 

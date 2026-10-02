@@ -659,7 +659,8 @@ Slack notifications are optional: export `SLACK_WEBHOOK_URL` (an incoming webhoo
 line per run with its cost). The worker reads both at start, so changing either needs a
 restart; `validate` warns while the variable is unset. On the hub the `web` service reads
 `SLACK_WEBHOOK_URL` too, to post the [GitHub Actions
-minutes](docs/dashboard.md#github-actions-minutes) alert.
+minutes](docs/dashboard.md#github-actions-minutes) and [Claude
+usage](docs/dashboard.md#claude-usage-alerts) alerts.
 
 The design lives in [`docs/superpowers/specs/`](docs/superpowers/specs/); start with
 the phased design, then the per-phase specs and plans. A bare `#135` anywhere in these
