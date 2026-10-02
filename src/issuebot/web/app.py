@@ -6,7 +6,9 @@ worker's rows. ``/`` redirects to the repository the browser last picked (a cook
 first registered one, and the header's dropdown is how a reader moves between them.
 
 Every request that reads opens one connection through ``Database.queries()`` and closes it when
-the response is built. The app never writes to a table; its one write is ``NOTIFY``. Templates
+the response is built. No request writes to a table -- a request's one write is ``NOTIFY`` --
+and the app's one table write is the Actions minutes poller's, to ``actions_minutes``, when the
+CLI builds one because the billing token is set (``issuebot.web.actions``). Templates
 render with autoescape on and ``StrictUndefined``; every response carries the security headers,
 the one an unhandled exception raises included (#106): the layer that adds them decorates the
 ``send`` channel rather than the response the next layer returns, and answers the exception
@@ -441,7 +443,7 @@ def create_app(
         runs_7d = await queries.runs_count(timedelta(days=7))
         totals_1d = await queries.run_totals(timedelta(days=1))
         totals_7d = await queries.run_totals(timedelta(days=7))
-        actions = await queries.actions_minutes()
+        actions_row = await queries.actions_minutes()
         return dashboard_context(
             row,
             groups,
@@ -454,7 +456,7 @@ def create_app(
             totals_7d=totals_7d,
             now=now(),
             labels=scope.labels,
-            actions=actions,
+            actions=actions_row,
         )
 
     async def load_turn(
@@ -627,8 +629,8 @@ def create_app(
         async with database.queries() as queries:
             scope = await load_scope(queries, owner, name)
             row = await scope.queries.snapshot()
-            actions = await scope.queries.actions_minutes()
-        return JSONResponse(state_document(row, now(), actions=actions))
+            actions_row = await scope.queries.actions_minutes()
+        return JSONResponse(state_document(row, now(), actions=actions_row))
 
     @app.get("/api/v1/repos/{owner}/{name}/issues/{number}")
     async def api_issue(owner: str, name: str, number: int) -> JSONResponse:

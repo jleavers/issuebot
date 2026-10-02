@@ -32,6 +32,7 @@ NOV = date(2026, 11, 1)
 TOKEN = "ghp_billingtokenfortests000000000000"
 WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXX"
 LOGIN = GhResult(returncode=0, stdout=json.dumps({"login": "jleavers"}), stderr="")
+SUMMARY = "/users/jleavers/settings/billing/usage/summary?product=actions"
 
 
 def summary(used: float, *, number: int = 10) -> GhResult:
@@ -133,13 +134,14 @@ def make(
     *,
     config: ActionsSettings | None = None,
     interval_s: float = 3600.0,
+    now: datetime = NOW,
 ) -> ActionsPoller:
     return ActionsPoller(
         config or settings(),
         store=store,
         runner=runner,
         post=webhook or Webhook(),
-        now=lambda: NOW,
+        now=lambda: now,
         interval_s=interval_s,
     )
 
@@ -298,6 +300,32 @@ async def test_a_failed_post_releases_the_claim_and_the_next_cycle_retries() -> 
     assert store.alerted == 75 and len(webhook.texts) == 2
 
 
+async def test_a_failed_post_is_logged_even_when_giving_the_claim_back_fails() -> None:
+    class Unreleasable(Store):
+        async def release_actions_alert(self, **kwargs: object) -> None:  # type: ignore[override]
+            raise StoreUnavailableError("cannot connect: refused")
+
+    store, webhook = Unreleasable(), Webhook(status=500)
+    with capture_logs() as logs, pytest.raises(StoreUnavailableError):
+        await make(Runner(summary(2306.0)), store, webhook).poll_once()
+    assert any(entry["event"] == "actions_minutes_alert_failed" for entry in logs)
+
+
+@pytest.mark.parametrize("stored", [None, (OCT, 2000.0)], ids=["empty", "holding-october"])
+async def test_a_month_that_has_ended_is_stored_but_never_alerted(
+    stored: tuple[date, float] | None,
+) -> None:
+    """GitHub still answering October once November has begun (UTC): an alert would say
+    "until 1 Nov" on 1 Nov, while the tile already reads 0%."""
+    store, webhook = Store(), Webhook()
+    if stored is not None:
+        store.period, store.used = stored
+    just_turned = datetime(2026, 11, 1, 0, 30, tzinfo=UTC)
+    await make(Runner(summary(3012.0, number=10)), store, webhook, now=just_turned).poll_once()
+    assert (store.period, store.used) == (OCT, 3012.0)
+    assert store.claims == [] and webhook.texts == []
+
+
 async def test_an_older_month_from_github_posts_nothing() -> None:
     store, webhook = Store(), Webhook()
     store.period, store.used, store.alerted = NOV, 10.0, 0
@@ -329,15 +357,20 @@ async def test_without_a_webhook_or_an_allowance_nothing_is_claimed_or_posted(
 
 
 async def test_start_runs_a_cycle_and_stop_ends_the_loop() -> None:
-    store = Store()
-    poller = make(Runner(summary(10.0)), store)
+    store, runner = Store(), Runner(summary(10.0))
+    poller = make(runner, store)
     poller.start()
     poller.start()  # a second start is a no-op, not a second loop
     for _ in range(50):
         if store.used is not None:
             break
         await asyncio.sleep(0)
+    for _ in range(10):  # room for a second loop, were there one, to run its cycle too
+        await asyncio.sleep(0)
     assert store.used == 10.0
+    # One loop reads the summary once before its hour's sleep. A second would read it again:
+    # the login is the poller's, so only that second summary call would tell them apart.
+    assert [call[1] for call in runner.calls] == ["/user", SUMMARY]
     await poller.stop()
     await poller.stop()
 

@@ -301,7 +301,7 @@ def actions_window(row: ActionsMinutesRow | None, now: datetime) -> dict[str, An
     if used is None:
         return {"value": "\u2014", "percent": None, "title": row.error or "no reading yet"}
     if not included:
-        title = f"{used:,} min used this month; {_ALLOWANCE_UNSET}"
+        title = f"{used:,} min used this month; {_ALLOWANCE_UNSET}{_refresh_failure(row, now)}"
         return {"value": "\u2014", "percent": None, "title": title}
     resets = next_period(date.fromisoformat(f"{document['period']}-01"))
     if used > included:
@@ -311,10 +311,18 @@ def actions_window(row: ActionsMinutesRow | None, now: datetime) -> dict[str, An
         )
     else:
         figures = f"{used:,} of {included:,} min used, {included - used:,} left"
-    title = f"{figures}, resets {resets.day} {resets:%b}, read {age_text(row.observed_at, now)}"
-    if row.error:
-        title += f"; last refresh failed {age_text(row.error_at, now)}: {row.error}"
+    title = (
+        f"{figures}, resets {resets.day} {resets:%b}, read {age_text(row.observed_at, now)}"
+        f"{_refresh_failure(row, now)}"
+    )
     return {"value": f"{document['percent']}%", "percent": document["percent"], "title": title}
+
+
+def _refresh_failure(row: ActionsMinutesRow, now: datetime) -> str:
+    """What a tooltip over a reading adds when the last refresh failed; empty when it did not."""
+    if not row.error:
+        return ""
+    return f"; last refresh failed {age_text(row.error_at, now)}: {row.error}"
 
 
 def cost_label(row: SnapshotRow | None) -> str:

@@ -1114,6 +1114,18 @@ def test_without_an_allowance_it_is_a_dash_that_names_the_setting() -> None:
     assert "ISSUEBOT_ACTIONS_INCLUDED_MINUTES" in window["title"]
 
 
+def test_without_an_allowance_a_failed_refresh_still_says_so() -> None:
+    row = actions_row(
+        included_minutes=None,
+        error="GitHub could not be reached",
+        error_at=NOW - timedelta(minutes=3),
+    )
+    window = actions_window(row, NOW)
+    assert window is not None and window["value"] == "—"
+    assert "ISSUEBOT_ACTIONS_INCLUDED_MINUTES" in window["title"]
+    assert window["title"].endswith("; last refresh failed 3 min ago: GitHub could not be reached")
+
+
 def test_an_error_with_no_reading_is_a_dash_whose_tooltip_is_the_error() -> None:
     row = actions_row(
         period=None,

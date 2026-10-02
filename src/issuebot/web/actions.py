@@ -5,7 +5,9 @@ a classic token with the ``user`` scope, and the web runs no session. One cycle 
 one an hour: learn the token's login once, read the month's summary, upsert the account's row,
 and post an alert when the reading reaches a threshold not yet posted this month. The row is the
 alert's memory, claimed before the post and given back if the post fails, so a restart -- which
-every upgrade is -- never posts twice and a failed post is retried an hour later.
+every upgrade is -- never posts twice and a failed post is retried an hour later. A cancellation
+(the web shutting down) mid-claim or mid-post leaves the claim held, which keeps delivery at
+most once: that threshold may go unposted this month, but it is never posted twice.
 """
 
 import asyncio
@@ -174,12 +176,13 @@ class ActionsPoller:
             )
             return
         self._recovered()
+        now = self._now()
         alerted = await self._store.record_actions_reading(
             account=account,
             period=usage.period,
             used_minutes=usage.used_minutes,
             included_minutes=self._settings.included_minutes,
-            observed_at=self._now(),
+            observed_at=now,
         )
         if alerted is None:
             self._log.info(
@@ -187,6 +190,11 @@ class ActionsPoller:
                 account=account,
                 period=usage.period.isoformat(),
             )
+            return
+        current = now.astimezone(UTC)
+        if usage.period < date(current.year, current.month, 1):
+            # GitHub still answering for a month that has ended: the reading is kept, but an
+            # alert would say "until 1 Nov" on 1 Nov while the window already reads 0%.
             return
         await self._alert(account, usage, alerted)
 
@@ -219,15 +227,17 @@ class ActionsPoller:
                 included=included,
             )
             return
-        await self._store.release_actions_alert(
-            account=account, period=usage.period, target=target, previous=alerted
-        )
+        # Logged before the claim is given back, so a database error on the release cannot
+        # hide the failed post.
         self._log.warning(
             "actions_minutes_alert_failed",
             account=account,
             threshold=target,
             status=result.status,
             error=result.error,
+        )
+        await self._store.release_actions_alert(
+            account=account, period=usage.period, target=target, previous=alerted
         )
 
     def _failed(self, exc: GitHubError) -> None:
