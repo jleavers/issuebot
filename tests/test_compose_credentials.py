@@ -215,3 +215,32 @@ def test_retired_credential_appears_nowhere_else_in_the_tracked_tree() -> None:
             if RETIRED.search(line)
         )
     assert hits == [], "\n".join(hits)
+
+
+BILLING = ("ISSUEBOT_GITHUB_BILLING_TOKEN", "ISSUEBOT_ACTIONS_INCLUDED_MINUTES")
+
+
+def test_the_actions_minutes_settings_reach_the_web_as_pass_throughs() -> None:
+    web = _env(_services()["web"])
+    for name in (*BILLING, "SLACK_WEBHOOK_URL"):
+        assert web[name] == f"${{{name}:-}}", (name, web.get(name))
+
+
+def test_the_billing_token_reaches_the_web_alone() -> None:
+    """The account owner's credential (spec 2026-10-02). The worker's env_file loads the hub's
+    whole .env, so its environment map empties the token, and environment wins over env_file;
+    no other service names it at all."""
+    services = _services()
+    assert _env(services["worker"])["ISSUEBOT_GITHUB_BILLING_TOKEN"] == ""
+    for name, service in services.items():
+        if name not in ("web", "worker"):
+            assert "ISSUEBOT_GITHUB_BILLING_TOKEN" not in str(service.get("environment", "")), name
+    uses = re.findall(r"\$\{ISSUEBOT_GITHUB_BILLING_TOKEN[^}]*\}", COMPOSE.read_text())
+    assert uses == ["${ISSUEBOT_GITHUB_BILLING_TOKEN:-}"], uses
+
+
+def test_env_example_ships_the_actions_minutes_settings_empty() -> None:
+    lines = ENV_EXAMPLE.read_text().splitlines()
+    for name in BILLING:
+        assignments = [line for line in lines if line.startswith(f"{name}=")]
+        assert assignments == [f"{name}="], assignments
