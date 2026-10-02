@@ -212,7 +212,11 @@ class ClaudeLimitsWatcher:
             return
         window = None if alert.limit_window == UNKNOWN_WINDOW else alert.limit_window
         text = format_claude_limit_alert(
-            window=window, percent=alert.percent, resets_at=alert.resets_at, now=now
+            window=window,
+            percent=alert.percent,
+            hit=alert.target == HIT_PERCENT,
+            resets_at=alert.resets_at,
+            now=now,
         )
         result = await self._post(
             self._webhook_url.get_secret_value(), slack_payload(text), timeout_s=POST_TIMEOUT_S

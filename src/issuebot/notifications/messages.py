@@ -137,13 +137,15 @@ _CLAUDE_WINDOWS = {"five_hour": "5-hour", "seven_day": "7-day"}
 
 
 def format_claude_limit_alert(
-    *, window: str | None, percent: int, resets_at: datetime, now: datetime
+    *, window: str | None, percent: int, hit: bool, resets_at: datetime, now: datetime
 ) -> str:
-    """The Claude usage line (spec 2026-10-02, claude-limits-alert): below 100 a warning that a
-    window is filling, at 100 a limit that has stopped the board. Times are UTC; a window name
-    claude has not used before is shown as reported, escaped."""
+    """The Claude usage line (spec 2026-10-02, claude-limits-alert): a warning that a
+    window is filling, or, when ``hit``, a limit that has stopped
+    the board. Times are UTC; a window name claude has not used before is shown as reported,
+    escaped. ``percent`` is shown only on a warning; a hit says the limit is reached whatever
+    the figure."""
     when = _utc_moment(resets_at, now)
-    if percent < 100:
+    if not hit:
         return (
             f":warning: Claude: {_claude_window(window, 'window')} is {percent}% used; "
             f"it resets {when}."

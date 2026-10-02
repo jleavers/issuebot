@@ -279,7 +279,9 @@ WEEK_RESET = datetime(2026, 10, 9, 5, 0, tzinfo=UTC)
 
 
 def test_a_claude_warning_names_the_window_its_share_and_its_reset() -> None:
-    text = format_claude_limit_alert(window="seven_day", percent=77, resets_at=WEEK_RESET, now=AT)
+    text = format_claude_limit_alert(
+        window="seven_day", percent=77, hit=False, resets_at=WEEK_RESET, now=AT
+    )
     assert text == (
         ":warning: Claude: the 7-day usage window is 77% used; it resets Fri 9 Oct, 05:00 UTC."
     )
@@ -287,7 +289,9 @@ def test_a_claude_warning_names_the_window_its_share_and_its_reset() -> None:
 
 def test_a_claude_limit_hit_says_when_work_resumes() -> None:
     reset = datetime(2026, 10, 2, 20, 0, tzinfo=UTC)
-    text = format_claude_limit_alert(window="five_hour", percent=100, resets_at=reset, now=AT)
+    text = format_claude_limit_alert(
+        window="five_hour", percent=100, hit=True, resets_at=reset, now=AT
+    )
     assert text == (
         ":rotating_light: Claude: the 5-hour usage limit is reached; issuebot stops claiming "
         "issues until 20:00 UTC (in 2 h 13 min)."
@@ -295,14 +299,18 @@ def test_a_claude_limit_hit_says_when_work_resumes() -> None:
 
 
 def test_a_seven_day_hit_names_the_day_it_lifts() -> None:
-    text = format_claude_limit_alert(window="seven_day", percent=100, resets_at=WEEK_RESET, now=AT)
+    text = format_claude_limit_alert(
+        window="seven_day", percent=100, hit=True, resets_at=WEEK_RESET, now=AT
+    )
     assert text.startswith(":rotating_light: Claude: the 7-day usage limit is reached;")
     assert text.endswith("until Fri 9 Oct, 05:00 UTC (in 6 d 11 h).")
 
 
 def test_a_reset_in_another_zone_is_written_in_utc() -> None:
     reset = datetime(2026, 10, 2, 21, 0, tzinfo=timezone(timedelta(hours=1)))
-    text = format_claude_limit_alert(window="five_hour", percent=100, resets_at=reset, now=AT)
+    text = format_claude_limit_alert(
+        window="five_hour", percent=100, hit=True, resets_at=reset, now=AT
+    )
     assert "until 20:00 UTC (in 2 h 13 min)." in text
 
 
@@ -317,14 +325,14 @@ def test_a_reset_in_another_zone_is_written_in_utc() -> None:
 )
 def test_a_limit_hit_says_how_long_until_it_lifts(resets_in: timedelta, words: str) -> None:
     text = format_claude_limit_alert(
-        window="five_hour", percent=100, resets_at=AT + resets_in, now=AT
+        window="five_hour", percent=100, hit=True, resets_at=AT + resets_in, now=AT
     )
     assert text.endswith(f"({words}).")
 
 
 def test_a_window_claude_has_not_named_before_is_escaped() -> None:
     text = format_claude_limit_alert(
-        window="<!channel>", percent=100, resets_at=AT + timedelta(hours=1), now=AT
+        window="<!channel>", percent=100, hit=True, resets_at=AT + timedelta(hours=1), now=AT
     )
     assert text.startswith(
         ":rotating_light: Claude: the usage limit (&lt;!channel&gt;) is reached;"
@@ -333,6 +341,15 @@ def test_a_window_claude_has_not_named_before_is_escaped() -> None:
 
 def test_a_hit_with_no_window_names_none() -> None:
     text = format_claude_limit_alert(
-        window=None, percent=100, resets_at=AT + timedelta(hours=1), now=AT
+        window=None, percent=100, hit=True, resets_at=AT + timedelta(hours=1), now=AT
     )
     assert text.startswith(":rotating_light: Claude: the usage limit is reached;")
+
+
+def test_a_warning_at_100_percent_is_still_a_warning() -> None:
+    text = format_claude_limit_alert(
+        window="seven_day", percent=100, hit=False, resets_at=WEEK_RESET, now=AT
+    )
+    assert text == (
+        ":warning: Claude: the 7-day usage window is 100% used; it resets Fri 9 Oct, 05:00 UTC."
+    )

@@ -252,6 +252,14 @@ async def test_a_seven_day_hit_says_so_once_instead_of_a_warning() -> None:
     assert len(webhook.texts) == 1 and webhook.texts[0].startswith(":rotating_light:")
 
 
+async def test_a_full_seven_day_reading_without_a_hold_is_a_warning() -> None:
+    store, webhook = Store(snapshot(rate_limits=limits(seven=1.0))), Webhook()
+    await make(store, webhook).poll_once()
+    assert store.claims == [("seven_day", WEEK_RESET, 90)]
+    assert len(webhook.texts) == 1
+    assert webhook.texts[0].startswith(":warning:") and "is 100% used" in webhook.texts[0]
+
+
 async def test_another_kind_of_hold_posts_nothing() -> None:
     held = DispatchHold(kind="auth", reason="not logged in", since=NOW, until=WALL)
     store, webhook = Store(snapshot(dispatch_hold=held)), Webhook()
