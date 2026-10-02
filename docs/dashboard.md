@@ -64,8 +64,9 @@ cookie-based authentication in front of the dashboard, is the way in.
 ## The hero's six tiles
 
 Closed, agents run, cost, tokens, limits and activity, each showing
-two figures: 1 day and 7 days for the first four, the two usage windows for limits, and
-running against retrying for activity.
+two figures: 1 day and 7 days for the first four, the two usage windows for limits (and a
+third, [GitHub Actions minutes](#github-actions-minutes), where the hub is given a billing
+token), and running against retrying for activity.
 
 The limits tile is what a Claude subscription is actually rationed by. `claude` reports the
 share of each usage window an account has spent, every worker session forwards the newest
@@ -85,6 +86,42 @@ seen a reading shows an em dash instead — nothing has run, rather than nothing
 and it fills in on its own. A probe too ambiguous to call — a login with `ANTHROPIC_API_KEY` also set,
 which `validate` warns about — leaves the tile labelled plainly `cost`, but still shows any
 reading it has.
+
+## GitHub Actions minutes
+
+Where the hub's `web` is given a billing token, the limits tile carries a third window,
+`Actions`: the share of the billing account's monthly Actions allowance used so far, with the
+same depletion bar as the Claude windows, and the figures in its tooltip -- `2,308 of 3,000 min
+used, 692 left, resets 1 Nov, read 12 min ago`. When the allowance runs out, workflows in
+private repositories stop starting and a pull request's checks fail with zero steps ([Checks
+that never ran](operations.md#checks-that-never-ran)); this window is where that shows first.
+
+Three settings in the hub checkout's `.env`, read by `web` alone:
+
+- `ISSUEBOT_GITHUB_BILLING_TOKEN`: a classic token of the account that owns the repositories,
+  with only `user` ticked. GitHub's billing endpoints take no fine-grained token and nothing
+  narrower, and that scope can also edit the account's profile and read its private email
+  addresses, so it goes to the dashboard and never to a worker ([The dashboard's billing
+  token](security-model.md#the-dashboards-billing-token)). Give it an expiry; a lapsed one shows
+  as the window's error.
+- `ISSUEBOT_ACTIONS_INCLUDED_MINUTES`: the plan's monthly allowance, 3000 on GitHub Pro and 2000
+  on Free. GitHub's API does not report it. Without it the window is a dash that names it; a
+  value that is not a positive whole number stops `issuebot web` from starting.
+- `SLACK_WEBHOOK_URL`, the worker's own: with it the dashboard posts to Slack when the month's
+  use reaches 75%, 90% and 100% of the allowance, each once a month. `notifications.slack.events`
+  does not govern it: that list is the worker's, and the web reads no workflow.
+
+The web reads the account's usage summary once an hour -- about 24 REST requests a day on the
+token's own budget, and none of the workers' GraphQL points. "Used" is what the billing page
+counts: every Actions minute, public repositories included, Windows at 1x. The window is drawn
+only on repositories that account owns, reads 0% once a new month (UTC) begins until that
+month's first reading, and keeps its last figure through a failed read, adding the failure to
+the tooltip. The web's log names the account it reads (`actions_minutes_account`), which is the
+first thing to check when no window appears.
+
+The reading is kept in the `actions_minutes` table, so it survives a restart and an alert is
+never posted twice. To take the window away, remove the token, restart `web`, and delete the
+row: `docker compose exec db psql -U issuebot -c 'DELETE FROM actions_minutes'`.
 
 ## What "issues closed" counts
 

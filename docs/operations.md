@@ -280,6 +280,10 @@ have a milder case of the same thing: they are opened with `GITHUB_TOKEN`, so Gi
 their CI run until someone with write access selects **Approve workflows to run** in the merge
 box, and until then their checks are pending rather than failed.
 
+Where the hub is given a billing token, the dashboard's limits tile shows the billing account's
+[GitHub Actions minutes](dashboard.md#github-actions-minutes), and Slack hears at 75%, 90% and
+100%; a window at 100% is this cause before it is any other.
+
 ### Cost
 
 Every turn is capped by `claude.max_budget_usd`, so one run's ceiling is that
