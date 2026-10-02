@@ -1,5 +1,6 @@
 """One error type for every GitHub failure, with a stable category for logs and retries."""
 
+import re
 from typing import Literal
 
 ErrorCategory = Literal[
@@ -8,6 +9,32 @@ ErrorCategory = Literal[
 
 RETRYABLE_CATEGORIES: frozenset[str] = frozenset({"rate_limited", "transport"})
 _STDERR_LIMIT = 500
+
+# How a failed `gh` invocation says what went wrong: exit code 4 is gh's own "authentication
+# required", and otherwise its stderr decides, first rule to match. Shared by the adapter and
+# the dashboard's billing reads, so the two cannot drift on what a 404 is.
+RATE_LIMITED = re.compile(r"http 429|rate limit|secondary rate")
+ERROR_RULES: tuple[tuple[ErrorCategory, re.Pattern[str]], ...] = (
+    ("auth", re.compile(r"http 401|bad credentials|authentication|gh auth login")),
+    ("not_found", re.compile(r"http 404|could not resolve to|\bnot found\b")),
+    ("rate_limited", RATE_LIMITED),
+    (
+        "transport",
+        re.compile(r"http 5\d\d|connection|could not resolve host|timeout|\btls\b|dial tcp"),
+    ),
+    ("auth", re.compile(r"http 403")),
+)
+
+
+def categorise(returncode: int, stderr: str) -> ErrorCategory:
+    """The category of a failed ``gh`` invocation; ``status`` when nothing more is known."""
+    if returncode == 4:
+        return "auth"
+    lowered = stderr.lower()
+    for candidate, pattern in ERROR_RULES:
+        if pattern.search(lowered):
+            return candidate
+    return "status"
 
 
 class GitHubError(Exception):

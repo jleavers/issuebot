@@ -1,0 +1,46 @@
+{
+  "timePeriod": {
+    "year": 2026,
+    "month": 10
+  },
+  "user": "jleavers",
+  "product": "Actions",
+  "usageItems": [
+    {
+      "product": "Actions",
+      "sku": "actions_linux",
+      "grossQuantity": 2192.0,
+      "discountQuantity": 2192.0,
+      "netQuantity": 0.0,
+      "grossAmount": 13.152,
+      "discountAmount": 13.152,
+      "netAmount": 0.0,
+      "pricePerUnit": 0.006,
+      "unitType": "minutes"
+    },
+    {
+      "product": "Actions",
+      "sku": "actions_storage",
+      "grossQuantity": 0.815204913,
+      "discountQuantity": 0.815204913,
+      "netQuantity": 0.0,
+      "grossAmount": 0.000273846,
+      "discountAmount": 0.000273846,
+      "netAmount": 0.0,
+      "pricePerUnit": 0.00033602,
+      "unitType": "gigabyte-hours"
+    },
+    {
+      "product": "Actions",
+      "sku": "actions_windows",
+      "grossQuantity": 114.0,
+      "discountQuantity": 114.0,
+      "netQuantity": 0.0,
+      "grossAmount": 1.14,
+      "discountAmount": 1.14,
+      "netAmount": 0.0,
+      "pricePerUnit": 0.01,
+      "unitType": "minutes"
+    }
+  ]
+}
