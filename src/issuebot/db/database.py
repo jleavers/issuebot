@@ -3,12 +3,14 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 
 import psycopg
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from issuebot.config import GitHubLabels
+from issuebot.db.actions import CLAIM_ALERT, RECORD_ERROR, RECORD_READING, RELEASE_ALERT
 from issuebot.db.connection import (
     NOT_A_URL,
     Connector,
@@ -110,6 +112,51 @@ class Database:
         bare channel is notified, which only a listener built without one hears."""
         async with self._open() as conn:
             await conn.execute("SELECT pg_notify(%s, %s)", (refresh_channel(repo), repo or ""))
+
+    async def record_actions_reading(
+        self,
+        *,
+        account: str,
+        period: date,
+        used_minutes: float,
+        included_minutes: int | None,
+        observed_at: datetime,
+    ) -> int | None:
+        """Upsert the account's reading and clear its error. Returns ``alerted_percent`` after
+        it (a new month has reset it to 0), or None when the reading was for an older month
+        than the stored one and was ignored."""
+        params = {
+            "account": account,
+            "period": period,
+            "used_minutes": used_minutes,
+            "included_minutes": included_minutes,
+            "observed_at": observed_at,
+        }
+        async with self._open() as conn:
+            row = await (await conn.execute(RECORD_READING, params)).fetchone()
+        return int(row[0]) if row is not None else None
+
+    async def record_actions_error(self, *, account: str, error: str, error_at: datetime) -> None:
+        """Record a failed read, keeping the last reading; a row without one if there is none."""
+        async with self._open() as conn:
+            await conn.execute(
+                RECORD_ERROR, {"account": account, "error": error, "error_at": error_at}
+            )
+
+    async def claim_actions_alert(self, *, account: str, period: date, target: int) -> bool:
+        """Take ``target`` as the month's alert before posting it; False if it was taken."""
+        params = {"account": account, "period": period, "target": target}
+        async with self._open() as conn:
+            cursor = await conn.execute(CLAIM_ALERT, params)
+            return cursor.rowcount == 1
+
+    async def release_actions_alert(
+        self, *, account: str, period: date, target: int, previous: int
+    ) -> None:
+        """Give a claim back after a failed post, so the next cycle tries again."""
+        params = {"account": account, "period": period, "target": target, "previous": previous}
+        async with self._open() as conn:
+            await conn.execute(RELEASE_ALERT, params)
 
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[AsyncConnection]:

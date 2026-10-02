@@ -10,6 +10,7 @@ from issuebot.config import GitHubLabels
 from issuebot.db import DatabaseError, MigrationResult, Probe
 from issuebot.db.connection import NOT_A_URL, is_postgres_url
 from issuebot.db.queries import (
+    ActionsMinutesRow,
     DailyPoint,
     EventRow,
     IssueRow,
@@ -88,6 +89,7 @@ class FakeQueries:
         self.repo_rows: dict[str, RepoRow] = {}
         self.snapshot_rows: dict[str, SnapshotRow] = {}  # per repo; snapshot_row is the default
         self.scoped_repos: list[str] = []
+        self.actions_rows: list[ActionsMinutesRow] = []
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -128,6 +130,13 @@ class FakeRepoQueries:
         if self.repo in parent.snapshot_rows:
             return parent.snapshot_rows[self.repo]
         return parent.snapshot_row
+
+    async def actions_minutes(self) -> ActionsMinutesRow | None:
+        self._check("actions_minutes")
+        owner = self.repo.split("/", 1)[0].lower()
+        return next(
+            (row for row in self._parent.actions_rows if row.account.lower() == owner), None
+        )
 
     async def closed_count(self, window: timedelta) -> int:
         self._check("closed_count")

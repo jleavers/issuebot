@@ -166,11 +166,26 @@ class RepoRow:
     seen_at: datetime
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ActionsMinutesRow:
+    """The billing account's Actions minutes, as the web's poller last recorded them."""
+
+    account: str
+    period: date | None
+    used_minutes: float | None
+    included_minutes: int | None
+    observed_at: datetime | None
+    alerted_percent: int
+    error: str | None
+    error_at: datetime | None
+
+
 # Explicit column lists rather than SELECT *: every table now carries a repo column the
 # row types do not, and the repository is in the request, not the row.
 ISSUE_COLUMNS = ", ".join(f.name for f in fields(IssueRow))
 RUN_COLUMNS = ", ".join(f.name for f in fields(RunRow))
 EVENT_COLUMNS = ", ".join(f.name for f in fields(EventRow))
+ACTIONS_COLUMNS = ", ".join(f.name for f in fields(ActionsMinutesRow))
 SUMMARY_COLUMNS = ", ".join(f"t.{f.name}" for f in fields(TurnSummaryRow))
 TURN_COLUMNS = ", ".join(f"t.{f.name}" for f in fields(TurnRow))
 
@@ -283,6 +298,11 @@ SNAPSHOTS = "SELECT repo, at, written_at, data FROM runtime_snapshot"
 REPOS = "SELECT repo, labels, workflow_path, registered_at, seen_at FROM repos ORDER BY repo"
 
 REPO = "SELECT repo, labels, workflow_path, registered_at, seen_at FROM repos WHERE repo = %(repo)s"
+
+# The account that owns the repository, compared case-insensitively as GitHub compares logins.
+ACTIONS_MINUTES = (
+    f"SELECT {ACTIONS_COLUMNS} FROM actions_minutes WHERE lower(account) = lower(%(owner)s)"
+)
 
 ISSUE = f"SELECT {ISSUE_COLUMNS} FROM issues WHERE repo = %(repo)s AND number = %(number)s"
 
@@ -480,3 +500,9 @@ class RepoQueries(_Reader):
     async def snapshot(self) -> SnapshotRow | None:
         rows = await self._rows(SNAPSHOT, self._params())
         return SnapshotRow(**rows[0]) if rows else None
+
+    async def actions_minutes(self) -> ActionsMinutesRow | None:
+        """The Actions minutes of the account that owns this repository, if the web reads them."""
+        owner = self.repo.split("/", 1)[0]
+        rows = await self._rows(ACTIONS_MINUTES, {"owner": owner})
+        return ActionsMinutesRow(**rows[0]) if rows else None
