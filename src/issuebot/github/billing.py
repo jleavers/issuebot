@@ -23,6 +23,8 @@ SUMMARY_PATH = "/users/{account}/settings/billing/usage/summary?product=actions"
 # GitHub's login alphabet. The account is interpolated into a path, so anything else is refused
 # rather than sent.
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+# How gh names the status of a refused request, "(HTTP 403)"; categorise matches it lower-case.
+_HTTP_STATUS = re.compile(r"\bhttp (\d{3})\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,11 +105,21 @@ async def _get(runner: GhRunnerLike, path: str) -> object:
 def describe_failure(error: GitHubError) -> str:
     """issuebot's own words for a failed read: what the window's tooltip and the row carry.
 
-    Never ``gh``'s stderr, which goes to the log; only the category reaches a page.
+    Never ``gh``'s stderr, which goes to the log; only the category reaches a page, and for an
+    ``auth`` failure the HTTP status number read out of it. ``categorise`` files a 403 under
+    ``auth`` with a 401, but the two are different mistakes: a 401 is a token that has lapsed,
+    and a 403 is most often a fine-grained token, which these endpoints refuse however fresh.
     """
     match error.category:
         case "auth":
-            return "token rejected: it may have expired or been revoked"
+            status = _http_status(error)
+            if status == "403":
+                return (
+                    "refused (403): billing needs a classic token with the user scope, "
+                    "not a fine-grained one"
+                )
+            prefix = f"token rejected ({status})" if status else "token rejected"
+            return f"{prefix}: it may have expired or been revoked"
         case "not_found":
             return (
                 "no access to this account's billing (404): the token needs the user scope "
@@ -123,3 +135,12 @@ def describe_failure(error: GitHubError) -> str:
             return "gh could not be run"
         case _:
             return "GitHub refused the request"
+
+
+def _http_status(error: GitHubError) -> str | None:
+    """The three digits of ``gh``'s ``(HTTP 401)``, or None; nothing else of its text."""
+    for text in (error.stderr, error.message):
+        match = _HTTP_STATUS.search(text or "")
+        if match:
+            return match.group(1)
+    return None

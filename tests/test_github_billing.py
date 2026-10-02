@@ -160,3 +160,40 @@ def test_a_failure_is_described_in_issuebot_s_words_not_gh_s(category: str, word
     error = GitHubError(category, "gh: stderr that says ghp_abc", stderr="ghp_abc")  # type: ignore[arg-type]
     text = describe_failure(error)
     assert words in text and "ghp_abc" not in text
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "words"),
+    [
+        (
+            1,
+            "gh: Bad credentials (HTTP 401)",
+            "token rejected (401): it may have expired or been revoked",
+        ),
+        # What a fine-grained token gets, the likeliest mistake: not an expired token at all.
+        (
+            1,
+            "gh: Resource not accessible by personal access token (HTTP 403)",
+            "refused (403): billing needs a classic token with the user scope, "
+            "not a fine-grained one",
+        ),
+        # gh's own "authentication required" names no status, so the words name none either.
+        (
+            4,
+            "To get started with GitHub CLI, please run:  gh auth login",
+            "token rejected: it may have expired or been revoked",
+        ),
+    ],
+    ids=["401", "403", "exit-4"],
+)
+async def test_an_auth_failure_is_told_apart_by_its_status(
+    returncode: int, stderr: str, words: str
+) -> None:
+    planted = "ghp_plantedinstderr000000000000000000"
+    runner = StubRunner(GhResult(returncode=returncode, stdout="", stderr=f"{stderr} {planted}"))
+    with pytest.raises(GitHubError) as caught:
+        await fetch_actions_usage(runner, "jleavers")
+    assert caught.value.category == "auth"
+    text = describe_failure(caught.value)
+    # The status number alone is taken from gh's stderr, never any of its text.
+    assert text == words and planted not in text

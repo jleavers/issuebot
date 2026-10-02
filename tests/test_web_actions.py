@@ -224,7 +224,7 @@ async def test_a_failed_read_records_the_error_and_keeps_the_reading() -> None:
     await poller.poll_once()
     await poller.poll_once()
     assert store.used == 2306.0
-    assert store.error == "token rejected: it may have expired or been revoked"
+    assert store.error == "token rejected (401): it may have expired or been revoked"
 
 
 async def test_a_failed_login_writes_nothing_and_the_next_cycle_retries() -> None:
