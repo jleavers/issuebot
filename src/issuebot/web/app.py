@@ -422,6 +422,7 @@ def create_app(
         runs_7d = await queries.runs_count(timedelta(days=7))
         totals_1d = await queries.run_totals(timedelta(days=1))
         totals_7d = await queries.run_totals(timedelta(days=7))
+        actions = await queries.actions_minutes()
         return dashboard_context(
             row,
             groups,
@@ -434,6 +435,7 @@ def create_app(
             totals_7d=totals_7d,
             now=now(),
             labels=scope.labels,
+            actions=actions,
         )
 
     async def load_turn(
@@ -606,7 +608,8 @@ def create_app(
         async with database.queries() as queries:
             scope = await load_scope(queries, owner, name)
             row = await scope.queries.snapshot()
-        return JSONResponse(state_document(row, now()))
+            actions = await scope.queries.actions_minutes()
+        return JSONResponse(state_document(row, now(), actions=actions))
 
     @app.get("/api/v1/repos/{owner}/{name}/issues/{number}")
     async def api_issue(owner: str, name: str, number: int) -> JSONResponse:

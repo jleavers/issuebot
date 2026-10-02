@@ -1,7 +1,7 @@
 """Builders for the web tests: rows shaped like the query module's, a clock, a test client."""
 
 import base64
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -10,6 +10,7 @@ from fakes.database import FakeDatabase
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
+    ActionsMinutesRow,
     EventRow,
     IssueRow,
     RepoRow,
@@ -45,6 +46,22 @@ def limits(
         seven_day=RateLimitWindow(utilization=seven, resets_at=NOW + seven_resets_in),
         observed_at=NOW - observed_ago,
     )
+
+
+def actions_row(**overrides: Any) -> ActionsMinutesRow:
+    """A reading for ``example``, the owner of ``REPO``: 2,308 of 3,000 this month, 12 min old."""
+    fields: dict[str, Any] = {
+        "account": "example",
+        "period": date(2026, 9, 1),
+        "used_minutes": 2308.0,
+        "included_minutes": 3000,
+        "observed_at": NOW - timedelta(minutes=12),
+        "alerted_percent": 75,
+        "error": None,
+        "error_at": None,
+    }
+    fields.update(overrides)
+    return ActionsMinutesRow(**fields)
 
 
 RUN_ID = "20260904T202535Z-0964cd"

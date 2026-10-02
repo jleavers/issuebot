@@ -18,6 +18,7 @@ from fakes.web import (
     REPO,
     RUN_ID,
     Harness,
+    actions_row,
     basic_auth,
     event_row,
     issue_row,
@@ -931,3 +932,14 @@ def test_repo_labels_validates_the_stored_mapping() -> None:
     assert repo_labels(row).review == "issuebot/check"
     with pytest.raises(ValueError):
         repo_labels(repo_row(labels={"todo": ""}))
+
+
+def test_the_state_document_carries_the_owner_s_actions_minutes(h: Harness) -> None:
+    h.queries.actions_rows = [actions_row()]
+    body = h.client.get(f"{API}/state").json()
+    assert body["actions_minutes"]["percent"] == 77
+    assert body["actions_minutes"]["remaining_minutes"] == 692
+
+
+def test_the_state_document_has_null_actions_minutes_without_a_row(h: Harness) -> None:
+    assert h.client.get(f"{API}/state").json()["actions_minutes"] is None

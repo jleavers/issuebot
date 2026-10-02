@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
     MAX_WINDOW_DAYS,
+    ActionsMinutesRow,
     DailyPoint,
     EventRow,
     IssueRow,
@@ -21,6 +22,7 @@ from issuebot.db.queries import (
     TurnSummaryRow,
 )
 from issuebot.github import StateLabel
+from issuebot.github.billing import next_period
 
 LIVE_POLL_S = 10
 CHART_POLL_S = 60
@@ -242,6 +244,79 @@ def limits_unavailable(row: SnapshotRow | None) -> dict[str, str]:
     }
 
 
+# The limits tile's third window: the billing account's GitHub Actions minutes (spec
+# 2026-10-02). Unlike the two Claude windows it is not in the snapshot; it is the row the web's
+# poller keeps for the account that owns the repository.
+_ALLOWANCE_UNSET = "set ISSUEBOT_ACTIONS_INCLUDED_MINUTES to the plan's allowance to see the share"
+
+
+def _month(moment: datetime) -> date:
+    moment = moment.astimezone(UTC)
+    return date(moment.year, moment.month, 1)
+
+
+def actions_document(row: ActionsMinutesRow | None, now: datetime) -> dict[str, Any] | None:
+    """GET .../state's ``actions_minutes``, and what the hero's Actions window is drawn from.
+
+    None without a row for this repository's owner. A reading from an earlier month reads as
+    this month with nothing used: the allowance has reset and nothing has been read since to
+    spend it, the rule the Claude windows follow once their reset time has passed.
+    """
+    if row is None:
+        return None
+    period = row.period
+    used: int | None = None
+    if period is not None and row.used_minutes is not None:
+        current = _month(now)
+        if period < current:
+            period, used = current, 0
+        else:
+            used = round(row.used_minutes)
+    included = row.included_minutes
+    percent = remaining = None
+    if used is not None and included:
+        percent = round(min(max(used / included, 0.0), 1.0) * 100)
+        remaining = max(included - used, 0)
+    resets = next_period(period) if period is not None else None
+    return {
+        "account": row.account,
+        "period": f"{period:%Y-%m}" if period is not None else None,
+        "used_minutes": used,
+        "included_minutes": included,
+        "remaining_minutes": remaining,
+        "percent": percent,
+        "resets_at": iso(datetime(resets.year, resets.month, 1, tzinfo=UTC)) if resets else None,
+        "observed_at": iso(row.observed_at),
+        "error": row.error,
+        "error_at": iso(row.error_at),
+    }
+
+
+def actions_window(row: ActionsMinutesRow | None, now: datetime) -> dict[str, Any] | None:
+    """The hero's Actions window: ``value``, ``percent`` (None draws no meter) and ``title``."""
+    document = actions_document(row, now)
+    if row is None or document is None:
+        return None
+    used, included = document["used_minutes"], document["included_minutes"]
+    if used is None:
+        return {"value": "\u2014", "percent": None, "title": row.error or "no reading yet"}
+    if not included:
+        title = f"{used:,} min used this month; {_ALLOWANCE_UNSET}"
+        return {"value": "\u2014", "percent": None, "title": title}
+    resets = next_period(date.fromisoformat(f"{document['period']}-01"))
+    if used > included:
+        figures = (
+            f"{used:,} of {included:,} min used, {used - included:,} min over the included "
+            f"{included:,}"
+        )
+    else:
+        figures = f"{used:,} of {included:,} min used, {included - used:,} left"
+    title = f"{figures}, resets {resets.day} {resets:%b}, read {age_text(row.observed_at, now)}"
+    if row.error:
+        title += f"; last refresh failed {age_text(row.error_at, now)}: {row.error}"
+    return {"value": f"{document['percent']}%", "percent": document["percent"], "title": title}
+
+
 def cost_label(row: SnapshotRow | None) -> str:
     """What the cost tile is called: a subscription spends effort, an API key spends money."""
     credential = row.data.get("credential") if row is not None else None
@@ -373,6 +448,7 @@ def dashboard_context(
     totals_7d: RunTotals,
     now: datetime,
     labels: GitHubLabels,
+    actions: ActionsMinutesRow | None = None,
 ) -> dict[str, Any]:
     """What partials/dashboard.html renders: the worker line, hero stats, panels, columns."""
     running = [running_entry(entry) for entry in _entries(row, "running")]
@@ -426,6 +502,7 @@ def dashboard_context(
             "tokens_7d": totals_7d.total_tokens,
             "limits": limits,
             "limits_unavailable": None if limits else limits_unavailable(row),
+            "actions": actions_window(actions, now),
         },
         "running": running,
         "retrying": retrying,
@@ -521,7 +598,9 @@ def _entries(row: SnapshotRow | None, key: str) -> list[dict[str, Any]]:
     return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
 
 
-def state_document(row: SnapshotRow | None, now: datetime) -> dict[str, Any]:
+def state_document(
+    row: SnapshotRow | None, now: datetime, *, actions: ActionsMinutesRow | None = None
+) -> dict[str, Any]:
     """GET /api/v1/state: the worker's last snapshot reshaped; empty, not missing, without one."""
     running = [running_entry(entry) for entry in _entries(row, "running")]
     retrying = [retry_entry(entry) for entry in _entries(row, "retrying")]
@@ -551,6 +630,7 @@ def state_document(row: SnapshotRow | None, now: datetime) -> dict[str, Any]:
         "counters": {key: _int(counters.get(key)) for key in _COUNTER_KEYS},
         "credential": data.get("credential", "unknown"),
         "rate_limits": rate_limit_windows(row, now),
+        "actions_minutes": actions_document(actions, now),
     }
 
 
