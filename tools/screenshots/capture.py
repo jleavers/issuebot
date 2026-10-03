@@ -3,6 +3,9 @@
 ``dashboard.png``        the whole page, once.
 ``issue-journey.gif``    the Kanban board once per stage, captioned and assembled.
 
+And then, by running ``social.py``, the repository's social preview, which is cut from the
+``dashboard.png`` just written and so is redrawn whenever it is.
+
 Playwright and Pillow are ephemeral here -- ``uv run --with playwright --with pillow`` -- so
 neither joins the project's dependencies for the sake of a picture. Pillow rather than
 ImageMagick or ffmpeg for the same reason: it is a wheel, so the host installs nothing.
@@ -160,6 +163,9 @@ def main() -> int:
     for stage in (1, 2, 3, 4):
         (HERE / f".frame-{stage}.png").unlink(missing_ok=True)
 
+    # It reports its own size, and its exit status is the verdict on it.
+    social = subprocess.run([sys.executable, str(HERE / "social.py"), "--theme", args.theme])
+
     over = []
     for path in (IMAGES / "dashboard.png", gif):
         kib = path.stat().st_size / 1024
@@ -169,7 +175,7 @@ def main() -> int:
     if over:
         print(f"over the 500 KB hook limit: {', '.join(over)}", file=sys.stderr)
         return 1
-    return 0
+    return social.returncode
 
 
 if __name__ == "__main__":
