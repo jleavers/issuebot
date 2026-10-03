@@ -310,7 +310,11 @@ jobs:
             # HTTPS client, so what is proved is the route rather than the settings of one tool.
             gh api rate_limit --jq .rate.limit > /dev/null
             gh api "repos/${GITHUB_REPOSITORY}" --jq .full_name > /dev/null
-            curl -fsS -o /dev/null --max-time 30 https://api.github.com/
+            # No -f: this client carries no token, so the status is for GitHub to choose -- a 403
+            # once the shared address of the runner has spent the unauthenticated limit, which
+            # failed this step on 2026-09-24 and 09-30 -- and any answer at all proves the route.
+            # A refusal at the proxy is exit 56 with or without -f, and still fails the step.
+            curl -sS -o /dev/null --max-time 30 https://api.github.com/
             # And the hub database, the one thing the internal network is there to carry.
             /app/.venv/bin/python -c "import socket; socket.create_connection((\"db\", 5432), 10).close()"
           '
