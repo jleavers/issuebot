@@ -584,6 +584,31 @@ def test_ci_proves_a_session_reaches_github_and_nothing_else() -> None:
     assert "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz" in CI
 
 
+def test_no_ci_script_handed_to_a_container_closes_its_own_quote() -> None:
+    """Each script CI runs inside a container is one single-quoted argument to `-c` or `-lc`,
+    so an apostrophe in it -- in a comment as readily as in a command -- ends the argument
+    there, and the runner's own shell runs the rest. That failed #269 with a 127 (the hub
+    probe looked for the image's venv on the runner), but it need not fail: moved to the
+    runner, `curl https://api.github.com/` passes and proves nothing about the egress
+    proxy. The `'"'"'` escape is the one way in, and is spelled out where it is used.
+    """
+    lines = CI.splitlines()
+    blocks = 0
+    i = 0
+    while i < len(lines):
+        if lines[i].endswith(" '") and lines[i].count("'") % 2 == 1:
+            j = next(k for k in range(i + 1, len(lines)) if lines[k].strip() == "'")
+            for k in range(i + 1, j):
+                stray = lines[k].replace("'\"'\"'", "")
+                assert "'" not in stray, f"ci.yml line {k + 1} ends the quoted script: {stray!r}"
+            blocks += 1
+            i = j
+        i += 1
+    # The walk finds the scripts at all, the egress step's among them.
+    assert blocks >= 10
+    assert "--entrypoint bash worker -lc '\n" in CI
+
+
 def test_ci_proves_a_session_cannot_reach_the_runner_itself() -> None:
     """The runtime half of the isolated gateway (#251). Every other assertion about it in this
     module is a string -- the option in `compose.yaml`, the recipe in the README and in `CI` --
