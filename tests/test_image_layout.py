@@ -577,6 +577,9 @@ def test_ci_proves_a_session_reaches_github_and_nothing_else() -> None:
     assert "curl -sS -o /dev/null --max-time 30 https://example.com/" in CI
     assert '--noproxy "*"' in CI
     assert "gh api rate_limit --jq .rate.limit" in CI
+    # The plain client asserts the tunnel, not the status: it has no token, so with -f it
+    # failed whenever the runner's address had spent GitHub's unauthenticated limit.
+    assert "curl -sS -o /dev/null --max-time 30 https://api.github.com/" in CI
     # The dashboard's published port still answers, which `db`'s second network could break.
     assert "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz" in CI
 
