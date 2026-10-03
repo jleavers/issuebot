@@ -1,0 +1,99 @@
+<!doctype html>
+<!--
+  The repository's social preview, rendered to docs/images/social-preview.png by social.py.
+  The colours are the dashboard's own: app.css is linked and data-theme picks the theme, so a
+  change to its tokens reaches this card without an edit here. The classes are prefixed sp-
+  so that nothing in app.css styles them.
+-->
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../src/issuebot/web/static/app.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=JetBrains+Mono:wght@500;700&display=block" rel="stylesheet">
+<style>
+  html, body { width: 1280px; height: 640px; overflow: hidden; margin: 0; }
+  body {
+    position: relative;
+    font-family: Inter, sans-serif; color: var(--ink);
+    background:
+      radial-gradient(900px 520px at 1040px 360px, color-mix(in srgb, var(--review) 13%, transparent), transparent 62%),
+      radial-gradient(600px 420px at 120px 620px, color-mix(in srgb, var(--complete) 10%, transparent), transparent 65%),
+      var(--bg);
+  }
+  /* a faint dot grid behind the words, gone before the window */
+  body::before {
+    content: ""; position: absolute; inset: 0;
+    background-image: radial-gradient(color-mix(in srgb, var(--ink) 6%, transparent) 1px, transparent 1px);
+    background-size: 24px 24px;
+    mask-image: linear-gradient(90deg, #000 0%, #000 40%, transparent 70%);
+  }
+
+  .sp-copy { position: absolute; left: 72px; top: 0; bottom: 0; width: 520px;
+             display: flex; flex-direction: column; justify-content: center; }
+  .sp-kicker { font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 18px;
+               color: var(--muted); letter-spacing: 0.01em; margin: 0 0 18px; }
+  .sp-kicker b { color: var(--ink); font-weight: 700; }
+  .sp-name { margin: 0; font-weight: 800; font-size: 104px; line-height: 0.95; letter-spacing: -0.045em; }
+  .sp-tag { margin: 26px 0 0; font-size: 32px; line-height: 1.22; font-weight: 600;
+            letter-spacing: -0.015em; }
+
+  /* the label state machine, in the board's column colours */
+  .sp-flow { margin-top: 40px; display: flex; align-items: center; gap: 6px; }
+  .sp-pill { font-family: "JetBrains Mono", monospace; font-size: 14px; font-weight: 700;
+             padding: 5px 11px 5px 10px; border-radius: 999px; border: 1.5px solid currentColor;
+             display: inline-flex; align-items: center; gap: 7px;
+             background: color-mix(in srgb, var(--ink) 2%, transparent); }
+  .sp-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .sp-arrow { font-size: 16px; font-weight: 600; color: color-mix(in srgb, var(--line) 50%, var(--muted)); }
+  .sp-todo { color: var(--todo); } .sp-in-progress { color: var(--in_progress); }
+  .sp-review { color: var(--review); } .sp-complete { color: var(--complete); }
+
+  .sp-foot { margin: 34px 0 0; font-size: 17px; color: var(--muted); font-weight: 500; }
+
+  /* the dashboard in a window, running off the right and bottom edges */
+  .sp-window {
+    position: absolute; left: 640px; top: 74px; width: 760px; height: 610px;
+    border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+    background: var(--panel);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  }
+  .sp-chrome { height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+               border-bottom: 1px solid var(--line);
+               background: color-mix(in srgb, var(--bg) 60%, var(--panel)); }
+  .sp-chrome i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); display: block; }
+  .sp-chrome span { margin-left: 14px; font-family: "JetBrains Mono", monospace; font-size: 12px;
+                    color: var(--muted); padding: 3px 10px; border-radius: 6px;
+                    background: color-mix(in srgb, var(--panel) 60%, var(--line)); }
+  /* dashboard.png is 1280 wide; at 1024 the tiles, the running table and the top of the
+     board fit, and 40 px up hides the page header the window's own bar replaces */
+  .sp-shot {
+    width: 100%; height: calc(100% - 36px);
+    background: url("../../docs/images/dashboard.png") no-repeat 0 -40px / 1024px auto;
+  }
+  .sp-window::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 110px;
+    background: linear-gradient(to bottom, transparent, var(--bg) 92%);
+  }
+</style>
+</head>
+<body>
+  <section class="sp-copy">
+    <p class="sp-kicker"><b>jleavers</b>/issuebot</p>
+    <h1 class="sp-name">issuebot</h1>
+    <p class="sp-tag">Label a GitHub issue,<br>get a pull request back.</p>
+    <div class="sp-flow">
+      <span class="sp-pill sp-todo">todo</span><span class="sp-arrow">→</span>
+      <span class="sp-pill sp-in-progress">in-progress</span><span class="sp-arrow">→</span>
+      <span class="sp-pill sp-review">review</span><span class="sp-arrow">→</span>
+      <span class="sp-pill sp-complete">complete</span>
+    </div>
+    <p class="sp-foot">Claude Code, unattended, on your own worker.</p>
+  </section>
+
+  <div class="sp-window">
+    <div class="sp-chrome"><i></i><i></i><i></i><span>issuebot · dashboard</span></div>
+    <div class="sp-shot"></div>
+  </div>
+</body>
+</html>

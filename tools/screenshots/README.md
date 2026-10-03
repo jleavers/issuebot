@@ -4,7 +4,8 @@
 dashboard serving **fabricated data**. Nothing in them is anyone's repository: the store is a
 throwaway, the repository is `acme/frontend` — the placeholder the README and
 `docs/toolchains.md` already use — and every issue, run, cost and token figure is invented in
-`seed.py`.
+`seed.py`. `docs/images/social-preview.png`, the repository's social card, is cut from the
+first, so it inherits the same guarantee.
 
 Regenerate them when the dashboard's layout changes, or the images quietly stop describing it.
 
@@ -29,7 +30,7 @@ uv run python tools/screenshots/seed.py history
 #    the real account's Actions minutes or post their alerts to the team's channel
 ISSUEBOT_GITHUB_BILLING_TOKEN= SLACK_WEBHOOK_URL= ISSUEBOT_WEB_PASSWORD=screenshot uv run issuebot web --port 8099 &
 
-# 3. capture both images
+# 3. capture both images, and the social preview cut from the first
 uv run --with playwright --with pillow python tools/screenshots/capture.py \
   --password screenshot --dsn "$DATABASE_URL"
 
@@ -47,10 +48,29 @@ is drawn rather than rendered, so `PALETTES` in `capture.py` carries `app.css`'s
 `--ink`, `--muted` and `--line` for each. A change to those tokens wants a change here, or the
 strip stops matching the board above it.
 
+## The social preview
+
+`docs/images/social-preview.png` is the 1280×640 card GitHub shows when the repository is
+linked elsewhere. `social.py` renders `social.html` — the name, the tagline, the label flow and
+a window cut from `dashboard.png` — and `capture.py` runs it last, so the card is redrawn
+whenever the dashboard is. A change to the card alone needs neither the store nor a dashboard:
+
+```bash
+uv run --with playwright python tools/screenshots/social.py
+```
+
+Its colours are not copied the way `PALETTES` is: `social.html` links `app.css` and sets
+`data-theme`, so the tokens are the board's own. Its faces are Inter and JetBrains Mono from
+Google Fonts, so it needs the network, and it writes nothing if either did not load.
+
+GitHub does not read the file from the tree. After it changes, someone with admin on the
+repository uploads it again under **Settings → General → Social preview**; until then a link
+still shows the old card.
+
 ## The size limit is the constraint
 
 `check-added-large-files` runs with its default, so **each file must stay under 500 KB**. The
-capture prints both sizes and exits non-zero if either is over, rather than leaving a commit to
+capture prints every size and exits non-zero if any is over, rather than leaving a commit to
 be rejected later. If a redesign pushes the GIF over, turn `--width` (900 by default) down
 before `--colours` (64): the board is flat colour, so it quantises well and loses more to
 resampling than to palette.
