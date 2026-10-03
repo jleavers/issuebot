@@ -385,6 +385,10 @@ class Orchestrator:
         # every other hold here, it names the moment it lifts, so nothing has to probe for it.
         self._usage_reason: str | None = None
         self._usage_reset_at: datetime | None = None
+        # What the snapshot says of it: the reset claude reported -- never the one-interval
+        # fallback, which moves every time it is taken -- and the window that came with it.
+        self._usage_until: datetime | None = None
+        self._usage_window: str | None = None
         self._credential: Credential = "unknown"
         # Seeded from the last stored snapshot by the caller that has a database, so a restart
         # keeps the last reading instead of blanking the limits tile until the next dispatch.
@@ -736,7 +740,7 @@ class Orchestrator:
         self._reported_auth_block = None
         self._unreadable_auth_probes = 0
 
-    def _hold_usage(self, error: str, reset_at: datetime | None) -> None:
+    def _hold_usage(self, error: str, reset_at: datetime | None, window: str | None = None) -> None:
         """Stop claiming issues until the account's refused window reopens (#173's incident).
 
         The only hold here that needs no probe to lift: claude says when the window reopens,
@@ -747,16 +751,28 @@ class Orchestrator:
         The reason is re-worded whenever a later run hits the same wall, and the reset is
         moved *out* only, never in: two sessions can be refused against the same window and
         report it seconds apart, and the later reading is the one to wait for.
+
+        A refusal whose ``rate_limit_event`` names no ``resetsAt`` is dated by the runner at the
+        moment the line was read (``parse_usage_limit``), so its ``until`` is already past and the
+        hub's watcher skips it; only a text-only refusal arrives here with no reset at all.
+
+        ``until`` and ``window`` in the snapshot take claude's own reset only, and move out with
+        it, so the two always describe the same refusal.
         """
         fallback = self._now() + timedelta(milliseconds=self._workflow.config.polling.interval_ms)
         due = reset_at or fallback
         if self._usage_reset_at is None or due > self._usage_reset_at:
             self._usage_reset_at = due
+        if reset_at is not None and (self._usage_until is None or reset_at > self._usage_until):
+            self._usage_until = reset_at
+            self._usage_window = window
         self._usage_reason = f"claude usage limit reached: {error}"
 
     def _release_usage_hold(self) -> None:
         self._usage_reason = None
         self._usage_reset_at = None
+        self._usage_until = None
+        self._usage_window = None
 
     def _settle_usage_hold(self) -> None:
         """Lift the usage hold once the window it named has reopened.
@@ -795,7 +811,13 @@ class Orchestrator:
             # authenticate is a fault an operator fixes, where this one lifts on its own and
             # says when. It is keyed on the constant so that a second session reporting the
             # same wall in different words keeps the hold's `since`.
-            return Hold("usage", self._usage_reason, key=USAGE_HOLD_KEY)
+            return Hold(
+                "usage",
+                self._usage_reason,
+                key=USAGE_HOLD_KEY,
+                until=self._usage_until,
+                window=self._usage_window,
+            )
         accounts = self._accounts_hold()
         if accounts is not None:
             # Keyed on *which* fault, not on the constant: an unusable setting and an unreadable
@@ -818,20 +840,31 @@ class Orchestrator:
         )
 
     def _hold_snapshot(
-        self, kind: DispatchHoldKind, reason: str, *, key: str | None = None
+        self,
+        kind: DispatchHoldKind,
+        reason: str,
+        *,
+        key: str | None = None,
+        until: datetime | None = None,
+        window: str | None = None,
     ) -> None:
         """Carry why dispatch is held into the snapshot; a hold that lasts keeps its ``since``.
 
         ``key`` is what makes two holds the same one when the wording is not: an unreadable
         ``claude`` can garble its output differently on every probe, and the operator should
-        still see how long the hold has really lasted.
+        still see how long the hold has really lasted. ``until`` and ``window`` follow the
+        newest reason, as the reason itself does.
         """
         identity = (kind, reason if key is None else key)
         if self._dispatch_hold is not None and identity == self._hold_identity:
-            self._dispatch_hold = replace(self._dispatch_hold, reason=reason)
+            self._dispatch_hold = replace(
+                self._dispatch_hold, reason=reason, until=until, window=window
+            )
             return
         self._hold_identity = identity
-        self._dispatch_hold = DispatchHold(kind=kind, reason=reason, since=self._now())
+        self._dispatch_hold = DispatchHold(
+            kind=kind, reason=reason, since=self._now(), until=until, window=window
+        )
 
     def _release_snapshot_hold(self) -> None:
         self._dispatch_hold = None
@@ -898,7 +931,9 @@ class Orchestrator:
         if hold is None:
             self._release_snapshot_hold()
         else:
-            self._hold_snapshot(hold.kind, hold.reason, key=hold.key)
+            self._hold_snapshot(
+                hold.kind, hold.reason, key=hold.key, until=hold.until, window=hold.window
+            )
 
     def _slots(self) -> int:
         return max(self._workflow.config.agent.max_concurrent_agents - len(self._running), 0)
@@ -1923,7 +1958,7 @@ class Orchestrator:
         lasts, so the board stops instead of grinding every candidate through the same wall.
         """
         error = result.error or "claude refused the turn: usage limit reached"
-        self._hold_usage(error, result.usage_reset_at)
+        self._hold_usage(error, result.usage_reset_at, result.usage_window)
         self._log.warning(
             "dispatch_usage_held",
             issue_number=entry.issue.number,

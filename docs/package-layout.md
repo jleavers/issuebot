@@ -1344,9 +1344,11 @@ the reason a caller refuses on can no longer be two different claims. The prefli
 to be a local `_Hold` inside `tick`, which is exactly why `_fire` honoured the other two and
 not it: there was nothing to consult (#112).
 Every hold is carried in the snapshot as `dispatch_hold` (#29), a `DispatchHold(kind,
-reason, since)` beside `config_error`: `kind` is `preflight` (the message `preflight`
+reason, since, until=, window=)` beside `config_error`: `kind` is `preflight` (the message `preflight`
 builds), `auth` (`claude authentication unavailable: <the probe's detail>`), `usage`
-(`claude usage limit reached: <claude's own sentence>`, the spent-window hold above), `accounts`
+(`claude usage limit reached: <claude's own sentence>`, the spent-window hold above, which alone also carries `until` -- the reset claude
+reported, never the one-interval fallback -- and `window`, the `rateLimitType` it refused on;
+`TurnResult` and `RunResult` carry it as `usage_window` beside `usage_reset_at`), `accounts`
 (#121: the account registry will not read, so no workspace can be bound to a session
 account) or `github` (#88, below), and `since`
 is when that reason first held dispatch, so an unchanged hold keeps its start and a changed
@@ -1396,7 +1398,7 @@ network rather than GitHub's.
 
 ## `issuebot.notifications`
 
-the Slack sink, imported by `cli`, and by `web` for one message. `messages.py` (pure):
+the Slack sink, imported by `cli`, and by `web` for two messages. `messages.py` (pure):
 `format_event(event, repo=, labels=)` → one line of mrkdwn per kind (issue link, `from → to`
 by actor, PR link, blocker reason, run cost) or `None`. `slack.py`: `urllib_post` (stdlib
 `urllib` in `asyncio.to_thread`, never raises, errors pass through `redact`), `PostResult`,
@@ -1409,13 +1411,15 @@ its own socket timeout first, so exit can take up to 20 s. Constants, not settin
 webhook or allow-list change needs a worker restart.
 
 `format_actions_alert` is the dashboard's low-minutes line, posted by `web.actions` through
-`urllib_post` with a single attempt; the next hourly cycle is the retry.
+`urllib_post` with a single attempt; the next hourly cycle is the retry. `format_claude_limit_alert` is the Claude usage line: a
+warning or a limit hit (chosen by `hit`), times in UTC.
 
 ## `issuebot.db`
 
 the observability store, imported by `cli` and `web`; imports `config`,
 `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`; schema version 4) applied by
+`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`;
+schema version 6) applied by
 `migrate.py` in one transaction
 under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
 files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
@@ -1498,10 +1502,15 @@ keeps the reading; `claim_actions_alert`/`release_actions_alert` are the alert's
 claim-then-post. `RepoQueries.actions_minutes()` reads the repository owner's row,
 case-insensitively.
 
+`0006_claude_limit_alerts.sql` and `claude_limits.py`: the Claude usage alert's memory, one
+row per window instance `(limit_window, resets_at)`, written only by the web's watcher:
+`Database.claude_limit_alerted` reads it, `claim_claude_limit_alert` writes a target only when
+it raises the stored percent, and `release_claude_limit_alert` gives a failed post's claim back.
+
 ## `issuebot.web`
 
 the dashboard, imported by `cli` only; imports `config`, `db`, `github`, `log` and
-`notifications`. `app.py`: `create_app(database, *, password, clock=, now=, actions=)`
+`notifications`. `app.py`: `create_app(database, *, password, clock=, now=, actions=, claude_limits=)`
 (FastAPI; every page and JSON route
 lives under a repository prefix, since one database now holds every worker's rows —
 `/r/<owner>/<name>/` for the pages, `/api/v1/repos/<owner>/<name>/` for the JSON. Pages:
@@ -1634,6 +1643,14 @@ raises, so `issuebot web` refuses to start), `ActionsPoller` (hourly; `create_ap
 starts and stops it with the lifespan), `alert_threshold` over `THRESHOLDS` (75, 90, 100).
 `views.actions_document`/`actions_window` draw the limits tile's third window and `/state`'s
 `actions_minutes` from the row.
+
+`claude_limits.py`: `ClaudeLimitsWatcher`, built when `SLACK_WEBHOOK_URL` is set
+(`webhook_setting`) and run by the same lifespan, reads every `runtime_snapshot` row once a
+minute; `due_alerts` turns them into 7-day warnings (`SEVEN_DAY_THRESHOLDS`, at the highest
+utilisation per reset time) and hits (a `usage` hold's `until` and `window`), each claimed
+in `claude_limit_alerts` before it is posted, a failed one retried after `RETRY_BACKOFF_S`.
+`views.parse_moment` is the snapshot timestamp reader they share, and `views.dispatch_hold`
+passes a hold's `until` and `window` through to `/state`.
 
 ## `issuebot.cli`
 

@@ -155,10 +155,16 @@ def dispatch_hold(row: SnapshotRow | None) -> dict[str, Any] | None:
     if not isinstance(reason, str) or not reason:
         return None
     kind = hold.get("kind")
+    until = hold.get("until")
+    window = hold.get("window")
     return {
         "kind": kind if isinstance(kind, str) and kind else "unknown",
         "reason": reason,
         "since": hold.get("since"),
+        # A usage hold's reset and window (spec 2026-10-02, claude-limits-alert); None on every
+        # other hold, and on a snapshot written before a worker recorded them.
+        "until": until if isinstance(until, str) else None,
+        "window": window if isinstance(window, str) else None,
     }
 
 
@@ -209,13 +215,16 @@ def _window_percent(window: dict[str, Any], now: datetime) -> int | None:
     utilization = window.get("utilization")
     if not isinstance(utilization, int | float) or isinstance(utilization, bool):
         return None
-    resets_at = _moment(window.get("resets_at"))
+    resets_at = parse_moment(window.get("resets_at"))
     if resets_at is not None and resets_at <= now:
         return 0
     return round(min(max(float(utilization), 0.0), 1.0) * 100)
 
 
-def _moment(value: object) -> datetime | None:
+def parse_moment(value: object) -> datetime | None:
+    """An ISO 8601 timestamp out of the snapshot's JSON, read as UTC when it names no zone.
+
+    None for anything else."""
     if not isinstance(value, str):
         return None
     try:

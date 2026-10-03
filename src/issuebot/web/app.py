@@ -7,12 +7,14 @@ first registered one, and the header's dropdown is how a reader moves between th
 
 Every request that reads opens one connection through ``Database.queries()`` and closes it when
 the response is built. No request writes to a table -- a request's one write is ``NOTIFY`` --
-and the app's one table write is the Actions minutes poller's, to ``actions_minutes``, when the
-CLI builds one because the billing token is set (``issuebot.web.actions``). Templates
-render with autoescape on and ``StrictUndefined``; every response carries the security headers,
-the one an unhandled exception raises included (#106): the layer that adds them decorates the
-``send`` channel rather than the response the next layer returns, and answers the exception
-itself through that channel before re-raising it, so the next such exception is covered before
+and the app's table writes are its two background tasks': the Actions minutes poller's, to
+``actions_minutes``, when the CLI builds one because the billing token is set
+(``issuebot.web.actions``), and the Claude usage watcher's, to ``claude_limit_alerts``, when
+``SLACK_WEBHOOK_URL`` is set (``issuebot.web.claude_limits``). Templates render with autoescape on
+and ``StrictUndefined``; every response carries the security headers, the one an unhandled
+exception raises included (#106): the layer that adds them decorates the ``send`` channel rather
+than the response the next layer returns, and answers the exception itself through that channel
+before re-raising it, so the next such exception is covered before
 anyone finds it.
 
 Every request but the static files carries the credential (#73, ``issuebot.web.auth``): one
@@ -62,6 +64,7 @@ from issuebot.db.queries import IssueRow, RepoRow, RunRow, TurnRow, TurnSummaryR
 from issuebot.log import get_logger
 from issuebot.web.actions import ActionsPoller
 from issuebot.web.auth import CHALLENGE, credential_matches, presented_password, refresh_refusal
+from issuebot.web.claude_limits import ClaudeLimitsWatcher
 from issuebot.web.transcript import parse_transcript
 from issuebot.web.views import (
     CHART_POLL_S,
@@ -310,29 +313,36 @@ def create_app(
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] = _utcnow,
     actions: ActionsPoller | None = None,
+    claude_limits: ClaudeLimitsWatcher | None = None,
 ) -> FastAPI:
     """The dashboard app over ``database``, gated by ``password`` (HTTP Basic, any username);
     ``clock`` and ``now`` are seams for tests. An empty password is refused here rather than
     letting the gate compare against nothing. ``actions`` is the Actions minutes poller the CLI
-    builds when the billing token is set; it starts and stops with the app."""
+    builds when the billing token is set; it starts and stops with the app. ``claude_limits`` is
+    the Claude usage watcher the CLI builds when ``SLACK_WEBHOOK_URL`` is set; it starts and stops
+    with the app too."""
     if not password:
         raise ValueError("the dashboard needs a password: export ISSUEBOT_WEB_PASSWORD")
 
+    background = [task for task in (actions, claude_limits) if task is not None]
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        # The Actions minutes poller lives as long as the server does (spec 2026-10-02).
-        if actions is not None:
-            actions.start()
+        # The background tasks live as long as the server does: the Actions minutes poller and
+        # the Claude usage watcher (specs 2026-10-02), stopped in the reverse order.
+        for task in background:
+            task.start()
         try:
             yield
         finally:
-            if actions is not None:
-                await actions.stop()
+            for task in reversed(background):
+                await task.stop()
 
     app = FastAPI(
         title="issuebot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
     )
     app.state.actions = actions
+    app.state.claude_limits = claude_limits
     log = get_logger(__name__)
     refreshes: dict[str, _Refresh] = {}
     env = template_environment()

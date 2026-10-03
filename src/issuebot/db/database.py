@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from issuebot.config import GitHubLabels
 from issuebot.db.actions import CLAIM_ALERT, RECORD_ERROR, RECORD_READING, RELEASE_ALERT
+from issuebot.db.claude_limits import CLAIM_CLAUDE_ALERT, CLAUDE_ALERTED, RELEASE_CLAUDE_ALERT
 from issuebot.db.connection import (
     NOT_A_URL,
     Connector,
@@ -157,6 +158,35 @@ class Database:
         params = {"account": account, "period": period, "target": target, "previous": previous}
         async with self._open() as conn:
             await conn.execute(RELEASE_ALERT, params)
+
+    async def claude_limit_alerted(self, *, limit_window: str, resets_at: datetime) -> int:
+        """The highest Claude usage alert already posted for this window instance; 0 for none."""
+        params = {"limit_window": limit_window, "resets_at": resets_at}
+        async with self._open() as conn:
+            row = await (await conn.execute(CLAUDE_ALERTED, params)).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    async def claim_claude_limit_alert(
+        self, *, limit_window: str, resets_at: datetime, target: int
+    ) -> bool:
+        """Take ``target`` for this window instance before posting it; False if it was taken."""
+        params = {"limit_window": limit_window, "resets_at": resets_at, "target": target}
+        async with self._open() as conn:
+            cursor = await conn.execute(CLAIM_CLAUDE_ALERT, params)
+            return cursor.rowcount == 1
+
+    async def release_claude_limit_alert(
+        self, *, limit_window: str, resets_at: datetime, target: int, previous: int
+    ) -> None:
+        """Give a claim back after a failed post, so a later cycle tries again."""
+        params = {
+            "limit_window": limit_window,
+            "resets_at": resets_at,
+            "target": target,
+            "previous": previous,
+        }
+        async with self._open() as conn:
+            await conn.execute(RELEASE_CLAUDE_ALERT, params)
 
     @asynccontextmanager
     async def _open(self) -> AsyncIterator[AsyncConnection]:

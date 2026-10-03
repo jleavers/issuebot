@@ -2678,6 +2678,8 @@ async def test_the_snapshot_hold_survives_the_round_trip_through_json(tmp_path: 
         "kind": "preflight",
         "reason": "'gh' not found on PATH",
         "since": h.now().isoformat(),
+        "until": None,
+        "window": None,
     }
 
 
@@ -3086,6 +3088,7 @@ USAGE_LIMITED = {
     "error": "success: You've hit your session limit \u00b7 resets 12:30pm (UTC)",
     "final_state": StateLabel.IN_PROGRESS,
     "usage_reset_at": USAGE_RESET,
+    "usage_window": "five_hour",
 }
 
 
@@ -3162,6 +3165,92 @@ async def test_the_usage_hold_keeps_its_since_across_a_second_refusal(tmp_path: 
     assert second is not None
     assert second.since == first.since
     assert second.reason != first.reason
+
+
+async def test_the_usage_hold_names_its_window_and_when_it_lifts(tmp_path: Path) -> None:
+    """What the hub's web keys its Slack alert on (spec 2026-10-02, claude-limits-alert)."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert (hold.kind, hold.until, hold.window) == ("usage", USAGE_RESET, "five_hour")
+    data = json.loads(json.dumps(h.orchestrator.snapshot().to_dict()))
+    assert (data["dispatch_hold"]["until"], data["dispatch_hold"]["window"]) == (
+        USAGE_RESET.isoformat(),
+        "five_hour",
+    )
+
+
+async def test_a_later_refusal_moves_the_hold_s_until_out_and_keeps_its_since(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    await h.tick()
+    first = h.orchestrator.snapshot().dispatch_hold
+    assert first is not None
+    h.clock.advance(5)
+    later = USAGE_RESET + timedelta(days=3)
+    await h.exit(
+        h.run_for(2), **{**USAGE_LIMITED, "usage_reset_at": later, "usage_window": "seven_day"}
+    )
+    await h.tick()
+    second = h.orchestrator.snapshot().dispatch_hold
+    assert second is not None
+    assert second.since == first.since
+    assert (second.until, second.window) == (later, "seven_day")
+
+
+async def test_an_earlier_refusal_leaves_the_hold_s_until_and_window_alone(tmp_path: Path) -> None:
+    """A refusal against an earlier reset (the 5-hour) does not pull a later 7-day hold in."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    later = USAGE_RESET + timedelta(days=3)
+    await h.exit(
+        h.run_for(1), **{**USAGE_LIMITED, "usage_reset_at": later, "usage_window": "seven_day"}
+    )
+    await h.tick()
+    await h.exit(h.run_for(2), **USAGE_LIMITED)
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert (hold.until, hold.window) == (later, "seven_day")
+
+
+async def test_an_undated_refusal_keeps_the_hold_s_until_and_window(tmp_path: Path) -> None:
+    """A text-only refusal after a dated one leaves the dated reset and its window in place."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_issue(1, "todo")
+    h.add_issue(2, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)
+    await h.tick()
+    await h.exit(h.run_for(2), **{**USAGE_LIMITED, "usage_reset_at": None, "usage_window": None})
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None
+    assert (hold.until, hold.window) == (USAGE_RESET, "five_hour")
+
+
+async def test_a_refusal_claude_did_not_date_names_no_until(tmp_path: Path) -> None:
+    """The one-interval fallback moves every time it is taken, so carrying it
+    would hand the web a fresh key -- and Slack a fresh alert -- every poll interval."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **{**USAGE_LIMITED, "usage_reset_at": None, "usage_window": None})
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "usage"
+    assert (hold.until, hold.window) == (None, None)
 
 
 # --- an escape must not be undone by the conflict bounce ----------------------------------
@@ -3847,6 +3936,8 @@ async def test_the_github_hold_survives_the_round_trip_through_json(
         "kind": "github",
         "reason": "GitHub is not answering this worker: transport: http 502: Bad Gateway",
         "since": h.now().isoformat(),
+        "until": None,
+        "window": None,
     }
 
 

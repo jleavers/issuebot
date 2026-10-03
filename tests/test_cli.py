@@ -73,6 +73,7 @@ from issuebot.notifications import PostResult
 from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 from issuebot.web.actions import ActionsPoller
+from issuebot.web.claude_limits import ClaudeLimitsWatcher
 
 SEED_AT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows"
@@ -3663,6 +3664,36 @@ def test_web_refuses_a_malformed_allowance_before_migrating(
         "minutes, such as 3000\n"
     )
     assert fake_serve.calls == [] and fake_database.migrations == 0
+
+
+def test_web_builds_no_claude_limits_watcher_without_a_webhook(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    assert main(["web"]) == 0
+    ((app, _host, _port),) = fake_serve.calls
+    assert app.state.claude_limits is None  # type: ignore[attr-defined]
+
+
+def test_web_builds_the_claude_limits_watcher_from_the_webhook_alone(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_database: FakeDatabase,
+    fake_serve: FakeServe,
+    web_password: str,
+) -> None:
+    """No billing token: the Claude alert needs nothing but the webhook (spec 2026-10-02)."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", f" {WEBHOOK}\n")
+    assert main(["web"]) == 0
+    ((app, _host, _port),) = fake_serve.calls
+    assert isinstance(app.state.claude_limits, ClaudeLimitsWatcher)  # type: ignore[attr-defined]
+    assert app.state.actions is None  # type: ignore[attr-defined]
+    err = capsys.readouterr().err
+    assert "web_started" in err and WEBHOOK not in err
 
 
 def test_web_needs_its_password(

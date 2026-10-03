@@ -299,6 +299,17 @@ every turn hits the cap therefore stops at `agent.max_turns` and is escalated li
 other. The dashboard and the `run_ended` Slack line (opt in via
 `notifications.slack.events`) show each run's cost.
 
+### A spent Claude usage window
+
+When claude refuses a turn because the subscription's 5-hour or 7-day window is spent, the
+worker holds dispatch until the moment claude says the window reopens (one poll interval when
+the refusal gives no time), requeues the issue on the same attempt, and escalates nothing: no
+issue is at fault and there is nothing to fix. `issuebot status` prints `dispatch: held (usage)`
+and the dashboard's worker line shows the hold. It lifts on its own at the reset. With
+`SLACK_WEBHOOK_URL` set on the hub, Slack is told once when the limit is hit, with the time work
+resumes, and beforehand as the 7-day window passes 75% and 90%
+([Claude usage alerts](dashboard.md#claude-usage-alerts)).
+
 ### Restarts
 
 Workspaces persist in the `workspaces` volume; on startup the worker resumes
