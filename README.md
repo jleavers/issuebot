@@ -544,8 +544,12 @@ without running anything.
 ### Choosing the model for an issue
 
 `claude.model` is the default for every session. Its value is passed straight to
-`claude --model`, so anything that flag accepts works: an alias such as `opus` or `sonnet`, or
-a full model id such as `claude-fable-5-1`.
+`claude --model`, so anything that flag accepts works: an alias such as `opus`, `sonnet` or
+`fable`, or a full model id such as `claude-fable-5-1`. An alias follows the newest model in
+its family and a full id stays on that one model, which is why the defaults below are all
+aliases. The alias is resolved by the Claude Code in the image, not by issuebot, so a new model
+reaches the workers when `CLAUDE_CODE_VERSION` is bumped to a release that knows it and the
+image is rebuilt.
 
 A spec-and-plan issue may deserve a bigger model than a one-line fix, so a label can override
 the default for one issue. Map the labels to models in the front matter:
@@ -555,7 +559,7 @@ claude:
   model: opus
   model_labels:
     issuebot/model/sonnet: sonnet
-    issuebot/model/fable: claude-fable-5-1
+    issuebot/model/fable: fable
 ```
 
 `issuebot labels ensure` creates those labels alongside the five state labels, so they appear
