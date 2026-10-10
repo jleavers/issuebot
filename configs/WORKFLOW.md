@@ -28,7 +28,7 @@ claude:
   # A label overrides the default for one issue; `labels ensure` creates these.
   model_labels:
     issuebot/model/sonnet: sonnet
-    issuebot/model/fable: claude-fable-5-1
+    issuebot/model/fable: fable
   permission_mode: auto
   max_budget_usd: 10.0
 notifications:
