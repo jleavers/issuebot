@@ -42,8 +42,12 @@ ruleset that refuses a direct push, a force push and a deletion, so there is not
 remember. The same ruleset merges a pull request only once CI's `lint`, `test` and `docker`
 checks have passed on its latest commit.
 
-Approvals are not required, because a single maintainer cannot approve their own pull request.
-Review is a person reading the diff, not a button.
+It also requires one approving review from a code owner, given after the pull request's latest
+push; a later push dismisses it. `.github/CODEOWNERS` names the maintainer for every path, so on
+anyone else's pull request (a contributor's, Dependabot's, or one a version-bump workflow
+opened) the maintainer's review is that approval. Their own pull requests cannot be approved by
+their author, so they are merged with the ruleset's bypass for repository administrators.
+Either way, the review that matters is a person reading the diff; the approval only records it.
 
 - Say what changed and why. A reviewer reading the diff alone should not have to guess the
   motivation.
