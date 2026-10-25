@@ -385,7 +385,7 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
 
     The `set` half carries a value each key accepts, which is most of that measurement and
     the easy thing to get wrong: `gh config set` validates the enum-valued keys, so a probe
-    passing a placeholder is refused for nine of the fourteen -- and a `|| true` would report
+    passing a placeholder is refused for ten of the fifteen -- and a `|| true` would report
     only the five free-form ones and call that the closed set. No `|| true`, so a set refused
     for anything but the one reason below fails the step.
 
@@ -415,7 +415,7 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     # Equality, not a subset: a subset check cannot notice a key gh moved back to config.yml,
     # which is half of what the list claims. `refused` is collected at runtime from gh's own
     # refusals, so a gh that starts writing `clipboard` host-level again leaves it empty and
-    # the equality then holds over all fourteen -- which is the right answer, the list being
+    # the equality then holds over all fifteen -- which is the right answer, the list being
     # unchanged. What lapses in that world is the read-back proof below, since it iterates
     # `refused`: the key would be back to being justified by what gh writes, which is what the
     # comparison on this line measures.
@@ -423,7 +423,7 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     assert "if advertised - written - refused:" in CI
     # And each declined key proved by what gh reads back, which is why it is in the list. The
     # two lookups are compared against each other and not against a literal, so this holds for
-    # the next declined key whatever gh defaults it to: four of the fourteen already default to
+    # the next declined key whatever gh defaults it to: five of the fifteen already default to
     # `disabled`, and a literal would fail on those without the sweep being wrong at all.
     assert "for key in $refused; do" in CI
     assert "before=$(gh config get $key)" in CI
@@ -431,8 +431,9 @@ def test_ci_asks_the_images_own_gh_which_keys_this_position_carries() -> None:
     assert 'if [ "$(gh config get $key)" != "$before" ]; then' in CI
     assert 'test "$(gh config get $key)" != disabled' not in CI
     # And the extraction must not shrink silently when a help line is reformatted. The floor
-    # tracks the count it guards: thirteen keys until 2.101.0 added `clipboard`, fourteen since.
-    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 14' in CI
+    # tracks the count it guards: thirteen keys until 2.101.0 added `clipboard`, fourteen until
+    # 2.103.0 added `expiring_credentials`, fifteen since.
+    assert 'test "$(printf "%s\\n" "$keys" | wc -l)" -ge 15' in CI
     # And git_protocol by what gh resolves rather than by what it writes.
     assert 'test "$(gh config get -h github.com git_protocol)" = ssh' in CI
     assert 'test "$(gh config get git_protocol)" = https' in CI
