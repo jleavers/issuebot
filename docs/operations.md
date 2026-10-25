@@ -187,8 +187,9 @@ warning for it and another only if the error changes, and the worker asks again 
 
 Triage (`issuebot/triage-todo`, by hand) never leaves an issue silently. When it cannot file a
 verdict it removes `issuebot/triage-todo`, posts a `### Issuebot <title>` comment saying why
-and publishes `blocked`. It never touches a state label, because the issue has none. The one
-action that resumes it is in the comment:
+and publishes `blocked`. Apart from the `operator step` refusal below, which takes off the
+`issuebot/todo` someone added, it never touches a state label: a triage candidate has none. The
+one action that resumes it is in the comment:
 
 - **`unapproved edit`**: the title or body was edited after `issuebot/triage-todo` by someone
   other than who applied it. Read the text as it stands and apply `issuebot/triage-todo` again
@@ -199,6 +200,9 @@ action that resumes it is in the comment:
   `agent.max_attempts` times. Add `issuebot/triage-todo` again to triage it afresh.
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
+- **`already split`**: the issue already has sub-issues. Re-triaging a split issue is the
+  parent review, which a later release adds, so no session runs and nothing is filed twice.
+  Close or unlink its sub-issues, then add `issuebot/triage-todo` again.
 - **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
   issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
 
@@ -207,7 +211,13 @@ That memory, and the count of failed triage attempts, are the worker's process o
 resets the count and loses a verdict not yet filed, and if the label swap had not happened
 `issuebot/triage-todo` is still on the issue to triage it again. A triage run's failures do
 not count toward a work run's `agent.max_attempts`; its cost counts toward the issue's spend.
-`issuebot run-once <number> --triage` runs one in the foreground.
+`issuebot run-once <number> --triage` runs one in the foreground. Stop the worker first if it
+serves the issue: it dispatches its own triage of the same `issuebot/triage-todo` issue, the two
+share one triage clone, and both file.
+
+A `split` files the steps up to and including the implementation plan. Once the plan step
+merges, nothing in this release files the implementation stages -- that is the parent review,
+a later release -- so open them yourself from the merged plan.
 
 ### GitHub itself
 
@@ -430,7 +440,10 @@ error (see [What a session may reach](security-model.md#what-a-session-may-reach
 
 After upgrading to the release that adds triage, run `labels ensure` once per repository before
 using it: the worker starts without the three triage labels, but a verdict cannot be filed until
-they exist.
+they exist. Stop the worker before you pull that release (`docker compose stop worker`): the
+pulled `WORKFLOW.md` prompt names `labels.triage_*`, and an older worker reloads it live and
+then fails every work render until its image is rebuilt. `tools/upgrade` stops the workers
+first already.
 
 The upgrade that brings in the approval check (GHSA-jm8h-q3j6-p8xp) reads the history of every
 issue already on the board as it next dispatches it, including the edits made before the

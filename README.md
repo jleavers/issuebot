@@ -35,8 +35,8 @@ Beside this file:
 ## How it works
 
 **The label is the state machine.** Nothing is installed in the target repository: it needs the
-five `issuebot/*` labels and the `issuebot/no-fault` marker, which `issuebot labels ensure`
-creates, and nothing else.
+five `issuebot/*` state labels, the `issuebot/no-fault` marker and the three triage labels below,
+which `issuebot labels ensure` creates, and nothing else.
 
 | Label | Set by |
 |---|---|
@@ -564,7 +564,8 @@ Triage has a prompt of its own. Put a `TRIAGE.md` beside `WORKFLOW.md` to replac
 one (`src/issuebot/config/triage_prompt.md`); it is plain Markdown with no front matter, and
 the worker reloads it when it appears, changes or is deleted. `issuebot run-once <number>
 --triage` runs one triage session in the foreground, and with `--show-prompt` renders it
-without running anything; `validate` renders it and warns while the triage labels are
+without running anything; stop the worker first if it serves the issue, or it triages the same
+issue beside you and both file. `validate` renders it and warns while the triage labels are
 missing. Work sessions are told never to touch the triage labels.
 
 ### Choosing the model for an issue

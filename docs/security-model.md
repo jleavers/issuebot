@@ -156,10 +156,19 @@ by the prompt or by anything in `WORKFLOW.md` the operator has widened for work 
   work session widens nothing here. It needs Claude Code 2.1.303 or later.
 - **No `GH_TOKEN`.** The session's environment carries no GitHub credential, and no `.issuebot/env`
   from a hook: the clone is hook-free. It runs as a session account, behind the egress proxy.
-- **What `--restricted` confines.** On 2026-10-25 a probe measured it: a read outside the clone
-  was refused, and so was a read through a symlink out of it. The deny rule closes `/proc`,
-  where a process's environment is. That is a measurement of one release, which is why the
-  version floor is where it is.
+- **What `--restricted` confines.** Measured on 2026-10-25 with exactly these flags, on 2.1.303
+  and on 2.1.310 alike: a read inside the clone succeeded, a read of an absolute path outside it
+  was refused, and so was a read through a symlink in the clone that points out of it; the
+  session's only tools were Glob, Grep, Read and the `StructuredOutput` that carries the
+  verdict. 2.1.303 is both the version floor and the shipped pin, and it carries all of
+  `--restricted`, `--tools` and `--json-schema`: the floor is a release that was measured, not
+  one assumed to behave like a later one.
+- **`/proc`.** `claude`'s own credential (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) sits
+  in the `claude` process's environment: it is the one credential the worker cannot withhold.
+  The deny rule refused `/proc/self/environ` in the probe. Without it, `--restricted` still
+  refused `/proc/version` and `/proc/self/status` as outside the working directory, and
+  `claude`'s own device-file guard refused `/proc/self/environ` and `/proc/self/cmdline`, so the
+  deny is defence in depth beside `--restricted`, not the only line.
 - **The worker writes.** The session returns a verdict and moves nothing. The worker creates the
   sub-issues, applies `issuebot/operator-step` to the steps for a human, swaps the labels and
   posts the comment; the agent never names a label.
