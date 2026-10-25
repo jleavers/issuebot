@@ -359,9 +359,10 @@ def test_remove_tree_removes_what_the_account_owns_including_closed_directories(
 
 # #190: what `gh config set -h github.com <key>` can write, beside the credential state the
 # same file holds. The five steering keys were measured against `gh version 2.100.0`: asked for
-# each of the thirteen keys `gh config --help` listed at the time -- fourteen since 2.101.0 added
-# `clipboard` (#231), which is the one key `-h` refuses -- exactly these landed in `hosts.yml`
-# and every other went to `config.yml`.
+# each of the thirteen keys `gh config --help` listed at the time -- fourteen once 2.101.0 added
+# `clipboard` (#231), which is the one key `-h` refuses, and fifteen since 2.103.0 added
+# `expiring_credentials`, which it writes -- exactly these landed in `hosts.yml` and every other
+# went to `config.yml`.
 GH_HOSTS_PLANT = """github.com:
     oauth_token: gho_KEEPTHISCREDENTIAL0123456789012345
     user: nobody
@@ -602,7 +603,7 @@ def test_sweep_strips_the_gh_steering_keys_and_keeps_the_credential(tmp_path: Pa
     # Both levels gh writes them. `gh config set -h <host> <key>` mirrors into `users.<name>`
     # once the file names a user, creating the subtree if it has to, so a host-level-only sweep
     # would leave a complete second copy of every planted key. Those copies are measured inert
-    # on this gh -- but so are twelve of the fourteen at host level, and they go for the same
+    # on this gh -- but so are twelve of the fifteen at host level, and they go for the same
     # reason. `oauth_token` is what the subtree is for and stays.
     document["github.com"]["users"]["nobody"]["api_host"] = "127.0.0.1"
     document["github.com"]["users"]["nobody"]["git_protocol"] = "ssh"
@@ -907,13 +908,13 @@ def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None
     a file that must keep working, so a key missing here is the channel back.
 
     It is `gh`'s own configuration surface -- every key `gh config` manages -- because that set
-    is what `hosts.yml` can carry and what `gh` resolves out of it host-level. Measured against
-    `gh version 2.101.0` two ways, because 2.101.0 is where the two came apart. Thirteen of the
-    fourteen by `gh config set -h <host> <key> <value>`, which writes them into `hosts.yml`
-    rather than into `config.yml`, with a value each key accepts -- the easy thing to get wrong,
-    since `gh config set` validates the enum-valued keys, so a probe passing a placeholder is
-    refused for nine of the fourteen, and a probe that swallows the refusal reports only the five
-    free-form ones and calls that the closed set.
+    is what `hosts.yml` can carry and what `gh` resolves out of it host-level. Measured two ways,
+    against `gh version 2.101.0`, where the two came apart, and again against 2.103.2 for the
+    key 2.103.0 added. Fourteen of the fifteen by `gh config set -h <host> <key> <value>`, which
+    writes them into `hosts.yml` rather than into `config.yml`, with a value each key accepts --
+    the easy thing to get wrong, since `gh config set` validates the enum-valued keys, so a probe
+    passing a placeholder is refused for ten of the fifteen, and a probe that swallows the
+    refusal reports only the five free-form ones and calls that the closed set.
 
     `clipboard` is the fourteenth and is named on the other measurement (#231): `gh config set
     -h` refuses it (`--host cannot be used when setting clipboard`), so `gh`'s own writer will
@@ -923,16 +924,23 @@ def test_the_gh_steering_key_list_names_every_key_gh_writes_host_level() -> None
     lookup, exactly as `git_protocol`'s does, and resolution rather than authorship is what makes
     a key steer `gh`. `runas.py`'s comment carries that decision in full.
 
+    `expiring_credentials` is the fifteenth, added by 2.103.0 with its auto-refreshing OAuth
+    tokens, and is named on the first measurement: `-h` writes it under the host like the
+    thirteen before `clipboard`. It is a preference over which kind of token `gh auth login`
+    asks for, not a token, so naming it takes nothing the file is kept for.
+
     So what survives the sweep is what `gh config` does not manage: `oauth_token`, `user` and
     the `users:` subtree. The `docker` CI job re-takes both measurements off the image's own
-    `gh` on every pull request, so a release that adds a fifteenth key fails there -- which is
-    how `clipboard` was found. Dropping one here has to be a deliberate edit in both places."""
+    `gh` on every pull request, so a release that adds a sixteenth key fails there -- which is
+    how `clipboard` and `expiring_credentials` were found. Dropping one here has to be a
+    deliberate edit in both places."""
     advertised = {
         "api_host",
         "git_protocol",
         "editor",
         "prompt",
         "prefer_editor_prompt",
+        "expiring_credentials",
         "pager",
         "http_unix_socket",
         "browser",
