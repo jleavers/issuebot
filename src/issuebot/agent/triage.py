@@ -72,8 +72,17 @@ async def run_triage(
             )
         )
         log.info("run_started", run_id=state.run_id, attempt=attempt, run_kind="triage")
+        crash: Exception | None = None
         if state.stop_reason is None:
-            await _execute(state, workflow, adapter, workspaces, runner, cancel, observer)
+            try:
+                await _execute(state, workflow, adapter, workspaces, runner, cancel, observer)
+            except Exception as exc:
+                # Whatever the run did not classify (an OSError reading the instructions, a
+                # runner that raised): the run still ends in the store as failed, then the
+                # exception goes on to the orchestrator's own crash handling. Cancellation is
+                # a BaseException and passes through, as it does in `run_session`.
+                state.fail("turn_failed", f"unexpected {type(exc).__name__}: {exc}")
+                crash = exc
         # A triage run moves no label, so it has no state to report and no refreshed issue.
         result = dataclasses.replace(state.result(), final_state=None, final_issue=None)
         bus.publish(
@@ -103,6 +112,8 @@ async def run_triage(
             cost_usd=result.cost_usd,
             error=_error_text(result),
         )
+        if crash is not None:
+            raise crash
         return result
     finally:
         clear_context()

@@ -125,3 +125,36 @@ async def test_the_triage_clone_is_not_the_work_workspace(tmp_path) -> None:  # 
     assert result.workspace_path is not None
     assert result.workspace_path.name.endswith(".triage")
     assert result.workspace_path != h.workspace
+
+
+class _Boom:
+    """A runner whose turn raises something no category covers."""
+
+    async def run_turn(self, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+
+async def test_an_unexpected_exception_still_ends_the_run_and_propagates(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path)
+    with pytest.raises(RuntimeError, match="boom"):
+        await h.triage(_Boom())  # type: ignore[arg-type]
+    assert h.kinds() == ["run_started", "run_ended"]
+    ended = h.recorder.events[-1]
+    assert isinstance(ended, RunEnded)
+    assert ended.run_kind == "triage"
+    assert ended.outcome == "failed"
+    assert ended.error is not None
+    assert "RuntimeError" in ended.error
+
+
+async def test_a_failing_sweep_still_ends_the_run_and_propagates(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path)
+
+    async def broken() -> None:
+        raise OSError("no home")
+
+    monkeypatch.setattr(h.workspaces, "sweep_agent_home", broken)
+    with pytest.raises(OSError, match="no home"):
+        await h.triage(ScriptedRunner())
+    assert h.kinds() == ["run_started", "run_ended"]
+    assert h.recorder.events[-1].outcome == "failed"  # type: ignore[attr-defined]
