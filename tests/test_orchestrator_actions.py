@@ -44,7 +44,9 @@ from issuebot.orchestrator.actions import (
     conflict_limit_block,
     conflict_rework,
     finish_terminal,
+    operator_step_escape,
     remove_workspace,
+    triage_escape,
     unapproved_block,
     unapproved_escape,
 )
@@ -1334,3 +1336,77 @@ async def test_budget_escape_moves_the_label_even_when_the_blind_note_cannot_be_
     assert "budget_escape_workpad_unreadable" in events
     assert "budget_escape_note_failed" in events
     assert "budget_escape_applied" in events
+
+
+# --- the triage escapes -----------------------------------------------------------------
+
+
+async def test_triage_escape_removes_the_label_first_then_comments(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    h.github.calls.clear()
+    issue = h.github.issue(42)
+    outcome = await triage_escape(
+        h.github,
+        h.bus,
+        issue,
+        title="triage failed",
+        reason="Could not triage.",
+        way_back="Add the label again.",
+        now=NOW,
+    )
+    assert outcome == "applied"
+    assert [name for name, _ in h.github.calls if name in ("edit_labels", "comment")] == [
+        "edit_labels",
+        "comment",
+    ]
+    assert h.github.issue(42).labels == ()
+    assert h.github.comments_for(42)[0].body == (
+        "### Issuebot triage failed (2026-09-03T14:02:11Z)\n\nCould not triage.\n\n"
+        "Add the label again."
+    )
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == ("issuebot/triage-todo", None)
+
+
+async def test_triage_escape_whose_label_write_fails_writes_nothing(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    h.github.fail_next("server_error", on="edit_labels")
+    outcome = await triage_escape(
+        h.github, h.bus, h.github.issue(42), title="t", reason="r", way_back="w", now=NOW
+    )
+    assert outcome == "failed"
+    assert h.github.comments_for(42) == [] and h.recorder.events == []
+    assert h.github.issue(42).labels == ("issuebot/triage-todo",)
+
+
+async def test_triage_escape_survives_a_failed_comment(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    h.github.fail_next("server_error", on="comment")
+    with capture_logs() as logs:
+        outcome = await triage_escape(
+            h.github, h.bus, h.github.issue(42), title="t", reason="r", way_back="w", now=NOW
+        )
+    assert outcome == "applied"
+    assert [e for e in logs if e["event"] == "triage_escape_note_failed"]
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+
+
+async def test_operator_step_escape_clears_todo_and_says_why(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/todo", "issuebot/operator-step"), number=42)
+    outcome = await operator_step_escape(h.github, h.bus, h.github.issue(42), now=NOW)
+    assert outcome == "applied"
+    assert h.github.issue(42).state is None
+    body = h.github.comments_for(42)[0].body
+    assert body.startswith("### Issuebot operator step (2026-09-03T14:02:11Z)\n\n")
+    assert "#42 is an operator step (`issuebot/operator-step`): issuebot does not run it" in body
+    assert body.endswith("issuebot has removed `issuebot/todo`.")
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == ("issuebot/todo", None)
+    assert h.recorder.kinds == ["state_changed", "blocked"]
