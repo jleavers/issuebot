@@ -127,3 +127,49 @@ def test_an_unknown_key_that_is_a_credential_is_not_echoed() -> None:
 def test_a_non_string_key_is_a_verdict_error() -> None:
     with pytest.raises(VerdictError):
         parse_verdict({**GOOD_SPLIT, 7: "x"}, max_sub_issues=8, scrubber=SCRUB)
+
+
+# C1: what `gh api -f` hands `create_subprocess_exec` cannot hold a NUL, and what reaches its
+# stdin cannot hold a lone surrogate. Either one raised `ValueError` past every `GitHubError`
+# handler and stopped the worker, so the parser refuses both before anything is filed.
+STEP = GOOD_SPLIT["sub_issues"][1]
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        ({"sub_issues": [{**STEP, "body": "Do it.\x00"}]}, "body has a control character in it"),
+        ({"sub_issues": [{**STEP, "body": "Do\x1b[2Jit."}]}, "body has a control character in it"),
+        ({"summary": "Too\x00big."}, "summary has a control character in it"),
+        ({"needs_human": "No\x7f."}, "needs_human has a control character in it"),
+        ({"sub_issues": [{**STEP, "title": "Write\x00the plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write\tthe plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write\x9bthe plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write \ud800"}]}, "title is not valid Unicode"),
+        ({"sub_issues": [{**STEP, "body": "From \udc80 it."}]}, "body is not valid Unicode"),
+        ({"lands_fast": "\udfff"}, "lands_fast is not valid Unicode"),
+    ],
+)
+def test_parse_refuses_text_no_process_can_carry(change: dict, message: str) -> None:
+    with pytest.raises(VerdictError, match=message) as info:
+        parse_verdict({**GOOD_SPLIT, **change}, max_sub_issues=8, scrubber=SCRUB)
+    # One line, and the field's name only: the offending character is never echoed.
+    text = str(info.value)
+    assert text.isprintable() and text.encode("utf-8")
+
+
+def test_a_lone_surrogate_from_json_escapes_is_refused() -> None:
+    raw = json.loads(json.dumps({**GOOD_SPLIT, "summary": "x"}).replace('"x"', '"\\ud83d"'))
+    with pytest.raises(VerdictError, match="summary is not valid Unicode"):
+        parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_newlines_and_tabs_in_bodies_and_reasons_are_kept() -> None:
+    raw = {
+        **GOOD_SPLIT,
+        "summary": "One.\n\tTwo.",
+        "sub_issues": [{**STEP, "body": "- [ ] a\n\t- [ ] b"}],
+    }
+    verdict = parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+    assert verdict.summary == "One.\n\tTwo."
+    assert verdict.sub_issues[0].body == "- [ ] a\n\t- [ ] b"

@@ -5335,6 +5335,23 @@ async def test_repeated_bad_verdicts_escape(tmp_path: Path) -> None:
     assert len(h.triage_sessions.runs) == 2
 
 
+async def test_a_verdict_no_process_can_carry_is_a_failed_run_not_a_crash(
+    tmp_path: Path,
+) -> None:
+    """A NUL in a sub-issue's text would reach `gh api -f` as an argument, where it raises
+    `ValueError` rather than `GitHubError`: the parser refuses it, so it counts as one failed
+    attempt and nothing is filed."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    step = {"title": "Step", "body": "Do\x00it.", "kind": "issuebot"}
+    nul = {**FITS, "verdict": "split", "sub_issues": [step]}
+    await h.exit(h.triage_sessions.runs[0], stop_reason="verdict", structured_output=nul)
+    assert h.calls("create_sub_issue") == [] and h.calls("comment") == []
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.orchestrator._triage_failures == {"1": 1}
+
+
 async def test_a_triage_escape_github_refused_is_retried_rather_than_rerun(
     tmp_path: Path,
 ) -> None:

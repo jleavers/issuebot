@@ -97,6 +97,27 @@ async def test_non_executable_command_raises_config(tmp_path: Path) -> None:
     assert not exc.value.retryable
 
 
+@pytest.mark.parametrize("arg", ["body=a\x00b", "title=\ud800"], ids=["nul", "surrogate"])
+async def test_an_argument_no_process_can_carry_raises_config(arg: str) -> None:
+    """`create_subprocess_exec` raises `ValueError` (or `UnicodeEncodeError`) for these, not
+    `OSError`, and every caller of `run` handles `GitHubError` alone: a request text
+    `gh api -f` cannot be handed is a request the client could not send, not a crash."""
+    with pytest.raises(GitHubError) as exc:
+        await _runner().run(["api", "repos/o/r/issues", "-f", arg])
+    assert exc.value.category == "config"
+    assert not exc.value.retryable
+    assert "\x00" not in exc.value.message
+
+
+async def test_stdin_no_process_can_carry_raises_config_before_spawning(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    runner = _runner(extra_env={"FAKE_GH_PIDFILE": str(pidfile)})
+    with pytest.raises(GitHubError) as exc:
+        await runner.run(["api", "--input", "-"], stdin='{"body": "\ud800"}')
+    assert exc.value.category == "config"
+    assert not pidfile.exists(), "refused before a process was started, so none is left behind"
+
+
 async def test_timeout_logs_debug_line() -> None:
     stream = io.StringIO()
     configure_logging(level="DEBUG", stream=stream)

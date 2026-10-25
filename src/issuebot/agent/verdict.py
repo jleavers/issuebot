@@ -12,8 +12,17 @@ public repository the comment this feeds is public (spec section 5).
 
 A `VerdictError` is one line and safe to publish: it names a field, never its content, since
 it can end up in a GitHub comment and in Slack.
+
+Every string must also be one a process can carry: the worker files a sub-issue as `gh api -f`
+arguments (`GhCliAdapter.create_sub_issue`), where a NUL makes `create_subprocess_exec` raise
+`ValueError` and a lone surrogate (JSON's `\\uD800` decodes to one) `UnicodeEncodeError`.
+Neither is a `GitHubError`, and one escaping `apply_verdict` stopped the whole worker, so the
+parser refuses control characters (category `Cc`, bar a body's or a reason's newlines and tabs)
+and anything that is not UTF-8, as `parse_workspace_env` refuses a NUL in an environment value.
+`GhRunner.run` maps both to a `GitHubError` as well, as the backstop.
 """
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -79,10 +88,21 @@ def verdict_schema(max_sub_issues: int) -> dict[str, Any]:
     }
 
 
+def _carriable(name: str, value: str, *, keep: str = "\n\t") -> None:
+    """Refuse a string no process argument or pipe can hold, naming only the field."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise VerdictError(f"{name} is not valid Unicode") from None
+    if any(unicodedata.category(c) == "Cc" and c not in keep for c in value):
+        raise VerdictError(f"{name} has a control character in it")
+
+
 def _text(obj: dict[str, Any], name: str, limit: int, *, required: bool = False) -> str:
     value = obj[name]
     if not isinstance(value, str):
         raise VerdictError(f"{name} must be a string")
+    _carriable(name, value)
     value = value.strip()
     if len(value) > limit:
         raise VerdictError(f"{name} is longer than {limit} characters")
@@ -136,6 +156,8 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
         title = _text(item, "title", TITLE_LIMIT, required=True)
         if len(title.splitlines()) != 1:
             raise VerdictError("a title is one line")
+        # A title is one line already, so no control character has a reason to be in it.
+        _carriable("title", title, keep="")
         body = _text(item, "body", BODY_LIMIT, required=True)
         if item["kind"] not in _KINDS:
             raise VerdictError("kind must be issuebot or operator")

@@ -76,7 +76,10 @@ class GhRunner:
     async def run(self, args: Sequence[str], *, stdin: str | None = None) -> GhResult:
         argv = [self._command, *args]
         started = time.monotonic()
+        summary = " ".join(args[:3])
         try:
+            # Encoded before the process starts, so text no pipe can carry leaves none behind.
+            payload = stdin.encode("utf-8") if stdin is not None else None
             process = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
@@ -93,9 +96,24 @@ class GhRunner:
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
             raise GitHubError("config", f"cannot run {self._command!r}: {exc}") from exc
+        except ValueError as exc:
+            # A NUL in an argument (`ValueError`), or a lone surrogate in one or in stdin
+            # (`UnicodeEncodeError`, a `ValueError` too): a request the client could not send.
+            # Every caller handles `GitHubError` alone, so one of these escaping here would
+            # stop the worker (triage verdicts reach `gh api -f` as arguments). The message
+            # names the request, never the offending text.
+            self._log.debug(
+                "gh_invocation",
+                argv=[arg[:_LOGGED_ARG_LENGTH] for arg in argv],
+                exit_code=None,
+                error=type(exc).__name__,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+            shown = summary if summary.isprintable() else "a request"
+            raise GitHubError(
+                "config", f"cannot pass the request to {self._command!r}: {shown}"
+            ) from None
 
-        payload = stdin.encode("utf-8") if stdin is not None else None
-        summary = " ".join(args[:3])
         overrun = asyncio.Event()
         try:
             out, err = await asyncio.wait_for(
