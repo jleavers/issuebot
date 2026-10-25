@@ -1671,7 +1671,7 @@ App user (`ghu_`) token, whose reach is the account's while the session holds it
 the fine-grained alternative restricted to `github.repo` (#109), three network probes
 through the
 adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
-the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
+the five state labels, a `claude --version` floor of 2.1.303, the `claude auth status --json`
 probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the
 agent would use (`claude.ai`,
 `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and

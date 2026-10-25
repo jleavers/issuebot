@@ -87,11 +87,11 @@ LOGGED_IN = '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "
 
 @pytest.fixture
 def executables(monkeypatch: pytest.MonkeyPatch) -> Callable[[set[str]], None]:
-    """Pretend the given names are on PATH, reporting Claude Code 2.1.259 and a claude.ai login."""
+    """Pretend the given names are on PATH, reporting Claude Code 2.1.303 and a claude.ai login."""
 
     def install(
         names: set[str],
-        version: str | None = "2.1.259 (Claude Code)",
+        version: str | None = "2.1.303 (Claude Code)",
         auth: str | None = LOGGED_IN,
     ) -> None:
         monkeypatch.setattr(
@@ -253,7 +253,7 @@ def test_validate_good_workflow_exits_zero(
     assert "[ OK ] github.repo: example/repo" in out
     assert "[ OK ] github.token: set (from $GH_TOKEN)" in out
     assert "[ OK ] workspace.root: /workspaces" in out
-    assert "[ OK ] claude.command: /usr/bin/claude (2.1.259)" in out
+    assert "[ OK ] claude.command: /usr/bin/claude (2.1.303)" in out
     assert (
         "[ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json "
         "are data, not configuration" in out
@@ -1487,7 +1487,7 @@ def test_validate_old_claude_fails(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert (
-        "[FAIL] claude.command: /usr/bin/claude is 2.1.240; issuebot needs 2.1.259 or newer" in out
+        "[FAIL] claude.command: /usr/bin/claude is 2.1.240; issuebot needs 2.1.303 or newer" in out
     )
 
 

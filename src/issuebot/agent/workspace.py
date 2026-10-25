@@ -97,6 +97,16 @@ def workspace_key(identifier: str) -> str:
     return key
 
 
+# The triage session's clone sits beside the work clone under this suffix (spec section 4). A
+# work key is `<repo>-<number>` and ends in a digit, so no work key can end in it, and
+# `triage_identifiers` reads the suffix back off the disk.
+TRIAGE_SUFFIX = ".triage"
+
+
+def triage_key(identifier: str) -> str:
+    return f"{workspace_key(identifier)}{TRIAGE_SUFFIX}"
+
+
 def session_path(workspace: Path) -> Path:
     return workspace / ".issuebot" / "session.json"
 
@@ -221,6 +231,9 @@ class WorkspaceManager:
             raise AgentError("workspace_error", f"workspace path {path} is issuebot's own")
         return path
 
+    def triage_path_for(self, identifier: str) -> Path:
+        return self._path_for_key(triage_key(identifier))
+
     def is_contained(self, path: Path) -> bool:
         resolved = path.resolve()
         return resolved != self.root and resolved.is_relative_to(self.root)
@@ -290,6 +303,80 @@ class WorkspaceManager:
             raise
         self._log.info("workspace_created", workspace=str(path))
         return Workspace(key=path.name, path=path, created=True)
+
+    async def create_triage(self, issue: Issue) -> Workspace:
+        """A throwaway clone of the default branch for a read-only triage session.
+
+        Never reused: a remnant is removed and the clone made fresh, because the session that
+        read it holds no state worth keeping and a stale tree would be triaged against. No
+        post-clone script and no hook (spec section 4): the post-clone script wires up a
+        credential helper, and ``after_create`` is where the target repository's own install
+        runs. The session has neither a token nor a shell, so the clone needs neither.
+        """
+        path = self.triage_path_for(issue.identifier)
+        if path.exists():
+            self._log.warning("workspace_remnant_removed", workspace=str(path))
+            await self._remove_tree(path, "cannot remove remnant")
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AgentError(
+                "workspace_error", f"cannot create workspace root {self.root}: {exc}"
+            ) from exc
+        try:
+            path.mkdir(mode=SEALED_DIR_MODE)
+            self._share(path)
+        except OSError as exc:
+            raise AgentError(
+                "workspace_error", f"cannot create workspace directory {path}: {exc}"
+            ) from exc
+        try:
+            await self._clone(path)
+            self._make_state_dir(path)
+            try:
+                self._boundary.create_marker(path, (STATE_DIR, CREATED_MARKER))
+            except OSError as exc:
+                raise AgentError("workspace_error", f"cannot mark {path} created: {exc}") from exc
+        except AgentError:
+            with contextlib.suppress(AgentError):
+                await self._remove_tree(path, "cannot remove the failed workspace")
+            raise
+        self._log.info("triage_workspace_created", workspace=str(path))
+        return Workspace(key=path.name, path=path, created=True)
+
+    async def remove_triage(self, identifier: str) -> bool:
+        """Remove the triage clone, running no ``before_remove`` hook; False if none was there."""
+        path = self.triage_path_for(identifier)
+        if not path.exists():
+            return False
+        with contextlib.suppress(AgentError):
+            self._share(path)
+        try:
+            await self._remove_tree(path, "cannot remove triage workspace")
+        finally:
+            if path.exists():
+                self.seal(path)
+        self._log.info("triage_workspace_removed", workspace=str(path))
+        return True
+
+    def triage_identifiers(self) -> list[str]:
+        """The triage clones on the disk, as keys, for the startup sweep.
+
+        Through the boundary like ``finished_keys``: a name is a triage clone only when it is a
+        directory of the worker's reached without following a link. Never raises.
+        """
+        try:
+            children = sorted(child.name for child in self.root.iterdir())
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            self._log.warning("workspace_scan_failed", root=str(self.root), error=str(exc))
+            return []
+        return [
+            name
+            for name in children
+            if name.endswith(TRIAGE_SUFFIX) and self._boundary.is_own_dir(self.root, (name,))
+        ]
 
     def _is_complete(self, path: Path) -> bool:
         """A clone whose creation finished, in a workspace whose state is still the worker's.

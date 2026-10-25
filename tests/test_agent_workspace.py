@@ -28,6 +28,7 @@ from issuebot.agent.workspace import (
     _remove_path,
     run_log_dir,
     session_path,
+    triage_key,
     workspace_key,
 )
 from issuebot.config import Settings
@@ -1193,3 +1194,64 @@ async def test_marking_a_workspace_is_a_no_op_when_there_is_none(tmp_path: Path)
     manager, _ = make_manager(tmp_path)
     manager.mark_finished("example-42")
     assert manager.finished_keys() == []
+
+
+# --- triage: a hook-free throwaway clone (spec section 4) -------------------------------
+
+
+@posix
+async def test_create_triage_clones_without_hooks(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, gh = make_manager(tmp_path, hooks={"after_create": "touch HOOKED"})
+    ws = await manager.create_triage(make_issue(identifier="example-42"))
+    assert ws.created is True
+    assert ws.path == manager.root.resolve() / f"{workspace_key('example-42')}.triage"
+    assert ws.key == triage_key("example-42")
+    assert (ws.path / ".git").is_dir()
+    assert (ws.path / ".issuebot" / "created").is_file()
+    assert (ws.path / ".issuebot" / "runs").is_dir()
+    assert not (ws.path / "HOOKED").exists()
+    # No post-clone credential helper either: the clone is read-only and holds no credential.
+    assert ".issuebot" not in (ws.path / ".git" / "info" / "exclude").read_text()
+    assert not manager.path_for("example-42").exists()
+    assert [call[:2] for call in gh.calls] == [["repo", "clone"]]
+
+
+@posix
+async def test_create_triage_replaces_a_remnant(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    remnant = manager.root / f"{workspace_key('example-42')}.triage"
+    remnant.mkdir(parents=True)
+    (remnant / "stale").write_text("old")
+    ws = await manager.create_triage(make_issue(identifier="example-42"))
+    assert ws.created is True
+    assert not (ws.path / "stale").exists()
+    assert (ws.path / ".git").is_dir()
+
+
+@posix
+async def test_remove_triage_runs_no_before_remove_hook(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    marker = tmp_path / "removed"
+    manager, _ = make_manager(tmp_path, hooks={"before_remove": f"touch {marker}"})
+    ws = await manager.create_triage(make_issue(identifier="example-42"))
+    assert await manager.remove_triage("example-42") is True
+    assert not marker.exists()
+    assert not ws.path.exists()
+    assert await manager.remove_triage("example-42") is False
+
+
+@posix
+async def test_triage_identifiers_lists_only_triage_directories(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    await manager.create_or_reuse(make_issue(identifier="example-1"))
+    await manager.create_triage(make_issue(identifier="example-2"))
+    await manager.create_triage(make_issue(identifier="example-3"))
+    (manager.root / "stray.triage").write_text("a file, not a directory")
+    assert manager.triage_identifiers() == [triage_key("example-2"), triage_key("example-3")]

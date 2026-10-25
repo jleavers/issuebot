@@ -588,7 +588,7 @@ both the label and the default.
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and, for the
 container stack, Docker with Compose. Running the CLI outside a container — the host route,
 which is what `agent.run_as` unset means and how the test suite runs — also wants `git`, the
-[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
+[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.303 or
 newer on `PATH`, where `claude` uses whatever login you already have. On Windows, use WSL. It
 is a development convenience rather than a deployment, and what it removes is the container
 that the Safety note above calls the sandbox: the session runs at your own uid, with your

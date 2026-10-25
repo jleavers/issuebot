@@ -16,6 +16,7 @@ from issuebot.agent.runner import (
     ClaudeAuthVerdict,
     ClaudeRunner,
     StreamParser,
+    TriageRunner,
     TurnEvent,
     TurnObserver,
     TurnResult,
@@ -48,6 +49,7 @@ from issuebot.agent.workspace import (
     WorkspaceManager,
     run_log_dir,
     session_path,
+    triage_key,
     workspace_key,
 )
 
@@ -70,6 +72,7 @@ __all__ = [
     "SessionRecord",
     "StopReason",
     "StreamParser",
+    "TriageRunner",
     "TurnEvent",
     "TurnObserver",
     "TurnResult",
@@ -94,6 +97,7 @@ __all__ = [
     "session_path",
     "settings_for_labels",
     "settings_with_model",
+    "triage_key",
     "workspace_environment",
     "workspace_key",
 ]
