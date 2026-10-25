@@ -53,10 +53,12 @@ class ScriptedRunner:
         *outcomes: str,
         on_turn: Callable[[int], None] | None = None,
         texts: dict[int, str] | None = None,
+        outputs: dict[int, object] | None = None,
     ) -> None:
         self.script = list(outcomes)
         self.on_turn = on_turn
         self.texts = texts or {}
+        self.outputs = outputs or {}
         self.calls: list[dict[str, object]] = []
 
     async def run_turn(
@@ -106,6 +108,7 @@ class ScriptedRunner:
             duration_ms=1000,
             permission_denials=0,
             result_text=self.texts.get(turn_number, "done"),
+            structured_output=self.outputs.get(turn_number),
             error_category=category if failed else None,  # type: ignore[arg-type]
             error=f"injected {category}" if failed else None,
             stdout_path=log_dir / f"turn-{turn_number}.jsonl",

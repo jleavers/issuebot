@@ -42,6 +42,7 @@ from issuebot.agent.session import (
     new_run_id,
     run_session,
 )
+from issuebot.agent.triage import RunTriageFn, run_triage
 from issuebot.agent.workspace import (
     HookResult,
     SessionRecord,
@@ -69,6 +70,7 @@ __all__ = [
     "PromptContext",
     "PromptRenderer",
     "RunResult",
+    "RunTriageFn",
     "SessionRecord",
     "StopReason",
     "StreamParser",
@@ -94,6 +96,7 @@ __all__ = [
     "read_workspace_env",
     "run_log_dir",
     "run_session",
+    "run_triage",
     "session_path",
     "settings_for_labels",
     "settings_with_model",
