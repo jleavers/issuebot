@@ -1028,6 +1028,14 @@ transcript. `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7)
 scrubber wrote it -- its home was `/home/jleavers` -- and a test proves it is the scrubber's
 fixed point; pre-commit excludes it because the tests pin its sizes.
 
+`verdict.py` and `triage.py` hold triage's side of the package (triage design, sections 3-5).
+`verdict.py` is the shape a read-only session returns and the parser that re-checks every
+constraint the schema states, scrubbing each string after decoding; its errors name a field,
+never content, so they may be published. `triage.py` is `run_triage`: a hook-free throwaway
+clone, the turn loop and a run that ends in the store even when it raises. `TriageRunner`
+(`runner.py`) is `ClaudeRunner` with its own flags, built from nothing of the operator's
+widening.
+
 ## `issuebot.orchestrator`
 
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
@@ -1400,6 +1408,10 @@ waits for it): never a gate, so a timeout, silence,
 an exception or a body of the wrong shape costs the annotation and nothing else, and an
 `All Systems Operational` reading is still carried, since it points at the operator's own
 network rather than GitHub's.
+
+`triage.py` is the worker filing a verdict: sub-issues linked to the parent, `operator_step`
+on steps for a human, `triage_todo` swapped for `triage_complete`, the comment last. Runs carry
+a kind (`work` or `triage`, migration 0007); a triage failure does not extend a work chain.
 
 ## `issuebot.notifications`
 

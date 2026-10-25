@@ -544,6 +544,7 @@ def test_every_documented_variable_is_reachable(make_issue: Callable[..., Issue]
     template = (
         "{{ issue.identifier }}|{{ repo }}|{{ labels.todo }}|{{ labels.in_progress }}|"
         "{{ labels.review }}|{{ labels.rework }}|{{ labels.complete }}|{{ labels.no_fault }}|"
+        "{{ labels.triage_todo }}|{{ labels.triage_complete }}|{{ labels.operator_step }}|"
         "{{ workpad_marker }}|{{ workpad.id }}|{{ workpad.url }}|"
         "{{ attempt }}|{{ turn_number }}|{{ max_turns }}|{{ rework }}|{{ self_review }}"
     )
@@ -552,7 +553,8 @@ def test_every_documented_variable_is_reachable(make_issue: Callable[..., Issue]
     )
     assert rendered == (
         "repo-42|example/repo|issuebot/todo|issuebot/in-progress|issuebot/review|"
-        f"issuebot/rework|issuebot/complete|issuebot/no-fault|{WORKPAD_MARKER}|"
+        f"issuebot/rework|issuebot/complete|issuebot/no-fault|"
+        f"issuebot/triage-todo|issuebot/triage-complete|issuebot/operator-step|{WORKPAD_MARKER}|"
         f"1002|{WORKPAD.url}|2|3|5|True|True"
     )
 

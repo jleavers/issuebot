@@ -314,6 +314,9 @@ class PromptContext:
             "labels": {
                 **{role.value: getattr(self.labels, role.value) for role in StateLabel},
                 "no_fault": self.labels.no_fault,
+                "triage_todo": self.labels.triage_todo,
+                "triage_complete": self.labels.triage_complete,
+                "operator_step": self.labels.operator_step,
             },
             "workpad_marker": WORKPAD_MARKER,
             "workpad": workpad_variables(self.workpad),

@@ -141,6 +141,37 @@ worker's environment points sessions at a proxy of your own; issuebot passes the
 variables through to `claude`, every hook and the clone, and a hook's `.issuebot/env` cannot
 overwrite them.
 
+## A triage session
+
+`issuebot/triage-todo` starts a session that reads an issue against the clone and answers with
+a verdict. It is the narrowest session issuebot runs, and its bounds are set by the worker, not
+by the prompt or by anything in `WORKFLOW.md` the operator has widened for work sessions.
+
+- **Flags.** `claude` runs with `--restricted --tools Read,Grep,Glob --permission-mode dontAsk
+  --permission-prompts none --strict-mcp-config --setting-sources user` and `--json-schema`
+  carrying the verdict's shape. No shell, no edit, no network tool. `--settings` carries
+  the same `claudeMdExcludes` allow-list as a work session, plus `permissions.deny:
+  ["Read(//proc/**)"]`. Triage never passes the operator's `claude.permission_mode`,
+  `allowed_tools`, `disallowed_tools`, `mcp_config` or `append_system_prompt`, so widening a
+  work session widens nothing here. It needs Claude Code 2.1.303 or later.
+- **No `GH_TOKEN`.** The session's environment carries no GitHub credential, and no `.issuebot/env`
+  from a hook: the clone is hook-free. It runs as a session account, behind the egress proxy.
+- **What `--restricted` confines.** On 2026-10-25 a probe measured it: a read outside the clone
+  was refused, and so was a read through a symlink out of it. The deny rule closes `/proc`,
+  where a process's environment is. That is a measurement of one release, which is why the
+  version floor is where it is.
+- **The worker writes.** The session returns a verdict and moves nothing. The worker creates the
+  sub-issues, applies `issuebot/operator-step` to the steps for a human, swaps the labels and
+  posts the comment; the agent never names a label.
+- **The scrub.** Every string in the verdict is scrubbed after decoding, since a token written
+  as JSON `\uXXXX` escapes only becomes the credential once it is decoded, and the comment it
+  feeds is public. A verdict that is malformed or over its limits is refused, not trimmed.
+- **The clone.** It is a throwaway, `<workspace key>.triage`, removed 10 minutes after the run
+  exits, and any left behind is swept when the worker starts.
+- **The text it acts on.** The same approval rule as work: an edit to the title or body after
+  `triage-todo` by someone other than who applied it hands the issue back before any session
+  reads it ([Triage](operations.md#triage)).
+
 ## One account per concurrent session
 
 `agent.run_as` names the accounts a session runs as, and the image's default is the pool
