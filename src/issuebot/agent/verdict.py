@@ -91,14 +91,19 @@ def _text(obj: dict[str, Any], name: str, limit: int, *, required: bool = False)
     return value
 
 
-def _fields(obj: object, names: tuple[str, ...], what: str) -> dict[str, Any]:
+def _fields(obj: object, names: tuple[str, ...], what: str, scrubber: Scrubber) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise VerdictError(f"{what} must be an object")
     for name in obj:
         if name not in names:
-            # An unknown key is the agent's text: name it only when it looks like a field.
-            shown = name if name.isidentifier() and len(name) <= 40 else "(unnamed)"
-            raise VerdictError(f"unexpected field {shown} in {what}")
+            # An unknown key is the agent's text and may be a credential: it is named only
+            # when it is a short identifier, and then only after the scrubber has seen it.
+            if not isinstance(name, str):
+                raise VerdictError(f"unexpected field in {what}")
+            shown = scrubber.scrub(name) if name.isidentifier() and len(name) <= 40 else ""
+            raise VerdictError(
+                f"unexpected field {shown} in {what}" if shown else f"unexpected field in {what}"
+            )
     for name in names:
         if name not in obj:
             raise VerdictError(f"missing field {name} in {what}")
@@ -109,7 +114,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     """Validate `raw` (a decoded `structured_output`) and return it scrubbed."""
     if raw is None:
         raise VerdictError("the session returned no verdict")
-    obj = _fields(raw, _FIELDS, "the verdict")
+    obj = _fields(raw, _FIELDS, "the verdict", scrubber)
     kind = obj["verdict"]
     if kind not in ("fits", "split"):
         raise VerdictError("verdict must be fits or split")
@@ -127,7 +132,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     drafts: list[SubIssueDraft] = []
     seen: set[str] = set()
     for step in steps:
-        item = _fields(step, _SUB_FIELDS, "a sub-issue")
+        item = _fields(step, _SUB_FIELDS, "a sub-issue", scrubber)
         title = _text(item, "title", TITLE_LIMIT, required=True)
         if len(title.splitlines()) != 1:
             raise VerdictError("a title is one line")

@@ -115,3 +115,15 @@ def test_the_schema_matches_the_parser() -> None:
         "ignored_requests",
         "sub_issues",
     }
+
+
+def test_an_unknown_key_that_is_a_credential_is_not_echoed() -> None:
+    for key in ("s3cret-token", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"):
+        with pytest.raises(VerdictError) as info:
+            parse_verdict({**GOOD_SPLIT, key: "x"}, max_sub_issues=8, scrubber=SCRUB)
+        assert key not in str(info.value)
+
+
+def test_a_non_string_key_is_a_verdict_error() -> None:
+    with pytest.raises(VerdictError):
+        parse_verdict({**GOOD_SPLIT, 7: "x"}, max_sub_issues=8, scrubber=SCRUB)
