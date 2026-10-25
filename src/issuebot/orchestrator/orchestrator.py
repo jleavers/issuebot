@@ -5,7 +5,7 @@ import math
 import os
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1542,21 +1542,53 @@ class Orchestrator:
                 return False
             issue = claimed
         workflow = self._workflow
+        self._start_run(
+            issue,
+            lambda entry: self._worker(entry, workflow, resume_session_id),
+            kind="work",
+            attempt=attempt,
+            account=account,
+            rework=rework,
+            resumed=resume_session_id is not None,
+        )
+        return True
+
+    def _start_run(
+        self,
+        issue: Issue,
+        worker: Callable[[RunningEntry], Coroutine[Any, Any, RunResult]],
+        *,
+        kind: RunKind,
+        attempt: int,
+        account: str | None,
+        rework: bool = False,
+        resumed: bool = False,
+    ) -> None:
+        """Start one run, work or triage, and everything a run's start owes: the one place.
+
+        Both kinds share a slot, an account and the issue's ledger (spec 2026-10-25, section
+        4), so the bookkeeping is one block rather than one per kind: a step added to a run's
+        start reaches both. ``worker`` builds the run's coroutine from its entry; beyond that the
+        kinds differ only in what the task and the log line are called.
+
+        A pending retry is dropped for either kind. Admission's ``busy`` refuses a claim for an
+        issue with one, so today there is never one to drop; the line is what keeps a retry
+        from firing beside a run should that ever stop being true.
+        """
         entry = RunningEntry(
             issue=issue,
             attempt=attempt,
             rework=rework,
-            resumed=resume_session_id is not None,
+            resumed=resumed,
             run_id=new_run_id(self._now()),
             started_mono=self._clock(),
             started_at=self._now(),
             cancel=asyncio.Event(),
             account=account,
+            kind=kind,
         )
-        entry.task = asyncio.create_task(
-            self._worker(entry, workflow, resume_session_id),
-            name=f"issuebot-worker-{issue.number}",
-        )
+        role = "worker" if kind == "work" else "triage"
+        entry.task = asyncio.create_task(worker(entry), name=f"issuebot-{role}-{issue.number}")
         entry.task.add_done_callback(
             lambda _task, issue_id=issue.id: self._queue.put_nowait(_WorkerExited(issue_id))
         )
@@ -1565,19 +1597,18 @@ class Orchestrator:
         self._counters = self._counters.bump(runs_started=1)
         ledger = self._ledger.dispatched(issue.identifier, at=self._now())
         self._log.info(
-            "dispatched",
+            "dispatched" if kind == "work" else "triage_dispatched",
             issue_number=issue.number,
             issue_identifier=issue.identifier,
             attempt=attempt,
             rework=rework,
-            resumed=entry.resumed,
+            resumed=resumed,
             run_id=entry.run_id,
             account=account,
             slots_left=self._slots(),
             issue_runs=ledger.runs,
             issue_cost_usd=ledger.cost_usd,
         )
-        return True
 
     async def _worker(
         self, entry: RunningEntry, workflow: Workflow, resume_session_id: str | None
@@ -1760,37 +1791,12 @@ class Orchestrator:
         if not ready:
             return False
         workflow = self._workflow
-        entry = RunningEntry(
-            issue=issue,
-            attempt=attempt,
-            rework=False,
-            resumed=False,
-            run_id=new_run_id(self._now()),
-            started_mono=self._clock(),
-            started_at=self._now(),
-            cancel=asyncio.Event(),
-            account=account,
+        self._start_run(
+            issue,
+            lambda entry: self._triage_worker(entry, workflow),
             kind="triage",
-        )
-        entry.task = asyncio.create_task(
-            self._triage_worker(entry, workflow), name=f"issuebot-triage-{issue.number}"
-        )
-        entry.task.add_done_callback(
-            lambda _task, issue_id=issue.id: self._queue.put_nowait(_WorkerExited(issue_id))
-        )
-        self._running[issue.id] = entry
-        self._counters = self._counters.bump(runs_started=1)
-        ledger = self._ledger.dispatched(issue.identifier, at=self._now())
-        self._log.info(
-            "triage_dispatched",
-            issue_number=issue.number,
-            issue_identifier=issue.identifier,
             attempt=attempt,
-            run_id=entry.run_id,
             account=account,
-            slots_left=self._slots(),
-            issue_runs=ledger.runs,
-            issue_cost_usd=ledger.cost_usd,
         )
         return True
 
@@ -1834,31 +1840,12 @@ class Orchestrator:
             self._schedule_triage_discard(entry.identifier)
             return
         if result is not None and result.error_category in ("usage_limited", "auth_failed"):
-            # Account-wide, and nothing about this issue: held as a work run's would be, with
-            # no failure counted and no escape.
+            # Account-wide, and nothing about this issue: the same hold a work run takes, with
+            # no failure counted, no escape and no requeue -- the label is what brings it back.
             if result.error_category == "usage_limited":
-                reason = result.error or "claude refused the turn: usage limit reached"
-                self._hold_usage(reason, result.usage_reset_at, result.usage_window)
-                self._log.warning(
-                    "dispatch_usage_held",
-                    issue_number=entry.issue.number,
-                    issue_identifier=entry.identifier,
-                    run_id=entry.run_id,
-                    kind="triage",
-                    reset_at=self._usage_reset_at.isoformat() if self._usage_reset_at else None,
-                    error=reason,
-                )
+                self._hold_for_usage_limit(entry, result)
             else:
-                reason = result.error or "claude could not authenticate"
-                self._log.error(
-                    "dispatch_auth_failed",
-                    issue_number=entry.issue.number,
-                    issue_identifier=entry.identifier,
-                    run_id=entry.run_id,
-                    kind="triage",
-                    error=reason,
-                )
-                self._hold_dispatch(reason)
+                self._hold_for_auth_failure(entry, result)
             self._triage_not_before[issue_id] = self._clock() + settings.polling.interval_ms / 1000
             self._schedule_triage_discard(entry.identifier)
             return
@@ -2427,16 +2414,7 @@ class Orchestrator:
         Retrying is pointless while the credential is the problem, and the attempts would only
         spread opaque blockers over every issue in the queue, so the escape happens at once.
         """
-        error = result.error or "claude could not authenticate"
-        self._log.error(
-            "dispatch_auth_failed",
-            issue_number=entry.issue.number,
-            issue_identifier=entry.identifier,
-            run_id=entry.run_id,
-            attempt=entry.attempt,
-            error=error,
-        )
-        self._hold_dispatch(error)
+        error = self._hold_for_auth_failure(entry, result)
         reason = (
             f"Claude could not authenticate in attempt {entry.attempt}, so the run failed: "
             f"{error}. The worker has stopped claiming issues and re-checks the credential "
@@ -2459,6 +2437,43 @@ class Orchestrator:
         The hold is what keeps that from being per-issue at all: no issue is claimed while it
         lasts, so the board stops instead of grinding every candidate through the same wall.
         """
+        error = self._hold_for_usage_limit(entry, result)
+        # Requeued on the entry's own attempt, not the next one: the chain is untouched, so
+        # the run that follows the window is this attempt over again.
+        self._schedule(
+            entry.issue,
+            attempt=entry.attempt,
+            kind="usage",
+            delay_ms=self._usage_delay_ms(),
+            error=error,
+        )
+
+    def _hold_for_auth_failure(self, entry: RunningEntry, result: RunResult) -> str:
+        """Hold dispatch for a run claude could not authenticate (#20); the error, for the caller.
+
+        Any run's, work or triage: the credential is the account's, so whichever kind of run
+        found it broken, nothing more is claimed until a probe reports a login. What the issue
+        is owed is the caller's -- a work run escalates it, a triage run waits.
+        """
+        error = result.error or "claude could not authenticate"
+        self._log.error(
+            "dispatch_auth_failed",
+            issue_number=entry.issue.number,
+            issue_identifier=entry.identifier,
+            run_id=entry.run_id,
+            attempt=entry.attempt,
+            error=error,
+        )
+        self._hold_dispatch(error)
+        return error
+
+    def _hold_for_usage_limit(self, entry: RunningEntry, result: RunResult) -> str:
+        """Hold dispatch until the refused window reopens; the error, for the caller's requeue.
+
+        Any run's, work or triage: the window is the account's, so a refusal met by either kind
+        stops the whole board (`_usage_limited` says why that matters). Neither kind counts it
+        as a failure; what the issue does next is the caller's.
+        """
         error = result.error or "claude refused the turn: usage limit reached"
         self._hold_usage(error, result.usage_reset_at, result.usage_window)
         self._log.warning(
@@ -2470,15 +2485,7 @@ class Orchestrator:
             reset_at=self._usage_reset_at.isoformat() if self._usage_reset_at else None,
             error=error,
         )
-        # Requeued on the entry's own attempt, not the next one: the chain is untouched, so
-        # the run that follows the window is this attempt over again.
-        self._schedule(
-            entry.issue,
-            attempt=entry.attempt,
-            kind="usage",
-            delay_ms=self._usage_delay_ms(),
-            error=error,
-        )
+        return error
 
     def _usage_delay_ms(self) -> int:
         """How long until the refused window reopens, floored at one poll interval.
