@@ -1,7 +1,9 @@
 # Triage: issuebot sizes an issue before anyone starts it
 
 Date: 2026-10-25
-Status: proposed
+Status: approved 2026-10-25; phase 1 planned in
+[`../plans/2026-10-25-triage-phase-1.md`](../plans/2026-10-25-triage-phase-1.md), with the
+refinements found while planning folded in below (sections 1, 4 and 7, and "Phases")
 
 ## Why
 
@@ -122,8 +124,14 @@ They are a separate track from the five state labels, the way `issuebot/no-fault
 the rule that an issue wears exactly one state label is unchanged, and `triage-complete` stays
 on the issue when the operator then adds `todo`. Concretely they join `GitHubLabels`
 (configurable names, `triage_todo`, `triage_complete`, `operator_step`), are returned by
-`markers()` rather than `as_tuple()` so that `clear_state` and every state move leave them
-alone, are covered by the distinctness check, and are created by `issuebot labels ensure`.
+`markers()` rather than `as_tuple()` so that `clear_state` leaves them alone, are covered by
+the distinctness check, and are created by `issuebot labels ensure`.
+
+Refined while planning: a claim (`set_state(in_progress, clear_markers=True)`) used to strip
+every label in `markers()`, which would take `triage-complete` off the moment the operator's
+`todo` was claimed. So `markers()` now means every non-state label issuebot owns, and a new
+`claim_clears()` names what a claim strips: `no-fault`, as before, and `triage-todo`. That is
+also how "a state label wins" happens on GitHub, in the same `gh issue edit` as the claim.
 
 Moves on the triage track:
 
@@ -139,8 +147,9 @@ back (section 2).
 A state label wins over the triage track. An issue that carries a state label is never
 dispatched for triage; if the operator adds `todo` to an issue still in `triage-todo`, the
 human has decided, so issuebot removes `triage-todo` and treats the issue as it does today.
-(A triage run already in flight when that happens is the builder's to settle -- cancelling it
-or discarding its verdict both satisfy the rule.)
+A triage run already in flight when that happens is cancelled: the reconcile step stops a
+triage run whose issue gains a state label or loses `triage-todo`, and its verdict, if any, is
+discarded.
 
 An `operator-step` sub-issue is never dispatched as a work run. If the operator adds `todo` to
 one by mistake, issuebot refuses it the way it refuses an unapproved issue: it removes the
@@ -252,6 +261,32 @@ cumulative spend (`agent.max_issue_cost_usd`). A triage run that keeps failing e
 
 `issuebot run-once <number> --triage` runs one triage session in the foreground, as
 `run-once` does for a work run; `--show-prompt` renders the triage prompt.
+
+Refined while planning, and measured on 2026-10-25 with claude 2.1.310:
+
+- The session is started with `--restricted --tools Read,Grep,Glob --permission-mode dontAsk
+  --json-schema <the verdict schema>`, whatever `claude.permission_mode`, `allowed_tools`,
+  `disallowed_tools`, `mcp_config` and `append_system_prompt` say. `--restricted` drops the
+  code-running tools, ignores settings files, and confines the file tools to the working
+  directory. In the probe a read inside the clone succeeded, a read of an absolute path outside
+  it was refused ("is outside ... --restricted confines the file tools to the working
+  directory"), and a symlink inside the clone pointing out of it was refused ("resolves through
+  a symlink to ..., which is outside"). `--settings` still applies under `--restricted`, so it
+  carries `permissions.deny: ["Read(//proc/**)"]` beside the `claudeMdExcludes` allow-list as a
+  second line. `--json-schema` adds a `StructuredOutput` tool, and the verdict arrives already
+  parsed as the result message's `structured_output`.
+- `MIN_CLAUDE_VERSION` moves to 2.1.303, the shipped pin, which carries all three flags
+  (checked in the built image).
+- The worker fetches the issue's comments itself (GraphQL `bodyHTML`, rendered through
+  `visible_text` as the body is), since the session has no `gh`. Maintainers' comments arrive
+  enveloped and everyone else's as author and URL only.
+- The triage workspace is `<workspace key>.triage`. It stays until the next triage of the same
+  issue replaces it or the issue closes, so the turn capture, which reads the run's log
+  directory after `RunEnded`, never races its removal.
+- In phase 1 the triage failure chain is kept in memory, so a worker restart resets it. Every
+  attempt is still bounded by `agent.max_attempts` within one process, and the store's ledger
+  seed counts only work runs' failures toward the work chain, while all runs' cost counts toward
+  the issue's spend.
 
 ### 5. What triage judges, and how it splits
 
@@ -381,6 +416,8 @@ rounds and review count, since a human has re-authorised it. This is the design'
 - **Slack.** Every verdict is a label move or a close, so the worker publishes each as a
   `state_changed` event carrying the verdict in its text, and each hand-over as `blocked`.
   That keeps existing deployments' `notifications.slack.events` lists working unchanged.
+  `StateChanged` gains an optional `note` for that text, and the store leaves an issue's
+  recorded state alone for a move on the triage track.
 - **The dashboard.** Two new columns to the left of Todo: **Triage** (`triage-todo`, waiting or
   being triaged, the running one shown the way a running work issue is) and **Triaged**
   (`triage-complete` and no state label: waiting for the operator's `todo`). A split parent
@@ -435,6 +472,19 @@ The numbers are starting points for the builder, not decisions.
   changes no code.
 - A deployment that leaves auto-triage off and never adds `triage-todo` by hand sees no
   difference beyond two empty columns.
+
+## Phases
+
+Each phase is its own pull request and works on its own; each later one is planned against the
+code the one before it leaves.
+
+1. **Triage by hand.** The labels and settings, the read-only session, the verdict, filing the
+   sub-issues, the comment, Slack, the escapes, the operator-step refusal, `run-once --triage`,
+   and `validate`. A human adds `triage-todo`.
+2. **Order within a split** (section 5).
+3. **The parent review** (section 6): `next`, `met`, `gap`, the bounds and the hand-over.
+4. **Auto-triage** (section 2, and section 3's authorship approval).
+5. **The dashboard's two columns** (section 7), and the README's images.
 
 ## Documentation to update
 
