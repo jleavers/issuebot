@@ -194,6 +194,11 @@ class PendingVerdict:
     ``triage-todo`` and nothing on GitHub says a verdict is owed. ``tries`` counts the retries
     that failed; a retry replaces the entry rather than mutating it. In memory only, like the
     triage failure chain in phase 1 (spec section 4), so a restart in that window loses it.
+
+    ``swapped`` is whether that swap has landed, recorded when it does rather than read off
+    the labels: a re-triaged issue still carries its earlier ``triage-complete``, so the
+    labels cannot tell a swap that landed from one that never did, and a retry is owed after
+    a human's ``todo`` only in the first case (section 1: the comment is all that is missing).
     """
 
     issue: Issue
@@ -203,6 +208,7 @@ class PendingVerdict:
     turns: int
     cost_usd: float
     tries: int = 0
+    swapped: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

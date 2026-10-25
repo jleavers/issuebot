@@ -1693,16 +1693,20 @@ class Orchestrator:
         """Try once more to file each verdict GitHub refused, once per entry per tick.
 
         ``apply_verdict`` is idempotent step by step, so a retry files only what is missing and
-        posts the comment once. ``agent.max_attempts`` failed retries hand the issue back; an
-        entry is dropped only once that note has landed, so a GitHub that refuses the note as
-        well as the filing leaves the verdict to be tried again rather than forgotten.
+        posts the comment once. Each retry reads the issue first, as the first filing does, and
+        drops a verdict that is owed no longer without a write (``_verdict_owed``).
+        ``agent.max_attempts`` failed retries hand the issue back; an entry is dropped only once
+        that note has landed, so a GitHub that refuses the note as well as the filing leaves the
+        verdict to be tried again rather than forgotten.
         """
         agent = self._workflow.config.agent
         labels = self._workflow.config.github.labels
-        for issue_id, pending in list(self._triage_pending.items()):
-            failure = await self._file_verdict(pending)
+        for issue_id in list(self._triage_pending):
+            failure = await self._file_verdict(self._triage_pending[issue_id])
             if failure is None:
                 continue
+            # The entry the failed try stored, with its swap if that landed; counted here.
+            pending = self._triage_pending[issue_id]
             pending = replace(pending, tries=pending.tries + 1)
             self._triage_pending[issue_id] = pending
             if pending.tries < agent.max_attempts:
@@ -1721,25 +1725,36 @@ class Orchestrator:
                 self._schedule_triage_discard(pending.issue.identifier)
 
     async def _file_verdict(self, pending: PendingVerdict) -> GitHubError | None:
-        """File one verdict; ``None`` once it landed, else the error GitHub refused it with.
+        """File one verdict; ``None`` once it landed or is owed no longer, else GitHub's error.
 
-        Success ends the issue's triage chain and schedules its clone's removal. A failure
-        leaves the bookkeeping to the caller: the first one stores the verdict, a retry's
-        counts against it.
+        Filed on a fresh read of the issue (section 1, ``_verdict_owed``), so a change the
+        reconcile has not seen yet still discards it. Success ends the issue's triage chain and
+        schedules its clone's removal; a verdict owed no longer schedules the removal too, and
+        no failure is counted. A failure, the read's included, keeps the verdict for a retry --
+        stored here, with whether its label swap landed -- and the caller counts it.
         """
         issue = pending.issue
+        swapped = pending.swapped
+
+        def note_swap() -> None:
+            nonlocal swapped
+            swapped = True
+
         try:
-            await apply_verdict(
-                self._adapter,
-                self._bus,
-                issue,
-                pending.verdict,
-                run_id=pending.run_id,
-                attempt=pending.attempt,
-                turns=pending.turns,
-                cost_usd=pending.cost_usd,
-                now=self._now(),
-            )
+            current = await self._verdict_owed(pending)
+            if current is not None:
+                await apply_verdict(
+                    self._adapter,
+                    self._bus,
+                    current,
+                    pending.verdict,
+                    run_id=pending.run_id,
+                    attempt=pending.attempt,
+                    turns=pending.turns,
+                    cost_usd=pending.cost_usd,
+                    now=self._now(),
+                    on_swapped=note_swap,
+                )
         except GitHubError as exc:
             self._log.warning(
                 "triage_file_failed",
@@ -1750,10 +1765,15 @@ class Orchestrator:
                 error=str(exc),
                 category=exc.category,
             )
+            # The session's work is kept: the next tick files it from memory, never by running
+            # the session again.
+            self._triage_pending[issue.id] = replace(pending, swapped=swapped)
             return exc
         self._triage_pending.pop(issue.id, None)
-        self._forget_triage_chain(issue.id)
         self._schedule_triage_discard(issue.identifier)
+        if current is None:
+            return None
+        self._forget_triage_chain(issue.id)
         self._log.info(
             "triage_filed",
             issue_number=issue.number,
@@ -1761,6 +1781,45 @@ class Orchestrator:
             run_id=pending.run_id,
             verdict=pending.verdict.verdict,
             sub_issues=len(pending.verdict.sub_issues),
+        )
+        return None
+
+    async def _verdict_owed(self, pending: PendingVerdict) -> Issue | None:
+        """The issue as it stands now while its verdict is owed; ``None``, logged, once not.
+
+        Section 1 discards a verdict once a state label wins, ``triage-todo`` goes or the issue
+        closes, and the reconcile sees any of those only at the start of a tick: one made in
+        the run's last interval, or while a filing waits for a retry, would otherwise get
+        sub-issues, a comment and ``triage-complete`` beside the human's ``todo``. So the issue
+        is read again, in one query, right before the first write. It is owed while it is
+        still a triage candidate, and once its swap has landed, while it is open at all: it
+        already shows the verdict as filed, and only the comment saying what it was is missing,
+        whatever label a human has added since.
+        """
+        labels = self._workflow.config.github.labels
+        found = await self._adapter.fetch_issues_by_ids([pending.issue.id])
+        current = next((issue for issue in found if issue.id == pending.issue.id), None)
+        if current is None:
+            reason = "missing"
+        elif is_triage_candidate(current, labels):
+            return current
+        elif current.github_state != "open":
+            reason = "closed"
+        elif pending.swapped:
+            return current
+        elif current.state_labels:
+            reason = "state label"
+        else:
+            reason = "triage-todo removed"
+        if reason in ("closed", "missing"):
+            # As for a reconcile's stop: a closed or vanished issue has no chain left.
+            self._forget_triage_chain(pending.issue.id)
+        self._log.info(
+            "triage_verdict_discarded",
+            issue_number=pending.issue.number,
+            issue_identifier=pending.issue.identifier,
+            run_id=pending.run_id,
+            reason=reason,
         )
         return None
 
@@ -1868,10 +1927,8 @@ class Orchestrator:
                 turns=result.turns,
                 cost_usd=result.cost_usd,
             )
-            if await self._file_verdict(pending) is not None:
-                # The session's work is kept: the next tick files it from memory, never by
-                # running the session again.
-                self._triage_pending[issue_id] = pending
+            # A failure is kept for the next tick by `_file_verdict` itself.
+            await self._file_verdict(pending)
             return
         if entry.stop_cause == "stalled":
             failure = f"stalled: {entry.stop_detail}"

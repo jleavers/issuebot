@@ -5,7 +5,7 @@ the worker acting on it. The agent never chooses a label: ``operator_step`` is a
 only to drafts of kind ``operator``, and no state label is ever added to a sub-issue.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
 from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
@@ -104,6 +104,7 @@ async def apply_verdict(
     turns: int,
     cost_usd: float,
     now: datetime,
+    on_swapped: Callable[[], None] | None = None,
 ) -> list[SubIssue]:
     """File ``verdict``; raises ``GitHubError`` from any step, so the caller retries.
 
@@ -111,6 +112,8 @@ async def apply_verdict(
     by title against the parent's children, the label swap is a set operation, and the comment
     -- the one write that would show twice -- is last, so a failure before it leaves at most a
     label move to redo. A repeated StateChanged is the cost of a failed comment, not a write.
+    ``on_swapped`` is called once the swap has landed, so a caller keeping the verdict for a
+    retry knows when only the comment is left.
     """
     labels = adapter.labels
     filed: list[SubIssue] = []
@@ -134,6 +137,8 @@ async def apply_verdict(
     await adapter.edit_labels(
         issue.number, add=[labels.triage_complete], remove=[labels.triage_todo]
     )
+    if on_swapped is not None:
+        on_swapped()
     bus.publish(
         StateChanged(
             issue_number=issue.number,

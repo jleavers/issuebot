@@ -5419,6 +5419,129 @@ async def test_a_verdict_github_keeps_refusing_is_handed_back(tmp_path: Path) ->
     assert len(h.github.comments_for(1)) == 1, "dropped once handed back"
 
 
+SPLIT_VERDICT = {
+    "stop_reason": "verdict",
+    "structured_output": {
+        **FITS,
+        "verdict": "split",
+        "sub_issues": [
+            {"title": "First step", "body": "Do it.", "kind": "issuebot"},
+            {"title": "Second step", "body": "By hand.", "kind": "operator"},
+        ],
+    },
+}
+
+
+def triage_comments(h: Harness, number: int) -> list[Any]:
+    return [c for c in h.github.comments_for(number) if c.body.startswith("### Issuebot triage (")]
+
+
+async def test_todo_after_the_last_reconcile_discards_the_verdict(tmp_path: Path) -> None:
+    """Section 1: a state label wins, and the verdict is discarded. The reconcile sees a change
+    only at the start of a tick, so a `todo` added in the run's last interval is caught by the
+    read made right before the first write: nothing is filed and no failure is counted."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    # No tick in between: the reconcile never saw the `todo`.
+    await h.exit(h.triage_sessions.runs[0], **SPLIT_VERDICT)
+    assert h.calls("create_sub_issue") == [] and h.calls("comment") == []
+    assert h.calls("edit_labels") == []
+    assert h.labels.triage_complete not in h.github.issue(1).labels
+    assert h.recorder.kinds == []
+    assert h.orchestrator._triage_pending == {}
+    assert h.orchestrator._triage_failures == {}
+    # The human's `todo` is then worked as it is today.
+    await h.tick()
+    assert [r.issue.number for r in h.sessions.runs] == [1]
+
+
+async def test_triage_todo_removed_after_the_last_reconcile_discards_the_verdict(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert h.calls("edit_labels") == [] and h.calls("comment") == []
+    assert h.orchestrator._triage_failures == {}
+
+
+async def test_an_unreadable_issue_at_filing_is_kept_as_owed_not_discarded(
+    tmp_path: Path,
+) -> None:
+    """The read before the first write failing is a failed filing attempt: the verdict waits
+    in memory for the next tick, which reads the issue again and files it."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="fetch_issues_by_ids")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert h.calls("edit_labels") == [] and h.calls("comment") == []
+    assert "1" in h.orchestrator._triage_pending
+    await h.tick()
+    assert len(triage_comments(h, 1)) == 1
+    assert h.orchestrator._triage_pending == {}
+    assert len(h.triage_sessions.runs) == 1
+
+
+async def test_an_issue_closed_while_its_verdict_is_owed_drops_it(tmp_path: Path) -> None:
+    """A retry reads the issue first, as the first filing does: a closed issue is owed
+    nothing, even once the label swap has landed and only the comment was missing."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert "1" in h.orchestrator._triage_pending
+    h.github.close_issue(1)
+    written = len(h.calls("edit_labels")), len(h.calls("comment"))
+    await h.tick()
+    assert (len(h.calls("edit_labels")), len(h.calls("comment"))) == written
+    assert h.github.comments_for(1) == []
+    assert h.orchestrator._triage_pending == {}
+    assert h.orchestrator._triage_failures == {}
+
+
+async def test_a_swapped_verdict_still_posts_its_comment_after_a_todo(tmp_path: Path) -> None:
+    """Once the swap has landed only the comment is owed, and a human's `todo` since does not
+    change that: the verdict the issue already shows as filed gets the comment that says what
+    it was."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert h.labels.triage_complete in h.github.issue(1).labels
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    [comment] = triage_comments(h, 1)
+    assert "**Verdict: fits.**" in comment.body
+    assert h.orchestrator._triage_pending == {}
+
+
+async def test_an_unswapped_verdict_is_dropped_when_triage_todo_goes(tmp_path: Path) -> None:
+    """Before the swap lands, a retry is owed only while the issue is still a triage candidate.
+    Re-triage keeps an earlier `triage-complete` on the issue, so what the labels show is not
+    what says the swap landed: the entry remembers that itself."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    h.github.human_add_label(1, h.labels.triage_complete, actor="maintainer")
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert "1" in h.orchestrator._triage_pending
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    written = len(h.calls("edit_labels"))
+    await h.tick()
+    assert len(h.calls("edit_labels")) == written
+    assert h.github.comments_for(1) == []
+    assert h.orchestrator._triage_pending == {}
+
+
 async def test_a_usage_limited_triage_run_holds_dispatch_and_counts_no_failure(
     tmp_path: Path,
 ) -> None:

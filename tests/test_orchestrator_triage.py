@@ -121,6 +121,35 @@ async def test_a_retry_files_only_the_missing_sub_issues() -> None:
     assert LABELS.operator_step in github.issue(3).labels
 
 
+async def test_on_swapped_reports_the_swap_and_only_the_swap() -> None:
+    """A caller keeping the verdict for a retry learns when only the comment is left."""
+    github, _recorder, bus = setup()
+    swapped: list[bool] = []
+
+    async def file() -> None:
+        with pytest.raises(GitHubError):
+            await apply_verdict(
+                github,
+                bus,
+                github.issue(1),
+                SPLIT,
+                run_id="r",
+                attempt=1,
+                turns=1,
+                cost_usd=0.0,
+                now=NOW,
+                on_swapped=lambda: swapped.append(True),
+            )
+
+    github.fail_next("server_error", on="create_sub_issue")
+    await file()
+    assert swapped == []
+    github.fail_next("server_error", on="comment")
+    await file()
+    assert swapped == [True]
+    assert github.issue(1).labels == (LABELS.triage_complete,)
+
+
 def test_sub_issue_body_for_an_issuebot_step_has_no_operator_preamble() -> None:
     body = sub_issue_body(SPLIT.sub_issues[0], parent=1, step=1, steps=2, labels=LABELS)
     assert body == "Do the first.\n\n---\nPart of #1: step 1 of 2, filed by issuebot triage."
