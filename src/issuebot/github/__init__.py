@@ -18,7 +18,9 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    SubIssue,
     TextEdit,
+    TrackerComment,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
@@ -82,7 +84,9 @@ __all__ = [
     "RateLimit",
     "RepoInfo",
     "StateLabel",
+    "SubIssue",
     "TextEdit",
+    "TrackerComment",
     "carries_no_fault",
     "classify_closed",
     "fetch_status_summary",

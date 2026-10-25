@@ -1,0 +1,14 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "subIssues": {
+          "nodes": [
+            {"number": 71, "title": "Second by number, first by GitHub", "url": "https://github.com/example/repo/issues/71", "state": "OPEN"},
+            {"number": 70, "title": "First by number", "url": "https://github.com/example/repo/issues/70", "state": "CLOSED"}
+          ]
+        }
+      }
+    }
+  }
+}

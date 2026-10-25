@@ -409,3 +409,115 @@ def test_the_fake_renders_a_minimal_body_html() -> None:
     )
     fake.add_issue("U", body=None, number=2)
     assert fake.issue(2).body_html is None
+
+
+# --- triage: labels, comments and sub-issues -----------------------------------------------
+
+
+async def test_fake_create_sub_issue_links_both_ways(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Big thing")
+    sub = await fake.create_sub_issue(parent.number, title="Step one", body="Do it.")
+    assert sub.state == "open" and sub.title == "Step one"
+    assert fake._issues[sub.number].parent == parent.number
+    assert fake.issue(sub.number).body == "Do it."
+    assert [s.number for s in await fake.sub_issues(parent.number)] == [sub.number]
+    # Linked at creation and carrying no label: no poll sees it parentless or on the board.
+    assert fake.issue(sub.number).labels == ()
+
+
+async def test_fake_create_sub_issue_needs_an_existing_parent(fake: FakeGitHub) -> None:
+    with pytest.raises(GitHubError) as exc:
+        await fake.create_sub_issue(99, title="Orphan", body="")
+    assert exc.value.category == "not_found"
+
+
+async def test_fake_fetch_comments_returns_seeded_associations(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task")
+    fake.add_tracker_comment(
+        issue.number, body="Cover admin.\n\nPlease.", author="owner", association="OWNER"
+    )
+    fake.add_tracker_comment(issue.number, body="Hi", author=None, association="NONE")
+    comments = await fake.fetch_comments(issue.number)
+    assert [(c.author, c.association) for c in comments] == [("owner", "OWNER"), (None, "NONE")]
+    assert comments[0].body_html == ('<p dir="auto">Cover admin.</p>\n<p dir="auto">Please.</p>\n')
+    assert comments[0].created_at <= comments[1].created_at
+
+
+async def test_fake_fetch_comments_includes_comments_the_adapter_wrote(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task")
+    await fake.comment(issue.number, "from issuebot")
+    (written,) = await fake.fetch_comments(issue.number)
+    assert written.author == "issuebot"
+
+
+async def test_fake_edit_labels_leaves_state_labels_alone(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task", labels=["issuebot/review", "issuebot/triage-todo"])
+    await fake.edit_labels(
+        issue.number, add=["issuebot/triage-complete"], remove=["issuebot/triage-todo"]
+    )
+    assert set(fake.issue(issue.number).labels) == {"issuebot/review", "issuebot/triage-complete"}
+    assert fake.issue(issue.number).state is StateLabel.REVIEW
+
+
+async def test_fake_edit_labels_refuses_a_label_the_repository_lacks(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task")
+    with pytest.raises(GitHubError) as exc:
+        await fake.edit_labels(issue.number, add=["no-such-label"])
+    assert exc.value.category == "not_found"
+
+
+async def test_fake_fetch_issues_with_label_is_open_oldest_first(fake: FakeGitHub) -> None:
+    first = fake.add_issue("A", labels=["issuebot/triage-todo"])
+    fake.add_issue("B", labels=["other"])
+    closed = fake.add_issue("C", labels=["issuebot/triage-todo"])
+    fake.close_issue(closed.number)
+    third = fake.add_issue("D", labels=["Issuebot/Triage-Todo"])
+    found = await fake.fetch_issues_with_label("issuebot/triage-todo")
+    assert [i.number for i in found] == [first.number, third.number]
+
+
+async def test_fail_next_on_a_method_leaves_other_calls_alone(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task")
+    fake.fail_next("server_error", on="comment")
+    assert (await fake.auth_status()).login == "issuebot"  # passes, and does not consume it
+    with pytest.raises(GitHubError) as exc:
+        await fake.comment(issue.number, "x")
+    assert exc.value.category == "server_error"
+    await fake.comment(issue.number, "y")  # consumed: the next one succeeds
+
+
+async def test_fail_next_after_lets_matching_calls_succeed_first(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Parent")
+    fake.fail_next("server_error", on="create_sub_issue", after=1)
+    await fake.create_sub_issue(parent.number, title="one", body="")
+    await fake.comment(parent.number, "between")  # not a match, so not counted
+    with pytest.raises(GitHubError):
+        await fake.create_sub_issue(parent.number, title="two", body="")
+    await fake.create_sub_issue(parent.number, title="three", body="")
+    assert [s.title for s in await fake.sub_issues(parent.number)] == ["one", "three"]
+
+
+async def test_fail_next_after_without_a_method_counts_any_call(fake: FakeGitHub) -> None:
+    fake.fail_next("transport", after=1)
+    await fake.auth_status()
+    with pytest.raises(GitHubError):
+        await fake.rate_limit()
+    await fake.rate_limit()
+
+
+async def test_fail_next_times_with_a_method_fails_that_many_in_a_row(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("Task")
+    fake.fail_next("transport", times=2, on="comment")
+    for _ in range(2):
+        with pytest.raises(GitHubError):
+            await fake.comment(issue.number, "x")
+    await fake.comment(issue.number, "x")
+
+
+async def test_fail_next_after_applies_once_before_a_run_of_failures(fake: FakeGitHub) -> None:
+    fake.fail_next("transport", times=2, after=1)
+    await fake.auth_status()
+    for _ in range(2):
+        with pytest.raises(GitHubError):
+            await fake.auth_status()
+    await fake.auth_status()

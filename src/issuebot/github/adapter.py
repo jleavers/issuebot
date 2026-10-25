@@ -14,6 +14,8 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    SubIssue,
+    TrackerComment,
 )
 from issuebot.github.state import LabelStyle
 
@@ -29,6 +31,10 @@ class GitHubAdapter(Protocol):
 
     async def fetch_issues_by_states(self, states: Iterable[StateLabel]) -> list[Issue]:
         """Open issues carrying any of the given state labels; [] for an empty input."""
+        ...
+
+    async def fetch_issues_with_label(self, label: str) -> list[Issue]:
+        """Open issues carrying ``label``, oldest first, whatever other labels they carry."""
         ...
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
@@ -47,6 +53,26 @@ class GitHubAdapter(Protocol):
 
     async def clear_state(self, number: int) -> None:
         """Remove every state label."""
+        ...
+
+    async def edit_labels(
+        self, number: int, *, add: Sequence[str] = (), remove: Sequence[str] = ()
+    ) -> None:
+        """Add and remove the given labels in one write; nothing is sent when both are empty."""
+        ...
+
+    async def fetch_comments(self, number: int) -> list[TrackerComment]:
+        """Every comment on the issue, oldest first, as GitHub renders it. Past the timeline
+        ceiling is a ``PageCeilingError``."""
+        ...
+
+    async def sub_issues(self, number: int) -> list[SubIssue]:
+        """The issue's sub-issues, in GitHub's order."""
+        ...
+
+    async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
+        """Create an issue already linked under ``parent``, in one write, so that no read sees
+        it parentless."""
         ...
 
     async def comment(self, number: int, body: str) -> Comment: ...

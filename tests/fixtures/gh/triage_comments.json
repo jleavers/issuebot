@@ -1,0 +1,29 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "comments": {
+          "nodes": [
+            {
+              "databaseId": 2001,
+              "url": "https://github.com/example/repo/issues/60#issuecomment-2001",
+              "bodyHTML": "<p dir=\"auto\">Please also cover the admin view.</p>",
+              "authorAssociation": "OWNER",
+              "author": {"login": "jleavers"},
+              "createdAt": "2026-10-02T10:00:00Z"
+            },
+            {
+              "databaseId": 2002,
+              "url": "https://github.com/example/repo/issues/60#issuecomment-2002",
+              "bodyHTML": "<p dir=\"auto\">Drive-by suggestion.</p>",
+              "authorAssociation": "NONE",
+              "author": null,
+              "createdAt": "2026-10-03T10:00:00Z"
+            }
+          ],
+          "pageInfo": {"hasNextPage": false, "endCursor": null}
+        }
+      }
+    }
+  }
+}

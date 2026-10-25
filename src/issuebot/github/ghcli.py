@@ -24,7 +24,9 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    SubIssue,
     TextEdit,
+    TrackerComment,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name, optional_timestamp
@@ -161,6 +163,52 @@ CONTENT_EDITS_QUERY = (
     "  }\n"
     "}\n"
 )
+# The issue's comments with GitHub's own render and author association, oldest first: what
+# the triage prompt is built from, fetched by the worker because the session has no
+# credential to ask with (triage spec section 4).
+COMMENTS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    issue(number: $number) {\n"
+    f"      comments(first: {PAGE_SIZE}, after: $cursor) {{\n"
+    "        nodes { databaseId url bodyHTML authorAssociation author { login } createdAt }\n"
+    "        pageInfo { hasNextPage endCursor }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+# One page and no cursor: a triage creates at most `max_sub_issues` (at most 20), far under it.
+SUB_ISSUES_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    issue(number: $number) {\n"
+    f"      subIssues(first: {PAGE_SIZE}) {{\n"
+    "        nodes { number title url state }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+# The node ids `createIssue` wants: the repository's and the parent's, in one read.
+NODE_IDS_QUERY = (
+    "query($owner: String!, $name: String!, $parent: Int!) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    "    id\n"
+    "    issue(number: $parent) { id }\n"
+    "  }\n"
+    "}\n"
+)
+# `parentIssueId` makes the link part of the creation, so no poll ever sees a sub-issue
+# without its parent (triage spec section 5): a separate link call could fail between the two.
+CREATE_SUB_ISSUE_MUTATION = (
+    "mutation($repo: ID!, $parent: ID!, $title: String!, $body: String!) {\n"
+    "  createIssue(input: {repositoryId: $repo, parentIssueId: $parent,"
+    " title: $title, body: $body}) {\n"
+    "    issue { number title url state }\n"
+    "  }\n"
+    "}\n"
+)
 
 
 def by_ids_query(numbers: Sequence[int]) -> str:
@@ -199,6 +247,9 @@ class GhCliAdapter:
         self._owner, self._name = settings.repo.split("/", 1)
         self._login = login
         self._ignored_workpads: set[tuple[int, int]] = set()
+        # Node ids never change, so a triage creating several sub-issues asks for them once.
+        self._repository_id: str | None = None
+        self._issue_ids: dict[int, str] = {}
         self._log = get_logger(__name__)
 
     @property
@@ -232,6 +283,11 @@ class GhCliAdapter:
             max_pages=MAX_TERMINAL_PAGES,
             per_role=True,
         )
+
+    async def fetch_issues_with_label(self, label: str) -> list[Issue]:
+        """Open issues carrying ``label``, oldest first; the ceiling is the board poll's."""
+        login = await self.own_login()
+        return await self._issues_with_label(label, OPEN_ISSUES_QUERY, login, MAX_ISSUE_PAGES)
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         numbers = sorted(
@@ -289,10 +345,18 @@ class GhCliAdapter:
         await self._edit_labels(number, add=None, remove=list(self.labels.as_tuple()))
 
     async def _edit_labels(self, number: int, *, add: str | None, remove: Sequence[str]) -> None:
+        await self.edit_labels(number, add=() if add is None else (add,), remove=remove)
+
+    async def edit_labels(
+        self, number: int, *, add: Sequence[str] = (), remove: Sequence[str] = ()
+    ) -> None:
+        if not add and not remove:
+            return
         args = ["issue", "edit", str(number), "-R", self.repo]
-        if add is not None:
-            args += ["--add-label", add]
-        args += ["--remove-label", ",".join(remove)]
+        if add:
+            args += ["--add-label", ",".join(add)]
+        if remove:
+            args += ["--remove-label", ",".join(remove)]
         try:
             await self._gh(args)
         except GitHubError as exc:
@@ -316,6 +380,80 @@ class GhCliAdapter:
             stdin=json.dumps({"body": body}),
         )
         return _comment_from(_parse_json(result.stdout))
+
+    async def fetch_comments(self, number: int) -> list[TrackerComment]:
+        """Every comment, oldest first, with GitHub's render and the author's association.
+
+        Bounded at ``MAX_TIMELINE_PAGES`` under #110's rule: a thread longer than that is a
+        fact about the issue (a ``PageCeilingError``), not a moment's failure. A record without
+        its id, url, render or timestamp is a malformed response, not a comment to skip: the
+        triage prompt would be built from an incomplete thread.
+        """
+        self._log.debug("fetch_comments", issue_number=number)
+        comments: list[TrackerComment] = []
+        async for node in self._paginate(
+            COMMENTS_QUERY,
+            number,
+            ("repository", "issue", "comments"),
+            overflow=f"comments on #{number} run past {MAX_TIMELINE_PAGES * PAGE_SIZE}",
+        ):
+            comment_id = node.get("databaseId")
+            url = node.get("url")
+            body_html = node.get("bodyHTML")
+            created_at = optional_timestamp(node.get("createdAt"))
+            if (
+                not isinstance(comment_id, int)
+                or not isinstance(url, str)
+                or not isinstance(body_html, str)
+                or created_at is None
+            ):
+                raise GitHubError("response", f"malformed comment record on #{number}")
+            author = _dig(node, "author", "login")
+            association = node.get("authorAssociation")
+            comments.append(
+                TrackerComment(
+                    id=comment_id,
+                    url=url,
+                    author=author if isinstance(author, str) and author else None,
+                    association=association if isinstance(association, str) else None,
+                    body_html=body_html,
+                    created_at=created_at,
+                )
+            )
+        return comments
+
+    async def sub_issues(self, number: int) -> list[SubIssue]:
+        self._log.debug("sub_issues", issue_number=number)
+        data = await self._graphql(
+            SUB_ISSUES_QUERY, {"owner": self._owner, "name": self._name, "number": number}
+        )
+        connection = _dig(data, "repository", "issue", "subIssues")
+        if not isinstance(connection, Mapping):
+            raise GitHubError("response", "GraphQL response has no issue.subIssues")
+        return [_sub_issue_from(node) for node in connection.get("nodes") or []]
+
+    async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
+        self._log.debug("create_sub_issue", issue_number=parent)
+        if self._repository_id is None or parent not in self._issue_ids:
+            data = await self._graphql(
+                NODE_IDS_QUERY, {"owner": self._owner, "name": self._name, "parent": parent}
+            )
+            repository_id = _dig(data, "repository", "id")
+            parent_id = _dig(data, "repository", "issue", "id")
+            if not isinstance(repository_id, str) or not isinstance(parent_id, str):
+                raise GitHubError("not_found", f"issue #{parent} not found in {self.repo}")
+            self._repository_id = repository_id
+            self._issue_ids[parent] = parent_id
+        data = await self._graphql(
+            CREATE_SUB_ISSUE_MUTATION,
+            {
+                "repo": self._repository_id,
+                "parent": self._issue_ids[parent],
+                "title": title,
+                "body": body,
+            },
+        )
+        return _sub_issue_from(_dig(data, "createIssue", "issue"))
 
     async def find_workpad_comment(self, number: int) -> Comment | None:
         """The account's own comment whose first line is the marker, lowest id first.
@@ -865,6 +1003,22 @@ def _parse_json(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         return None
+
+
+def _sub_issue_from(node: Any) -> SubIssue:
+    if not isinstance(node, Mapping):
+        raise GitHubError("response", "sub-issue record is not an object")
+    number, title, url, state = (node.get(k) for k in ("number", "title", "url", "state"))
+    if (
+        not isinstance(number, int)
+        or not isinstance(title, str)
+        or not isinstance(url, str)
+        or state not in ("OPEN", "CLOSED")
+    ):
+        raise GitHubError("response", "malformed sub-issue record")
+    return SubIssue(
+        number=number, title=title, url=url, state="open" if state == "OPEN" else "closed"
+    )
 
 
 def _dig(mapping: Any, *keys: str) -> Any:

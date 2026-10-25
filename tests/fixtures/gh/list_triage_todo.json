@@ -1,0 +1,25 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "nodes": [
+          {
+            "number": 60,
+            "title": "Add export to CSV",
+            "body": null,
+            "state": "OPEN",
+            "url": "https://github.com/example/repo/issues/60",
+            "createdAt": "2026-10-01T10:00:00Z",
+            "updatedAt": "2026-10-01T10:00:00Z",
+            "closedAt": null,
+            "authorAssociation": "OWNER",
+            "labels": {"nodes": [{"name": "issuebot/triage-todo"}]},
+            "assignees": {"nodes": []},
+            "closedByPullRequestsReferences": {"nodes": []}
+          }
+        ],
+        "pageInfo": {"hasNextPage": false, "endCursor": null}
+      }
+    }
+  }
+}

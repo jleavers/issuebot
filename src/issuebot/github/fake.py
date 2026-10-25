@@ -24,7 +24,9 @@ from issuebot.github.models import (
     RateLimit,
     RepoInfo,
     StateLabel,
+    SubIssue,
     TextEdit,
+    TrackerComment,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name
@@ -89,6 +91,11 @@ class _FakeIssue:
     label_events: list[tuple[str, str, datetime]] = field(default_factory=list)
     # Body edits and title renames, oldest first, as ``approval_evidence`` reports them.
     edits: list[TextEdit] = field(default_factory=list)
+    # The sub-issue link, both ways, as GitHub keeps it.
+    parent: int | None = None
+    children: list[int] = field(default_factory=list)
+    # What ``Comment`` cannot carry, by comment id: (author or None once deleted, association).
+    tracker_authors: dict[int, tuple[str | None, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -132,7 +139,8 @@ class FakeGitHub:
         self._prs: dict[int, _FakePr] = {}
         self._next_number = 1
         self._next_comment_id = 1000
-        self._failures: list[ErrorCategory] = []
+        # [category, method or None, matching calls still to let through], one per failure.
+        self._failures: list[list[Any]] = []
         if preseed_labels:
             for role in StateLabel:
                 self.repo_labels[label_name(settings.labels, role)] = LABEL_STYLES[role]
@@ -160,6 +168,14 @@ class FakeGitHub:
             record
             for record in self._issues.values()
             if record.state == "open" and wanted & {name.lower() for name in record.labels}
+        )
+
+    async def fetch_issues_with_label(self, label: str) -> list[Issue]:
+        self._enter("fetch_issues_with_label", label)
+        return self._snapshots(
+            record
+            for record in self._issues.values()
+            if record.state == "open" and label.lower() in {name.lower() for name in record.labels}
         )
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
@@ -208,6 +224,54 @@ class FakeGitHub:
         self._require_state_labels()
         self._strip_state_labels(record)
         record.updated_at = self._now()
+
+    async def edit_labels(
+        self, number: int, *, add: Sequence[str] = (), remove: Sequence[str] = ()
+    ) -> None:
+        self._enter("edit_labels", number, tuple(add), tuple(remove))
+        if not add and not remove:
+            return
+        record = self._require_issue(number)
+        for name in (*add, *remove):
+            self._require_label(name)
+        gone = {name.lower() for name in remove}
+        record.labels = [name for name in record.labels if name.lower() not in gone]
+        record.updated_at = self._now()
+        for name in add:
+            if name.lower() not in {held.lower() for held in record.labels}:
+                record.labels.append(name)
+                record.label_events.append((self.login, name, record.updated_at))
+
+    async def fetch_comments(self, number: int) -> list[TrackerComment]:
+        self._enter("fetch_comments", number)
+        record = self._require_issue(number)
+        found: list[TrackerComment] = []
+        for comment in record.comments:
+            author, association = record.tracker_authors.get(comment.id, (comment.author, "NONE"))
+            found.append(
+                TrackerComment(
+                    id=comment.id,
+                    url=comment.url,
+                    author=author,
+                    association=association,
+                    body_html=render_body_html(comment.body) or "",
+                    created_at=comment.created_at,
+                )
+            )
+        return found
+
+    async def sub_issues(self, number: int) -> list[SubIssue]:
+        self._enter("sub_issues", number)
+        record = self._require_issue(number)
+        return [self._sub_issue(self._issues[child]) for child in record.children]
+
+    async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
+        self._enter("create_sub_issue", parent, title, body)
+        record = self._require_issue(parent)
+        child = self._issues[self.add_issue(title, body=body, author=self.login).number]
+        child.parent = parent
+        record.children.append(child.number)
+        return self._sub_issue(child)
 
     async def comment(self, number: int, body: str) -> Comment:
         self._enter("comment", number, body)
@@ -419,6 +483,15 @@ class FakeGitHub:
         record.comments.append(comment)
         return comment
 
+    def add_tracker_comment(
+        self, number: int, *, body: str, author: str | None, association: str
+    ) -> Comment:
+        """A comment with the association (and, for a deleted account, no author) that
+        ``fetch_comments`` reports; ``add_comment`` leaves both at their defaults."""
+        comment = self.add_comment(number, body, author=author or "")
+        self._require_issue(number).tracker_authors[comment.id] = (author, association)
+        return comment
+
     def open_pr(
         self,
         issue_number: int,
@@ -478,16 +551,32 @@ class FakeGitHub:
     def issue(self, number: int) -> Issue:
         return self._snapshot(self._require_issue(number))
 
-    def fail_next(self, category: ErrorCategory, *, times: int = 1) -> None:
-        self._failures.extend([category] * times)
+    def fail_next(
+        self, category: ErrorCategory, *, times: int = 1, on: str | None = None, after: int = 0
+    ) -> None:
+        """Make calls fail with ``category``, ``times`` in a row.
+
+        Bare, it is the very next call of any method. ``on`` narrows it to calls of that
+        method (the name ``_enter`` receives): the others pass through and do not consume it.
+        ``after=N`` lets N matching calls succeed first, once, before the run of ``times``
+        failures: ``on="create_sub_issue", after=1`` fails the second creation.
+        """
+        self._failures.extend([[category, on, after if i == 0 else 0] for i in range(times)])
 
     # --- internals ---------------------------------------------------------------
 
     def _enter(self, name: str, *args: Any) -> None:
         self.calls.append((name, args))
-        if self._failures:
-            category = self._failures.pop(0)
+        for failure in self._failures:
+            category, only, after = failure
+            if only is not None and only != name:
+                continue
+            if after:
+                failure[2] -= 1
+                return
+            self._failures.remove(failure)
             raise GitHubError(category, f"injected {category} failure")
+        return
 
     def _require_issue(self, number: int) -> _FakeIssue:
         record = self._issues.get(number)
@@ -515,6 +604,14 @@ class FakeGitHub:
 
     def _issue_url(self, number: int) -> str:
         return f"https://github.com/{self.repo}/issues/{number}"
+
+    def _sub_issue(self, record: _FakeIssue) -> SubIssue:
+        return SubIssue(
+            number=record.number,
+            title=record.title,
+            url=self._issue_url(record.number),
+            state="open" if record.state == "open" else "closed",
+        )
 
     def _linked_pr(self, pr: _FakePr) -> LinkedPr:
         return LinkedPr(
