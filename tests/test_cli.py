@@ -278,7 +278,7 @@ def test_validate_good_workflow_exits_zero(
     assert (
         out.index("[ OK ] gh: ") < out.index("[ OK ] gh auth:") < out.index("[ OK ] database.url")
     )
-    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("22 checks: 0 failed, 3 warnings")
     assert "secret-token-value" not in out
 
 
@@ -300,7 +300,7 @@ def test_validate_names_the_overlay_and_counts_its_overrides(
     out = capsys.readouterr().out
     assert f"[ OK ] workflow: {path.resolve()} + WORKFLOW.local.md (2 overrides)" in out
     assert "[ OK ] github.repo: acme/frontend" in out
-    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("22 checks: 0 failed, 3 warnings")
 
     overlay.write_text("---\nclaude:\n  model: null\n---\n", encoding="utf-8")
     assert main(["validate", "--workflow", str(path)]) == 0
@@ -1023,7 +1023,7 @@ def test_validate_configured_database_and_slack(
         "hooks.slack.com/services/ webhook (a compatible endpoint is fine)" in out
     )
     assert "hooks.example" not in out
-    assert "21 checks: 0 failed, 3 warnings" in out
+    assert "22 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_warns_when_the_clones_files_are_claudes_configuration(
@@ -1114,7 +1114,7 @@ def test_validate_rejects_a_non_postgres_database_url(
     assert _validate_with_database(tmp_path, monkeypatch, "mysql://u:p@h/db") == 1
     out = capsys.readouterr().out
     assert "[FAIL] database.url: not a postgresql:// URL" in out
-    assert "21 checks: 1 failed, 2 warnings" in out
+    assert "22 checks: 1 failed, 2 warnings" in out
     assert fake_database.urls == []
 
 
@@ -1170,7 +1170,7 @@ def test_validate_warns_when_the_schema_is_behind(
         "[WARN] database.url: connected (PostgreSQL 18.1); schema version 0 of 1; "
         "run issuebot migrate" in out
     )
-    assert "21 checks: 0 failed, 3 warnings" in out
+    assert "22 checks: 0 failed, 3 warnings" in out
 
 
 def test_validate_names_the_compose_command_for_a_migration(
@@ -1229,7 +1229,7 @@ def test_validate_warns_about_an_incident_without_failing(
         "[WARN] github.status: incident in progress \u2014 "
         "Pull Requests, major outage; Actions, degraded performance" in out
     )
-    assert "21 checks: 0 failed, 4 warnings" in out
+    assert "22 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_says_so_when_the_status_page_does_not_answer(
@@ -1244,7 +1244,7 @@ def test_validate_says_so_when_the_status_page_does_not_answer(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer; this check is advisory" in out
-    assert "21 checks: 0 failed, 4 warnings" in out
+    assert "22 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
@@ -1260,7 +1260,7 @@ def test_validate_survives_a_status_page_that_cannot_be_read_at_all(
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com did not answer" in out
     assert "[ OK ] prompt:" in out
-    assert "21 checks: 0 failed, 4 warnings" in out
+    assert "22 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
@@ -1284,7 +1284,7 @@ def test_validate_does_not_wait_on_a_status_probe_that_will_not_return(
         assert "[WARN] github.status: githubstatus.com could not be read: TimeoutError" in out
         # The checks after it still ran, which is the whole point of the deadline.
         assert "[ OK ] prompt:" in out
-        assert "21 checks: 0 failed, 4 warnings" in out
+        assert "22 checks: 0 failed, 4 warnings" in out
     finally:
         released.set()
 
@@ -1302,7 +1302,7 @@ def test_validate_survives_a_status_probe_that_raises(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[WARN] github.status: githubstatus.com could not be read: RuntimeError" in out
-    assert "21 checks: 0 failed, 4 warnings" in out
+    assert "22 checks: 0 failed, 4 warnings" in out
 
 
 def test_validate_checks_the_status_page_even_without_gh(
@@ -1347,7 +1347,7 @@ def test_validate_slack_configured_ok(
     assert main(["validate", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] notifications.slack: configured (blocked, state_changed)" in out
-    assert "21 checks: 0 failed, 2 warnings" in out
+    assert "22 checks: 0 failed, 2 warnings" in out
     assert "secret" not in out
 
 
@@ -1513,7 +1513,7 @@ def test_validate_reports_a_claude_ai_login(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert "[ OK ] claude auth: logged in (claude.ai, max)" in out
-    assert out.rstrip().endswith("21 checks: 0 failed, 3 warnings")
+    assert out.rstrip().endswith("22 checks: 0 failed, 3 warnings")
 
 
 def test_validate_reports_an_oauth_token_login(
@@ -4317,7 +4317,7 @@ def test_validate_reports_the_session_account_when_the_delegation_works(
         f"other than this process's ({uid}), but all 3 concurrent sessions share it"
     ) in out
     assert probed == ["agent"]
-    assert "21 checks: 0 failed, 3 warnings" in out
+    assert "22 checks: 0 failed, 3 warnings" in out
 
 
 def test_run_once_takes_the_workspaces_own_account_from_the_pool(
@@ -4397,7 +4397,7 @@ def test_validate_reports_a_pool_of_session_accounts(
     # this process's, so the line says so rather than leaving the reader to take it on trust.
     assert f"each at a uid other than this process's ({os.getuid()})" in out
     assert probed == ["agent-1", "agent-2", "agent-3"]
-    assert "21 checks: 0 failed, 2 warnings" in out
+    assert "22 checks: 0 failed, 2 warnings" in out
 
 
 # --- validate: the session's network egress (#126) ------------------------------------
@@ -5202,7 +5202,7 @@ def test_validate_fails_when_the_session_account_cannot_be_reached(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert "[FAIL] agent.run_as: cannot run as 'agent': sudo: a password is required" in out
-    assert "21 checks: 1 failed, 2 warnings" in out
+    assert "22 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_warns_when_the_pool_size_disagrees_with_the_image(
@@ -5291,7 +5291,7 @@ def test_validate_fails_on_a_session_account_list_that_names_no_account(
         f"[FAIL] agent.run_as: session accounts empty: {listing} exists and names no "
         "account; rebuild the image (docker compose build worker)" in out
     )
-    assert "21 checks: 1 failed, 2 warnings" in out
+    assert "22 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_will_not_read(
@@ -5320,7 +5320,7 @@ def test_validate_fails_on_a_session_account_list_that_will_not_read(
     reported = [line for line in out.splitlines() if line.startswith(prefix)]
     assert len(reported) == 1
     assert str(listing) in reported[0]
-    assert "21 checks: 1 failed, 2 warnings" in out
+    assert "22 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
@@ -5340,7 +5340,7 @@ def test_validate_fails_on_a_session_account_list_that_is_not_utf8(
     assert main(["validate", "--workflow", str(GOOD)]) == 1
     out = capsys.readouterr().out
     assert f"[FAIL] agent.run_as: session accounts unreadable: {listing}: " in out
-    assert "21 checks: 1 failed, 2 warnings" in out
+    assert "22 checks: 1 failed, 2 warnings" in out
 
 
 def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as(
@@ -5365,3 +5365,292 @@ def test_validate_reports_a_damaged_list_as_the_workflow_when_it_resolves_run_as
     out = capsys.readouterr().out
     assert "[FAIL] workflow: " in out
     assert f"session accounts empty: {listing} exists and names no account" in out
+
+
+# --- run-once --triage and validate's triage check -----------------------------------------
+
+TRIAGE_FITS = {
+    "verdict": "fits",
+    "summary": "One run should do it.",
+    "fits_caps": "yes",
+    "lands_fast": "yes",
+    "needs_human": "no",
+    "ignored_requests": "",
+    "sub_issues": [],
+}
+
+
+class StubTriage:
+    """Stands in for run_triage: records the call and returns a configurable RunResult."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.stop_reason = "verdict"
+        self.structured_output: object = TRIAGE_FITS
+
+    async def __call__(
+        self,
+        issue: Issue,
+        workflow: object,
+        adapter: object,
+        bus: object,
+        *,
+        workspaces: WorkspaceManager,
+        runner: object,
+        attempt: int = 1,
+        **kwargs: object,
+    ) -> RunResult:
+        self.calls.append({"issue": issue, "attempt": attempt})
+        return RunResult(
+            run_id="20261025T081200Z-abc123",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            attempt=attempt,
+            session_id="s",
+            outcome="succeeded" if self.stop_reason == "verdict" else "failed",
+            stop_reason=self.stop_reason,  # type: ignore[arg-type]
+            error_category=None,
+            error=None,
+            turns=1,
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.12,
+            duration_s=30.0,
+            final_state=None,
+            final_issue=None,
+            workspace_path=workspaces.root / "repo-42.triage",
+            log_dir=None,
+            structured_output=self.structured_output,
+        )
+
+
+@pytest.fixture
+def stub_triage(monkeypatch: pytest.MonkeyPatch) -> StubTriage:
+    stub = StubTriage()
+    monkeypatch.setattr("issuebot.cli._run_triage", stub)
+    monkeypatch.setattr("issuebot.cli._triage_runner_factory", lambda settings: object())
+    return stub
+
+
+def _approve_triage(fake: FakeGitHub, number: int = 42) -> None:
+    fake.human_record_label(number, "issuebot/triage-todo", actor="maintainer")
+
+
+def test_run_once_triage_show_prompt_prints_the_triage_prompt(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path), "--show-prompt"]) == 0
+    out = capsys.readouterr().out
+    assert "Add retry backoff" in out
+    assert "Body for" not in out
+    assert stub_triage.calls == []
+    assert [name for name, _ in fake_github.calls] == [
+        "fetch_issues_by_ids",
+        "fetch_comments",
+        "own_login",
+        "repo_info",
+    ]
+    assert not (tmp_path / "ws").exists()
+
+
+def test_run_once_triage_refuses_an_issue_with_a_state_label(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue(
+        "Add retry backoff", labels=("issuebot/triage-todo", "issuebot/todo"), number=42
+    )
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "[FAIL] issue: #42 carries a state label (issuebot/todo)" in capsys.readouterr().out
+    assert stub_triage.calls == []
+
+
+def test_run_once_triage_refuses_an_issue_without_the_triage_label(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "label it issuebot/triage-todo first" in capsys.readouterr().out
+
+
+def test_not_triageable_is_the_inverse_of_is_triage_candidate(fake_github: FakeGitHub) -> None:
+    from issuebot.orchestrator.triage import is_triage_candidate
+
+    labels = GitHubLabels()
+    for number, issue_labels in enumerate(
+        [
+            (),
+            ("issuebot/triage-todo",),
+            ("issuebot/triage-todo", "issuebot/todo"),
+            ("issuebot/triage-todo", "issuebot/review"),
+            ("issuebot/triage-complete",),
+        ],
+        1,
+    ):
+        fake_github.add_issue("t", labels=issue_labels, number=number)
+    closed = fake_github.add_issue("c", labels=("issuebot/triage-todo",), number=9)
+    for issue in [*(fake_github.issue(n) for n in range(1, 6)), fake_github.issue(closed.number)]:
+        reason = cli.not_triageable(issue, labels)
+        assert (reason is None) == is_triage_candidate(issue, labels)
+    assert cli.not_triageable(fake_github.issue(2), labels) is None
+
+
+def test_run_once_triage_refuses_an_unapproved_label(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] approval:" in out
+    assert "apply issuebot/triage-todo again" in out
+    assert stub_triage.calls == []
+
+
+def test_run_once_triage_files_a_fits_verdict(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
+    assert "triage: fits" in capsys.readouterr().out
+    assert len(stub_triage.calls) == 1
+    labels = fake_github.issue(42).labels
+    assert "issuebot/triage-complete" in labels
+    assert "issuebot/triage-todo" not in labels
+    assert any("Issuebot triage" in c.body for c in fake_github.comments_for(42))
+
+
+def test_run_once_triage_files_a_split_verdict(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    stub_triage.structured_output = {
+        **TRIAGE_FITS,
+        "verdict": "split",
+        "sub_issues": [
+            {"title": "Part one", "body": "Do one.", "kind": "issuebot"},
+            {"title": "Part two", "body": "Do two.", "kind": "operator"},
+        ],
+    }
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "triage: split into 2 sub-issues (#43, #44)" in out
+
+
+def test_run_once_triage_without_a_verdict_writes_nothing(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    stub_triage.stop_reason = "max_turns"
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "triage: no verdict: max_turns" in capsys.readouterr().out
+    assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
+    assert fake_github.comments_for(42) == []
+
+
+def test_run_once_triage_with_a_refused_verdict_writes_nothing(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    stub_triage.structured_output = {"verdict": "maybe"}
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "triage: no verdict: verdict refused:" in capsys.readouterr().out
+    assert fake_github.comments_for(42) == []
+
+
+def test_run_once_triage_reports_a_github_failure_filing_the_verdict(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    path = _workflow_with_root(tmp_path)
+    fake_github.fail_next("server_error", on="comment")
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "[FAIL] triage: could not file the verdict:" in capsys.readouterr().out
+
+
+def test_validate_reports_triage(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, "
+        "at most 8 sub-issues" in out
+    )
+    assert out.index("] prompt:") < out.index("] triage:")
+
+
+def test_validate_fails_a_triage_prompt_that_does_not_render(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text("Triage {{ nope }}\n")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    assert "[FAIL] triage:" in capsys.readouterr().out

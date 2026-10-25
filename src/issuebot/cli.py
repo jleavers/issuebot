@@ -35,6 +35,7 @@ from issuebot.agent import (
     PromptContext,
     PromptRenderer,
     RunResult,
+    TriageRunner,
     TurnRunner,
     WorkspaceManager,
     claude_auth_status,
@@ -53,14 +54,19 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import (
+    TRIAGE_CONTINUATION_TEMPLATE,
     PromptVariant,
+    TriageLimits,
+    TriagePromptContext,
     render_variants,
     unfiltered_comment_reads,
 )
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import RateLimits
 from issuebot.agent.scrub import Scrubber
+from issuebot.agent.triage import run_triage
 from issuebot.agent.turnlog import TurnCapture, capture_turns
+from issuebot.agent.verdict import VerdictError, parse_verdict
 from issuebot.config import (
     ConfigError,
     GitHubLabels,
@@ -135,6 +141,7 @@ from issuebot.orchestrator import (
 )
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
+from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate
 from issuebot.web import create_app, dispatch_hold
 from issuebot.web.actions import ALLOWANCE_ENV, ActionsPoller, ActionsSettings, actions_settings
 from issuebot.web.claude_limits import ClaudeLimitsWatcher, webhook_setting
@@ -167,6 +174,8 @@ _claude_auth = claude_auth_status
 _run_as_probe = probe_run_as
 _run_as_factory: Callable[[str], RunAs] = RunAs
 _run_session = run_session
+_run_triage = run_triage
+_triage_runner_factory: Callable[[Settings], TurnRunner] = TriageRunner
 _orchestrator_factory = Orchestrator
 _slack_post = urllib_post
 _github_status = fetch_status_summary
@@ -298,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-prompt",
         action="store_true",
         help="print the rendered first-turn prompt and exit without running anything",
+    )
+    run_once.add_argument(
+        "--triage",
+        action="store_true",
+        help="run a triage session (read-only; files a verdict) instead of a work session",
     )
     run_once.set_defaults(func=cmd_run_once)
 
@@ -435,6 +449,7 @@ def run_checks(
     checks.append(_database_check(cfg))
     checks.append(_slack_check(cfg, probe=slack_probe))
     checks.append(_prompt_check(workflow))
+    checks.append(_triage_check(workflow))
     return checks
 
 
@@ -1579,6 +1594,42 @@ def _slack_check(settings: Settings, *, probe: bool) -> Check:
     return Check(subject, status, detail)
 
 
+def _triage_check(workflow: Workflow) -> Check:
+    """The triage prompt in force compiles and renders, first turn and continuation, against
+    a placeholder issue (the work prompt's check is ``_prompt_check``)."""
+    settings = workflow.config
+    try:
+        renderer = PromptRenderer(
+            workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
+        )
+        sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
+        context = TriagePromptContext(
+            issue=sample,
+            repo=settings.github.repo,
+            login=SAMPLE_LOGIN,
+            admin=False,
+            labels=settings.github.labels,
+            limits=TriageLimits.from_settings(settings),
+            comments=(),
+            repo_instructions=(),
+            turn_number=1,
+            max_turns=settings.triage.max_turns,
+            max_sub_issues=settings.triage.max_sub_issues,
+        )
+        renderer.render(context)
+        renderer.render_continuation(replace(context, turn_number=2))
+    except AgentError as exc:
+        return Check("triage", "fail", exc.message)
+    source = str(workflow.triage_path) if workflow.triage_path else "shipped default"
+    triage = settings.triage
+    return Check(
+        "triage",
+        "ok",
+        f"prompt {source}, model {triage.model or 'default'}, {triage.max_turns} turn(s) at "
+        f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues",
+    )
+
+
 # The login ``_sample_context`` renders, and so the one ``unfiltered_comment_reads`` must be
 # handed: the own-account exclusion is a string comparison against exactly this name.
 SAMPLE_LOGIN = "sample-bot"
@@ -1952,12 +2003,23 @@ def cmd_run_once(args: argparse.Namespace) -> int:
     if workflow is None:
         return 2
     return asyncio.run(
-        _run_once(workflow, args.number, show_prompt=args.show_prompt, model=args.model)
+        _run_once(
+            workflow,
+            args.number,
+            show_prompt=args.show_prompt,
+            model=args.model,
+            triage=args.triage,
+        )
     )
 
 
 async def _run_once(
-    workflow: Workflow, number: int, *, show_prompt: bool, model: str | None = None
+    workflow: Workflow,
+    number: int,
+    *,
+    show_prompt: bool,
+    model: str | None = None,
+    triage: bool = False,
 ) -> int:
     settings = workflow.config
     adapter = _adapter_factory(settings.github)
@@ -1970,6 +2032,10 @@ async def _run_once(
         print(f"[FAIL] issue: #{number} not found")
         return 1
     issue = issues[0]
+    if triage:
+        return await _run_once_triage(
+            workflow, adapter, issue, show_prompt=show_prompt, model=model
+        )
     problem = not_runnable(issue, settings.github.labels)
     if problem is not None:
         print(f"[FAIL] issue: #{number} {problem}")
@@ -2054,6 +2120,156 @@ async def _run_once(
         await sinks.close()
 
 
+async def _run_once_triage(
+    workflow: Workflow,
+    adapter: GitHubAdapter,
+    issue: Issue,
+    *,
+    show_prompt: bool,
+    model: str | None,
+) -> int:
+    """`run-once --triage`: one triage session in the foreground, its verdict filed (spec §4).
+
+    The worker's path without the queue: the same candidate test, the same approval check on
+    ``triage_todo`` (no escape, as for a work run), the same ``run_triage`` and the same
+    ``apply_verdict``. Nothing is claimed, since a triage run moves no state label.
+    """
+    settings = workflow.config
+    labels = settings.github.labels
+    number = issue.number
+    problem = not_triageable(issue, labels)
+    if problem is not None:
+        print(f"[FAIL] issue: #{number} {problem}")
+        return 1
+    if not show_prompt and not await _approved_for_run_once(
+        adapter, issue, labels, todo_label=labels.triage_todo
+    ):
+        return 1
+    try:
+        workflow = _with_bound_account(workflow, issue)
+        settings = workflow.config
+        workspaces = WorkspaceManager(settings)
+    except AgentError as exc:
+        print(f"[FAIL] workspace: {exc.message}")
+        return 1
+    if show_prompt:
+        try:
+            comments = tuple(await adapter.fetch_comments(number))
+        except GitHubError as exc:
+            print(f"[FAIL] comments: {exc}")
+            return 1
+        try:
+            login = await adapter.own_login()
+        except GitHubError as exc:
+            print(f"[FAIL] login: {exc}")
+            return 1
+        try:
+            admin = (await adapter.repo_info()).admin
+        except GitHubError as exc:
+            print(f"[FAIL] repository role: {exc}")
+            return 1
+        # The preview touches no workspace, so there is no clone to carry instruction files
+        # from; the real session reads them out of its fresh clone.
+        context = TriagePromptContext(
+            issue=issue,
+            repo=settings.github.repo,
+            login=login,
+            admin=admin,
+            labels=labels,
+            limits=TriageLimits.from_settings(settings),
+            comments=comments,
+            repo_instructions=(),
+            turn_number=1,
+            max_turns=settings.triage.max_turns,
+            max_sub_issues=settings.triage.max_sub_issues,
+        )
+        try:
+            renderer = PromptRenderer(
+                workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
+            )
+            print(renderer.render(context).rstrip("\n"))
+        except AgentError as exc:
+            print(f"[FAIL] prompt: {exc.message}")
+            return 1
+        return 0
+    scrubber = _deployment_scrubber(settings, os.environ)
+    try:
+        sinks = await _build_sinks(settings, workflow_path=str(workflow.path), scrubber=scrubber)
+    except DatabaseError as exc:
+        print(f"[FAIL] database: {exc.message}")
+        return 1
+    sinks.start()
+    sinks.record_issues([issue])
+    try:
+        runner_settings = settings_with_model(settings, model) if model else settings
+        result = await _run_triage(
+            issue,
+            workflow,
+            adapter,
+            sinks.bus,
+            workspaces=workspaces,
+            runner=_triage_runner_factory(runner_settings),
+        )
+        # The summary's first line only: the lines after it describe a work run's next step.
+        print(render_run_summary(result).splitlines()[0])
+        reason = result.stop_reason
+        if result.stop_reason == "verdict":
+            try:
+                verdict = parse_verdict(
+                    result.structured_output,
+                    max_sub_issues=settings.triage.max_sub_issues,
+                    scrubber=scrubber,
+                )
+            except VerdictError as exc:
+                reason = f"verdict refused: {exc}"
+            else:
+                try:
+                    filed = await apply_verdict(
+                        adapter,
+                        sinks.bus,
+                        issue,
+                        verdict,
+                        run_id=result.run_id,
+                        attempt=result.attempt,
+                        turns=result.turns,
+                        cost_usd=result.cost_usd,
+                        now=datetime.now(UTC),
+                    )
+                except GitHubError as exc:
+                    print(f"[FAIL] triage: could not file the verdict: {exc}")
+                    return 1
+                if verdict.verdict == "fits":
+                    print("triage: fits")
+                else:
+                    numbers = ", ".join(f"#{sub.number}" for sub in filed)
+                    print(f"triage: split into {len(filed)} sub-issues ({numbers})")
+                return 0
+        elif result.error:
+            reason = f"{result.stop_reason}: {result.error}"
+        print(f"triage: no verdict: {reason}")
+        return 1
+    finally:
+        await sinks.close()
+
+
+def not_triageable(issue: Issue, labels: GitHubLabels) -> str | None:
+    """Why `run-once --triage` refuses this issue, or None when the worker would triage it.
+
+    The answer is ``is_triage_candidate``'s, with a reason attached: the predicate decides and
+    this only explains, so the two cannot disagree.
+    """
+    if is_triage_candidate(issue, labels):
+        return None
+    if issue.github_state == "closed":
+        return "is closed"
+    if issue.state_labels:
+        return (
+            f"carries a state label ({', '.join(issue.state_labels)}); triage is for "
+            "issues without one"
+        )
+    return f"does not carry {labels.triage_todo}; label it {labels.triage_todo} first"
+
+
 async def _claim_and_run(
     workflow: Workflow,
     adapter: GitHubAdapter,
@@ -2123,7 +2339,7 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
 
 
 async def _approved_for_run_once(
-    adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels
+    adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels, *, todo_label: str | None = None
 ) -> bool:
     """The worker's approval check, answered in the foreground (GHSA-jm8h-q3j6-p8xp).
 
@@ -2133,14 +2349,16 @@ async def _approved_for_run_once(
     the label stays where it is. An unreadable history, the ceiling included, is a failure
     too; here there is nobody to hand an issue back to, only a command to stop.
     ``--show-prompt`` skips it: a preview renders for the operator and runs nothing.
+    ``todo_label`` is the label whose approval is checked: ``triage_todo`` for a triage run.
     """
+    todo_label = todo_label or labels.todo
     try:
-        verdict = await assess_issue(adapter, issue.number, todo_label=labels.todo)
+        verdict = await assess_issue(adapter, issue.number, todo_label=todo_label)
     except GitHubError as exc:
         print(f"[FAIL] approval: could not read the issue's history: {exc}")
         return False
     if isinstance(verdict, Unapproved):
-        print(f"[FAIL] approval: {verdict.reason}; apply {labels.todo} again")
+        print(f"[FAIL] approval: {verdict.reason}; apply {todo_label} again")
         return False
     return True
 
