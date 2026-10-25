@@ -2516,6 +2516,33 @@ async def test_reload_follows_the_overlay_being_created_edited_and_deleted(
     assert h.snapshots[-1].config_valid is True
 
 
+async def test_editing_triage_md_reloads_the_workflow(tmp_path: Path) -> None:
+    """TRIAGE.md is a third watched file: created, edited and deleted like the overlay."""
+    h = Harness(tmp_path)
+    await h.tick()
+    triage = h.path.with_name("TRIAGE.md")
+
+    def write(text: str, mtime: int) -> None:
+        triage.write_text(text, encoding="utf-8")
+        os.utime(triage, ns=(mtime * 1_000_000_000,) * 2)
+
+    write("First", 1_700_000_100)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.orchestrator._workflow.triage_template == "First"
+    reloaded = next(entry for entry in logs if entry["event"] == "workflow_reloaded")
+    assert reloaded["changed"] == ["triage prompt"]
+
+    write("Second", 1_700_000_101)
+    await h.tick()
+    assert h.orchestrator._workflow.triage_template == "Second"
+
+    triage.unlink()
+    await h.tick()
+    assert h.orchestrator._workflow.triage_path is None
+    assert h.snapshots[-1].config_valid is True
+
+
 async def test_an_invalid_overlay_keeps_the_last_good_workflow_and_names_it(
     tmp_path: Path,
 ) -> None:

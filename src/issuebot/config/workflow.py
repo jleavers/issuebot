@@ -5,6 +5,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,8 @@ from issuebot.config.resolve import resolve_config
 from issuebot.config.settings import Settings
 
 FRONT_MATTER_DELIMITER = "---"
+TRIAGE_FILE_NAME = "TRIAGE.md"
+"""The triage prompt's override, beside WORKFLOW.md: replaces the shipped default whole."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,15 @@ class Workflow:
     overlay_dev: int = 0
     overlay_ino: int = 0
     overlay_config: dict[str, Any] = field(default_factory=dict)
+    # The triage prompt: the shipped default unless a TRIAGE.md sits beside the workflow
+    # file, in which case ``triage_path`` names it and its identity is recorded for the
+    # watcher, as the overlay's is. The default is the empty string only for a Workflow a
+    # test builds by hand; ``load_workflow`` always fills it.
+    triage_template: str = ""
+    triage_path: Path | None = None
+    triage_mtime_ns: int = 0
+    triage_dev: int = 0
+    triage_ino: int = 0
 
     @property
     def source_identity(self) -> tuple[int, int, int]:
@@ -68,6 +80,13 @@ class Workflow:
         """``(dev, ino, mtime_ns)`` of the overlay, or all zero when there was none."""
         return (self.overlay_dev, self.overlay_ino, self.overlay_mtime_ns)
 
+    @property
+    def triage_identity(self) -> tuple[int, int, int] | None:
+        """``(dev, ino, mtime_ns)`` of TRIAGE.md, or ``None`` when the default is in force."""
+        if self.triage_path is None:
+            return None
+        return (self.triage_dev, self.triage_ino, self.triage_mtime_ns)
+
 
 def overlay_path_for(path: Path) -> Path:
     """The local overlay's path: ``WORKFLOW.md`` -> ``WORKFLOW.local.md``, beside it.
@@ -78,6 +97,20 @@ def overlay_path_for(path: Path) -> Path:
     There is no chaining: an overlay's own overlay would be ``WORKFLOW.local.local.md``.
     """
     return path.with_name(f"{path.stem}.local{path.suffix}")
+
+
+def triage_prompt_path_for(path: Path) -> Path:
+    """The triage prompt override's path: ``TRIAGE.md`` in the workflow file's directory.
+
+    Derived for the reason the overlay's is: a sibling inside a mounted directory live-reloads
+    through the same directory entry as the workflow itself (#46).
+    """
+    return path.with_name(TRIAGE_FILE_NAME)
+
+
+def default_triage_prompt() -> str:
+    """The triage prompt issuebot ships, read from the package so an installed wheel has it."""
+    return (resources.files("issuebot.config") / "triage_prompt.md").read_text(encoding="utf-8")
 
 
 def merge_front_matter(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
@@ -188,6 +221,9 @@ def load_workflow(
         )
         if local_body:
             body = local_body
+    triage_path, triage, triage_body = _read_triage(
+        triage_prompt_path_for(resolved_path), base=resolved_path
+    )
     merged = merge_front_matter(raw, local_raw) if local_path is not None else raw
 
     try:
@@ -217,6 +253,11 @@ def load_workflow(
         overlay_dev=local.st_dev if local is not None else 0,
         overlay_ino=local.st_ino if local is not None else 0,
         overlay_config=local_raw,
+        triage_template=triage_body if triage is not None else default_triage_prompt(),
+        triage_path=triage_path,
+        triage_mtime_ns=triage.st_mtime_ns if triage is not None else 0,
+        triage_dev=triage.st_dev if triage is not None else 0,
+        triage_ino=triage.st_ino if triage is not None else 0,
     )
 
 
@@ -248,6 +289,41 @@ def _read_overlay(
         exc.path = overlay_path
         raise
     return overlay_path, local, raw, body
+
+
+def _read_triage(
+    triage_path: Path, *, base: Path
+) -> tuple[Path | None, os.stat_result | None, str]:
+    """``(path, stat, body)`` of TRIAGE.md; ``(None, None, "")`` without one.
+
+    Read as ``_read_overlay`` reads the overlay. It is a prompt and nothing else: front matter
+    would be a second place for settings to hide, and one that never merged into anything.
+    """
+    try:
+        found = triage_path.stat()
+    except FileNotFoundError:
+        return None, None, ""
+    except OSError as exc:
+        raise MissingWorkflowFile(f"{TRIAGE_FILE_NAME} unreadable: {exc}", path=base) from exc
+    if not stat.S_ISREG(found.st_mode):
+        raise MissingWorkflowFile(
+            f"{TRIAGE_FILE_NAME} is not a regular file: {triage_path}", path=base
+        )
+    try:
+        text = triage_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MissingWorkflowFile(f"{TRIAGE_FILE_NAME} unreadable: {exc}", path=base) from exc
+    try:
+        raw, body = parse_workflow_text(text)
+    except ConfigError as exc:
+        exc.path = triage_path
+        raise
+    if raw:
+        raise WorkflowParseError(
+            f"{TRIAGE_FILE_NAME} takes no front matter; settings belong in WORKFLOW.md",
+            path=triage_path,
+        )
+    return triage_path, found, body
 
 
 def _format_errors(exc: ValidationError) -> list[tuple[str, str]]:

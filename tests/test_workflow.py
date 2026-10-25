@@ -13,7 +13,7 @@ from issuebot.config.errors import (
     SettingsValidationError,
     WorkflowParseError,
 )
-from issuebot.config.workflow import parse_workflow_text
+from issuebot.config.workflow import default_triage_prompt, parse_workflow_text
 
 # --- parse_workflow_text -------------------------------------------------------
 
@@ -224,3 +224,46 @@ def test_empty_workspace_root_is_rejected(tmp_path: Path) -> None:
         load_workflow(wf_path, environ={})
     fields = {field for field, _ in exc.value.errors}
     assert "workspace.root" in fields
+
+
+# --- TRIAGE.md -------------------------------------------------------------------
+
+
+def _write_good(tmp_path: Path) -> Path:
+    wf_path = tmp_path / "WORKFLOW.md"
+    wf_path.write_text(GOOD, encoding="utf-8")
+    return wf_path
+
+
+def test_the_shipped_triage_prompt_is_used_without_a_triage_file(tmp_path: Path) -> None:
+    wf = load_workflow(_write_good(tmp_path), environ={"TOKEN": "t"})
+    assert wf.triage_path is None
+    assert wf.triage_template == default_triage_prompt()
+    assert wf.triage_identity is None
+
+
+def test_a_triage_file_beside_the_workflow_replaces_it(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("Size #{{ issue.number }}\n", encoding="utf-8")
+    wf = load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert wf.triage_path == triage.resolve()
+    assert wf.triage_template == "Size #{{ issue.number }}"
+    stat = triage.stat()
+    assert wf.triage_identity == (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+
+
+def test_a_triage_file_with_front_matter_is_refused(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("---\ntriage:\n  max_turns: 3\n---\nbody\n", encoding="utf-8")
+    with pytest.raises(WorkflowParseError, match=r"TRIAGE\.md") as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.path == triage.resolve()
+
+
+def test_a_triage_path_that_is_a_directory_is_refused(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    (tmp_path / "TRIAGE.md").mkdir()
+    with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md"):
+        load_workflow(wf_path, environ={"TOKEN": "t"})

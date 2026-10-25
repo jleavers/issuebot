@@ -46,6 +46,7 @@ from issuebot.config import (
     load_workflow,
     overlay_path_for,
 )
+from issuebot.config.workflow import triage_prompt_path_for
 from issuebot.events import EventBus
 from issuebot.github import (
     GhCliAdapter,
@@ -992,13 +993,24 @@ class Orchestrator:
             # A file that exists and cannot be stat'ed is not something to guess about.
             self._report_reload_failure(f"workflow overlay unreadable: {exc}")
             return
+        triage_path = triage_prompt_path_for(path)
+        try:
+            triage: os.stat_result | None = triage_path.stat()
+        except FileNotFoundError:
+            # The normal case: the shipped triage prompt is in force.
+            triage = None
+        except OSError as exc:
+            self._report_reload_failure(f"{triage_path.name} unreadable: {exc}")
+            return
         loaded = (
             workflow.source_identity,
             workflow.overlay_identity if workflow.overlay_path is not None else None,
+            workflow.triage_identity,
         )
         found = (
             _identity(source),
             _identity(overlay) if overlay is not None else None,
+            _identity(triage) if triage is not None else None,
         )
         if loaded == found:
             # Nothing to load: neither identity has moved and the overlay's presence has not
@@ -1009,6 +1021,8 @@ class Orchestrator:
             complaint = _pinned_mount_complaint(path, source)
             if complaint is None and overlay is not None:
                 complaint = _pinned_mount_complaint(overlay_path, overlay)
+            if complaint is None and triage is not None:
+                complaint = _pinned_mount_complaint(triage_path, triage)
             if complaint is not None:
                 self._report_reload_failure(complaint)
             else:
@@ -2401,6 +2415,8 @@ def _changed_sections(old: Workflow, new: Workflow) -> list[str]:
     ]
     if old.prompt_template != new.prompt_template:
         changed.append("prompt")
+    if old.triage_template != new.triage_template:
+        changed.append("triage prompt")
     return changed
 
 
