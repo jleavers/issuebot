@@ -110,8 +110,8 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 - **One `WORKFLOW.md` is one worker watching one repository.** It lives in `configs/`, the
   directory Compose mounts (see [Configuration
   changes](docs/operations.md#configuration-changes) for why the directory and not the file). Nothing is installed in the
-  target repository: it only needs the five `issuebot/*` state labels and the `issuebot/no-fault`
-  marker, which `issuebot labels ensure` creates. To work on several repositories, run one
+  target repository: it only needs the five `issuebot/*` state labels, the `issuebot/no-fault`
+  marker and the three triage labels, which `issuebot labels ensure` creates. To work on several repositories, run one
   worker checkout per repository against one shared database and one dashboard (see [More
   than one repository](docs/operations.md#more-than-one-repository)).
 - `WORKFLOW.md` has two parts. The YAML front matter is the configuration; everything after

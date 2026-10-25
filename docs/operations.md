@@ -197,12 +197,14 @@ one action that resumes it is in the comment:
 - **`triage failed`**: `agent.max_attempts` failed attempts in a row, a malformed verdict
   included. Fix the cause the comment names, then add `issuebot/triage-todo` again.
 - **`triage not filed`**: the session finished but GitHub refused the filing
-  `agent.max_attempts` times. Add `issuebot/triage-todo` again to triage it afresh.
+  `agent.max_attempts` times. Unlink any sub-issues it filed from this issue first, then add
+  `issuebot/triage-todo` again to triage it afresh.
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
 - **`already split`**: the issue already has sub-issues. Re-triaging a split issue is the
   parent review, which a later release adds, so no session runs and nothing is filed twice.
-  Close or unlink its sub-issues, then add `issuebot/triage-todo` again.
+  Remove its sub-issues from it ("Remove sub-issue" on the parent; closing them does not
+  unlink them), then add `issuebot/triage-todo` again.
 - **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
   issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
 

@@ -1721,7 +1721,10 @@ class Orchestrator:
                 pending.issue,
                 title="triage not filed",
                 reason=f"issuebot could not file the triage verdict on GitHub: {error}",
-                way_back=f"Add `{labels.triage_todo}` again to triage it afresh.",
+                way_back=(
+                    "Unlink any sub-issues it filed from this issue first, then add "
+                    f"`{labels.triage_todo}` again to triage it afresh."
+                ),
             )
             if outcome != "failed":
                 # The note ends the chain (`_triage_hand_back`), and the verdict with it.
@@ -1873,7 +1876,8 @@ class Orchestrator:
                     "the parent review, a later phase"
                 ),
                 way_back=(
-                    f"Close or unlink its sub-issues, then add `{labels.triage_todo}` again."
+                    f"Remove its sub-issues from it (closing them does not unlink them), then add "
+                    f"`{labels.triage_todo}` again."
                 ),
             )
             return False

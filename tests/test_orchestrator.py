@@ -5320,7 +5320,7 @@ async def test_an_issue_with_sub_issues_is_handed_back_as_already_split(tmp_path
     [comment] = h.github.comments_for(1)
     assert comment.body.startswith("### Issuebot already split (")
     assert "#1 already has sub-issues" in comment.body
-    assert "Close or unlink its sub-issues, then add `issuebot/triage-todo` again." in comment.body
+    assert "Remove its sub-issues from it (closing them does not unlink them)" in comment.body
     assert h.recorder.kinds == ["state_changed", "blocked"]
     assert h.calls("create_sub_issue") == [(1, "First step", "Do it.")]
     assert orchestrator._triage_failures == {}
@@ -5469,7 +5469,7 @@ async def test_a_verdict_github_keeps_refusing_is_handed_back(tmp_path: Path) ->
     [note] = h.github.comments_for(1)
     assert note.body.startswith("### Issuebot triage not filed (")
     assert "issuebot could not file the triage verdict on GitHub: " in note.body
-    assert "Add `issuebot/triage-todo` again to triage it afresh." in note.body
+    assert "`issuebot/triage-todo` again to triage it afresh." in note.body
     assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
     assert len(h.triage_sessions.runs) == 1
     await h.tick()

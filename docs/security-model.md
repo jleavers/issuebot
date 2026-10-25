@@ -156,8 +156,9 @@ by the prompt or by anything in `WORKFLOW.md` the operator has widened for work 
   work session widens nothing here. It needs Claude Code 2.1.303 or later.
 - **No `GH_TOKEN`.** The session's environment carries no GitHub credential, and no `.issuebot/env`
   from a hook: the clone is hook-free. It runs as a session account, behind the egress proxy.
-- **What `--restricted` confines.** Measured on 2026-10-25 with exactly these flags, on 2.1.303
-  and on 2.1.310 alike: a read inside the clone succeeded, a read of an absolute path outside it
+- **What `--restricted` confines.** Measured on 2026-10-25 with exactly these flags on 2.1.303,
+  and earlier on 2.1.310 with `--restricted --tools ... --permission-mode dontAsk
+  --json-schema`, with the same result on both: a read inside the clone succeeded, a read of an absolute path outside it
   was refused, and so was a read through a symlink in the clone that points out of it; the
   session's only tools were Glob, Grep, Read and the `StructuredOutput` that carries the
   verdict. 2.1.303 is both the version floor and the shipped pin, and it carries all of
