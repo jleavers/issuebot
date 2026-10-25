@@ -2345,6 +2345,12 @@ def test_run_once_reports_missing_issue(
         ((), False, "#42 is unlabelled"),
         (("issuebot/todo", "issuebot/review"), False, "#42 carries more than one state label"),
         (("issuebot/todo",), True, "#42 is closed"),
+        # Spec 2026-10-25, section 1: an operator step is never a work run, whatever `todo`.
+        (
+            ("issuebot/todo", "issuebot/operator-step"),
+            False,
+            "#42 is an operator step (issuebot/operator-step); do it yourself, then close it",
+        ),
     ],
 )
 def test_run_once_refuses_unrunnable_issues(
@@ -2937,6 +2943,10 @@ def test_not_runnable_messages(make_issue: Callable[..., Issue]) -> None:
     assert not_runnable(closed, labels) == "is closed"
     assert not_runnable(make_issue(state=StateLabel.COMPLETE), labels) == (
         "is complete; label it issuebot/todo or issuebot/rework first"
+    )
+    step = make_issue(labels=("issuebot/todo", "issuebot/operator-step"))
+    assert not_runnable(step, labels) == (
+        "is an operator step (issuebot/operator-step); do it yourself, then close it"
     )
 
 

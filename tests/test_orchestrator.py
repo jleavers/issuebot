@@ -5599,6 +5599,42 @@ async def test_an_unswapped_verdict_is_dropped_when_triage_todo_goes(tmp_path: P
     assert h.orchestrator._triage_pending == {}
 
 
+async def test_a_tick_with_no_free_slot_makes_no_triage_read(tmp_path: Path) -> None:
+    """Section 9: every deployment shares the account's hourly GraphQL budget, and with no slot
+    to fill the candidates read is spent for nothing -- the gate would refuse the first one on
+    `slots`. A verdict already owed is still filed, since filing needs no slot."""
+    h = Harness(tmp_path, max_concurrent=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment", times=2)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    h.add_issue(2, "todo")
+    await h.tick()  # the first retry fails too; the work run takes the one slot
+    assert [r.issue.number for r in h.sessions.runs] == [2]
+    h.add_triage_issue(3)
+    reads = len(h.calls("fetch_issues_with_label"))
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == reads
+    assert len(triage_comments(h, 1)) == 1, "the owed verdict is filed without a slot"
+    assert len(h.triage_sessions.runs) == 1
+
+
+async def test_an_owed_triage_escape_keeps_the_read_with_no_free_slot(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=1, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels", times=2)
+    failed = {"outcome": "failed", "stop_reason": "failure", "error_category": "turn_failed"}
+    await h.exit(h.triage_sessions.runs[0], **failed, error="boom")
+    h.add_issue(2, "todo")
+    await h.tick()  # the escape is refused again; the work run takes the one slot
+    assert [r.issue.number for r in h.sessions.runs] == [2]
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    await h.tick()
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.github.comments_for(1)[-1].body.startswith("### Issuebot triage failed (")
+
+
 async def test_a_usage_limited_triage_run_holds_dispatch_and_counts_no_failure(
     tmp_path: Path,
 ) -> None:

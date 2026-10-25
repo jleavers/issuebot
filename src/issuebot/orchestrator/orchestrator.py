@@ -1647,6 +1647,11 @@ class Orchestrator:
         the hold is the board's, and the board's own poll follows in this tick to answer it.
         """
         await self._retry_pending_verdicts()
+        if self._slots() == 0 and not self._triage_escapes:
+            # Section 9: every deployment shares the account's hourly GraphQL budget, and with
+            # no slot to fill the gate would refuse the first candidate on `slots` anyway. An
+            # escape note still owed needs no slot, so it keeps the read.
+            return 0
         labels = self._workflow.config.github.labels
         try:
             issues = await self._adapter.fetch_issues_with_label(labels.triage_todo)

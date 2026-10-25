@@ -2744,12 +2744,16 @@ def triage_settings(root: Path, **claude: object) -> Settings:
 
 
 def test_triage_argv_is_restricted_and_read_only(tmp_path: Path) -> None:
+    # Every operator setting the triage argv ignores, set to something visible: the project
+    # source the operator allows, and a deny list whose flag a triage argv never carries.
     cfg = triage_settings(
         tmp_path,
         allowed_tools=["Bash"],
+        disallowed_tools=["Write"],
         permission_mode="bypassPermissions",
         mcp_config=["x.json"],
         append_system_prompt="hi",
+        setting_sources=["user", "project"],
     )
     runner = TriageRunner(cfg, environ={"HOME": "/home/agent"})
     argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
@@ -2785,8 +2789,9 @@ def test_triage_argv_is_restricted_and_read_only(tmp_path: Path) -> None:
         "--session-id",
         SESSION_ID,
     ]
-    for operator_only in ("Bash", "bypassPermissions", "x.json", "hi", "--allowedTools"):
-        assert operator_only not in argv
+    operator_only = ("Bash", "Write", "bypassPermissions", "x.json", "hi", "user,project")
+    for value in (*operator_only, "--allowedTools", "--disallowedTools", "--mcp-config"):
+        assert value not in argv
 
 
 def test_triage_argv_resumes_and_takes_the_triage_model(tmp_path: Path) -> None:
@@ -2826,6 +2831,16 @@ def test_triage_environment_has_no_github_token(tmp_path: Path) -> None:
     assert "GH_TOKEN" not in env
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth"
     assert workspace_env == []
+
+
+def test_triage_child_environment_has_no_github_token(tmp_path: Path) -> None:
+    """The base class's `child_environment` carries `GH_TOKEN`; the triage runner's never does,
+    whichever path asks for it, and it is the environment a turn actually runs with."""
+    runner = TriageRunner(triage_settings(tmp_path), environ={"PATH": "/bin", "HOME": "/h"})
+    env = runner.child_environment()
+    assert "GH_TOKEN" not in env
+    assert "ghp_sekret" not in env.values()
+    assert env == runner._session_environment(tmp_path / "ws")[0]
 
 
 def test_triage_ignores_the_workspace_env_file(tmp_path: Path) -> None:

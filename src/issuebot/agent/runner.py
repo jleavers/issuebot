@@ -1677,10 +1677,16 @@ class TriageRunner(ClaudeRunner):
         document["permissions"] = {"deny": list(TRIAGE_DENY)}
         return json.dumps(document)
 
+    def child_environment(self) -> dict[str, str]:
+        # No token and no uv cache. `token=None` here and not a nulled
+        # `settings.github.token`, which `Scrubber.for_deployment` still has to read. Overridden
+        # here, not only bypassed below, so no path into this runner reaches the base class's
+        # `GH_TOKEN` (spec section 4).
+        return agent_environment(self._environ, token=None)
+
     def _session_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
-        # No token, no env file, no uv cache. `token=None` here and not a nulled
-        # `settings.github.token`, which `Scrubber.for_deployment` still has to read.
-        return agent_environment(self._environ, token=None), []
+        # Nor the workspace's env file: triage runs no hooks to write one.
+        return self.child_environment(), []
 
 
 class _Emitter:

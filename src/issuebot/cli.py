@@ -2345,6 +2345,10 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
     hint = f"; label it {labels.todo} or {labels.rework} first"
     if issue.github_state == "closed":
         return "is closed"
+    if labels.operator_step.lower() in issue.labels:
+        # Spec 2026-10-25, section 1: never dispatched as a work run. The worker clears the
+        # state label and says so (`operator_step_escape`); here nothing is written.
+        return f"is an operator step ({labels.operator_step}); do it yourself, then close it"
     if issue.state is None:
         if issue.state_labels:
             return "carries more than one state label" + hint
