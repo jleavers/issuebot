@@ -1423,8 +1423,8 @@ warning or a limit hit (chosen by `hit`), times in UTC.
 
 the observability store, imported by `cli` and `web`; imports `config`,
 `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`;
-schema version 6) applied by
+`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`, `0007_run_kind`;
+schema version 7) applied by
 `migrate.py` in one transaction
 under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
 files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
@@ -1511,6 +1511,11 @@ case-insensitively.
 row per window instance `(limit_window, resets_at)`, written only by the web's watcher:
 `Database.claude_limit_alerted` reads it, `claim_claude_limit_alert` writes a target only when
 it raises the stored percent, and `release_claude_limit_alert` gives a failed post's claim back.
+
+`0007_run_kind.sql`: `runs.kind` (`work` or `triage`, default `work`), carried by `RunStarted` and
+`RunEnded` as `run_kind`. `ISSUE_LEDGERS` counts only work runs toward the failure chain, while the
+cost of every run is the issue's spend; `apply_event` leaves `issues.state` alone for a move on
+the triage labels (`_on_the_triage_track`), though the `events` row is still written.
 
 ## `issuebot.web`
 

@@ -215,3 +215,41 @@ def test_log_sink_logs_kind_and_fields() -> None:
     assert record["logger"] == "issuebot.events"
     assert record["level"] == "info"
     assert LogSink.name == "log"
+
+
+def test_run_events_default_to_work_and_round_trip_the_kind() -> None:
+    common: dict[str, object] = {
+        "issue_number": 1,
+        "issue_identifier": "repo-1",
+        "run_id": "run-1",
+        "outcome": "succeeded",
+        "error": None,
+        "turns": 1,
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "duration_s": 1.0,
+    }
+    assert RunEnded(**common).to_dict()["run_kind"] == "work"  # type: ignore[arg-type]
+    assert RunEnded(**common, run_kind="triage").to_dict()["run_kind"] == "triage"  # type: ignore[arg-type]
+    started = RunStarted(
+        issue_number=1,
+        issue_identifier="repo-1",
+        run_id="run-1",
+        attempt=1,
+        session_id=None,
+        workspace_path="/w",
+    )
+    assert started.to_dict()["run_kind"] == "work"
+
+
+def test_state_changed_note_defaults_to_none() -> None:
+    event = StateChanged(
+        issue_number=1,
+        issue_identifier="repo-1",
+        from_label=None,
+        to_label="issuebot/triage-complete",
+        actor="issuebot",
+    )
+    assert event.note is None
+    assert event.to_dict()["note"] is None

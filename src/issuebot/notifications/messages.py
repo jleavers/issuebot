@@ -90,6 +90,8 @@ def _state_changed(event: StateChanged, issue: str, labels: GitHubLabels) -> str
     text = f"{emoji} {issue} {move} {_ACTORS[event.actor]}"
     if event.pr_url:
         text += f" · {pr_link(event.pr_url)}"
+    if event.note:
+        text += f" · {_escape(event.note)}"
     return text
 
 

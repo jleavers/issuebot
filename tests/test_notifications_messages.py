@@ -42,6 +42,19 @@ def state_changed(**overrides: object) -> StateChanged:
     return StateChanged(**fields)  # type: ignore[arg-type]
 
 
+def test_a_state_change_note_is_appended() -> None:
+    event = state_changed(
+        from_label="issuebot/triage-todo",
+        to_label="issuebot/triage-complete",
+        actor="issuebot",
+        note="split into 3 sub-issues",
+    )
+    assert fmt(event) == (
+        f":compass: {ISSUE} `issuebot/triage-todo` → `issuebot/triage-complete` by issuebot"
+        " · split into 3 sub-issues"
+    )
+
+
 def run_ended(**overrides: object) -> RunEnded:
     fields: dict[str, object] = {
         "issue_number": 42,

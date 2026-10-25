@@ -833,6 +833,30 @@ async def test_issue_ledgers_reads_the_chain_and_what_it_cost(
     assert rows["repo-20"].last_run_at is not None
 
 
+async def test_triage_failures_do_not_count_toward_the_work_chain(db_url: str) -> None:
+    await migrate(db_url)
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    await store.connect()
+    try:
+        for n, kind in enumerate(("triage", "triage", "triage", "work")):
+            ago = (5 - n) * HOUR
+            await store.apply_event(
+                run_ended(
+                    f"t{n}",
+                    30,
+                    NOW - ago,
+                    outcome="failed",
+                    cost_usd=0.5,
+                    run_kind=kind,
+                )
+            )
+    finally:
+        await store.close()
+    async with scoped(Database(db_url)) as queries:
+        (row,) = await queries.issue_ledgers()
+    assert (row.failures, row.runs, row.cost_usd) == (1, 4, 2.0)
+
+
 async def test_issue_ledgers_is_bounded_by_repository_window_and_limit(
     with_ledger_history: Database,
 ) -> None:
