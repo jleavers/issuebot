@@ -1246,7 +1246,7 @@ async def test_remove_triage_runs_no_before_remove_hook(
 
 
 @posix
-async def test_triage_identifiers_lists_only_triage_directories(
+async def test_triage_keys_lists_only_triage_directories(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:
     manager, _ = make_manager(tmp_path)
@@ -1254,4 +1254,20 @@ async def test_triage_identifiers_lists_only_triage_directories(
     await manager.create_triage(make_issue(identifier="example-2"))
     await manager.create_triage(make_issue(identifier="example-3"))
     (manager.root / "stray.triage").write_text("a file, not a directory")
-    assert manager.triage_identifiers() == [triage_key("example-2"), triage_key("example-3")]
+    assert manager.triage_keys() == [triage_key("example-2"), triage_key("example-3")]
+
+
+@posix
+async def test_the_sweep_removes_every_key_triage_keys_returns(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    manager, _ = make_manager(tmp_path)
+    work = await manager.create_or_reuse(make_issue(identifier="example-1"))
+    await manager.create_triage(make_issue(identifier="example-2"))
+    await manager.create_triage(make_issue(identifier="example-3"))
+    keys = manager.triage_keys()
+    assert len(keys) == 2
+    for key in keys:
+        assert await manager.remove_triage_key(key) is True
+    assert manager.triage_keys() == []
+    assert work.path.is_dir()

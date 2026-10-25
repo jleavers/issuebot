@@ -99,7 +99,7 @@ def workspace_key(identifier: str) -> str:
 
 # The triage session's clone sits beside the work clone under this suffix (spec section 4). A
 # work key is `<repo>-<number>` and ends in a digit, so no work key can end in it, and
-# `triage_identifiers` reads the suffix back off the disk.
+# `triage_keys` reads the suffix back off the disk.
 TRIAGE_SUFFIX = ".triage"
 
 
@@ -345,8 +345,17 @@ class WorkspaceManager:
         return Workspace(key=path.name, path=path, created=True)
 
     async def remove_triage(self, identifier: str) -> bool:
-        """Remove the triage clone, running no ``before_remove`` hook; False if none was there."""
-        path = self.triage_path_for(identifier)
+        """Remove the issue's triage clone, running no ``before_remove`` hook."""
+        return await self.remove_triage_key(triage_key(identifier))
+
+    async def remove_triage_key(self, key: str) -> bool:
+        """Remove the triage clone stored under ``key`` (suffix included); False if none was there.
+
+        Addressed by key for the same reason ``remove_key`` is: the startup sweep reads its
+        candidates off the disk with ``triage_keys``, and a key already carries the suffix that
+        ``remove_triage`` would add a second time.
+        """
+        path = self._path_for_key(key)
         if not path.exists():
             return False
         with contextlib.suppress(AgentError):
@@ -359,8 +368,10 @@ class WorkspaceManager:
         self._log.info("triage_workspace_removed", workspace=str(path))
         return True
 
-    def triage_identifiers(self) -> list[str]:
+    def triage_keys(self) -> list[str]:
         """The triage clones on the disk, as keys, for the startup sweep.
+
+        The sweep removes each with ``remove_triage_key``; a key already ends in the suffix.
 
         Through the boundary like ``finished_keys``: a name is a triage clone only when it is a
         directory of the worker's reached without following a link. Never raises.
