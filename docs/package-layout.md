@@ -298,7 +298,7 @@ git's `core.pager`, `core.editor`, `credential.helper` or `[alias] x = !...`, ss
 `ProxyCommand`, `gh`'s `aliases`. The `gh` entry is #173, which reversed #151's decision to
 leave it: #151 measured `aliases:`, which runs a shell command but cannot shadow a core one,
 and judged the channel too narrow to spend an entry on; `http_unix_socket`, one of the
-fourteen keys `gh config list` prints, re-points `gh`'s HTTP transport at a unix socket the
+fifteen keys `gh config list` prints, re-points `gh`'s HTTP transport at a unix socket the
 session names and
 *does* fire on an ordinary core command -- measured, `gh api user` handed a listener
 `Authorization: token <GH_TOKEN>` and took a forged `{"login": "forged"}` back, and so did
@@ -350,14 +350,15 @@ no `Authorization` header to a substituted host (from `GH_TOKEN` or from the fil
 forged answer needs a CA in root's trust store, and #126's proxy refuses a name off its
 allow-list while an on-list one completes -- so what survives is availability, not
 confidentiality, and it needs no network at all.
-The keys removed are `gh`'s whole configuration surface, the fourteen `gh config --help`
+The keys removed are `gh`'s whole configuration surface, the fifteen `gh config --help`
 advertises, because that set is what this position can carry and what `gh` resolves out of it.
-Thirteen of them because `gh config set -h <host> <key> <value>` writes them here rather than
-into `config.yml`. That measurement has to be taken with a value each key accepts,
+Fourteen of them because `gh config set -h <host> <key> <value>` writes them here rather than
+into `config.yml` -- `expiring_credentials`, which `gh` 2.103.0 added, among them. That
+measurement has to be taken with a value each key accepts,
 which is the easy thing to get wrong and was got wrong first time round: `gh config set`
-validates the enum-valued keys, so a probe passing a placeholder is refused for nine of the
-fourteen, and one that swallows the refusal reports only the five free-form ones and calls
-that the closed set. The fourteenth is `clipboard`, added by `gh` 2.101.0 and the first key to
+validates the enum-valued keys, so a probe passing a placeholder is refused for ten of the
+fifteen, and one that swallows the refusal reports only the five free-form ones and calls
+that the closed set. The other is `clipboard`, added by `gh` 2.101.0 and the first key to
 separate writing from resolving (#231): `gh config set -h` refuses it outright (`--host cannot
 be used when setting clipboard`), so `gh`'s own writer never puts it here, and it is named all
 the same because the list is over what the file carries and `gh` reads back -- planted by hand
@@ -370,19 +371,23 @@ credential state: `oauth_token` and `user`, neither of which `-h` can write. The
 `gh` writes them -- host level, where it reads them, and the `users.<name>` subtree, which
 `gh config set -h` mirrors the keys it writes into (creating it if need be) once the file names
 a user, so a host-level-only sweep would leave a complete second copy of every planted key.
-Those copies are measured inert on this `gh`, but so are twelve of the fourteen at host level.
+Those copies are measured inert on this `gh`, but so are twelve of the fifteen at host level.
 `GH_HOSTS_MAX_DEPTH` (8) is the other half of being able to write the file back at all: PyYAML
 recurses per nesting level, `gh` writes this file three levels deep at most, and a key whose
 value nests past the bound is dropped -- measured, ~900 bytes of brackets beside a plant used
 to make the *dump* raise, so the keys came out of the document and the write was then
 abandoned, leaving the plant for the container's lifetime. Nothing credential is that deep.
-Two of the fourteen are live from this position and they differ in reach. `api_host` is the
+Three of the fifteen are live from this position and they differ in reach. `api_host` is the
 issue's subject and the only one *only* reachable here, top level being inert for it, so this
 closes it outright. `git_protocol` set to `ssh` reads back ahead of the hostname-less lookup,
 makes `gh auth status` report `Git operations protocol: ssh`, and fails `gh repo clone`
 outright with `cannot run ssh: No such file or directory`, the image shipping no ssh client --
 but it is *also* honoured from `config.yml`, which #173 takes -- #190 was written while that
-was still open and said so; in this tree both positions are closed. `http_unix_socket`,
+was still open and said so; in this tree both positions are closed. `expiring_credentials`
+reaches least: planted under the host, it turns an interactive `gh auth login` into an
+expiring-token login (measured on `gh` 2.103.2), but that is the one command it steers, it
+picks a kind of token rather than holding one, and `gh auth login` refuses outright while
+`GH_TOKEN` is set, as a session's is. `http_unix_socket`,
 `pager`, `editor` and `browser` are measured *inert* here (the same values at top level fire;
 the hostname-less lookup is what gh's own pager, editor and browser resolution uses) and the
 remaining eight are cosmetic or documented global -- `clipboard` among them, a

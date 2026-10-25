@@ -529,11 +529,13 @@ to build the next workspace to that host instead of GitHub's. `git_protocol` is 
 `ssh` there, the next session's `gh repo clone` fails outright, since the image ships no ssh
 client.
 
-So the sweep removes gh's whole configuration surface from that file — the fourteen keys
+So the sweep removes gh's whole configuration surface from that file — the fifteen keys
 `gh config --help` advertises, none of which is credential state — and leaves everything else,
-the tokens included. Thirteen of the fourteen are on the list because `gh config set -h <host>`
-writes them here rather than into `config.yml`. The fourteenth, `clipboard`, which `gh` 2.101.0
-added, is on it for the property those thirteen share rather than for that one: `gh` declines to
+the tokens included. Fourteen of the fifteen are on the list because `gh config set -h <host>`
+writes them here rather than into `config.yml`; `expiring_credentials`, which `gh` 2.103.0 added,
+is one of them, a preference over which kind of token `gh auth login` asks for rather than a
+token. The other, `clipboard`, which `gh` 2.101.0
+added, is on it for the property those fourteen share rather than for that one: `gh` declines to
 write it host-level at all, but a value planted by hand under the host is still resolved from
 here ahead of the hostname-less lookup, and residue is planted rather than politely set (#231).
 The rule is not "these keys are dangerous" but "a session does not leave *configuration* in a
