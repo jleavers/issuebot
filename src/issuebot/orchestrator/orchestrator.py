@@ -513,6 +513,25 @@ class Orchestrator:
         except GitHubError as exc:
             problems.append(f"github.labels: {exc.message}")
         else:
+            # A deployment that upgrades has no triage labels until someone runs `labels
+            # ensure`; refusing to start over them would leave the worker (and tools/upgrade's
+            # checkout) down for a feature nobody has used yet, so they only warn.
+            triage_names = {
+                name.lower()
+                for name in (
+                    settings.github.labels.triage_todo,
+                    settings.github.labels.triage_complete,
+                    settings.github.labels.operator_step,
+                )
+            }
+            absent_triage = [name for name in missing if name.lower() in triage_names]
+            missing = [name for name in missing if name.lower() not in triage_names]
+            if absent_triage:
+                self._log.warning(
+                    "triage_labels_missing",
+                    labels=absent_triage,
+                    hint=run_hint("labels ensure"),
+                )
             if missing:
                 names = ", ".join(missing)
                 problems.append(f"labels missing: {names}; {run_hint('labels ensure')}")

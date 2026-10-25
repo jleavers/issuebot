@@ -5,13 +5,45 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from issuebot.config.settings import DEFAULT_DISALLOWED_TOOLS, GitHubLabels, Settings
+from issuebot.config.settings import (
+    DEFAULT_DISALLOWED_TOOLS,
+    GitHubLabels,
+    Settings,
+    TriageSettings,
+)
 
 MINIMAL = {"github": {"repo": "owner/repo"}}
 
 
 def _locs(exc: ValidationError) -> set[str]:
     return {".".join(str(p) for p in e["loc"]) for e in exc.errors()}
+
+
+def test_the_markers_are_every_non_state_label_issuebot_owns() -> None:
+    labels = GitHubLabels()
+    assert labels.markers() == (
+        "issuebot/no-fault",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
+    )
+    assert labels.claim_clears() == ("issuebot/no-fault", "issuebot/triage-todo")
+
+
+def test_triage_label_names_are_checked_like_the_others() -> None:
+    with pytest.raises(ValidationError):
+        GitHubLabels(triage_todo="a,b")
+    with pytest.raises(ValidationError):
+        GitHubLabels(operator_step="ISSUEBOT/TODO")  # collides with todo, case-insensitively
+
+
+def test_triage_settings_defaults() -> None:
+    settings = Settings.model_validate(MINIMAL)
+    assert settings.triage == TriageSettings(
+        model=None, max_turns=1, max_budget_usd=2.0, max_sub_issues=8
+    )
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**MINIMAL, "triage": {"max_sub_issues": 21}})
 
 
 def test_minimal_config_applies_every_default() -> None:
@@ -25,7 +57,6 @@ def test_minimal_config_applies_every_default() -> None:
         "issuebot/rework",
         "issuebot/complete",
     )
-    assert s.github.labels.markers() == ("issuebot/no-fault",)
     assert s.github.request_timeout_ms == 30_000
     assert s.polling.interval_ms == 30_000
     assert s.workspace.root == Path("/workspaces")

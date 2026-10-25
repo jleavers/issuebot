@@ -22,6 +22,7 @@ from issuebot.config.settings import (
     Settings,
     SettingSource,
     SlackSettings,
+    TriageSettings,
     WorkspaceSettings,
 )
 from issuebot.config.workflow import (
@@ -52,6 +53,7 @@ __all__ = [
     "Settings",
     "SettingsValidationError",
     "SlackSettings",
+    "TriageSettings",
     "Workflow",
     "WorkflowParseError",
     "WorkspaceSettings",

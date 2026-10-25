@@ -80,7 +80,7 @@ def claimed_snapshot(issue: Issue, labels: GitHubLabels, *, clear_markers: bool 
     ``clear_markers`` mirrors ``set_state``'s: `run-once` claims without clearing them, and
     its snapshot says what its claim did rather than what the worker's would have.
     """
-    markers = labels.markers() if clear_markers else ()
+    markers = labels.claim_clears() if clear_markers else ()
     dropped = {name.lower() for name in (*labels.as_tuple(), *markers)}
     target = labels.in_progress.lower()
     kept = tuple(name for name in issue.labels if name.lower() not in dropped)

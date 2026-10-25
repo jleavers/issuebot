@@ -745,6 +745,33 @@ async def test_startup_fails_on_preflight_auth_or_labels(
     ]
 
 
+async def test_startup_tolerates_missing_triage_labels(tmp_path: Path) -> None:
+    """An upgraded deployment has no triage labels until `labels ensure` runs; the worker must
+    still start, and say what to run."""
+    h = Harness(tmp_path)
+    for name in ("issuebot/triage-todo", "issuebot/triage-complete", "issuebot/operator-step"):
+        h.github.repo_labels.pop(name)
+    with capture_logs() as logs:
+        await h.orchestrator.startup()
+    warned = [log for log in logs if log["event"] == "triage_labels_missing"]
+    assert len(warned) == 1
+    assert warned[0]["labels"] == [
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
+    ]
+    assert "labels ensure" in warned[0]["hint"]
+
+
+async def test_startup_still_fails_on_a_missing_no_fault_label(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.repo_labels.pop("issuebot/no-fault")
+    h.github.repo_labels.pop("issuebot/triage-todo")
+    with pytest.raises(OrchestratorStartupError) as exc:
+        await h.orchestrator.startup()
+    assert exc.value.problems == ["labels missing: issuebot/no-fault; run issuebot labels ensure"]
+
+
 async def test_startup_names_the_compose_command_inside_the_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

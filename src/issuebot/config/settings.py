@@ -29,16 +29,35 @@ class GitHubLabels(_Model):
     rework: NonEmptyStr = "issuebot/rework"
     complete: NonEmptyStr = "issuebot/complete"
     no_fault: NonEmptyStr = "issuebot/no-fault"
+    triage_todo: NonEmptyStr = "issuebot/triage-todo"
+    triage_complete: NonEmptyStr = "issuebot/triage-complete"
+    operator_step: NonEmptyStr = "issuebot/operator-step"
 
     def as_tuple(self) -> tuple[str, ...]:
         """The five state labels, and only those: what ``clear_state`` strips."""
         return (self.todo, self.in_progress, self.review, self.rework, self.complete)
 
     def markers(self) -> tuple[str, ...]:
-        """Labels issuebot owns that are not states, so a state change must not remove them."""
-        return (self.no_fault,)
+        """Labels issuebot owns that are not states: ensured, checked distinct, never cleared by
+        ``clear_state``."""
+        return (self.no_fault, self.triage_todo, self.triage_complete, self.operator_step)
 
-    @field_validator("todo", "in_progress", "review", "rework", "complete", "no_fault")
+    def claim_clears(self) -> tuple[str, ...]:
+        """What a claim strips: the last verdict's no-fault marker, and ``triage-todo``, since
+        a state label wins over triage (spec section 1)."""
+        return (self.no_fault, self.triage_todo)
+
+    @field_validator(
+        "todo",
+        "in_progress",
+        "review",
+        "rework",
+        "complete",
+        "no_fault",
+        "triage_todo",
+        "triage_complete",
+        "operator_step",
+    )
     @classmethod
     def _label_name_is_usable(cls, value: str) -> str:
         if "," in value:
@@ -246,6 +265,15 @@ class NotificationsSettings(_Model):
     slack: SlackSettings = Field(default_factory=SlackSettings)
 
 
+class TriageSettings(_Model):
+    """The read-only session that sizes an issue before anyone starts it."""
+
+    model: str | None = None
+    max_turns: int = Field(default=1, ge=1)
+    max_budget_usd: float = Field(default=2.0, gt=0)
+    max_sub_issues: int = Field(default=8, ge=1, le=20)
+
+
 class Settings(_Model):
     github: GitHubSettings
     polling: PollingSettings = Field(default_factory=PollingSettings)
@@ -253,5 +281,6 @@ class Settings(_Model):
     hooks: HooksSettings = Field(default_factory=HooksSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     claude: ClaudeSettings = Field(default_factory=ClaudeSettings)
+    triage: TriageSettings = Field(default_factory=TriageSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)

@@ -196,7 +196,7 @@ class FakeGitHub:
         target = label_name(self.labels, state)
         self._strip_state_labels(record)
         if clear_markers:
-            markers = {name.lower() for name in self.labels.markers()}
+            markers = {name.lower() for name in self.labels.claim_clears()}
             record.labels = [name for name in record.labels if name.lower() not in markers]
         record.labels.append(target)
         record.updated_at = self._now()

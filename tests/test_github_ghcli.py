@@ -672,13 +672,30 @@ async def test_set_state_adds_target_and_removes_the_other_four() -> None:
     ]
 
 
+async def test_a_claim_strips_no_fault_and_triage_todo_but_keeps_triage_complete() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS, clear_markers=True)
+    removed = runner.argv(0)[-1].split(",")
+    assert removed == [
+        "issuebot/todo",
+        "issuebot/review",
+        "issuebot/rework",
+        "issuebot/complete",
+        "issuebot/no-fault",
+        "issuebot/triage-todo",
+    ]
+    assert "issuebot/triage-complete" not in removed
+
+
 async def test_set_state_removes_the_markers_only_when_asked() -> None:
     """#34: `claim` drops the no-fault marker; every other `set_state` must preserve it."""
     runner = StubRunner()
     runner.on(has("issue", "edit"))
     await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS, clear_markers=True)
     assert runner.argv(0)[-1] == (
-        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete,issuebot/no-fault"
+        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete,"
+        "issuebot/no-fault,issuebot/triage-todo"
     )
 
 
@@ -915,6 +932,9 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         ("issuebot/rework", "created"),
         ("issuebot/complete", "created"),
         ("issuebot/no-fault", "created"),
+        ("issuebot/triage-todo", "created"),
+        ("issuebot/triage-complete", "created"),
+        ("issuebot/operator-step", "created"),
     ]
     assert runner.argv(0) == [
         "label",
@@ -927,7 +947,7 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         "200",
     ]
     creates = [argv for argv, _ in runner.calls if argv[:2] == ["label", "create"]]
-    assert len(creates) == 5
+    assert len(creates) == 8
     assert creates[0] == [
         "label",
         "create",
@@ -953,6 +973,9 @@ async def test_missing_labels_lists_absent_names_in_role_order() -> None:
         "issuebot/rework",
         "issuebot/complete",
         "issuebot/no-fault",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
     ]
 
 
@@ -965,6 +988,9 @@ async def test_missing_labels_reports_the_extra_names_after_the_state_ones() -> 
         "issuebot/rework",
         "issuebot/complete",
         "issuebot/no-fault",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
         "issuebot/model/sonnet",
     ]
 

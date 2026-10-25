@@ -278,7 +278,7 @@ class GhCliAdapter:
         target = label_name(self.labels, state)
         others = [label_name(self.labels, role) for role in StateLabel if role is not state]
         if clear_markers:
-            others += list(self.labels.markers())
+            others += list(self.labels.claim_clears())
         self._log.debug(
             "set_state", issue_number=number, state=state.value, clear_markers=clear_markers
         )

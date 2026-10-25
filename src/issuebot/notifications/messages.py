@@ -25,6 +25,8 @@ _ROLE_EMOJI = {
     "review": ":eyes:",
     "rework": ":repeat:",
     "complete": ":white_check_mark:",
+    "triage_todo": ":inbox_tray:",
+    "triage_complete": ":compass:",
 }
 _OTHER_LABEL_EMOJI = ":label:"
 _OUTCOME_WORDS = {"timed_out": "timed out"}

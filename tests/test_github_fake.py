@@ -243,7 +243,7 @@ async def test_a_marker_comment_by_anyone_else_is_not_the_workpad(fake: FakeGitH
 
 async def test_ensure_and_missing_labels(fake: FakeGitHub) -> None:
     assert await fake.missing_labels() == []
-    assert [r.outcome for r in await fake.ensure_labels()] == ["unchanged"] * 6
+    assert [r.outcome for r in await fake.ensure_labels()] == ["unchanged"] * 9
     del fake.repo_labels["issuebot/rework"]
     fake.repo_labels["issuebot/review"] = LabelStyle("000000", "old")
     assert await fake.missing_labels() == ["issuebot/rework"]
@@ -287,6 +287,12 @@ async def test_set_state_leaves_the_no_fault_marker_alone(fake: FakeGitHub) -> N
     await fake.set_state(issue.number, StateLabel.COMPLETE)
     assert fake.issue(issue.number).labels == ("issuebot/no-fault", "issuebot/complete")
     assert fake.issue(issue.number).state is StateLabel.COMPLETE
+
+
+async def test_a_claim_keeps_triage_complete(fake: FakeGitHub) -> None:
+    issue = fake.add_issue("A", labels=("issuebot/todo", "issuebot/triage-complete"))
+    await fake.set_state(issue.number, StateLabel.IN_PROGRESS, clear_markers=True)
+    assert fake.issue(issue.number).labels == ("issuebot/triage-complete", "issuebot/in-progress")
 
 
 def test_preseed_labels_can_be_disabled() -> None:
