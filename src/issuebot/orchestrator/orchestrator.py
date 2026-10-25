@@ -17,6 +17,8 @@ from issuebot.agent import (
     ClaudeAuth,
     ClaudeRunner,
     RunResult,
+    RunTriageFn,
+    TriageRunner,
     TurnEvent,
     TurnRunner,
     WorkspaceManager,
@@ -24,6 +26,7 @@ from issuebot.agent import (
     describe_claude_auth,
     new_run_id,
     run_session,
+    run_triage,
     settings_for_labels,
     workspace_key,
 )
@@ -38,6 +41,7 @@ from issuebot.agent.accounts import (
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits, agent_environment
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
+from issuebot.agent.verdict import VerdictError, parse_verdict
 from issuebot.config import (
     ConfigError,
     GitHubSettings,
@@ -47,7 +51,7 @@ from issuebot.config import (
     overlay_path_for,
 )
 from issuebot.config.workflow import triage_prompt_path_for
-from issuebot.events import EventBus
+from issuebot.events import EventBus, RunKind
 from issuebot.github import (
     GhCliAdapter,
     GitHubAdapter,
@@ -81,6 +85,7 @@ from issuebot.orchestrator.state import (
     Counters,
     DispatchHold,
     DispatchHoldKind,
+    PendingVerdict,
     RetryEntry,
     RetryKind,
     RetryRow,
@@ -93,6 +98,7 @@ from issuebot.orchestrator.state import (
     observe_transition,
     sort_candidates,
 )
+from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate
 
 RunSessionFn = Callable[..., Awaitable[RunResult]]
 CANDIDATE_STATES: tuple[StateLabel, ...] = (
@@ -136,6 +142,10 @@ MIN_REFRESH_INTERVAL_S = 5.0
 # How much of `gh`'s complaint the hold's reason carries. Neither `gh`'s stderr nor GitHub's
 # GraphQL messages are bounded, and the reason is stored and drawn on every tick it lasts.
 MAX_HOLD_ERROR_CHARS = 300
+# How long a triage clone outlives the run that read it. The turn capture reads the run's log
+# directory after `RunEnded`, so removing the clone at the exit would race it; ten minutes is
+# far past any capture, and the startup sweep is the backstop for a worker that stops first.
+TRIAGE_DISCARD_DELAY_S = 600.0
 
 
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
@@ -313,6 +323,8 @@ class Orchestrator:
         workspaces_factory: Callable[[Settings], WorkspaceManager] = WorkspaceManager,
         runner_factory: Callable[[Settings], TurnRunner] = ClaudeRunner,
         run_session: RunSessionFn = run_session,
+        triage_runner_factory: Callable[[Settings], TurnRunner] = TriageRunner,
+        run_triage: RunTriageFn = run_triage,
         which: Callable[[str], str | None] = shutil.which,
         claude_auth: ClaudeAuthProbe = claude_auth_status,
         github_status: GitHubStatusProbe = fetch_status_summary,
@@ -337,6 +349,8 @@ class Orchestrator:
         self._workspaces_factory = workspaces_factory
         self._runner_factory = runner_factory
         self._run_session = run_session
+        self._triage_runner_factory = triage_runner_factory
+        self._run_triage = run_triage
         self._which = which
         self._claude_auth = claude_auth
         self._github_status = github_status
@@ -435,11 +449,31 @@ class Orchestrator:
         # stamps `updatedAt` to the second, and an edit landing in the second of the change
         # the verdict saw would otherwise leave the key where it was and reuse an approval of
         # the text before it -- the same-second race the tie rule in `approval.py` closes.
+        # The approving label is in the key too: `todo` and `triage-todo` approve the same
+        # text independently (spec 2026-10-25, section 3), so a verdict about one is not one
+        # about the other.
         self._approval_verdicts: dict[
-            str, tuple[tuple[datetime, str, str | None], Approved | Unapproved]
+            str, tuple[tuple[str, datetime, str, str | None], Approved | Unapproved]
         ] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
+        # The triage track (spec 2026-10-25-triage-design.md, section 4), all keyed by issue id
+        # but the discard. Kept in memory in phase 1, so a restart resets each of them; every
+        # attempt is still bounded by `agent.max_attempts` within one process.
+        # Verdicts GitHub would not let the worker file, retried from memory once a tick.
+        self._triage_pending: dict[str, PendingVerdict] = {}
+        # The triage failure chain: failed triage runs in a row. Apart from the ledger's, which
+        # counts work runs only, so a run of failed triage cannot strand the issue's work.
+        self._triage_failures: dict[str, int] = {}
+        # The monotonic moment before which an issue is not triaged again: a failure's backoff,
+        # or one poll interval after a hold.
+        self._triage_not_before: dict[str, float] = {}
+        # The reason of a triage hand-back GitHub refused to write. The chain it ends is over
+        # for this process, so the issue's next pass writes the note again rather than starting
+        # another session for an issue that has spent its attempts.
+        self._triage_escapes: dict[str, str] = {}
+        # Identifier to the monotonic moment its triage clone is removed (TRIAGE_DISCARD_DELAY_S).
+        self._triage_discard: dict[str, float] = {}
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
@@ -565,6 +599,15 @@ class Orchestrator:
         # outright could have left one open to its account (#121). Close them all; the next
         # dispatch opens the one it needs.
         self._workspaces.seal_idle()
+        # And every triage clone on the disk is a previous process's: this one has run nothing,
+        # and a clone is only ever read by the run that made it (spec 2026-10-25, section 4).
+        for key in self._workspaces.triage_keys():
+            try:
+                await self._workspaces.remove_triage_key(key)
+            except AgentError as exc:
+                self._log.warning(
+                    "triage_workspace_sweep_failed", workspace_key=key, error=exc.message
+                )
         self._log.info(
             "orchestrator_started",
             claude_auth=auth.detail,
@@ -926,7 +969,12 @@ class Orchestrator:
                 # claiming that has nowhere to go until the window reopens.
                 await self._poll_issues()
             else:
-                dispatched = await self._dispatch_candidates()
+                # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
+                # short and what it unblocks is a human, so it takes a free slot before work.
+                dispatched = await self._dispatch_triage()
+                dispatched += await self._dispatch_candidates()
+        # Whatever the holds: removing a clone asks nothing of GitHub or of claude.
+        await self._discard_triage_workspaces()
         self._settle_dispatch_hold()
         self._tick_count += 1
         self._last_tick_at = self._now()
@@ -1135,12 +1183,15 @@ class Orchestrator:
             return
         await self._fetch_issues()
 
-    def _admit(self, identifier: str, issue_id: str, issue: Issue | None) -> Admission:
+    def _admit(
+        self, identifier: str, issue_id: str, issue: Issue | None, *, kind: RunKind = "work"
+    ) -> Admission:
         """Ask the one gate (#112). Every precondition is its, and it reads the live holds.
 
         Live rather than ``self._dispatch_hold``, which only settles at the end of a tick: a
         GitHub hold that this tick's successful fetch has just lifted must not refuse the
-        claim that fetch produced.
+        claim that fetch produced. A triage run asks the same gate, so it shares the slots,
+        the holds and the issue's spend with work (spec 2026-10-25, section 4).
         """
         agent = self._workflow.config.agent
         return admit(
@@ -1153,6 +1204,7 @@ class Orchestrator:
                 stopping=self._stopping,
                 max_attempts=agent.max_attempts,
                 max_issue_cost_usd=agent.max_issue_cost_usd,
+                kind=kind,
             )
         )
 
@@ -1396,8 +1448,13 @@ class Orchestrator:
             return None, False
         return account, True
 
-    async def _assess_approval(self, issue: Issue) -> Approved | Unapproved | None:
+    async def _assess_approval(
+        self, issue: Issue, *, label: str | None = None
+    ) -> Approved | Unapproved | None:
         """Is the issue's text the text a human approved? ``None`` when GitHub would not say.
+
+        ``label`` is the one that approves: ``todo`` unless the caller names another, which
+        the triage dispatch does with ``triage-todo`` (spec 2026-10-25, section 3).
 
         Read at dispatch rather than at poll: one issue is dispatched at a time, where every
         poll reads the whole board. A verdict is remembered for as long as the issue is
@@ -1408,7 +1465,8 @@ class Orchestrator:
         what was approved, and the next tick would read the same ten pages to say so again.
         It is a verdict, so the escape takes the label off and the spin stops.
         """
-        key = (issue.updated_at, issue.title, issue.body)
+        label = label or self._adapter.labels.todo
+        key = (label, issue.updated_at, issue.title, issue.body)
         remembered = self._approval_verdicts.get(issue.id)
         if remembered is not None and remembered[0] == key:
             return remembered[1]
@@ -1418,7 +1476,7 @@ class Orchestrator:
             verdict = await actions.assess_issue(
                 self._adapter,
                 issue.number,
-                todo_label=self._adapter.labels.todo,
+                todo_label=label,
                 own_labels_approve=self._own_labels_approve,
             )
         except PageCeilingError as exc:
@@ -1445,6 +1503,17 @@ class Orchestrator:
         return verdict
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
+        # Before anything about the issue is read (spec 2026-10-25, section 1): a step triage
+        # filed for the operator is never a work run, so a `todo` on one comes off again with a
+        # note, the way an unapproved issue is handed back. `Issue.labels` is lower-cased.
+        if self._workflow.config.github.labels.operator_step.lower() in issue.labels:
+            outcome = await actions.operator_step_escape(
+                self._adapter, self._bus, issue, now=self._now()
+            )
+            if outcome == "applied":
+                self._counters = self._counters.bump(blocked=1)
+            self._record_escape(issue.identifier, outcome)
+            return False
         # Before the account and before the claim (GHSA-jm8h-q3j6-p8xp): an issue whose text
         # is no longer the text a human approved is handed back, and never holds a slot.
         verdict = await self._assess_approval(issue)
@@ -1536,6 +1605,386 @@ class Orchestrator:
             run_id=entry.run_id,
         )
 
+    # --- triage (spec 2026-10-25-triage-design.md) ---------------------------------------
+
+    async def _dispatch_triage(self) -> int:
+        """File what is owed, then start a triage run for each candidate the gate admits.
+
+        The candidates are a read of their own -- one label, open issues only -- rather than a
+        field of the board's poll, which fetches by state label and so never sees an issue on
+        the triage track. A failure of that read is not counted towards the GitHub hold (#88):
+        the hold is the board's, and the board's own poll follows in this tick to answer it.
+        """
+        await self._retry_pending_verdicts()
+        labels = self._workflow.config.github.labels
+        try:
+            issues = await self._adapter.fetch_issues_with_label(labels.triage_todo)
+        except GitHubError as exc:
+            self._log.warning("triage_fetch_failed", error=str(exc))
+            return 0
+        dispatched = 0
+        for issue in issues:
+            if not is_triage_candidate(issue, labels):
+                continue
+            if issue.id in self._running or issue.id in self._triage_pending:
+                continue
+            if self._clock() < self._triage_not_before.get(issue.id, -math.inf):
+                continue
+            reason = self._triage_escapes.get(issue.id)
+            if reason is not None:
+                await self._triage_give_up(issue, reason)
+                continue
+            verdict = self._admit(issue.identifier, issue.id, issue, kind="triage")
+            if isinstance(verdict, Refused):
+                if verdict.kind in ("slots", "hold", "stopping"):
+                    # Nothing about this issue; the next candidate would be told the same.
+                    break
+                if verdict.kind == "spend":
+                    # Handed back rather than refused on every tick, as a work issue is; the
+                    # escape takes `triage-todo` off, which is what stops the refusal repeating.
+                    await self._triage_hand_back(
+                        issue,
+                        title="triage budget limit",
+                        reason=verdict.reason,
+                        way_back=(
+                            "Raise `agent.max_issue_cost_usd`, *then* add "
+                            f"`{labels.triage_todo}` again: what that ceiling counts is what "
+                            "the issue has already cost, and that never resets."
+                        ),
+                    )
+                continue
+            attempt = self._triage_failures.get(issue.id, 0) + 1
+            if await self._dispatch_triage_one(issue, attempt=attempt):
+                dispatched += 1
+        return dispatched
+
+    async def _retry_pending_verdicts(self) -> None:
+        """Try once more to file each verdict GitHub refused, once per entry per tick.
+
+        ``apply_verdict`` is idempotent step by step, so a retry files only what is missing and
+        posts the comment once. ``agent.max_attempts`` failed retries hand the issue back; an
+        entry is dropped only once that note has landed, so a GitHub that refuses the note as
+        well as the filing leaves the verdict to be tried again rather than forgotten.
+        """
+        agent = self._workflow.config.agent
+        labels = self._workflow.config.github.labels
+        for issue_id, pending in list(self._triage_pending.items()):
+            failure = await self._file_verdict(pending)
+            if failure is None:
+                continue
+            pending = replace(pending, tries=pending.tries + 1)
+            self._triage_pending[issue_id] = pending
+            if pending.tries < agent.max_attempts:
+                continue
+            error = _clipped(str(failure), MAX_HOLD_ERROR_CHARS)
+            outcome = await self._triage_hand_back(
+                pending.issue,
+                title="triage not filed",
+                reason=f"issuebot could not file the triage verdict on GitHub: {error}",
+                way_back=f"Add `{labels.triage_todo}` again to triage it afresh.",
+            )
+            if outcome != "failed":
+                # The note ends the chain, as a work run's escape ends its own.
+                del self._triage_pending[issue_id]
+                self._forget_triage_chain(issue_id)
+                self._schedule_triage_discard(pending.issue.identifier)
+
+    async def _file_verdict(self, pending: PendingVerdict) -> GitHubError | None:
+        """File one verdict; ``None`` once it landed, else the error GitHub refused it with.
+
+        Success ends the issue's triage chain and schedules its clone's removal. A failure
+        leaves the bookkeeping to the caller: the first one stores the verdict, a retry's
+        counts against it.
+        """
+        issue = pending.issue
+        try:
+            await apply_verdict(
+                self._adapter,
+                self._bus,
+                issue,
+                pending.verdict,
+                run_id=pending.run_id,
+                attempt=pending.attempt,
+                turns=pending.turns,
+                cost_usd=pending.cost_usd,
+                now=self._now(),
+            )
+        except GitHubError as exc:
+            self._log.warning(
+                "triage_file_failed",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                run_id=pending.run_id,
+                tries=pending.tries,
+                error=str(exc),
+                category=exc.category,
+            )
+            return exc
+        self._triage_pending.pop(issue.id, None)
+        self._forget_triage_chain(issue.id)
+        self._schedule_triage_discard(issue.identifier)
+        self._log.info(
+            "triage_filed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            run_id=pending.run_id,
+            verdict=pending.verdict.verdict,
+            sub_issues=len(pending.verdict.sub_issues),
+        )
+        return None
+
+    async def _dispatch_triage_one(self, issue: Issue, *, attempt: int) -> bool:
+        """Start one triage run. It claims nothing: the session moves no label (section 4)."""
+        labels = self._workflow.config.github.labels
+        # Before the account (spec section 3, GHSA-jm8h-q3j6-p8xp): the latest `triage-todo` a
+        # person applied approves the text as it stood, and an edit after it by anyone else
+        # hands the issue back without a session ever reading it.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        if verdict is None:
+            return False
+        if isinstance(verdict, Unapproved):
+            outcome = await self._triage_hand_back(
+                issue,
+                title="unapproved edit",
+                reason=verdict.reason,
+                way_back=(
+                    f"Apply `{labels.triage_todo}` again to approve the text as it stands now."
+                ),
+            )
+            if outcome == "applied":
+                self._approval_verdicts.pop(issue.id, None)
+            return False
+        # The issue's own binding key (#121): a later work run on the issue lands on the same
+        # account, and a sibling session never shares this one's uid.
+        account, ready = self._bind_account(issue)
+        if not ready:
+            return False
+        workflow = self._workflow
+        entry = RunningEntry(
+            issue=issue,
+            attempt=attempt,
+            rework=False,
+            resumed=False,
+            run_id=new_run_id(self._now()),
+            started_mono=self._clock(),
+            started_at=self._now(),
+            cancel=asyncio.Event(),
+            account=account,
+            kind="triage",
+        )
+        entry.task = asyncio.create_task(
+            self._triage_worker(entry, workflow), name=f"issuebot-triage-{issue.number}"
+        )
+        entry.task.add_done_callback(
+            lambda _task, issue_id=issue.id: self._queue.put_nowait(_WorkerExited(issue_id))
+        )
+        self._running[issue.id] = entry
+        self._counters = self._counters.bump(runs_started=1)
+        ledger = self._ledger.dispatched(issue.identifier, at=self._now())
+        self._log.info(
+            "triage_dispatched",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            attempt=attempt,
+            run_id=entry.run_id,
+            account=account,
+            slots_left=self._slots(),
+            issue_runs=ledger.runs,
+            issue_cost_usd=ledger.cost_usd,
+        )
+        return True
+
+    async def _triage_worker(self, entry: RunningEntry, workflow: Workflow) -> RunResult:
+        # Narrowed to the one account bound to the issue (#121) and nothing else: a model label
+        # chooses a work run's model, and triage has `triage.model` of its own.
+        settings = settings_with_run_as(workflow.config, entry.account)
+        return await self._run_triage(
+            entry.issue,
+            workflow,
+            self._adapter,
+            self._bus,
+            workspaces=self._workspaces_factory(settings),
+            runner=self._triage_runner_factory(settings),
+            attempt=entry.attempt,
+            cancel=entry.cancel,
+            observer=RunObserver(
+                entry, clock=self._clock, now=self._now, on_rate_limits=self._record_rate_limits
+            ),
+            run_id=entry.run_id,
+        )
+
+    async def _triage_exit(
+        self, entry: RunningEntry, result: RunResult | None, error: str | None
+    ) -> None:
+        """What a triage run's end means: a verdict filed, a failure counted, or nothing.
+
+        The slot, the account and the spend were settled by ``handle_worker_exit`` before it
+        came here, exactly as for a work run.
+        """
+        settings = self._workflow.config
+        issue_id = entry.issue_id
+        stopped = ("moved", "closed", "missing", "shutdown")
+        if entry.terminal_issue is not None or entry.stop_cause in stopped:
+            # Section 1: a state label won, `triage-todo` went, or the issue did. Any verdict
+            # the run reached is discarded, and the reconcile's own cancel is no failure of the
+            # issue's -- `closed` included, for an issue reopened before the run ended, which
+            # clears `terminal_issue`. A closed or vanished issue has no chain left.
+            if entry.terminal_issue is not None or entry.stop_cause in ("closed", "missing"):
+                self._forget_triage_chain(issue_id)
+            self._schedule_triage_discard(entry.identifier)
+            return
+        if result is not None and result.error_category in ("usage_limited", "auth_failed"):
+            # Account-wide, and nothing about this issue: held as a work run's would be, with
+            # no failure counted and no escape.
+            if result.error_category == "usage_limited":
+                reason = result.error or "claude refused the turn: usage limit reached"
+                self._hold_usage(reason, result.usage_reset_at, result.usage_window)
+                self._log.warning(
+                    "dispatch_usage_held",
+                    issue_number=entry.issue.number,
+                    issue_identifier=entry.identifier,
+                    run_id=entry.run_id,
+                    kind="triage",
+                    reset_at=self._usage_reset_at.isoformat() if self._usage_reset_at else None,
+                    error=reason,
+                )
+            else:
+                reason = result.error or "claude could not authenticate"
+                self._log.error(
+                    "dispatch_auth_failed",
+                    issue_number=entry.issue.number,
+                    issue_identifier=entry.identifier,
+                    run_id=entry.run_id,
+                    kind="triage",
+                    error=reason,
+                )
+                self._hold_dispatch(reason)
+            self._triage_not_before[issue_id] = self._clock() + settings.polling.interval_ms / 1000
+            self._schedule_triage_discard(entry.identifier)
+            return
+        if result is not None and result.stop_reason == "verdict":
+            try:
+                verdict = parse_verdict(
+                    result.structured_output,
+                    max_sub_issues=settings.triage.max_sub_issues,
+                    scrubber=self._scrubber,
+                )
+            except VerdictError as exc:
+                # Section 4: a refused verdict counts as a failed run.
+                await self._triage_failed(entry, f"verdict refused: {exc}")
+                return
+            pending = PendingVerdict(
+                issue=entry.issue,
+                verdict=verdict,
+                run_id=entry.run_id,
+                attempt=entry.attempt,
+                turns=result.turns,
+                cost_usd=result.cost_usd,
+            )
+            if await self._file_verdict(pending) is not None:
+                # The session's work is kept: the next tick files it from memory, never by
+                # running the session again.
+                self._triage_pending[issue_id] = pending
+            return
+        if entry.stop_cause == "stalled":
+            failure = f"stalled: {entry.stop_detail}"
+        elif result is None:
+            failure = error or "worker crashed"
+        elif result.error_category is not None:
+            failure = f"{result.error_category}: {result.error}"
+        else:
+            failure = f"the session returned no verdict in {result.turns} turns"
+        await self._triage_failed(entry, failure)
+
+    async def _triage_failed(self, entry: RunningEntry, error: str) -> None:
+        """One more failure on the issue's triage chain: back off, or hand it back (section 4)."""
+        # Scrubbed once, here, as `_after_failure` does (#91): it becomes a public note.
+        error = self._scrubber.scrub(error)
+        agent = self._workflow.config.agent
+        issue_id = entry.issue_id
+        failures = self._triage_failures.get(issue_id, 0) + 1
+        self._schedule_triage_discard(entry.identifier)
+        self._log.warning(
+            "triage_failed",
+            issue_number=entry.issue.number,
+            issue_identifier=entry.identifier,
+            run_id=entry.run_id,
+            failures=failures,
+            max_attempts=agent.max_attempts,
+            error=error,
+        )
+        if failures < agent.max_attempts:
+            self._triage_failures[issue_id] = failures
+            delay_s = backoff_ms(failures, agent.max_retry_backoff_ms) / 1000
+            self._triage_not_before[issue_id] = self._clock() + delay_s
+            return
+        self._forget_triage_chain(issue_id)
+        await self._triage_give_up(
+            entry.issue, f"Triage failed {failures} times; the last: {error}"
+        )
+
+    async def _triage_give_up(self, issue: Issue, reason: str) -> None:
+        """Hand back an issue whose triage chain is spent; remembered until the note lands."""
+        labels = self._workflow.config.github.labels
+        outcome = await self._triage_hand_back(
+            issue,
+            title="triage failed",
+            reason=reason,
+            way_back=f"Add `{labels.triage_todo}` again to retry once the cause is fixed.",
+        )
+        if outcome == "failed":
+            self._triage_escapes[issue.id] = reason
+        else:
+            self._triage_escapes.pop(issue.id, None)
+
+    async def _triage_hand_back(
+        self, issue: Issue, *, title: str, reason: str, way_back: str
+    ) -> actions.EscapeOutcome:
+        """`triage_escape`: `triage-todo` off, then a note. It never touches a state label."""
+        outcome = await actions.triage_escape(
+            self._adapter,
+            self._bus,
+            issue,
+            title=title,
+            reason=self._scrubber.scrub(reason),
+            way_back=way_back,
+            now=self._now(),
+        )
+        if outcome == "applied":
+            self._counters = self._counters.bump(blocked=1)
+        return outcome
+
+    def _forget_triage_chain(self, issue_id: str) -> None:
+        self._triage_failures.pop(issue_id, None)
+        self._triage_not_before.pop(issue_id, None)
+        self._triage_escapes.pop(issue_id, None)
+
+    def _schedule_triage_discard(self, identifier: str) -> None:
+        self._triage_discard[identifier] = self._clock() + TRIAGE_DISCARD_DELAY_S
+
+    async def _discard_triage_workspaces(self) -> None:
+        """Remove each triage clone whose delay is up, unless a run for its issue is reading it.
+
+        As the account bound to the issue (#121), which is the one the run read the clone as;
+        a failure is logged and left to the startup sweep rather than retried every tick.
+        """
+        if not self._triage_discard:
+            return
+        now = self._clock()
+        running = {entry.identifier for entry in self._running.values()}
+        for identifier, due in list(self._triage_discard.items()):
+            if due > now or identifier in running:
+                continue
+            del self._triage_discard[identifier]
+            try:
+                await self._workspaces_for_key(workspace_key(identifier)).remove_triage(identifier)
+            except AgentError as exc:
+                self._log.warning(
+                    "triage_workspace_remove_failed",
+                    issue_identifier=identifier,
+                    error=exc.message,
+                )
+
     # --- reconcile ----------------------------------------------------------------------
 
     async def reconcile(self) -> None:
@@ -1589,6 +2038,7 @@ class Orchestrator:
             return
         self._report_issues(refreshed)
         by_id = {issue.id: issue for issue in refreshed}
+        triage_todo = self._workflow.config.github.labels.triage_todo.lower()
         for issue_id in ids:
             entry = self._running.get(issue_id)
             if entry is None:
@@ -1605,6 +2055,15 @@ class Orchestrator:
                 self._bus.publish(event)
             entry.issue = current
             entry.terminal_issue = None
+            if entry.kind == "triage":
+                # Spec 2026-10-25, section 1: a state label wins over the triage track, and a
+                # human taking `triage-todo` off means "leave this alone". Either way the run is
+                # stopped and its verdict, if it reaches one, is discarded at the exit.
+                if current.state_labels:
+                    self._stop_entry(entry, "moved", "state label")
+                elif triage_todo not in current.labels:
+                    self._stop_entry(entry, "moved", "triage-todo removed")
+                continue
             if current.state is StateLabel.IN_PROGRESS and current.dispatchable:
                 continue
             if current.state is StateLabel.REVIEW:
@@ -1772,6 +2231,9 @@ class Orchestrator:
         ``_approval_verdicts``, the last verdict and the snapshot it was about. A closed issue
         is never a candidate, so neither can be read again for it, and a reopened one is a
         fresh snapshot that would miss the verdict anyway.
+
+        The triage chain goes too (spec 2026-10-25, section 4): a triage run a human's ``todo``
+        stopped leaves its failures behind, and the issue this closes is where they would sit.
         """
         # Removing a workspace means unlinking what the session wrote, which only the session's
         # own account can do (#75) -- and under a pool that is the account bound to *this*
@@ -1783,6 +2245,7 @@ class Orchestrator:
         self._conflict_gave_up.pop(issue.id, None)
         self._approval_check_failed.pop(issue.id, None)
         self._approval_verdicts.pop(issue.id, None)
+        self._forget_triage_chain(issue.id)
         if outcome != "failed":
             self._ledger.forget(issue.identifier)
         if outcome in ("complete", "no_change"):
@@ -1879,6 +2342,7 @@ class Orchestrator:
             issue_number=entry.issue.number,
             issue_identifier=entry.identifier,
             run_id=entry.run_id,
+            kind=entry.kind,
             attempt=entry.attempt,
             outcome=result.outcome if result is not None else None,
             stop_reason=result.stop_reason if result is not None else None,
@@ -1887,6 +2351,11 @@ class Orchestrator:
             cost_usd=result.cost_usd if result is not None else 0.0,
             error=error or (result.error if result is not None else None),
         )
+        # After the slot, the account and the spend are settled above, which every run shares;
+        # what the end of a triage run means is its own (spec 2026-10-25, section 4).
+        if entry.kind == "triage":
+            await self._triage_exit(entry, result, error)
+            return
         if entry.terminal_issue is not None:
             await self._finish(entry.terminal_issue)
             return

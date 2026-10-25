@@ -357,3 +357,53 @@ def test_the_attempt_budget_is_asked_before_the_spend_one(
     )
     assert isinstance(verdict, Refused)
     assert verdict.kind == "attempts"
+
+
+# --- triage (spec 2026-10-25-triage-design.md, section 4) -------------------------------
+
+
+def _triage_candidate(make_issue: Callable[..., Issue]) -> Issue:
+    return make_issue(state=None, state_labels=(), labels=("issuebot/triage-todo",))
+
+
+def test_a_triage_request_is_not_inactive_and_has_no_chain(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """A triage candidate wears no state label, and its failure chain is kept in memory beside
+    the orchestrator rather than on the ledger, which counts only work runs' failures."""
+    issue = _triage_candidate(make_issue)
+    verdict = admit(
+        request(issue=issue, kind="triage", ledger=IssueLedger(failures=9), max_attempts=3)
+    )
+    assert isinstance(verdict, Admitted)
+    # The same issue asked for as work is refused: the kind is what admits it.
+    work = admit(request(issue=issue))
+    assert isinstance(work, Refused)
+    assert work.kind == "inactive"
+
+
+def test_a_triage_request_still_respects_slots_and_spend(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """A triage run takes a slot like any run, and its cost is the issue's spend (section 4)."""
+    issue = _triage_candidate(make_issue)
+    full = admit(request(issue=issue, kind="triage", slots=0))
+    assert isinstance(full, Refused)
+    assert (full.kind, full.wait) == ("slots", "slots")
+    held = admit(request(issue=issue, kind="triage", hold=Hold("github", "down")))
+    assert isinstance(held, Refused)
+    assert held.kind == "hold"
+    busy = admit(request(issue=issue, kind="triage", busy=True))
+    assert isinstance(busy, Refused)
+    assert busy.kind == "busy"
+    spent = admit(
+        request(
+            issue=issue,
+            kind="triage",
+            ledger=IssueLedger(cost_usd=12.5, runs=4),
+            max_issue_cost_usd=10.0,
+        )
+    )
+    assert isinstance(spent, Refused)
+    assert (spent.kind, spent.wait) == ("spend", None)
+    assert "agent.max_issue_cost_usd is $10.00" in spent.reason

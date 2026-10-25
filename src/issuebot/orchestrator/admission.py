@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
+from issuebot.events import RunKind
 from issuebot.github import ACTIVE_STATES, Issue
 from issuebot.orchestrator.state import DispatchHoldKind, RetryKind
 
@@ -309,6 +310,12 @@ class AdmissionRequest:
     out which issue it may not claim -- and again with the issue in hand, which is also the
     second chance the awaited fetch makes necessary: a slot can go while it is in flight.
     Without an issue the answer covers the worker's own preconditions and stops there.
+
+    ``kind`` is the run the claim would start (spec 2026-10-25-triage-design.md, section 4). A
+    triage run shares the worker's preconditions and the issue's spend with a work run, and
+    neither of the other two: its candidate wears no state label by definition, and its failure
+    chain is kept beside the orchestrator rather than on the ledger, which counts only work
+    runs' failures -- so a triage request skips ``inactive`` and ``attempts``.
     """
 
     issue: Issue | None = None
@@ -319,6 +326,7 @@ class AdmissionRequest:
     stopping: bool = False
     max_attempts: int
     max_issue_cost_usd: float = 0.0
+    kind: RunKind = "work"
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -371,9 +379,10 @@ def admit(request: AdmissionRequest) -> Admission:
         # about the issue, and a refusal on it is not something a caller that cannot see the
         # issue could act on -- it hands the issue over to a human, and that needs the issue.
         return Admitted(attempt=ledger.attempt, ledger=ledger)
-    if not (issue.dispatchable and issue.state in ACTIVE_STATES):
+    work = request.kind == "work"
+    if work and not (issue.dispatchable and issue.state in ACTIVE_STATES):
         return Refused(kind="inactive", reason="the issue is not in a state this worker claims")
-    if ledger.failures >= request.max_attempts:
+    if work and ledger.failures >= request.max_attempts:
         return Refused(
             kind="attempts",
             reason=(

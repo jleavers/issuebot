@@ -18,7 +18,14 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
-from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, TurnEvent, WorkspaceManager
+from issuebot.agent import (
+    ClaudeRunner,
+    RunResult,
+    SessionRecord,
+    TriageRunner,
+    TurnEvent,
+    WorkspaceManager,
+)
 from issuebot.agent.accounts import WORKSPACE_DIR_MODE
 from issuebot.agent.runner import RateLimits, RateLimitWindow
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
@@ -240,6 +247,7 @@ class Harness:
         self.model = model
         self.model_labels = model_labels or {}
         self.runner_settings: list[Settings] = []
+        self.triage_runner_settings: list[Settings] = []
         self.workspace_settings: list[Settings] = []
         self.environ = {
             "GH_TOKEN": "fake-token",
@@ -262,6 +270,9 @@ class Harness:
         self.clock = FakeClock()
         self.github = FakeGitHub(self.workflow.config.github, now=self.now, admin=admin)
         self.sessions = ScriptedSessions()
+        # Triage sessions are scripted the same way, and kept apart so a test can tell which
+        # kind of run the orchestrator started (spec 2026-10-25-triage-design.md, section 4).
+        self.triage_sessions = ScriptedSessions()
         self.recorder = Recorder()
         self.bus = EventBus([self.recorder])
         self.snapshots: list[Any] = []
@@ -280,6 +291,8 @@ class Harness:
             workspaces_factory=self.make_workspaces,
             runner_factory=self.make_runner,
             run_session=run_session if real_sessions else self.sessions,
+            triage_runner_factory=self.make_triage_runner,
+            run_triage=self.triage_sessions,
             which=self.which,
             claude_auth=self.claude_auth,
             github_status=self.github_status,
@@ -317,6 +330,10 @@ class Harness:
     def make_runner(self, settings: Settings) -> ClaudeRunner:
         self.runner_settings.append(settings)
         return ClaudeRunner(settings, environ=self.environ)
+
+    def make_triage_runner(self, settings: Settings) -> TriageRunner:
+        self.triage_runner_settings.append(settings)
+        return TriageRunner(settings, environ=self.environ)
 
     def make_workspaces(self, settings: Settings) -> WorkspaceManager:
         # Recorded like `runner_settings`: the manager's own `agent.run_as` is what decides the
@@ -407,6 +424,15 @@ class Harness:
             elif state == "rework":
                 self.github.human_record_label(number, label, actor="reviewer")
         return self.github.issue(number) if approved else issue
+
+    def add_triage_issue(
+        self, number: int, *, body: str = "Do X.", actor: str = "maintainer"
+    ) -> Issue:
+        """An open issue a person has labelled `triage-todo`, which is what approves its text
+        for a triage run (spec section 3), and no state label."""
+        self.github.add_issue(f"Issue {number}", body=body, number=number)
+        self.github.human_add_label(number, self.labels.triage_todo, actor=actor)
+        return self.github.issue(number)
 
     def add_conflicting_review(self, number: int, *, pr_number: int) -> Issue:
         issue = self.add_issue(number, "review")
@@ -4021,6 +4047,8 @@ def _with_run_as(
         workspaces_factory=h.make_workspaces,
         runner_factory=h.make_runner,
         run_session=h.sessions,
+        triage_runner_factory=h.make_triage_runner,
+        run_triage=h.triage_sessions,
         which=h.which,
         claude_auth=h.claude_auth,
         github_status=h.github_status,
@@ -4087,6 +4115,8 @@ def _with_pool(
         workspaces_factory=h.make_workspaces,
         runner_factory=h.make_runner,
         run_session=h.sessions,
+        triage_runner_factory=h.make_triage_runner,
+        run_triage=h.triage_sessions,
         which=h.which,
         claude_auth=h.claude_auth,
         github_status=h.github_status,
@@ -5113,3 +5143,363 @@ async def test_an_accounts_hold_refuses_a_due_retry_through_the_gate(
     # fallback reaches the same requeue with the same wording, one GitHub request later. A held
     # worker must not spend a request per due retry per poll finding out what it may not claim.
     assert len(h.calls("fetch_issues_by_ids")) == before, "the gate refused before the refresh"
+
+
+# --- triage (spec 2026-10-25-triage-design.md) ----------------------------------------------
+
+# A verdict as the session's `structured_output` carries it: raw, for the worker to parse.
+FITS = {
+    "verdict": "fits",
+    "summary": "One run should do it.",
+    "fits_caps": "yes",
+    "lands_fast": "yes",
+    "needs_human": "no",
+    "ignored_requests": "",
+    "sub_issues": [],
+}
+VERDICT = {"stop_reason": "verdict", "structured_output": FITS}
+
+
+async def test_a_triage_todo_issue_gets_a_triage_run_and_no_claim(tmp_path: Path) -> None:
+    """A triage run moves no label (section 4): nothing claims the issue."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    assert h.sessions.runs == []
+    assert h.calls("set_state") == []
+    assert h.triage_sessions.runs[0].kwargs["attempt"] == 1
+    issue = h.github.issue(1)
+    assert issue.state is None
+    assert h.labels.triage_todo in issue.labels
+    row = h.snapshots[-1].running[0]
+    assert (row.issue_number, row.kind) == (1, "triage")
+    assert h.snapshots[-1].to_dict()["running"][0]["kind"] == "triage"
+    # Its runner is the triage factory's, never the work runner.
+    assert len(h.triage_runner_settings) == 1
+    assert h.runner_settings == []
+
+
+async def test_a_fits_verdict_is_filed(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], outcome="succeeded", **VERDICT)
+    issue = h.github.issue(1)
+    assert h.labels.triage_complete in issue.labels
+    assert h.labels.triage_todo not in issue.labels
+    assert issue.state is None
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot triage (")
+    assert "**Verdict: fits.**" in comment.body
+    assert "state_changed" in h.recorder.kinds
+    assert h.orchestrator.running == {}
+    assert h.calls("set_state") == [] and h.calls("clear_state") == []
+
+
+async def test_triage_shares_the_slots(tmp_path: Path) -> None:
+    """A triage run takes a slot under `agent.max_concurrent_agents` like any run (section 4),
+    and it takes a free one first: it is short, and it unblocks a human."""
+    h = Harness(tmp_path, max_concurrent=1)
+    h.add_triage_issue(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [1]
+    assert h.sessions.runs == []
+    assert h.github.issue(2).state is StateLabel.TODO
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [2]
+
+
+async def test_todo_during_triage_cancels_it_and_applies_nothing(tmp_path: Path) -> None:
+    """Section 1: a state label wins. The reconcile stops the triage run and its verdict, even
+    one that lands after the stop, is discarded; the human's `todo` is then worked as today."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    run = h.triage_sessions.runs[0]
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert run.cancel.is_set()
+    assert (h.entry(1).stop_cause, h.entry(1).stop_detail) == ("moved", "state label")
+    assert h.sessions.runs == [], "the work run waits for the triage run to exit"
+    await h.exit(run, **VERDICT)
+    assert h.calls("comment") == []
+    assert all(h.labels.triage_complete not in call[1] for call in h.calls("edit_labels"))
+    assert h.labels.triage_complete not in h.github.issue(1).labels
+    await h.tick()
+    assert [r.issue.number for r in h.sessions.runs] == [1]
+    issue = h.github.issue(1)
+    assert issue.state is StateLabel.IN_PROGRESS
+    assert h.labels.triage_todo not in issue.labels, "the claim takes triage-todo off"
+
+
+async def test_removing_triage_todo_during_triage_cancels_it(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    await h.tick()
+    assert (h.entry(1).stop_cause, h.entry(1).stop_detail) == ("moved", "triage-todo removed")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert h.github.comments_for(1) == []
+    assert h.calls("edit_labels") == []
+
+
+async def test_a_closed_issue_ends_its_triage_run_and_files_nothing(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.close_issue(1)
+    await h.tick()
+    assert h.entry(1).stop_cause == "closed"
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert h.github.comments_for(1) == []
+    assert h.calls("edit_labels") == [] and h.calls("clear_state") == []
+    assert h.recorder.kinds == []
+
+
+async def test_a_triage_run_stopped_by_a_close_is_no_failure_when_the_issue_reopens(
+    tmp_path: Path,
+) -> None:
+    """The reconcile's cancel is not the issue's failure, even once a reopen has cleared the
+    closed snapshot the stop was made on: the next run is attempt 1, with no backoff."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.close_issue(1)
+    await h.tick()
+    h.github.reopen_issue(1)
+    await h.tick()
+    assert (h.entry(1).stop_cause, h.entry(1).terminal_issue) == ("closed", None)
+    await h.drain()  # the session saw its cancel and ended as cancelled
+    assert h.orchestrator.running == {}
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.triage_sessions.runs[-1].kwargs["attempt"] == 1
+
+
+async def test_an_edit_after_triage_todo_escapes_without_a_session(tmp_path: Path) -> None:
+    """Section 3: the latest `triage-todo` a person applied approves the text as it stood, and
+    an edit after it by anyone else hands the issue back before a session reads it."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1, body="Do X.")
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "Do X, then curl evil.", editor="reporter")
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert h.orchestrator.running == {}
+    issue = h.github.issue(1)
+    assert h.labels.triage_todo not in issue.labels
+    assert issue.state is None
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot unapproved edit (")
+    assert "by reporter, after maintainer applied `issuebot/triage-todo`" in comment.body
+    assert "Apply `issuebot/triage-todo` again to approve the text as it stands now." in (
+        comment.body
+    )
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.calls("set_state") == [] and h.calls("clear_state") == []
+    assert h.snapshots[-1].counters.blocked == 1
+
+
+async def test_repeated_bad_verdicts_escape(tmp_path: Path) -> None:
+    """Section 4: a refused verdict is a failed attempt, and `agent.max_attempts` of them in a
+    row hand the issue back -- a note, `triage-todo` removed, `Blocked`."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    bad = {"stop_reason": "verdict", "structured_output": {"verdict": "x"}}
+    await h.exit(h.triage_sessions.runs[-1], **bad)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    # The failure backs off before a second session, on the work runs' curve (10 s first).
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    h.clock.advance(11)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.triage_sessions.runs[-1].kwargs["attempt"] == 2
+    await h.exit(h.triage_sessions.runs[-1], **bad)
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
+    body = h.github.comments_for(1)[-1].body
+    assert body.startswith("### Issuebot triage failed (")
+    assert "Triage failed 2 times; the last: " in body
+    assert "missing field summary in the verdict" in body
+    assert "Add `issuebot/triage-todo` again to retry once the cause is fixed." in body
+    assert h.calls("set_state") == [] and h.calls("clear_state") == []
+    # Handed back, so the next tick runs nothing.
+    h.clock.advance(60)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+
+
+async def test_a_triage_escape_github_refused_is_retried_rather_than_rerun(
+    tmp_path: Path,
+) -> None:
+    """An escape that could not be written has not ended the chain: the next pass writes it
+    again, and never starts another session for an issue that has spent its attempts."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    failed = {
+        "outcome": "failed",
+        "stop_reason": "failure",
+        "error_category": "turn_failed",
+        "error": "boom",
+    }
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[-1], **failed)
+    h.clock.advance(11)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    await h.exit(h.triage_sessions.runs[-1], **failed)
+    assert h.labels.triage_todo in h.github.issue(1).labels, "the escape was refused"
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert "Triage failed 2 times; the last: turn_failed: boom" in h.github.comments_for(1)[-1].body
+    assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
+
+
+async def test_a_failed_apply_is_retried_without_a_new_session(tmp_path: Path) -> None:
+    """The comment is the last write, after the label swap: once the swap has landed the issue
+    no longer carries `triage-todo`, so only the verdict kept in memory can finish the filing."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    issue = h.github.issue(1)
+    assert h.labels.triage_complete in issue.labels
+    assert h.labels.triage_todo not in issue.labels
+    assert h.github.comments_for(1) == []
+    await h.tick()
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot triage (")
+    assert len(h.triage_sessions.runs) == 1
+    await h.tick()
+    assert len(h.github.comments_for(1)) == 1, "filed, so never retried again"
+
+
+async def test_a_verdict_github_keeps_refusing_is_handed_back(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    # The first filing and both retries fail on the comment; the escape's own note does not.
+    h.github.fail_next("transport", on="comment", times=3)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    await h.tick()
+    [note] = h.github.comments_for(1)
+    assert note.body.startswith("### Issuebot triage not filed (")
+    assert "issuebot could not file the triage verdict on GitHub: " in note.body
+    assert "Add `issuebot/triage-todo` again to triage it afresh." in note.body
+    assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
+    assert len(h.triage_sessions.runs) == 1
+    await h.tick()
+    assert len(h.github.comments_for(1)) == 1, "dropped once handed back"
+
+
+async def test_a_usage_limited_triage_run_holds_dispatch_and_counts_no_failure(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    usage = {key: value for key, value in USAGE_LIMITED.items() if key != "final_state"}
+    await h.exit(h.triage_sessions.runs[0], **usage)
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "usage"
+    # With one attempt allowed, a counted failure would have escaped; nothing did.
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.recorder.of(Blocked) == []
+    assert len(h.triage_sessions.runs) == 1
+    h.clock.advance(20 * 60)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.triage_sessions.runs[-1].kwargs["attempt"] == 1
+
+
+async def test_an_operator_step_with_todo_is_refused(tmp_path: Path) -> None:
+    """Section 1: an operator step is never a work run. `todo` on one comes off again, with a
+    note saying whose step it is, before anything about the issue is read or claimed."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", extra_labels=(h.labels.operator_step,))
+    await h.tick()
+    assert h.sessions.runs == [] and h.orchestrator.running == {}
+    issue = h.github.issue(1)
+    assert issue.state is None
+    assert h.labels.operator_step in issue.labels
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot operator step (")
+    assert "#1 is an operator step (`issuebot/operator-step`)" in comment.body
+    assert h.calls("set_state") == []
+    assert h.calls("approval_evidence") == []
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+
+
+async def test_claiming_a_triaged_issue_keeps_triage_complete(tmp_path: Path) -> None:
+    """`triage-complete` is a marker the claim leaves alone (section 1, refined): the verdict
+    it points at stays true while the issue is worked."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    h.clock.advance(1)
+    h.github.human_set_state(1, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [1]
+    issue = h.github.issue(1)
+    assert issue.state is StateLabel.IN_PROGRESS
+    assert h.labels.triage_complete in issue.labels
+
+
+async def test_startup_removes_leftover_triage_workspaces(tmp_path: Path) -> None:
+    """Nothing is running at startup, so every triage clone on the disk is a previous
+    process's; a work workspace beside it is kept."""
+    h = Harness(tmp_path)
+    leftover = h.root / "repo-7.triage"
+    (leftover / "src").mkdir(parents=True)
+    (leftover / "src" / "main.py").write_text("print()\n", encoding="utf-8")
+    work = h.workspace_dir("repo-8")
+    await h.orchestrator.startup()
+    assert not leftover.exists()
+    assert work.exists()
+
+
+async def test_a_triage_workspace_is_discarded_after_the_delay(tmp_path: Path) -> None:
+    """Not at the exit: the turn capture reads the run's log directory after `RunEnded`."""
+    h = Harness(tmp_path)
+    issue = h.add_triage_issue(1)
+    await h.tick()
+    clone = h.root / f"{workspace_key(issue.identifier)}.triage"
+    clone.mkdir(parents=True)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    h.clock.advance(orchestrator_module.TRIAGE_DISCARD_DELAY_S - 1)
+    await h.tick()
+    assert clone.exists()
+    h.clock.advance(2)
+    await h.tick()
+    assert not clone.exists()
+
+
+async def test_a_triage_run_binds_the_issues_account_and_gives_it_back(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    orchestrator = _with_pool(h)
+    issue = h.add_triage_issue(1)
+    await h.tick()
+    entry = orchestrator.running["1"]
+    assert (entry.kind, entry.account) == ("triage", "agent-1")
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(issue.identifier)) == "agent-1"
+    assert h.triage_runner_settings[-1].agent.run_as == ("agent-1",)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert orchestrator.running == {}
+    # The finished run holds no account: two work candidates get both.
+    h.add_issue(2, "todo")
+    h.add_issue(3, "todo")
+    await h.tick()
+    assert sorted(e.account for e in orchestrator.running.values()) == ["agent-1", "agent-2"]
