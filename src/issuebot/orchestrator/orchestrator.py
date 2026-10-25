@@ -1719,9 +1719,8 @@ class Orchestrator:
                 way_back=f"Add `{labels.triage_todo}` again to triage it afresh.",
             )
             if outcome != "failed":
-                # The note ends the chain, as a work run's escape ends its own.
+                # The note ends the chain (`_triage_hand_back`), and the verdict with it.
                 del self._triage_pending[issue_id]
-                self._forget_triage_chain(issue_id)
                 self._schedule_triage_discard(pending.issue.identifier)
 
     async def _file_verdict(self, pending: PendingVerdict) -> GitHubError | None:
@@ -1843,6 +1842,35 @@ class Orchestrator:
             )
             if outcome == "applied":
                 self._approval_verdicts.pop(issue.id, None)
+            return False
+        # Section 1: re-triaging an issue that already has sub-issues is the parent review,
+        # "so nothing is filed twice". That is a later phase, so until it lands such an issue
+        # is handed back before an account or a session is spent on it: a fresh session would
+        # write new titles, and the filing would add a second batch beside the first. A read
+        # that fails skips the issue this tick, as an unreadable approval history does.
+        try:
+            split = bool(await self._adapter.sub_issues(issue.number))
+        except GitHubError as exc:
+            self._log.warning(
+                "triage_sub_issues_unreadable",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                error=str(exc),
+                category=exc.category,
+            )
+            return False
+        if split:
+            await self._triage_hand_back(
+                issue,
+                title="already split",
+                reason=(
+                    f"#{issue.number} already has sub-issues; re-triaging a split issue is "
+                    "the parent review, a later phase"
+                ),
+                way_back=(
+                    f"Close or unlink its sub-issues, then add `{labels.triage_todo}` again."
+                ),
+            )
             return False
         # The issue's own binding key (#121): a later work run on the issue lands on the same
         # account, and a sibling session never shares this one's uid.
@@ -1984,7 +2012,12 @@ class Orchestrator:
     async def _triage_hand_back(
         self, issue: Issue, *, title: str, reason: str, way_back: str
     ) -> actions.EscapeOutcome:
-        """`triage_escape`: `triage-todo` off, then a note. It never touches a state label."""
+        """`triage_escape`: `triage-todo` off, then a note. It never touches a state label.
+
+        One that landed ends the issue's triage chain, as a work escape that landed ends the
+        work chain (``_record_escape``): the issue is a human's now, and the `triage-todo` that
+        brings it back starts again at attempt 1, with no backoff.
+        """
         outcome = await actions.triage_escape(
             self._adapter,
             self._bus,
@@ -1996,6 +2029,7 @@ class Orchestrator:
         )
         if outcome == "applied":
             self._counters = self._counters.bump(blocked=1)
+            self._forget_triage_chain(issue.id)
         return outcome
 
     def _forget_triage_chain(self, issue_id: str) -> None:

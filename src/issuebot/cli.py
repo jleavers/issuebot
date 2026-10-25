@@ -2131,8 +2131,9 @@ async def _run_once_triage(
     """`run-once --triage`: one triage session in the foreground, its verdict filed (spec §4).
 
     The worker's path without the queue: the same candidate test, the same approval check on
-    ``triage_todo`` (no escape, as for a work run), the same ``run_triage`` and the same
-    ``apply_verdict``. Nothing is claimed, since a triage run moves no state label.
+    ``triage_todo`` (no escape, as for a work run), the same refusal of an issue that already
+    has sub-issues, the same ``run_triage`` and the same ``apply_verdict``. Nothing is
+    claimed, since a triage run moves no state label.
     """
     settings = workflow.config
     labels = settings.github.labels
@@ -2145,6 +2146,21 @@ async def _run_once_triage(
         adapter, issue, labels, todo_label=labels.triage_todo
     ):
         return 1
+    if not show_prompt:
+        # Section 1: a split issue's re-triage is the parent review, a later phase. The worker
+        # hands such an issue back as `already split`; the operator typed this command, so
+        # here it is a refusal, and nothing is written. A preview runs nothing, so skips it.
+        try:
+            split = bool(await adapter.sub_issues(number))
+        except GitHubError as exc:
+            print(f"[FAIL] sub-issues: {exc}")
+            return 1
+        if split:
+            print(
+                f"[FAIL] issue: #{number} already has sub-issues; re-triaging a split issue "
+                "is the parent review, a later phase"
+            )
+            return 1
     try:
         workflow = _with_bound_account(workflow, issue)
         settings = workflow.config

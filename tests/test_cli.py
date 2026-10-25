@@ -5630,6 +5630,53 @@ def test_run_once_triage_reports_a_github_failure_filing_the_verdict(
     assert "[FAIL] triage: could not file the verdict:" in capsys.readouterr().out
 
 
+def test_run_once_triage_refuses_an_issue_that_already_has_sub_issues(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """Section 1: a split issue's re-triage is the parent review, a later phase. The worker
+    hands it back; here the operator typed the command, so it is a refusal that writes
+    nothing."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    fake_github.add_issue("Step one", number=43)
+    fake_github._issues[42].children.append(43)
+    fake_github._issues[43].parent = 42
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "[FAIL] issue: #42 already has sub-issues; re-triaging a split issue is the parent "
+        "review, a later phase"
+    ]
+    assert stub_triage.calls == []
+    assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
+    assert fake_github.comments_for(42) == []
+
+
+def test_run_once_triage_fails_when_the_sub_issues_cannot_be_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    fake_github.fail_next("transport", on="sub_issues")
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    assert "[FAIL] sub-issues: " in capsys.readouterr().out
+    assert stub_triage.calls == []
+
+
 def test_validate_reports_triage(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
 ) -> None:

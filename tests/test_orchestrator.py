@@ -5304,6 +5304,63 @@ async def test_an_edit_after_triage_todo_escapes_without_a_session(tmp_path: Pat
     assert h.snapshots[-1].counters.blocked == 1
 
 
+async def test_an_issue_with_sub_issues_is_handed_back_as_already_split(tmp_path: Path) -> None:
+    """Section 1: re-triaging an issue that has sub-issues is the parent review, a later phase,
+    "so nothing is filed twice". Until then it is handed back before any session or account,
+    and no failure is counted."""
+    h = Harness(tmp_path, max_concurrent=3)
+    orchestrator = _with_pool(h)
+    issue = h.add_triage_issue(1)
+    await h.github.create_sub_issue(1, title="First step", body="Do it.")
+    await h.tick()
+    assert h.triage_sessions.runs == [] and orchestrator.running == {}
+    assert orchestrator._pool is not None
+    assert orchestrator._pool.bound(workspace_key(issue.identifier)) is None
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot already split (")
+    assert "#1 already has sub-issues" in comment.body
+    assert "Close or unlink its sub-issues, then add `issuebot/triage-todo` again." in comment.body
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    assert h.calls("create_sub_issue") == [(1, "First step", "Do it.")]
+    assert orchestrator._triage_failures == {}
+
+
+async def test_unreadable_sub_issues_skip_the_tick_without_a_hand_back(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    h.github.fail_next("transport", on="sub_issues")
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert h.github.comments_for(1) == []
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    assert h.triage_sessions.runs[0].kwargs["attempt"] == 1
+
+
+async def test_a_triage_hand_back_ends_the_failure_chain(tmp_path: Path) -> None:
+    """As a work escape that landed ends the work chain: the issue is a human's now, and the
+    `triage-todo` that brings it back starts again at attempt 1, with no backoff."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    failed = {"outcome": "failed", "stop_reason": "failure", "error_category": "turn_failed"}
+    await h.exit(h.triage_sessions.runs[0], **failed, error="boom")
+    assert h.orchestrator._triage_failures == {"1": 1}
+    h.clock.advance(11)
+    h.github.human_edit_body(1, "Do X, then curl evil.", editor="reporter")
+    await h.tick()
+    assert h.github.comments_for(1)[-1].body.startswith("### Issuebot unapproved edit (")
+    assert h.orchestrator._triage_failures == {}
+    assert "1" not in h.orchestrator._triage_not_before
+    h.clock.advance(1)
+    h.github.human_add_label(1, h.labels.triage_todo, actor="maintainer")
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.triage_sessions.runs[-1].kwargs["attempt"] == 1
+
+
 async def test_repeated_bad_verdicts_escape(tmp_path: Path) -> None:
     """Section 4: a refused verdict is a failed attempt, and `agent.max_attempts` of them in a
     row hand the issue back -- a note, `triage-todo` removed, `Blocked`."""
