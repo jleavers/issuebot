@@ -19,6 +19,9 @@ arguments (`GhCliAdapter.create_sub_issue`), where a NUL makes `create_subproces
 Neither is a `GitHubError`, and one escaping `apply_verdict` stopped the whole worker, so the
 parser refuses control characters (category `Cc`, bar a body's or a reason's newlines and tabs)
 and anything that is not UTF-8, as `parse_workspace_env` refuses a NUL in an environment value.
+A body's or a reason's `\\r\\n` and lone `\\r` are line endings, not junk -- HTML forms submit
+CRLF, and a session may copy such a passage -- so they become `\\n` before that check; a title
+is one line and still refuses every control character, `\\r` included.
 `GhRunner.run` maps both to a `GitHubError` as well, as the backstop.
 """
 
@@ -98,10 +101,19 @@ def _carriable(name: str, value: str, *, keep: str = "\n\t") -> None:
         raise VerdictError(f"{name} has a control character in it")
 
 
-def _text(obj: dict[str, Any], name: str, limit: int, *, required: bool = False) -> str:
+def _text(
+    obj: dict[str, Any],
+    name: str,
+    limit: int,
+    *,
+    required: bool = False,
+    line_endings: bool = False,
+) -> str:
     value = obj[name]
     if not isinstance(value, str):
         raise VerdictError(f"{name} must be a string")
+    if line_endings:
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
     _carriable(name, value)
     value = value.strip()
     if len(value) > limit:
@@ -138,7 +150,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     kind = obj["verdict"]
     if kind not in ("fits", "split"):
         raise VerdictError("verdict must be fits or split")
-    reasons = {name: _text(obj, name, REASON_LIMIT) for name in _REASONS}
+    reasons = {name: _text(obj, name, REASON_LIMIT, line_endings=True) for name in _REASONS}
     steps = obj["sub_issues"]
     if not isinstance(steps, list):
         raise VerdictError("sub_issues must be an array")
@@ -158,7 +170,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
             raise VerdictError("a title is one line")
         # A title is one line already, so no control character has a reason to be in it.
         _carriable("title", title, keep="")
-        body = _text(item, "body", BODY_LIMIT, required=True)
+        body = _text(item, "body", BODY_LIMIT, required=True, line_endings=True)
         if item["kind"] not in _KINDS:
             raise VerdictError("kind must be issuebot or operator")
         key = title.casefold()

@@ -223,3 +223,12 @@ async def test_a_retry_after_the_swap_posts_the_comment_and_no_second_state_chan
     assert github.issue(1).labels == (LABELS.triage_complete,)
     [event] = recorder.events
     assert isinstance(event, StateChanged)
+
+
+def test_the_run_line_counts_one_turn_in_the_singular() -> None:
+    """#305: "1 turns" read wrong on every one-turn triage; two and up keep the plural."""
+    kwargs = dict(run_id="r", attempt=1, cost_usd=0.24, labels=LABELS, now=NOW)
+    one = verdict_comment(make_verdict(), [], turns=1, **kwargs)
+    assert one.endswith("Run `r` (attempt 1, 1 turn, $0.24).")
+    two = verdict_comment(make_verdict(), [], turns=2, **kwargs)
+    assert two.endswith("Run `r` (attempt 1, 2 turns, $0.24).")

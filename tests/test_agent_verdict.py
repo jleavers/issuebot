@@ -145,6 +145,10 @@ STEP = GOOD_SPLIT["sub_issues"][1]
         ({"sub_issues": [{**STEP, "title": "Write\x00the plan"}]}, "title has a control"),
         ({"sub_issues": [{**STEP, "title": "Write\tthe plan"}]}, "title has a control"),
         ({"sub_issues": [{**STEP, "title": "Write\x9bthe plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write\rthe plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write\r\nthe plan"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "title": "Write the plan\r"}]}, "title has a control"),
+        ({"sub_issues": [{**STEP, "body": "a\r\n\x00b"}]}, "body has a control character in it"),
         ({"sub_issues": [{**STEP, "title": "Write \ud800"}]}, "title is not valid Unicode"),
         ({"sub_issues": [{**STEP, "body": "From \udc80 it."}]}, "body is not valid Unicode"),
         ({"lands_fast": "\udfff"}, "lands_fast is not valid Unicode"),
@@ -173,3 +177,25 @@ def test_newlines_and_tabs_in_bodies_and_reasons_are_kept() -> None:
     verdict = parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
     assert verdict.summary == "One.\n\tTwo."
     assert verdict.sub_issues[0].body == "- [ ] a\n\t- [ ] b"
+
+
+# #307: HTML forms submit CRLF, so a passage a session copies out of an issue can carry `\r`.
+# A body's or a reason's line endings are normalised to `\n` rather than refusing the verdict.
+@pytest.mark.parametrize("ending", ["\r\n", "\r"])
+def test_carriage_returns_in_bodies_and_reasons_become_newlines(ending: str) -> None:
+    raw = {
+        **GOOD_SPLIT,
+        "summary": f"One.{ending}Two.",
+        "ignored_requests": f"{ending}{ending}None.{ending}",
+        "sub_issues": [{**STEP, "body": f"line one{ending}line two{ending}{ending}- [ ] c"}],
+    }
+    verdict = parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+    assert verdict.summary == "One.\nTwo."
+    assert verdict.ignored_requests == "None."
+    assert verdict.sub_issues[0].body == "line one\nline two\n\n- [ ] c"
+
+
+def test_each_lone_carriage_return_is_one_line_ending() -> None:
+    raw = {**GOOD_SPLIT, "sub_issues": [{**STEP, "body": "a\r\rb\n\rc"}]}
+    verdict = parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+    assert verdict.sub_issues[0].body == "a\n\nb\n\nc"

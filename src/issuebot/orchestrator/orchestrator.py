@@ -98,7 +98,7 @@ from issuebot.orchestrator.state import (
     observe_transition,
     sort_candidates,
 )
-from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate
+from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate, plural
 
 RunSessionFn = Callable[..., Awaitable[RunResult]]
 CANDIDATE_STATES: tuple[StateLabel, ...] = (
@@ -551,14 +551,7 @@ class Orchestrator:
             # A deployment that upgrades has no triage labels until someone runs `labels
             # ensure`; refusing to start over them would leave the worker (and tools/upgrade's
             # checkout) down for a feature nobody has used yet, so they only warn.
-            triage_names = {
-                name.lower()
-                for name in (
-                    settings.github.labels.triage_todo,
-                    settings.github.labels.triage_complete,
-                    settings.github.labels.operator_step,
-                )
-            }
+            triage_names = {name.lower() for name in settings.github.labels.warn_only()}
             absent_triage = [name for name in missing if name.lower() in triage_names]
             missing = [name for name in missing if name.lower() not in triage_names]
             if absent_triage:
@@ -1978,7 +1971,7 @@ class Orchestrator:
         elif result.error_category is not None:
             failure = f"{result.error_category}: {result.error}"
         else:
-            failure = f"the session returned no verdict in {result.turns} turns"
+            failure = f"the session returned no verdict in {plural(result.turns, 'turn')}"
         await self._triage_failed(entry, failure)
 
     async def _triage_failed(self, entry: RunningEntry, error: str) -> None:
@@ -2005,7 +1998,7 @@ class Orchestrator:
             return
         self._forget_triage_chain(issue_id)
         await self._triage_give_up(
-            entry.issue, f"Triage failed {failures} times; the last: {error}"
+            entry.issue, f"Triage failed {plural(failures, 'time')}; the last: {error}"
         )
 
     async def _triage_give_up(self, issue: Issue, reason: str) -> None:
@@ -2470,8 +2463,8 @@ class Orchestrator:
             if result.stop_reason == "max_turns" and result.final_state is StateLabel.IN_PROGRESS:
                 review = self._workflow.config.github.labels.review
                 reason = (
-                    f"Turn budget exhausted: {result.turns} turns in attempt {entry.attempt} "
-                    f"without reaching `{review}`."
+                    f"Turn budget exhausted: {plural(result.turns, 'turn')} in attempt "
+                    f"{entry.attempt} without reaching `{review}`."
                 )
                 await self._escape(entry, reason, result)
                 return
@@ -2505,7 +2498,7 @@ class Orchestrator:
             # way. The issue's ceiling is therefore agent.run_timeout_ms, not a multiple of it.
             review = self._workflow.config.github.labels.review
             reason = (
-                f"Wall clock exhausted: {result.turns} turns in attempt {entry.attempt} "
+                f"Wall clock exhausted: {plural(result.turns, 'turn')} in attempt {entry.attempt} "
                 f"without reaching `{review}` ({result.error})."
             )
             await self._escape(entry, reason, result)

@@ -47,6 +47,13 @@ class GitHubLabels(_Model):
         a state label wins over triage (spec section 1)."""
         return (self.no_fault, self.triage_todo)
 
+    def warn_only(self) -> tuple[str, ...]:
+        """The labels worker startup only warns over when they are missing: triage's, which a
+        deployment that upgraded has not got until someone runs ``labels ensure``. Every other
+        label missing still refuses startup; a marker added later that a deployment can run
+        without belongs here too."""
+        return (self.triage_todo, self.triage_complete, self.operator_step)
+
     @field_validator(
         "todo",
         "in_progress",

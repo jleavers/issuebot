@@ -28,9 +28,10 @@ from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
 
 # The oldest claude carrying `--permission-prompts none`, the flag that makes an
-# unattended headless run possible. A compatibility floor `validate` enforces against
-# whatever claude is on PATH, not the version the image ships: raise it only when the
-# code starts depending on something newer.
+# unattended headless run possible, and the triage session's `--restricted`, `--tools` and
+# `--json-schema` (docs/security-model.md, "A triage session"). A compatibility floor
+# `validate` enforces against whatever claude is on PATH, not the version the image ships:
+# raise it only when the code starts depending on something newer.
 MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 303)
 # `claude --version` and `claude auth status` are quick; past this they are treated as unanswered.
 CLAUDE_PROBE_TIMEOUT_S = 10
@@ -1065,6 +1066,16 @@ def settings_with_model(settings: Settings, model: str | None) -> Settings:
         return settings
     claude = settings.claude.model_copy(update={"model": model})
     return settings.model_copy(update={"claude": claude})
+
+
+def settings_with_triage_model(settings: Settings, model: str) -> Settings:
+    """Settings running a triage session with ``model``: ``triage.model`` wins over
+    ``claude.model`` in ``TriageRunner``, so an override has to replace both (#304)."""
+    settings = settings_with_model(settings, model)
+    if settings.triage.model in (None, model):
+        return settings
+    triage = settings.triage.model_copy(update={"model": model})
+    return settings.model_copy(update={"triage": triage})
 
 
 def settings_for_labels(settings: Settings, labels: Sequence[str]) -> Settings:
