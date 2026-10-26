@@ -2466,8 +2466,8 @@ class Orchestrator:
             if result.stop_reason == "max_turns" and result.final_state is StateLabel.IN_PROGRESS:
                 review = self._workflow.config.github.labels.review
                 reason = (
-                    f"Turn budget exhausted: {result.turns} turns in attempt {entry.attempt} "
-                    f"without reaching `{review}`."
+                    f"Turn budget exhausted: {plural(result.turns, 'turn')} in attempt "
+                    f"{entry.attempt} without reaching `{review}`."
                 )
                 await self._escape(entry, reason, result)
                 return
@@ -2501,7 +2501,7 @@ class Orchestrator:
             # way. The issue's ceiling is therefore agent.run_timeout_ms, not a multiple of it.
             review = self._workflow.config.github.labels.review
             reason = (
-                f"Wall clock exhausted: {result.turns} turns in attempt {entry.attempt} "
+                f"Wall clock exhausted: {plural(result.turns, 'turn')} in attempt {entry.attempt} "
                 f"without reaching `{review}` ({result.error})."
             )
             await self._escape(entry, reason, result)

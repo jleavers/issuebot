@@ -3149,7 +3149,7 @@ async def test_end_to_end_with_the_fakes(tmp_path: Path) -> None:
     assert (runs[0] / "turn-1.jsonl").exists()
     body = h.github.comments_for(1)[0].body
     assert body.startswith(WORKPAD_MARKER)
-    assert "Turn budget exhausted: 1 turns in attempt 1" in body
+    assert "Turn budget exhausted: 1 turn in attempt 1" in body
     assert str(runs[0]) in body
     totals = h.orchestrator.snapshot().totals
     assert totals.input_tokens > 0 and totals.cost_usd > 0
