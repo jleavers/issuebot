@@ -1068,6 +1068,16 @@ def settings_with_model(settings: Settings, model: str | None) -> Settings:
     return settings.model_copy(update={"claude": claude})
 
 
+def settings_with_triage_model(settings: Settings, model: str) -> Settings:
+    """Settings running a triage session with ``model``: ``triage.model`` wins over
+    ``claude.model`` in ``TriageRunner``, so an override has to replace both (#304)."""
+    settings = settings_with_model(settings, model)
+    if settings.triage.model in (None, model):
+        return settings
+    triage = settings.triage.model_copy(update={"model": model})
+    return settings.model_copy(update={"triage": triage})
+
+
 def settings_for_labels(settings: Settings, labels: Sequence[str]) -> Settings:
     """Settings with ``claude.model`` replaced by the one an issue's model label names.
 

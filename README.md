@@ -609,7 +609,8 @@ The model each turn actually ran with is recorded and shown on the dashboard's i
 which is worth checking after the first run with a new label.
 
 For one session without touching labels, `issuebot run-once <number> --model <name>` overrides
-both the label and the default.
+both the label and the default. With `--triage` it overrides `triage.model` as well, which
+otherwise wins over `claude.model` for a triage session.
 
 ## Development
 
