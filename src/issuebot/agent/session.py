@@ -8,12 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
+
 from issuebot.agent.errors import AgentError, AgentErrorCategory, outcome_for
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import PromptContext, PromptRenderer
 from issuebot.agent.runner import TurnObserver, TurnResult, TurnRunner
 from issuebot.agent.workspace import SessionRecord, WorkspaceManager, run_log_dir
-from issuebot.config import Workflow
+from issuebot.config import AgentSettings, Workflow
 from issuebot.events import EventBus, RunEnded, RunOutcome, RunStarted
 from issuebot.github import Comment, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
@@ -94,7 +96,14 @@ def new_run_id(now: datetime | None = None) -> str:
 
 
 @dataclass
-class _State:
+class RunState:
+    """One run's progress, as ``run_session`` and ``run_triage`` both keep it.
+
+    The blocks both turn loops share live here as methods -- the deadline check, a failed turn
+    and cancellation between turns -- so a fix to the work path's handling of any of them
+    reaches triage's too.
+    """
+
     run_id: str
     session_id: str
     attempt: int
@@ -132,6 +141,63 @@ class _State:
         self.input_tokens += turn.total_input_tokens
         self.output_tokens += turn.output_tokens
         self.cost_usd += turn.cost_usd
+
+    def run_deadline(self, agent: AgentSettings) -> float:
+        """The run's wall clock (#110): fixed when the session started, before the clone and
+        the before_run hook, and handed to every turn. Nothing the session prints moves it."""
+        return self.started + agent.run_timeout_ms / 1000
+
+    def past_deadline(self, agent: AgentSettings, turn_number: int) -> bool:
+        """Fail the run, and say so, when its deadline has passed before ``turn_number``."""
+        if time.monotonic() < self.run_deadline(agent):
+            return False
+        self.fail(
+            "run_timeout",
+            f"run deadline reached before turn {turn_number}: "
+            f"{agent.run_timeout_ms / 1000:.0f}s of wall clock (agent.run_timeout_ms)",
+        )
+        return True
+
+    def fails_on(
+        self,
+        turn: TurnResult,
+        *,
+        turn_number: int,
+        max_turns: int,
+        log: structlog.stdlib.BoundLogger,
+    ) -> bool:
+        """Fail the run when ``turn`` failed, and say so; a capped turn is not a failure, and
+        is logged on ``log``, the caller's, so the line names the loop it came from."""
+        if turn.ok:
+            return False
+        if turn.error_category != "budget_exceeded":
+            # Carried through the failure so the orchestrator waits for the window rather
+            # than for a backoff: a `usage_limited` turn knows when it reopens.
+            self.usage_reset_at = turn.usage_reset_at
+            self.usage_window = turn.usage_window
+            self.fail(turn.error_category or "turn_failed", turn.error)
+            return True
+        # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh
+        # ledger: the cap is a turn boundary, not a failure, in both loops. Failing here instead
+        # would end the run, and the retry after it never resumes (orchestrator `_schedule`), so
+        # the replacement session would re-read the repository from cold and pay the cap again
+        # -- on the work path, to reach the point this one had already committed and pushed.
+        log.warning(
+            "turn_budget_exhausted",
+            run_id=self.run_id,
+            turn_number=turn_number,
+            max_turns=max_turns,
+            cost_usd=turn.cost_usd,
+            error=turn.error,
+        )
+        return False
+
+    def cancelled(self, cancel: asyncio.Event | None) -> bool:
+        """Fail the run as cancelled when ``cancel`` was set during the turn just finished."""
+        if cancel is None or not cancel.is_set():
+            return False
+        self.fail("cancelled", "cancelled between turns")
+        return True
 
     def session_record(self, turn_number: int, last_outcome: RunOutcome | None) -> SessionRecord:
         return SessionRecord(
@@ -189,7 +255,7 @@ async def run_session(
     run_id: str | None = None,
 ) -> RunResult:
     """Run one worker session for ``issue`` (roadmap §2.4) and report what happened."""
-    state = _State(
+    state = RunState(
         run_id=run_id or new_run_id(),
         session_id=resume_session_id or str(uuid.uuid4()),
         attempt=attempt,
@@ -249,7 +315,7 @@ async def run_session(
                 issue_identifier=issue.identifier,
                 run_id=result.run_id,
                 outcome=result.outcome,
-                error=_error_text(result),
+                error=error_text(result),
                 turns=result.turns,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
@@ -265,7 +331,7 @@ async def run_session(
             stop_reason=result.stop_reason,
             turns=result.turns,
             cost_usd=result.cost_usd,
-            error=_error_text(result),
+            error=error_text(result),
             blocker=result.blocker,
         )
         if crash is not None:
@@ -275,14 +341,14 @@ async def run_session(
         clear_context()
 
 
-def _error_text(result: RunResult) -> str | None:
+def error_text(result: RunResult) -> str | None:
     if result.error_category is None:
         return None
     return f"{result.error_category}: {result.error}"
 
 
 async def _execute(
-    state: _State,
+    state: RunState,
     workflow: Workflow,
     adapter: GitHubAdapter,
     workspaces: WorkspaceManager,
@@ -339,7 +405,7 @@ async def _execute(
 
 
 async def _turn_loop(
-    state: _State,
+    state: RunState,
     workflow: Workflow,
     renderer: PromptRenderer,
     adapter: GitHubAdapter,
@@ -355,10 +421,7 @@ async def _turn_loop(
 ) -> None:
     settings = workflow.config
     max_turns = settings.agent.max_turns
-    # The run's wall clock (#110): fixed when the session started, before the clone and the
-    # before_run hook, and handed to every turn. Nothing the session prints moves it.
-    run_timeout_s = settings.agent.run_timeout_ms / 1000
-    deadline = state.started + run_timeout_s
+    deadline = state.run_deadline(settings.agent)
     # The account the session acts as, once: the workflow's comment fetches leave its own text
     # out (GHSA-f3fm-r55f-2vgm), and it does not change between turns.
     try:
@@ -375,12 +438,7 @@ async def _turn_loop(
         state.fail("github_error", f"could not read the account's repository role: {exc}")
         return
     for turn_number in range(1, max_turns + 1):
-        if time.monotonic() >= deadline:
-            state.fail(
-                "run_timeout",
-                f"run deadline reached before turn {turn_number}: {run_timeout_s:.0f}s of "
-                "wall clock (agent.run_timeout_ms)",
-            )
+        if state.past_deadline(settings.agent, turn_number):
             return
         # The workpad is resolved here, by author, and handed to the prompt (#77): the agent
         # follows this id rather than finding the comment by a first line anyone can write.
@@ -438,29 +496,11 @@ async def _turn_loop(
         )
         state.record_turn(turn)
         _save(workspaces, workspace, state.session_record(turn_number, None))
-        if not turn.ok:
-            if turn.error_category != "budget_exceeded":
-                # Carried through the failure so the orchestrator waits for the window rather
-                # than for a backoff: a `usage_limited` turn knows when it reopens.
-                state.usage_reset_at = turn.usage_reset_at
-                state.usage_window = turn.usage_window
-                state.fail(turn.error_category or "turn_failed", turn.error)
-                return
-            # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh
-            # ledger: the cap is a turn boundary, not a failure. Failing here instead would end
-            # the run, and the retry after it never resumes (orchestrator `_schedule`), so the
-            # replacement session would re-read the repository from cold and pay the cap again
-            # to reach the point this one had already committed and pushed.
-            get_logger(__name__).warning(
-                "turn_budget_exhausted",
-                run_id=state.run_id,
-                turn_number=turn_number,
-                max_turns=max_turns,
-                cost_usd=turn.cost_usd,
-                error=turn.error,
-            )
-        if cancel is not None and cancel.is_set():
-            state.fail("cancelled", "cancelled between turns")
+        if state.fails_on(
+            turn, turn_number=turn_number, max_turns=max_turns, log=get_logger(__name__)
+        ):
+            return
+        if state.cancelled(cancel):
             return
         try:
             refreshed = await adapter.fetch_issues_by_ids([state.issue.id])

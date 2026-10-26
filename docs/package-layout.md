@@ -39,6 +39,11 @@ one) and `overlay_config` (its raw mapping, which `count_overrides` counts for `
 and is not a regular file is a `MissingWorkflowFile` naming it. `overlay=False` exists for
 `tests/test_workflow_default.py`, which loads the repository's own `configs/WORKFLOW.md`,
 exactly where a developer working on issuebot keeps their overlay.
+`TRIAGE.md`, beside the base, is read the same way: the overlay and it share `_read_beside`
+(stat, regular file, read, parse, with the errors naming the file), and `TRIAGE.md` alone
+refuses front matter. `GitHubLabels` groups its names for each caller -- `as_tuple()` the states,
+`markers()` the rest, `claim_clears()` what a claim strips, `warn_only()` the labels worker
+startup only warns over when missing -- so a new marker is added to one list, not to each caller.
 
 ## `issuebot.log`
 
@@ -842,7 +847,8 @@ start-up files #137: the sweep above.)
 Two timers, and they bound different things (#110):
 `claude.turn_timeout_ms` wraps a readline, so it bounds *silence* and the session's own
 output resets it; `agent.run_timeout_ms` is the run's wall clock, a monotonic `deadline`
-`_turn_loop` fixes from `_State.started` and hands to every `run_turn(deadline=)`. The
+`_turn_loop` fixes from `RunState.started` (`RunState.run_deadline`) and hands to every
+`run_turn(deadline=)`; `RunState.past_deadline` is the check before each turn. The
 reader waits for the shorter of the two, a turn still running at the deadline is
 terminated with category `run_timeout` (outcome `timed_out`, the `turn_timeout` turn
 event, a message naming the setting), and no turn starts past it. The orchestrator escapes
@@ -982,12 +988,12 @@ stderr line is `HookResult.summary`, which `before_run hook failed: ...` quotes 
 run's error -- and a hook runs with the token in its environment, so `WorkspaceManager`
 owns the same `Scrubber.for_deployment` and scrubs both tails where the `HookResult` is
 built, before the cut that keeps their end.
-`budget_exceeded` is the one category the turn loop does not fail on: `--max-budget-usd`
-caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
-same session with a fresh ledger. Failing there would end the run, and the retry after it
-never resumes, so the replacement session would re-read the repository from cold and spend
-the cap again reaching what the first had already committed and pushed; a run whose every
-turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
+`budget_exceeded` is the one category the turn loop does not fail on (`RunState.fails_on`):
+`--max-budget-usd` caps one `claude -p` process, so the cap is a turn boundary and the next
+turn resumes the same session with a fresh ledger. Failing there would end the run, and the
+retry after it never resumes, so the replacement session would re-read the repository from
+cold and spend the cap again reaching what the first had already committed and pushed; a run
+whose every turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
 Runtime turn events go to a `TurnObserver`, not the bus.
 Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
 `capture_turns(log_dir, scrubber=DEFAULT_SCRUBBER)` reads a run's `turn-N.jsonl`, `.prompt.md`
@@ -1032,7 +1038,14 @@ fixed point; pre-commit excludes it because the tests pin its sizes.
 `verdict.py` is the shape a read-only session returns and the parser that re-checks every
 constraint the schema states, scrubbing each string after decoding; its errors name a field,
 never content, so they may be published. `triage.py` is `run_triage`: a hook-free throwaway
-clone, the turn loop and a run that ends in the store even when it raises. `TriageRunner`
+clone, the turn loop and a run that ends in the store even when it raises. It keeps
+`session.py`'s `RunState` and reports through its `error_text`, and the blocks its loop shares
+with the work loop are `RunState` methods both call -- `past_deadline`, `fails_on` (a failed
+turn, or a capped one as a turn boundary) and `cancelled` -- so a fix to the work path's
+deadline or budget handling cannot miss triage (#310). Its prompt context comes from
+`TriagePromptContext.for_issue` (`prompt.py`), the one constructor `run-once --triage
+--show-prompt` and `validate` use as well, so the three cannot disagree about what a triage
+prompt is given. `TriageRunner`
 (`runner.py`) is `ClaudeRunner` with its own flags, built from nothing of the operator's
 widening.
 
@@ -1410,7 +1423,11 @@ an exception or a body of the wrong shape costs the annotation and nothing else,
 network rather than GitHub's.
 
 `triage.py` is the worker filing a verdict: sub-issues linked to the parent, `operator_step`
-on steps for a human, `triage_todo` swapped for `triage_complete`, the comment last. Runs carry
+on steps for a human, `triage_todo` swapped for `triage_complete`, the comment last, under a
+heading stamped by `actions.utc_stamp` as every other `### Issuebot ...` block is. Worker
+startup refuses to start over a missing label except those `GitHubLabels.warn_only()` names --
+triage's three, which a deployment that upgraded has not got until `labels ensure` -- and only
+warns over those (`triage_labels_missing`). Runs carry
 a kind (`work` or `triage`, migration 0007); a triage failure does not extend a work chain.
 
 ## `issuebot.notifications`
@@ -1762,7 +1779,9 @@ the operator's but has no comment barrier without them (#250); the product is th
 rather than this module's so that the shipped test cannot gain an axis this check does not, and
 the admin renders are scanned for the association half alone -- applied in that same first
 stage -- since the workflow drops the exclusion there and a read inside `{% if admin %}` would
-otherwise go unscanned (#252)),
+otherwise go unscanned (#252), and a `triage` check that renders the triage prompt in force,
+first turn and continuation, from `TriagePromptContext.for_issue` with one sample maintainer
+comment and one stranger's, so a `TRIAGE.md`'s comments section is rendered too (#310)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,

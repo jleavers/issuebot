@@ -57,7 +57,6 @@ from issuebot.agent.instructions import RepositoryFile, read_repository_instruct
 from issuebot.agent.prompt import (
     TRIAGE_CONTINUATION_TEMPLATE,
     PromptVariant,
-    TriageLimits,
     TriagePromptContext,
     render_variants,
     unfiltered_comment_reads,
@@ -117,6 +116,7 @@ from issuebot.github import (
     LinkedPr,
     RepoInfo,
     StateLabel,
+    TrackerComment,
     fetch_status_summary,
     model_label_style,
     parse_status_summary,
@@ -1600,25 +1600,21 @@ def _slack_check(settings: Settings, *, probe: bool) -> Check:
 
 def _triage_check(workflow: Workflow) -> Check:
     """The triage prompt in force compiles and renders, first turn and continuation, against
-    a placeholder issue (the work prompt's check is ``_prompt_check``)."""
+    a placeholder issue carrying one maintainer's comment and one stranger's, so a
+    ``TRIAGE.md``'s comments section is rendered too (the work prompt's check is
+    ``_prompt_check``)."""
     settings = workflow.config
     try:
         renderer = PromptRenderer(
             workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
         )
         sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
-        context = TriagePromptContext(
-            issue=sample,
-            repo=settings.github.repo,
+        context = TriagePromptContext.for_issue(
+            sample,
+            settings,
             login=SAMPLE_LOGIN,
             admin=False,
-            labels=settings.github.labels,
-            limits=TriageLimits.from_settings(settings),
-            comments=(),
-            repo_instructions=(),
-            turn_number=1,
-            max_turns=settings.triage.max_turns,
-            max_sub_issues=settings.triage.max_sub_issues,
+            comments=_SAMPLE_TRIAGE_COMMENTS,
         )
         renderer.render(context)
         renderer.render_continuation(replace(context, turn_number=2))
@@ -1739,6 +1735,29 @@ _SAMPLE_WORKPAD = Comment(
     author=SAMPLE_LOGIN,
     created_at=datetime(2026, 1, 1, tzinfo=UTC),
     updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+)
+
+
+# One comment of each kind ``comment_variables`` sorts into: a maintainer's, enveloped, and a
+# stranger's, named but never quoted. Without them ``validate`` rendered a triage prompt with
+# no comments, and a ``TRIAGE.md``'s comments section was never exercised.
+_SAMPLE_TRIAGE_COMMENTS = (
+    TrackerComment(
+        id=987654322,
+        url="https://github.com/example/repo/issues/1#issuecomment-987654322",
+        author="sample-maintainer",
+        association="OWNER",
+        body_html='<p dir="auto">Sample maintainer comment.</p>',
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    ),
+    TrackerComment(
+        id=987654323,
+        url="https://github.com/example/repo/issues/1#issuecomment-987654323",
+        author="sample-stranger",
+        association="NONE",
+        body_html='<p dir="auto">Sample comment from outside the repository.</p>',
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    ),
 )
 
 
@@ -2198,18 +2217,8 @@ async def _run_once_triage(
             return 1
         # The preview touches no workspace, so there is no clone to carry instruction files
         # from; the real session reads them out of its fresh clone.
-        context = TriagePromptContext(
-            issue=issue,
-            repo=settings.github.repo,
-            login=login,
-            admin=admin,
-            labels=labels,
-            limits=TriageLimits.from_settings(settings),
-            comments=comments,
-            repo_instructions=(),
-            turn_number=1,
-            max_turns=settings.triage.max_turns,
-            max_sub_issues=settings.triage.max_sub_issues,
+        context = TriagePromptContext.for_issue(
+            issue, settings, login=login, admin=admin, comments=comments
         )
         try:
             renderer = PromptRenderer(

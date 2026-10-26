@@ -5776,3 +5776,20 @@ def test_validate_fails_a_triage_prompt_that_does_not_render(
     (tmp_path / "TRIAGE.md").write_text("Triage {{ nope }}\n")
     assert main(["validate", "--workflow", str(path)]) == 1
     assert "[FAIL] triage:" in capsys.readouterr().out
+
+
+def test_validate_renders_the_triage_prompts_comments_section(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    # Each index is undefined on an empty list, so this renders only when validate hands the
+    # prompt a maintainer's comment and a stranger's.
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text(
+        "{{ comments.maintainers[0] }} {{ comments.quarantined[0].url }}\n"
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] triage:" in capsys.readouterr().out

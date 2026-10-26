@@ -12,7 +12,7 @@ from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
 from issuebot.config import GitHubLabels
 from issuebot.events import EventBus, StateChanged
 from issuebot.github import GitHubAdapter, Issue, SubIssue
-from issuebot.orchestrator.actions import _stamp
+from issuebot.orchestrator.actions import utc_stamp
 
 
 def plural(count: int, noun: str) -> str:
@@ -62,7 +62,7 @@ def verdict_comment(
     labels: GitHubLabels,
     now: datetime,
 ) -> str:
-    lines = [f"### Issuebot triage ({_stamp(now)})", ""]
+    lines = [f"### Issuebot triage ({utc_stamp(now)})", ""]
     if verdict.verdict == "fits":
         lines.append(
             f"**Verdict: fits.** One issuebot run should finish this. Add `{labels.todo}` "
