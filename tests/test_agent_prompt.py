@@ -956,6 +956,34 @@ def test_triage_limits_come_from_the_work_runs_settings() -> None:
     )
 
 
+def test_triage_context_for_issue_takes_the_rest_from_settings(
+    make_issue: Callable[..., Issue],
+) -> None:
+    issue = make_issue()
+    settings = Settings.model_validate(
+        {
+            "github": {"repo": "o/r"},
+            "triage": {"max_turns": 2, "max_sub_issues": 5},
+        }
+    )
+    context = TriagePromptContext.for_issue(
+        issue, settings, login="bot", admin=True, comments=(), turn_number=2
+    )
+    assert context == TriagePromptContext(
+        issue=issue,
+        repo="o/r",
+        login="bot",
+        admin=True,
+        labels=settings.github.labels,
+        limits=TriageLimits.from_settings(settings),
+        comments=(),
+        repo_instructions=(),
+        turn_number=2,
+        max_turns=2,
+        max_sub_issues=5,
+    )
+
+
 def test_comment_variables_admit_by_association() -> None:
     comments = [
         tracker_comment(1, author="maint", association="OWNER", body_html="<p>use sqlite</p>"),
