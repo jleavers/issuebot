@@ -221,18 +221,27 @@ async def run_session(
             rework=rework,
             resuming=resume_session_id is not None,
         )
+        crash: Exception | None = None
         if state.stop_reason is None:
-            await _execute(
-                state,
-                workflow,
-                adapter,
-                workspaces,
-                runner,
-                rework=rework,
-                resuming=resume_session_id is not None,
-                cancel=cancel,
-                observer=observer,
-            )
+            try:
+                await _execute(
+                    state,
+                    workflow,
+                    adapter,
+                    workspaces,
+                    runner,
+                    rework=rework,
+                    resuming=resume_session_id is not None,
+                    cancel=cancel,
+                    observer=observer,
+                )
+            except Exception as exc:
+                # Whatever the run did not classify (an OSError reading the instructions, a
+                # runner that raised): the run still ends in the store as failed, then the
+                # exception goes on to the orchestrator's own crash handling. Cancellation is
+                # a BaseException and passes through, as it does in `run_triage`.
+                state.fail("turn_failed", f"unexpected {type(exc).__name__}: {exc}")
+                crash = exc
         result = state.result()
         bus.publish(
             RunEnded(
@@ -259,6 +268,8 @@ async def run_session(
             error=_error_text(result),
             blocker=result.blocker,
         )
+        if crash is not None:
+            raise crash
         return result
     finally:
         clear_context()
