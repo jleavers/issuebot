@@ -209,8 +209,8 @@ one action that resumes it is in the comment:
   issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
 
 A verdict that failed to file is retried on each tick from memory, without a new session,
-and under a Claude authentication or usage hold too, since filing needs only GitHub; a
-preflight hold still waits.
+and under a Claude authentication or usage hold too, since filing needs only GitHub. A
+preflight hold still holds it, even one that names only `claude`.
 That memory, and the count of failed triage attempts, are the worker's process only: a restart
 resets the count and loses a verdict not yet filed, and if the label swap had not happened
 `issuebot/triage-todo` is still on the issue to triage it again. A triage run's failures do
