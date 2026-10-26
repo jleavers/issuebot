@@ -5542,14 +5542,15 @@ async def test_an_owed_verdict_is_filed_under_a_claude_hold(tmp_path: Path, hold
     assert h.github.issue(4).state is StateLabel.TODO
 
 
-async def test_an_owed_verdict_waits_under_a_preflight_hold(tmp_path: Path) -> None:
-    """`gh` or the token missing is what a preflight hold reports, so nothing is filed."""
+@pytest.mark.parametrize("missing", ["gh", "claude"])
+async def test_an_owed_verdict_waits_under_a_preflight_hold(tmp_path: Path, missing: str) -> None:
+    """A preflight hold files nothing, even one that names only `claude` (docs/operations.md)."""
     h = Harness(tmp_path)
     h.add_triage_issue(1)
     await h.tick()
     h.github.fail_next("transport", on="comment")
     await h.exit(h.triage_sessions.runs[0], **VERDICT)
-    h.which_missing = {"gh"}
+    h.which_missing = {missing}
     await h.tick()
     assert h.github.comments_for(1) == []
     assert "1" in h.orchestrator._triage_pending
