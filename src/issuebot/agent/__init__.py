@@ -31,6 +31,7 @@ from issuebot.agent.runner import (
     read_workspace_env,
     settings_for_labels,
     settings_with_model,
+    settings_with_triage_model,
     workspace_environment,
 )
 from issuebot.agent.session import (
@@ -100,6 +101,7 @@ __all__ = [
     "session_path",
     "settings_for_labels",
     "settings_with_model",
+    "settings_with_triage_model",
     "triage_key",
     "workspace_environment",
     "workspace_key",

@@ -274,25 +274,10 @@ def _read_overlay(
     A missing overlay is the normal case. One that exists but is not a regular file is an
     error naming it, rather than a "workflow file unreadable" from reading a directory.
     """
-    try:
-        local = overlay_path.stat()
-    except FileNotFoundError:
+    found = _read_beside(overlay_path, base=base, what="workflow overlay")
+    if found is None:
         return None, None, {}, ""
-    except OSError as exc:
-        raise MissingWorkflowFile(f"workflow overlay unreadable: {exc}", path=base) from exc
-    if not stat.S_ISREG(local.st_mode):
-        raise MissingWorkflowFile(
-            f"workflow overlay is not a regular file: {overlay_path}", path=base
-        )
-    try:
-        text = overlay_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise MissingWorkflowFile(f"workflow overlay unreadable: {exc}", path=base) from exc
-    try:
-        raw, body = parse_workflow_text(text)
-    except ConfigError as exc:
-        exc.path = overlay_path
-        raise
+    local, raw, body = found
     return overlay_path, local, raw, body
 
 
@@ -301,34 +286,49 @@ def _read_triage(
 ) -> tuple[Path | None, os.stat_result | None, str]:
     """``(path, stat, body)`` of TRIAGE.md; ``(None, None, "")`` without one.
 
-    Read as ``_read_overlay`` reads the overlay. It is a prompt and nothing else: front matter
-    would be a second place for settings to hide, and one that never merged into anything.
+    Read as the overlay is read. It is a prompt and nothing else: front matter would be a
+    second place for settings to hide, and one that never merged into anything.
     """
-    try:
-        found = triage_path.stat()
-    except FileNotFoundError:
+    found = _read_beside(triage_path, base=base, what=TRIAGE_FILE_NAME)
+    if found is None:
         return None, None, ""
-    except OSError as exc:
-        raise MissingWorkflowFile(f"{TRIAGE_FILE_NAME} unreadable: {exc}", path=base) from exc
-    if not stat.S_ISREG(found.st_mode):
-        raise MissingWorkflowFile(
-            f"{TRIAGE_FILE_NAME} is not a regular file: {triage_path}", path=base
-        )
-    try:
-        text = triage_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise MissingWorkflowFile(f"{TRIAGE_FILE_NAME} unreadable: {exc}", path=base) from exc
-    try:
-        raw, body = parse_workflow_text(text)
-    except ConfigError as exc:
-        exc.path = triage_path
-        raise
+    stat_result, raw, body = found
     if raw:
         raise WorkflowParseError(
             f"{TRIAGE_FILE_NAME} takes no front matter; settings belong in WORKFLOW.md",
             path=triage_path,
         )
-    return triage_path, found, body
+    return triage_path, stat_result, body
+
+
+def _read_beside(
+    path: Path, *, base: Path, what: str
+) -> tuple[os.stat_result, dict[str, Any], str] | None:
+    """``(stat, front_matter, body)`` of a file read beside the base workflow; ``None`` when
+    there is none, which is the normal case for both the overlay and ``TRIAGE.md``.
+
+    One that exists but is not a regular file is an error naming it, rather than an
+    "unreadable" from reading a directory; an error reading it names the base workflow, and a
+    parse error names the file itself. ``what`` is how the messages name it.
+    """
+    try:
+        found = path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MissingWorkflowFile(f"{what} unreadable: {exc}", path=base) from exc
+    if not stat.S_ISREG(found.st_mode):
+        raise MissingWorkflowFile(f"{what} is not a regular file: {path}", path=base)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MissingWorkflowFile(f"{what} unreadable: {exc}", path=base) from exc
+    try:
+        raw, body = parse_workflow_text(text)
+    except ConfigError as exc:
+        exc.path = path
+        raise
+    return found, raw, body
 
 
 def _format_errors(exc: ValidationError) -> list[tuple[str, str]]:

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import structlog
 
+from issuebot.agent import session as session_module
 from issuebot.agent.runner import TurnObserver, TurnResult
 from issuebot.agent.session import (
     BLOCKED_MARKER,
@@ -792,6 +793,57 @@ async def test_cancel_event_between_turns(tmp_path: Path) -> None:
     assert result.outcome == "cancelled"
     assert result.stop_reason == "cancelled"
     assert result.turns == 1
+
+
+class _Boom:
+    """A runner whose turn raises something no category covers."""
+
+    async def run_turn(self, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+
+async def test_an_unexpected_exception_still_ends_the_run_and_propagates(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    with pytest.raises(RuntimeError, match="boom"):
+        await h.run(_Boom())  # type: ignore[arg-type]
+    assert h.kinds() == ["run_started", "run_ended"]
+    ended = h.recorder.events[-1]
+    assert isinstance(ended, RunEnded)
+    assert ended.outcome == "failed"
+    assert ended.error is not None
+    assert "RuntimeError" in ended.error
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+async def test_an_unreadable_instruction_file_still_ends_the_run_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(session_module, "read_repository_instructions", broken)
+    runner = ScriptedRunner()
+    with pytest.raises(OSError, match="unreadable"):
+        await h.run(runner)
+    assert runner.calls == []
+    assert h.kinds() == ["run_started", "run_ended"]
+    assert h.recorder.events[-1].outcome == "failed"  # type: ignore[attr-defined]
+
+
+class _Cancelled:
+    """A runner whose turn is cancelled from outside."""
+
+    async def run_turn(self, **kwargs: object) -> object:
+        raise asyncio.CancelledError
+
+
+async def test_cancellation_passes_through_without_ending_the_run(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    with pytest.raises(asyncio.CancelledError):
+        await h.run(_Cancelled())  # type: ignore[arg-type]
+    assert h.kinds() == ["run_started"]
 
 
 async def test_log_context_is_bound_during_and_cleared_after(tmp_path: Path) -> None:

@@ -11,11 +11,10 @@ from issuebot.agent.instructions import read_repository_instructions
 from issuebot.agent.prompt import (
     TRIAGE_CONTINUATION_TEMPLATE,
     PromptRenderer,
-    TriageLimits,
     TriagePromptContext,
 )
 from issuebot.agent.runner import TurnObserver, TurnRunner
-from issuebot.agent.session import RunResult, _error_text, _State, new_run_id
+from issuebot.agent.session import RunResult, RunState, error_text, new_run_id
 from issuebot.agent.workspace import WorkspaceManager, run_log_dir
 from issuebot.config import Workflow
 from issuebot.events import EventBus, RunEnded, RunStarted
@@ -45,7 +44,7 @@ async def run_triage(
     but the clone is a fresh read-only one, there is no hook, no refresh between turns and no
     ``BLOCKED:`` escape, and the run stops as soon as a turn returns a verdict.
     """
-    state = _State(
+    state = RunState(
         run_id=run_id or new_run_id(),
         session_id=str(uuid.uuid4()),
         attempt=attempt,
@@ -91,7 +90,7 @@ async def run_triage(
                 issue_identifier=issue.identifier,
                 run_id=result.run_id,
                 outcome=result.outcome,
-                error=_error_text(result),
+                error=error_text(result),
                 turns=result.turns,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
@@ -110,7 +109,7 @@ async def run_triage(
             stop_reason=result.stop_reason,
             turns=result.turns,
             cost_usd=result.cost_usd,
-            error=_error_text(result),
+            error=error_text(result),
         )
         if crash is not None:
             raise crash
@@ -120,7 +119,7 @@ async def run_triage(
 
 
 async def _execute(
-    state: _State,
+    state: RunState,
     workflow: Workflow,
     adapter: GitHubAdapter,
     workspaces: WorkspaceManager,
@@ -165,29 +164,18 @@ async def _execute(
             state.fail("github_error", f"could not read the account's repository role: {exc}")
             return
         max_turns = settings.triage.max_turns
-        run_timeout_s = settings.agent.run_timeout_ms / 1000
-        deadline = state.started + run_timeout_s
-        limits = TriageLimits.from_settings(settings)
+        deadline = state.run_deadline(settings.agent)
         for turn_number in range(1, max_turns + 1):
-            if time.monotonic() >= deadline:
-                state.fail(
-                    "run_timeout",
-                    f"run deadline reached before turn {turn_number}: {run_timeout_s:.0f}s of "
-                    "wall clock (agent.run_timeout_ms)",
-                )
+            if state.past_deadline(settings.agent, turn_number):
                 return
-            context = TriagePromptContext(
-                issue=state.issue,
-                repo=settings.github.repo,
+            context = TriagePromptContext.for_issue(
+                state.issue,
+                settings,
                 login=login,
                 admin=admin,
-                labels=settings.github.labels,
-                limits=limits,
                 comments=comments,
                 repo_instructions=instructions,
                 turn_number=turn_number,
-                max_turns=max_turns,
-                max_sub_issues=settings.triage.max_sub_issues,
             )
             resume = turn_number > 1
             try:
@@ -212,27 +200,15 @@ async def _execute(
                 deadline=deadline,
             )
             state.record_turn(turn)
-            if not turn.ok:
-                if turn.error_category != "budget_exceeded":
-                    state.usage_reset_at = turn.usage_reset_at
-                    state.usage_window = turn.usage_window
-                    state.fail(turn.error_category or "turn_failed", turn.error)
-                    return
-                # A turn boundary, not a failure: the cap is per `claude -p` process.
-                get_logger(__name__).warning(
-                    "turn_budget_exhausted",
-                    run_id=state.run_id,
-                    turn_number=turn_number,
-                    max_turns=max_turns,
-                    cost_usd=turn.cost_usd,
-                    error=turn.error,
-                )
+            if state.fails_on(
+                turn, turn_number=turn_number, max_turns=max_turns, log=get_logger(__name__)
+            ):
+                return
             if turn.structured_output is not None:
                 state.structured_output = turn.structured_output
                 state.stop("verdict")
                 return
-            if cancel is not None and cancel.is_set():
-                state.fail("cancelled", "cancelled between turns")
+            if state.cancelled(cancel):
                 return
         state.stop("max_turns")
     finally:

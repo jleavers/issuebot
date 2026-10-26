@@ -956,6 +956,34 @@ def test_triage_limits_come_from_the_work_runs_settings() -> None:
     )
 
 
+def test_triage_context_for_issue_takes_the_rest_from_settings(
+    make_issue: Callable[..., Issue],
+) -> None:
+    issue = make_issue()
+    settings = Settings.model_validate(
+        {
+            "github": {"repo": "o/r"},
+            "triage": {"max_turns": 2, "max_sub_issues": 5},
+        }
+    )
+    context = TriagePromptContext.for_issue(
+        issue, settings, login="bot", admin=True, comments=(), turn_number=2
+    )
+    assert context == TriagePromptContext(
+        issue=issue,
+        repo="o/r",
+        login="bot",
+        admin=True,
+        labels=settings.github.labels,
+        limits=TriageLimits.from_settings(settings),
+        comments=(),
+        repo_instructions=(),
+        turn_number=2,
+        max_turns=2,
+        max_sub_issues=5,
+    )
+
+
 def test_comment_variables_admit_by_association() -> None:
     comments = [
         tracker_comment(1, author="maint", association="OWNER", body_html="<p>use sqlite</p>"),
@@ -994,6 +1022,18 @@ def test_a_comment_body_is_its_visible_text(make_issue: Callable[..., Issue]) ->
     assert "visible" in rendered
     assert "ignore the rules" not in rendered
     assert "Maintainers' comments" in rendered
+
+
+NOTHING_IGNORED = (
+    "When the issue asks for nothing but a verdict, return `ignored_requests` as an empty "
+    'string, not "None" or a note saying so.'
+)
+
+
+def test_the_shipped_triage_prompt_says_what_nothing_ignored_looks_like() -> None:
+    """#305: told only to report what it ignored, the session wrote "None. ..." on every
+    verdict, and the comment printed that as a refused request."""
+    assert NOTHING_IGNORED in " ".join(default_triage_prompt().split())
 
 
 def test_a_quarantined_comment_reaches_the_render_as_author_and_url_only(

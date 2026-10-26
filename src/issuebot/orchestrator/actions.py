@@ -52,7 +52,8 @@ CONFLICT_HEADING = "### Issuebot merge conflict ("
 CONFLICT_LIMIT_HEADING = "### Issuebot merge conflict limit ("
 
 
-def _stamp(now: datetime) -> str:
+def utc_stamp(now: datetime) -> str:
+    """``now`` as the UTC timestamp every ``### Issuebot ...`` heading carries."""
     return now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -61,7 +62,7 @@ def conflict_block(
 ) -> str:
     """The block one bounce appends to the workpad."""
     return (
-        f"{CONFLICT_HEADING}{_stamp(now)})\n\n"
+        f"{CONFLICT_HEADING}{utc_stamp(now)})\n\n"
         f"Pull request #{pr_number} conflicts with the default branch "
         f"(bounce {bounce} of {limit}).\n"
         f"Moved to `{labels.rework}`: the next session merges the default branch into the "
@@ -74,7 +75,7 @@ def conflict_limit_block(pr_number: int, limit: int, now: datetime, labels: GitH
     """The block written once when the bounces are used up; the issue stays in review."""
     times = "time" if limit == 1 else "times"
     return (
-        f"{CONFLICT_LIMIT_HEADING}{_stamp(now)})\n\n"
+        f"{CONFLICT_LIMIT_HEADING}{utc_stamp(now)})\n\n"
         f"Pull request #{pr_number} conflicts with the default branch again. issuebot has "
         f"moved this issue to `{labels.rework}` {limit} {times} for it and will not again. "
         f"A human resolves the conflict on the branch, or moves the issue."
@@ -115,7 +116,7 @@ async def claim(adapter: GitHubAdapter, bus: EventBus, issue: Issue) -> Issue | 
 
 def blocked_block(context: BlockedContext, now: datetime, labels: GitHubLabels) -> str:
     """The Markdown block the escape appends to the workpad."""
-    stamp = _stamp(now)
+    stamp = utc_stamp(now)
     turns = "turn" if context.turns == 1 else "turns"
     logs = f"; logs: `{context.log_dir}`" if context.log_dir else ""
     return (
@@ -353,7 +354,7 @@ def unapproved_block(verdict: Unapproved, now: datetime, labels: GitHubLabels) -
             "would act on."
         )
     return (
-        f"{UNAPPROVED_HEADING}{_stamp(now)})\n\n"
+        f"{UNAPPROVED_HEADING}{utc_stamp(now)})\n\n"
         f"{verdict.reason}. {explanation} Read the current title and description; if they "
         f"are what you want done, apply `{labels.todo}` again.\n"
     )
@@ -456,7 +457,7 @@ async def _hand_back(
         return "failed"
     try:
         await adapter.comment(
-            issue.number, f"### Issuebot {title} ({_stamp(now)})\n\n{reason}\n\n{way_back}"
+            issue.number, f"### Issuebot {title} ({utc_stamp(now)})\n\n{reason}\n\n{way_back}"
         )
     except GitHubError as exc:
         log.warning(
@@ -580,7 +581,7 @@ def budget_block(limit: BudgetLimit, reason: str, now: datetime, labels: GitHubL
     """The block the budget escape appends to the workpad."""
     recovery = _BUDGET_RECOVERY[limit].format(rework=labels.rework, todo=labels.todo)
     return (
-        f"{BUDGET_HEADING}{_stamp(now)})\n\n"
+        f"{BUDGET_HEADING}{utc_stamp(now)})\n\n"
         f"{BUDGET_REASON_PREFIX}{reason}.\n"
         f"Moved to `{labels.review}` for a human to look at. {recovery}"
     )

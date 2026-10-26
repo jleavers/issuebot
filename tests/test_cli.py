@@ -23,7 +23,7 @@ from fakes.database import DB_URL, FakeDatabase
 from issuebot import __version__, cli
 from issuebot.agent import ClaudeRunner, RunResult, SessionRecord, WorkspaceManager
 from issuebot.agent.prompt import PROMPT_VARIANT_AXES, PromptContext, prompt_variants
-from issuebot.agent.runner import RateLimits, RateLimitWindow
+from issuebot.agent.runner import RateLimits, RateLimitWindow, TriageRunner
 from issuebot.agent.scrub import Scrubber
 from issuebot.cli import (
     _DNS_NAME_CHARS,
@@ -5713,8 +5713,8 @@ def test_validate_reports_triage(
     assert main(["validate", "--workflow", str(GOOD)]) == 0
     out = capsys.readouterr().out
     assert (
-        "[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, "
-        "at most 8 sub-issues" in out
+        "[ OK ] triage: prompt shipped default, model claude's own default (neither "
+        "triage.model nor claude.model is set), 1 turn(s) at $2.00, at most 8 sub-issues" in out
     )
     assert out.index("] prompt:") < out.index("] triage:")
 
@@ -5748,6 +5748,71 @@ def test_validate_names_a_non_empty_triage_file(
     assert f"[ OK ] triage: prompt {triage.resolve()}, " in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("lines", "named"),
+    [
+        (("claude:", "  model: sonnet"), "model sonnet (claude.model),"),
+        (("claude:", "  model: sonnet", "triage:", "  model: opus"), "model opus (triage.model),"),
+        (("triage:", "  model: opus"), "model opus (triage.model),"),
+    ],
+)
+def test_validate_names_the_model_a_triage_run_uses(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+    lines: tuple[str, ...],
+    named: str,
+) -> None:
+    """`triage.model`, else `claude.model`: the choice `TriageRunner` makes (#304), not
+    "default" while `claude.model` is what the run uses."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path, **{str(i): line for i, line in enumerate(lines)})
+    main(["validate", "--workflow", str(path)])
+    [line] = [x for x in capsys.readouterr().out.splitlines() if "] triage:" in x]
+    assert line.startswith("[ OK ] triage: ")
+    assert named in line
+    assert "model default" not in line and "own default" not in line
+
+
+def test_run_once_triage_model_overrides_triage_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """`--model` reaches the triage argv even when `triage.model`, which wins over
+    `claude.model` there, names something else (#304)."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    seen: list[Settings] = []
+
+    def factory(settings: Settings) -> object:
+        seen.append(settings)
+        return object()
+
+    monkeypatch.setattr("issuebot.cli._triage_runner_factory", factory)
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    path = _workflow_with_root(
+        tmp_path, a="claude:", b="  model: sonnet", c="triage:", d="  model: opus"
+    )
+    assert main(["run-once", "42", "--triage", "--model", "haiku", "--workflow", str(path)]) == 0
+    [settings] = seen
+    argv = TriageRunner(settings, environ={}).build_argv(
+        session_id="s", resume=False, workspace=tmp_path / "ws" / "repo-42.triage"
+    )
+    assert argv[argv.index("--model") + 1] == "haiku"
+    assert argv.count("--model") == 1
+
+
+def test_run_once_model_help_names_triage(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["run-once", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "with --triage, overriding triage.model and claude.model" in help_text
+
+
 def test_validate_fails_a_triage_prompt_that_does_not_render(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -5759,3 +5824,20 @@ def test_validate_fails_a_triage_prompt_that_does_not_render(
     (tmp_path / "TRIAGE.md").write_text("Triage {{ nope }}\n")
     assert main(["validate", "--workflow", str(path)]) == 1
     assert "[FAIL] triage:" in capsys.readouterr().out
+
+
+def test_validate_renders_the_triage_prompts_comments_section(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    # Each index is undefined on an empty list, so this renders only when validate hands the
+    # prompt a maintainer's comment and a stranger's.
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text(
+        "{{ comments.maintainers[0] }} {{ comments.quarantined[0].url }}\n"
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] triage:" in capsys.readouterr().out

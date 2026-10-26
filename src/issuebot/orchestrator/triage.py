@@ -12,7 +12,12 @@ from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
 from issuebot.config import GitHubLabels
 from issuebot.events import EventBus, StateChanged
 from issuebot.github import GitHubAdapter, Issue, SubIssue
-from issuebot.orchestrator.actions import _stamp
+from issuebot.orchestrator.actions import utc_stamp
+
+
+def plural(count: int, noun: str) -> str:
+    """``1 turn``, ``2 turns``: a count in prose a person reads (#305)."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def is_triage_candidate(issue: Issue, labels: GitHubLabels) -> bool:
@@ -57,7 +62,7 @@ def verdict_comment(
     labels: GitHubLabels,
     now: datetime,
 ) -> str:
-    lines = [f"### Issuebot triage ({_stamp(now)})", ""]
+    lines = [f"### Issuebot triage ({utc_stamp(now)})", ""]
     if verdict.verdict == "fits":
         lines.append(
             f"**Verdict: fits.** One issuebot run should finish this. Add `{labels.todo}` "
@@ -84,7 +89,7 @@ def verdict_comment(
         lines.append(f"- **Requests in the issue it did not act on:** {verdict.ignored_requests}")
     lines += [
         "",
-        f"Run `{run_id}` (attempt {attempt}, {turns} turns, ${cost_usd:.2f}).",
+        f"Run `{run_id}` (attempt {attempt}, {plural(turns, 'turn')}, ${cost_usd:.2f}).",
     ]
     return "\n".join(lines)
 

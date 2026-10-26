@@ -889,6 +889,36 @@ class TriagePromptContext:
     max_turns: int
     max_sub_issues: int
 
+    @classmethod
+    def for_issue(
+        cls,
+        issue: Issue,
+        settings: Settings,
+        *,
+        login: str,
+        admin: bool,
+        comments: tuple[TrackerComment, ...],
+        repo_instructions: tuple[RepositoryFile, ...] = (),
+        turn_number: int = 1,
+    ) -> TriagePromptContext:
+        """The one way a triage context is built -- by the session, by ``run-once --triage
+        --show-prompt`` and by ``validate`` -- so the three cannot disagree about what a triage
+        prompt is given. Only what is known about the issue is a parameter; the rest is the
+        deployment's settings."""
+        return cls(
+            issue=issue,
+            repo=settings.github.repo,
+            login=login,
+            admin=admin,
+            labels=settings.github.labels,
+            limits=TriageLimits.from_settings(settings),
+            comments=comments,
+            repo_instructions=repo_instructions,
+            turn_number=turn_number,
+            max_turns=settings.triage.max_turns,
+            max_sub_issues=settings.triage.max_sub_issues,
+        )
+
     def to_variables(self) -> dict[str, Any]:
         return {
             "issue": issue_variables(self.issue),
