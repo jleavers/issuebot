@@ -5728,7 +5728,6 @@ def test_validate_names_the_model_a_triage_run_uses(
 
 
 def test_run_once_triage_model_overrides_triage_model(
-    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     fake_github: FakeGitHub,
@@ -5755,8 +5754,7 @@ def test_run_once_triage_model_overrides_triage_model(
     argv = TriageRunner(settings, environ={}).build_argv(
         session_id="s", resume=False, workspace=tmp_path / "ws" / "repo-42.triage"
     )
-    model = argv[argv.index("--model") + 1 :]
-    assert model[0] == "haiku"
+    assert argv[argv.index("--model") + 1] == "haiku"
     assert argv.count("--model") == 1
 
 
