@@ -32,7 +32,7 @@ TABLES = {
 # --- discovery (no database) -------------------------------------------------------------
 
 
-def test_the_package_ships_the_six_migrations() -> None:
+def test_the_package_ships_the_seven_migrations() -> None:
     migrations = discover_migrations()
     assert [m.label for m in migrations] == [
         "0001_initial",
@@ -41,8 +41,9 @@ def test_the_package_ships_the_six_migrations() -> None:
         "0004_run_turns_repo",
         "0005_actions_minutes",
         "0006_claude_limit_alerts",
+        "0007_run_kind",
     ]
-    assert [m.version for m in migrations] == [1, 2, 3, 4, 5, 6]
+    assert [m.version for m in migrations] == [1, 2, 3, 4, 5, 6, 7]
     assert "CREATE TABLE issues" in migrations[0].sql
     assert "CREATE TABLE runtime_snapshot" in migrations[0].sql
     assert "CREATE TABLE run_turns" in migrations[1].sql
@@ -106,15 +107,16 @@ async def test_migrate_applies_every_migration_once(db_url: str) -> None:
             "0004_run_turns_repo",
             "0005_actions_minutes",
             "0006_claude_limit_alerts",
+            "0007_run_kind",
         ),
-        6,
+        7,
     )
     second = await migrate(db_url)
-    assert (second.applied, second.version) == ((), 6)
+    assert (second.applied, second.version) == ((), 7)
     conn = await connect(db_url)
     try:
         assert await _tables(conn) == TABLES
-        assert await schema_version(conn) == 6
+        assert await schema_version(conn) == 7
     finally:
         await conn.close()
 
@@ -132,8 +134,8 @@ async def test_a_newer_recorded_version_is_refused(db_url: str) -> None:
     conn = await connect(db_url)
     try:
         await apply_migrations(conn)
-        await conn.execute("INSERT INTO schema_migrations (version, name) VALUES (7, 'future')")
-        with pytest.raises(MigrationError, match=r"schema version 7 is newer .* knows \(6\)"):
+        await conn.execute("INSERT INTO schema_migrations (version, name) VALUES (8, 'future')")
+        with pytest.raises(MigrationError, match=r"schema version 8 is newer .* knows \(7\)"):
             await apply_migrations(conn)
     finally:
         await conn.close()
@@ -213,10 +215,11 @@ async def test_0004_gives_every_turn_its_run_s_repository_and_keys_both_by_it(
     finally:
         await conn.close()
     result = await migrate(db_url)
-    assert result.version == 6 and result.applied == (
+    assert result.version == 7 and result.applied == (
         "0004_run_turns_repo",
         "0005_actions_minutes",
         "0006_claude_limit_alerts",
+        "0007_run_kind",
     )
     conn = await connect(db_url)
     try:
@@ -277,11 +280,12 @@ async def test_0003_ignores_a_stored_snapshot(db_url: str) -> None:
     finally:
         await conn.close()
     result = await migrate(db_url)
-    assert result.version == 6 and result.applied == (
+    assert result.version == 7 and result.applied == (
         "0003_repos",
         "0004_run_turns_repo",
         "0005_actions_minutes",
         "0006_claude_limit_alerts",
+        "0007_run_kind",
     )
     conn = await connect(db_url)
     try:
@@ -326,3 +330,20 @@ async def test_a_migration_blocked_on_the_advisory_lock_fails_instead_of_hanging
             assert "lock" in exc.value.message.lower()
     finally:
         await holder.close()
+
+
+async def test_0007_gives_existing_runs_kind_work(db_url: str) -> None:
+    conn = await connect(db_url)
+    try:
+        await apply_migrations(conn, discover_migrations()[:6])
+        await conn.execute(RUN_V3, ("alpha/one", "run-a"))
+    finally:
+        await conn.close()
+    result = await migrate(db_url)
+    assert result.version == 7 and result.applied == ("0007_run_kind",)
+    conn = await connect(db_url)
+    try:
+        row = await (await conn.execute("SELECT kind FROM runs WHERE run_id = 'run-a'")).fetchone()
+        assert row == ("work",)
+    finally:
+        await conn.close()

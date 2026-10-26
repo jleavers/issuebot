@@ -38,6 +38,13 @@ class StateChanged(IssueEvent):
     to_label: str | None
     actor: Literal["issuebot", "agent", "human"]
     pr_url: str | None = None
+    # A short line a move wants said beside it (triage's verdict: "split into 3 sub-issues").
+    note: str | None = None
+
+
+# A run is the work session or a triage one (spec 2026-10-25, section 4); the store keeps
+# the kind, because the admission ledger's failure chain counts work runs only.
+RunKind = Literal["work", "triage"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,6 +54,7 @@ class RunStarted(IssueEvent):
     attempt: int
     session_id: str | None
     workspace_path: str
+    run_kind: RunKind = "work"
 
 
 RunOutcome = Literal["succeeded", "failed", "timed_out", "stalled", "cancelled"]
@@ -64,6 +72,7 @@ class RunEnded(IssueEvent):
     cost_usd: float
     duration_s: float
     log_dir: str | None = None
+    run_kind: RunKind = "work"
 
 
 @dataclass(frozen=True, kw_only=True)

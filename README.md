@@ -35,8 +35,8 @@ Beside this file:
 ## How it works
 
 **The label is the state machine.** Nothing is installed in the target repository: it needs the
-five `issuebot/*` labels and the `issuebot/no-fault` marker, which `issuebot labels ensure`
-creates, and nothing else.
+five `issuebot/*` state labels, the `issuebot/no-fault` marker and the three triage labels below,
+which `issuebot labels ensure` creates, and nothing else.
 
 | Label | Set by |
 |---|---|
@@ -46,6 +46,9 @@ creates, and nothing else.
 | `issuebot/rework` | you, if the pull request needs more work; or the worker, when a sibling merge leaves it conflicting |
 | `issuebot/no-fault` | the agent, beside `review`, when the reported defect does not happen (a marker, not a state) |
 | `issuebot/complete` | automatically, when the issue closes by a merged pull request or with `issuebot/no-fault` |
+| `issuebot/triage-todo` | you, to have a session read the issue and file a verdict (not a state; see below) |
+| `issuebot/triage-complete` | the worker, after it filed a triage verdict; it stays beside a later state label |
+| `issuebot/operator-step` | the worker, on a sub-issue triage filed for you to do outside issuebot |
 
 ![An issue moving across the dashboard's Kanban board: someone labels it issuebot/todo, the worker claims it into issuebot/in-progress, it opens a pull request and moves to issuebot/review, and on merge it lands in issuebot/complete.](docs/images/issue-journey.gif)
 
@@ -56,6 +59,17 @@ does that itself when a sibling merge leaves the pull request conflicting, up to
 comes back with the evidence and the `issuebot/no-fault` marker instead of a pull request, and
 closing it counts as a completion too — on a backlog of aged issues that triage is most of the
 value.
+
+**Triage is by hand.** Label an issue `issuebot/triage-todo` and a read-only session reads it
+against the clone and files a verdict: `fits`, or `split` into ordered sub-issues. The worker
+files it, not the session: the sub-issues are created linked to the parent, a step for you
+rather than the agent carries `issuebot/operator-step`, `triage-todo` becomes
+`issuebot/triage-complete` and a `### Issuebot triage` comment says what was decided and why.
+Triage never adds `issuebot/todo` to anything: you read the verdict and label the issues you
+want worked. Run `issuebot labels ensure` once per repository first; a verdict cannot be filed
+until the three triage labels exist. How the session is bounded is
+[A triage session](docs/security-model.md#a-triage-session) and what to do when it hands an
+issue back is [Triage](docs/operations.md#triage).
 
 ## Quick start
 
@@ -96,8 +110,8 @@ dashboard at <http://127.0.0.1:8080> shows the run (any username, `ISSUEBOT_WEB_
 - **One `WORKFLOW.md` is one worker watching one repository.** It lives in `configs/`, the
   directory Compose mounts (see [Configuration
   changes](docs/operations.md#configuration-changes) for why the directory and not the file). Nothing is installed in the
-  target repository: it only needs the five `issuebot/*` state labels and the `issuebot/no-fault`
-  marker, which `issuebot labels ensure` creates. To work on several repositories, run one
+  target repository: it only needs the five `issuebot/*` state labels, the `issuebot/no-fault`
+  marker and the three triage labels, which `issuebot labels ensure` creates. To work on several repositories, run one
   worker checkout per repository against one shared database and one dashboard (see [More
   than one repository](docs/operations.md#more-than-one-repository)).
 - `WORKFLOW.md` has two parts. The YAML front matter is the configuration; everything after
@@ -467,6 +481,7 @@ first issue running; it is what to consult once one has.
 | `github.token` | `$VAR` naming the token variable | `GH_TOKEN` |
 | `github.labels.todo\|in_progress\|review\|rework\|complete` | the five state label names | `issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework`, `issuebot/complete` |
 | `github.labels.no_fault` | the marker a session adds beside `review` when it found no fault; not a state | `issuebot/no-fault` |
+| `github.labels.triage_todo\|triage_complete\|operator_step` | the three triage labels: the request, the verdict filed, and a sub-issue that is yours to do | `issuebot/triage-todo`, `issuebot/triage-complete`, `issuebot/operator-step` |
 | `github.request_timeout_ms` | the wall clock of one `gh` invocation. What it may hand back is bounded separately, by the code: 32 MiB per response, the workpad is looked for in an issue's first 1,000 comments, and a board poll reads at most 1,000 open issues under one state label. A board past that is a failed read -- which, repeated, holds dispatch and says so -- rather than a short one the worker would claim from; a held worker claims nothing, so getting under the ceiling again is a human's to do, by closing or un-labelling. The sweep that finishes closed issues reads 5,000 per label and, past that, skips *that* label with a warning and sweeps the rest | `30000` |
 | `polling.interval_ms` | how often GitHub is polled | `30000` |
 | `workspace.root` | where per-issue clones live; `~` and paths relative to `configs/WORKFLOW.md` are resolved | `/workspaces` (the Compose volume) |
@@ -487,6 +502,10 @@ first issue running; it is what to consult once one has.
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it; `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
+| `triage.model` | the model for a triage session; omit to use `claude.model` | none |
+| `triage.max_turns` | `claude -p` invocations per triage run | `1` |
+| `triage.max_budget_usd` | spend cap per triage turn (its cost counts toward `agent.max_issue_cost_usd`) | `2.0` |
+| `triage.max_sub_issues` | the most sub-issues one verdict may ask for, at most 20; a longer one is refused as malformed | `8` |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
@@ -541,6 +560,14 @@ is cut at 128 KiB. `validate` renders
 it against a sample issue; `run-once <number> --show-prompt` renders it against a real one
 without running anything.
 
+Triage has a prompt of its own. Put a `TRIAGE.md` beside `WORKFLOW.md` to replace the shipped
+one (`src/issuebot/config/triage_prompt.md`); it is plain Markdown with no front matter, and
+the worker reloads it when it appears, changes or is deleted. `issuebot run-once <number>
+--triage` runs one triage session in the foreground, and with `--show-prompt` renders it
+without running anything; stop the worker first if it serves the issue, or it triages the same
+issue beside you and both file. `validate` renders it and warns while the triage labels are
+missing. Work sessions are told never to touch the triage labels.
+
 ### Choosing the model for an issue
 
 `claude.model` is the default for every session. Its value is passed straight to
@@ -588,7 +615,7 @@ both the label and the default.
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for you) and, for the
 container stack, Docker with Compose. Running the CLI outside a container — the host route,
 which is what `agent.run_as` unset means and how the test suite runs — also wants `git`, the
-[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.259 or
+[GitHub CLI](https://cli.github.com/) and [Claude Code](https://claude.ai/code) 2.1.303 or
 newer on `PATH`, where `claude` uses whatever login you already have. On Windows, use WSL. It
 is a development convenience rather than a deployment, and what it removes is the container
 that the Safety note above calls the sandbox: the session runs at your own uid, with your
@@ -653,7 +680,8 @@ for the `claude` pin in the Dockerfile. Bump a hook by hand the same way:
 
 Upgrading an existing worker to a version that adds a label — `issuebot/no-fault` is the most
 recent — needs `issuebot labels ensure` run once against the target repository first. The worker
-checks its labels at startup and refuses to start while one is missing, naming it and the remedy.
+checks its labels at startup and refuses to start while one is missing, naming it and the remedy. The three triage labels are the exception: a worker starts without them and logs
+`triage_labels_missing`, but a verdict cannot be filed until `labels ensure` has created them.
 
 [**The dashboard**](docs/dashboard.md) documents what `issuebot web` serves and how it is
 reached: the board, the hero's six tiles, what "issues closed" counts, and the authorisation

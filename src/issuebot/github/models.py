@@ -83,6 +83,34 @@ class Comment:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class TrackerComment:
+    """One comment as the triage prompt shows it: GitHub's sanitised render, and who wrote it.
+
+    ``association`` is GitHub's ``CommentAuthorAssociation`` (``OWNER``, ``MEMBER``, ``NONE``,
+    ...), the signal that tells a maintainer's text from a stranger's; ``author`` is ``None``
+    once GitHub has deleted the account. ``body_html`` and not the raw body, for the reason the
+    issue's own text is (GHSA-f3fm-r55f-2vgm): hidden markup is not rendered.
+    """
+
+    id: int
+    url: str
+    author: str | None
+    association: str | None
+    body_html: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class SubIssue:
+    """A child of an issue, as GitHub links it."""
+
+    number: int
+    title: str
+    url: str
+    state: GitHubState
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LabelApplied:
     """One label addition as GitHub's timeline records it."""
 

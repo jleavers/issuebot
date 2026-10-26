@@ -5,18 +5,25 @@ import itertools
 import re
 import shlex
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from jinja2 import Environment, StrictUndefined, Template, TemplateError
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.instructions import RepositoryFile
 from issuebot.agent.visible import strip_invisible, visible_text
-from issuebot.config import GitHubLabels
-from issuebot.github.models import WORKPAD_MARKER, Comment, Issue, LinkedPr, StateLabel
+from issuebot.config import GitHubLabels, Settings
+from issuebot.github.models import (
+    WORKPAD_MARKER,
+    Comment,
+    Issue,
+    LinkedPr,
+    StateLabel,
+    TrackerComment,
+)
 
 GITHUB_TEXT_TAG = "github-text"
 """The envelope's tag; what the workflow's rule about GitHub-authored text is written against."""
@@ -252,6 +259,19 @@ def check_envelopes(rendered: str) -> str | None:
     return None
 
 
+TRIAGE_CONTINUATION_TEMPLATE = """\
+This is turn {{ turn_number }} of {{ max_turns }} of the triage of #{{ issue.number }}. The last \
+turn ended without a verdict. Return it now with the StructuredOutput tool, judging from what \
+you have already read.
+"""
+
+
+class VariablesContext(Protocol):
+    """What a renderer needs of a context: the variables a template sees, nothing more."""
+
+    def to_variables(self) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PromptContext:
     """Everything a template can see for one turn."""
@@ -294,6 +314,9 @@ class PromptContext:
             "labels": {
                 **{role.value: getattr(self.labels, role.value) for role in StateLabel},
                 "no_fault": self.labels.no_fault,
+                "triage_todo": self.labels.triage_todo,
+                "triage_complete": self.labels.triage_complete,
+                "operator_step": self.labels.operator_step,
             },
             "workpad_marker": WORKPAD_MARKER,
             "workpad": workpad_variables(self.workpad),
@@ -796,10 +819,112 @@ def workpad_variables(workpad: Comment | None) -> dict[str, Any] | None:
     return {"id": workpad.id, "url": workpad.url}
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TriageLimits:
+    """The *work* run's limits, which a triage judges an issue against (not triage's own)."""
+
+    max_turns: int
+    max_budget_usd: float
+    run_timeout_minutes: int
+    max_conflict_reworks: int
+    # 0.0 is "unset" (``agent.max_issue_cost_usd``'s default), which the template hides.
+    max_issue_cost_usd: float
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> TriageLimits:
+        return cls(
+            max_turns=settings.agent.max_turns,
+            max_budget_usd=settings.claude.max_budget_usd,
+            run_timeout_minutes=settings.agent.run_timeout_ms // 60_000,
+            max_conflict_reworks=settings.agent.max_conflict_reworks,
+            max_issue_cost_usd=settings.agent.max_issue_cost_usd,
+        )
+
+
+def comment_variables(
+    comments: Sequence[TrackerComment], *, issue_number: int, login: str, admin: bool
+) -> dict[str, list[Any]]:
+    """The comments as the triage prompt sees them: maintainers' enveloped, the rest named.
+
+    The admission rule is the work prompt's: a comment counts as a request only when GitHub
+    gives its author a maintainer association, and not when it is the account's own (unless
+    that account administers the repository, where it *is* the maintainer;
+    GHSA-f3fm-r55f-2vgm). Everyone else's text never reaches the prompt, only who wrote it and
+    where, so the session can say there was more to read. The account's own comments, when
+    excluded, are left out entirely: they are issuebot's own earlier output, not a stranger.
+    """
+    maintainers: list[Any] = []
+    quarantined: list[Any] = []
+    for comment in comments:
+        own = comment.author == login and not admin
+        if own:
+            continue
+        if comment.association in MAINTAINER_ASSOCIATIONS:
+            maintainers.append(
+                GitHubText(
+                    visible_text(comment.body_html),
+                    source=f"comment {comment.url} on issue #{issue_number}",
+                    author=comment.author,
+                    association=comment.association,
+                )
+            )
+        else:
+            quarantined.append({"author": comment.author or UNKNOWN_AUTHOR, "url": comment.url})
+    return {"maintainers": maintainers, "quarantined": quarantined}
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TriagePromptContext:
+    """Everything the triage template can see: the issue, what is known around it, the limits."""
+
+    issue: Issue
+    repo: str
+    login: str
+    admin: bool
+    labels: GitHubLabels
+    limits: TriageLimits
+    comments: tuple[TrackerComment, ...]
+    repo_instructions: tuple[RepositoryFile, ...]
+    turn_number: int
+    max_turns: int
+    max_sub_issues: int
+
+    def to_variables(self) -> dict[str, Any]:
+        return {
+            "issue": issue_variables(self.issue),
+            "repo": self.repo,
+            "repo_instructions": [
+                instruction_variables(file, self.repo) for file in self.repo_instructions
+            ],
+            "labels": {
+                "todo": self.labels.todo,
+                "triage_todo": self.labels.triage_todo,
+                "triage_complete": self.labels.triage_complete,
+                "operator_step": self.labels.operator_step,
+            },
+            "limits": {
+                "max_turns": self.limits.max_turns,
+                "max_budget_usd": self.limits.max_budget_usd,
+                "run_timeout_minutes": self.limits.run_timeout_minutes,
+                "max_conflict_reworks": self.limits.max_conflict_reworks,
+                "max_issue_cost_usd": self.limits.max_issue_cost_usd,
+            },
+            "comments": comment_variables(
+                self.comments,
+                issue_number=self.issue.number,
+                login=self.login,
+                admin=self.admin,
+            ),
+            "turn_number": self.turn_number,
+            "max_turns": self.max_turns,
+            "max_sub_issues": self.max_sub_issues,
+        }
+
+
 class PromptRenderer:
     """Compiles the workflow body once and renders it, and the continuation prompt, strictly."""
 
-    def __init__(self, template: str) -> None:
+    def __init__(self, template: str, *, continuation: str = CONTINUATION_TEMPLATE) -> None:
         self._env = Environment(
             undefined=StrictUndefined,
             autoescape=False,
@@ -808,12 +933,12 @@ class PromptRenderer:
             keep_trailing_newline=True,
         )
         self._template = self._compile(template)
-        self._continuation = self._compile(CONTINUATION_TEMPLATE)
+        self._continuation = self._compile(continuation)
 
-    def render(self, context: PromptContext) -> str:
+    def render(self, context: VariablesContext) -> str:
         return self._render(self._template, context)
 
-    def render_continuation(self, context: PromptContext) -> str:
+    def render_continuation(self, context: VariablesContext) -> str:
         return self._render(self._continuation, context)
 
     def _compile(self, source: str) -> Template:
@@ -823,7 +948,7 @@ class PromptRenderer:
             raise AgentError("prompt_error", f"template does not compile: {exc}") from exc
 
     @staticmethod
-    def _render(template: Template, context: PromptContext) -> str:
+    def _render(template: Template, context: VariablesContext) -> str:
         try:
             rendered = template.render(context.to_variables())
         except TemplateError as exc:

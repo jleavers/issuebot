@@ -34,6 +34,11 @@ build/
 # name so a second workflow file on a host (`--workflow frontend.md`) has its
 # `frontend.local.md` ignored too.
 configs/*.local.md
+# The deployment's triage prompt, when it overrides the shipped one: `TRIAGE.md` beside the
+# workflow file, as the README's configuration reference says to write it. Local for the same
+# reasons, and for one more: `tools/upgrade` refuses a checkout `git status` calls dirty, so an
+# untracked override the README told the operator to create would stop every upgrade.
+configs/TRIAGE.md
 
 # Local secrets - service principal creds for the FOCUS export storage account.
 .env

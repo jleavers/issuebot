@@ -164,6 +164,45 @@ async def test_run_ended_alone_computes_the_start(store: PostgresStore, db_url: 
     assert (row["outcome"], row["error"]) == ("failed", "turn_failed: boom")
 
 
+async def test_a_triage_run_is_stored_with_its_kind(store: PostgresStore, db_url: str) -> None:
+    await store.apply_event(started(run_kind="triage"))
+    (row,) = await rows(db_url, "SELECT kind FROM runs")
+    assert row["kind"] == "triage"
+    await store.apply_event(ended(run_kind="triage"))
+    (row,) = await rows(db_url, "SELECT kind FROM runs")
+    assert row["kind"] == "triage"
+
+
+async def test_run_ended_alone_still_records_the_kind(store: PostgresStore, db_url: str) -> None:
+    await store.apply_event(ended(run_kind="triage"))
+    (row,) = await rows(db_url, "SELECT kind FROM runs")
+    assert row["kind"] == "triage"
+    await store.apply_event(ended(run_id="run-2"))
+    assert {r["run_id"]: r["kind"] for r in await rows(db_url, "SELECT * FROM runs")} == {
+        "run-1": "triage",
+        "run-2": "work",
+    }
+
+
+async def test_a_triage_label_move_leaves_the_recorded_state_alone(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await store.upsert_issues([snapshot(make_issue(), 0)])
+    (before,) = await rows(db_url, "SELECT state, state_label FROM issues")
+    assert before["state"] == "todo"
+    await store.apply_event(
+        moved(
+            from_label="issuebot/triage-todo",
+            to_label="issuebot/triage-complete",
+            note="split into 3 sub-issues",
+        )
+    )
+    (after,) = await rows(db_url, "SELECT state, state_label FROM issues")
+    assert after == before
+    (event,) = await rows(db_url, "SELECT payload FROM events WHERE kind = 'state_changed'")
+    assert event["payload"]["note"] == "split into 3 sub-issues"
+
+
 def test_insert_turn_placeholders_match_turncapture_fields() -> None:
     """Hermetic (no DATABASE_URL needed): pins INSERT_TURN's bound parameters against
     TurnCapture so a future field cannot be silently dropped from the write."""

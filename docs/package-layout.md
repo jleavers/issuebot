@@ -1028,6 +1028,14 @@ transcript. `tests/fixtures/runs/<run_id>/` holds a real turn (scratch issue #7)
 scrubber wrote it -- its home was `/home/jleavers` -- and a test proves it is the scrubber's
 fixed point; pre-commit excludes it because the tests pin its sizes.
 
+`verdict.py` and `triage.py` hold triage's side of the package (triage design, sections 3-5).
+`verdict.py` is the shape a read-only session returns and the parser that re-checks every
+constraint the schema states, scrubbing each string after decoding; its errors name a field,
+never content, so they may be published. `triage.py` is `run_triage`: a hook-free throwaway
+clone, the turn loop and a run that ends in the store even when it raises. `TriageRunner`
+(`runner.py`) is `ClaudeRunner` with its own flags, built from nothing of the operator's
+widening.
+
 ## `issuebot.orchestrator`
 
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
@@ -1401,6 +1409,10 @@ an exception or a body of the wrong shape costs the annotation and nothing else,
 `All Systems Operational` reading is still carried, since it points at the operator's own
 network rather than GitHub's.
 
+`triage.py` is the worker filing a verdict: sub-issues linked to the parent, `operator_step`
+on steps for a human, `triage_todo` swapped for `triage_complete`, the comment last. Runs carry
+a kind (`work` or `triage`, migration 0007); a triage failure does not extend a work chain.
+
 ## `issuebot.notifications`
 
 the Slack sink, imported by `cli`, and by `web` for two messages. `messages.py` (pure):
@@ -1423,8 +1435,8 @@ warning or a limit hit (chosen by `hit`), times in UTC.
 
 the observability store, imported by `cli` and `web`; imports `config`,
 `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`;
-schema version 6) applied by
+`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`, `0007_run_kind`;
+schema version 7) applied by
 `migrate.py` in one transaction
 under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
 files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
@@ -1511,6 +1523,11 @@ case-insensitively.
 row per window instance `(limit_window, resets_at)`, written only by the web's watcher:
 `Database.claude_limit_alerted` reads it, `claim_claude_limit_alert` writes a target only when
 it raises the stored percent, and `release_claude_limit_alert` gives a failed post's claim back.
+
+`0007_run_kind.sql`: `runs.kind` (`work` or `triage`, default `work`), carried by `RunStarted` and
+`RunEnded` as `run_kind`. `ISSUE_LEDGERS` counts only work runs toward the failure chain, while the
+cost of every run is the issue's spend; `apply_event` leaves `issues.state` alone for a move on
+the triage labels (`_on_the_triage_track`), though the `events` row is still written.
 
 ## `issuebot.web`
 
@@ -1666,7 +1683,7 @@ App user (`ghu_`) token, whose reach is the account's while the session holds it
 the fine-grained alternative restricted to `github.repo` (#109), three network probes
 through the
 adapter, the labels one covering `claude.model_labels` and the `no_fault` marker as well as
-the five state labels, a `claude --version` floor of 2.1.259, the `claude auth status --json`
+the five state labels, a `claude --version` floor of 2.1.303, the `claude auth status --json`
 probe (shared with the worker's startup, see `issuebot.agent`) that names the credential the
 agent would use (`claude.ai`,
 `CLAUDE_CODE_OAUTH_TOKEN` or an API key), fails when logged out, warns when a login and

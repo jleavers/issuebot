@@ -56,24 +56,26 @@ VALUES (%(repo)s, %(at)s, %(kind)s, %(issue_number)s, %(run_id)s, %(payload)s)
 
 RUN_STARTED = """
 INSERT INTO runs (repo, run_id, issue_number, issue_identifier, attempt, session_id, started_at,
-                  workspace_path)
+                  workspace_path, kind)
 VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(attempt)s, %(session_id)s,
-        %(started_at)s, %(workspace_path)s)
+        %(started_at)s, %(workspace_path)s, %(kind)s)
 ON CONFLICT (repo, run_id) DO UPDATE SET
     issue_number = EXCLUDED.issue_number,
     issue_identifier = EXCLUDED.issue_identifier,
     attempt = EXCLUDED.attempt,
     session_id = EXCLUDED.session_id,
     started_at = EXCLUDED.started_at,
-    workspace_path = EXCLUDED.workspace_path
+    workspace_path = EXCLUDED.workspace_path,
+    kind = EXCLUDED.kind
 """
 
 RUN_ENDED = """
 INSERT INTO runs (repo, run_id, issue_number, issue_identifier, started_at, ended_at, outcome,
-                  error, turns, input_tokens, output_tokens, cost_usd, duration_s, log_dir)
+                  error, turns, input_tokens, output_tokens, cost_usd, duration_s, log_dir,
+                  kind)
 VALUES (%(repo)s, %(run_id)s, %(issue_number)s, %(issue_identifier)s, %(started_at)s, %(ended_at)s,
         %(outcome)s, %(error)s, %(turns)s, %(input_tokens)s, %(output_tokens)s, %(cost_usd)s,
-        %(duration_s)s, %(log_dir)s)
+        %(duration_s)s, %(log_dir)s, %(kind)s)
 ON CONFLICT (repo, run_id) DO UPDATE SET
     ended_at = EXCLUDED.ended_at,
     outcome = EXCLUDED.outcome,
@@ -83,7 +85,8 @@ ON CONFLICT (repo, run_id) DO UPDATE SET
     output_tokens = EXCLUDED.output_tokens,
     cost_usd = EXCLUDED.cost_usd,
     duration_s = EXCLUDED.duration_s,
-    log_dir = EXCLUDED.log_dir
+    log_dir = EXCLUDED.log_dir,
+    kind = EXCLUDED.kind
 """
 
 INSERT_TURN = """
@@ -246,7 +249,7 @@ class PostgresStore:
                             INSERT_TURN,
                             [self._stamp(turn_row(event.run_id, turn)) for turn in turns],
                         )
-            elif isinstance(event, StateChanged):
+            elif isinstance(event, StateChanged) and not _on_the_triage_track(event, self._labels):
                 await conn.execute(STATE_CHANGED, self._stamp(self._state_changed_row(event)))
             elif isinstance(event, IssueCompleted | IssueCancelled):
                 await conn.execute(
@@ -313,6 +316,19 @@ def event_row(event: Event) -> dict[str, Any]:
     }
 
 
+def _on_the_triage_track(event: StateChanged, labels: GitHubLabels) -> bool:
+    """Whether a move is triage's own (spec 2026-10-25, section 7).
+
+    The triage labels sit beside the issue's state rather than in it: an issue waiting to be
+    triaged is still ``todo``, and the verdict's label is not a column. The event is still
+    written, so the history has the move; only the recorded state is left alone.
+    """
+    track = {labels.triage_todo.lower(), labels.triage_complete.lower()}
+    return any(
+        name is not None and name.lower() in track for name in (event.from_label, event.to_label)
+    )
+
+
 def run_started_row(event: RunStarted) -> dict[str, Any]:
     return {
         "run_id": event.run_id,
@@ -322,6 +338,7 @@ def run_started_row(event: RunStarted) -> dict[str, Any]:
         "session_id": event.session_id,
         "started_at": event.at,
         "workspace_path": event.workspace_path or None,
+        "kind": event.run_kind,
     }
 
 
@@ -346,4 +363,5 @@ def run_ended_row(event: RunEnded) -> dict[str, Any]:
         "cost_usd": event.cost_usd,
         "duration_s": event.duration_s,
         "log_dir": event.log_dir,
+        "kind": event.run_kind,
     }

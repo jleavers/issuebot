@@ -672,13 +672,30 @@ async def test_set_state_adds_target_and_removes_the_other_four() -> None:
     ]
 
 
+async def test_a_claim_strips_no_fault_and_triage_todo_but_keeps_triage_complete() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS, clear_markers=True)
+    removed = runner.argv(0)[-1].split(",")
+    assert removed == [
+        "issuebot/todo",
+        "issuebot/review",
+        "issuebot/rework",
+        "issuebot/complete",
+        "issuebot/no-fault",
+        "issuebot/triage-todo",
+    ]
+    assert "issuebot/triage-complete" not in removed
+
+
 async def test_set_state_removes_the_markers_only_when_asked() -> None:
     """#34: `claim` drops the no-fault marker; every other `set_state` must preserve it."""
     runner = StubRunner()
     runner.on(has("issue", "edit"))
     await make_adapter(runner).set_state(42, StateLabel.IN_PROGRESS, clear_markers=True)
     assert runner.argv(0)[-1] == (
-        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete,issuebot/no-fault"
+        "issuebot/todo,issuebot/review,issuebot/rework,issuebot/complete,"
+        "issuebot/no-fault,issuebot/triage-todo"
     )
 
 
@@ -915,6 +932,9 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         ("issuebot/rework", "created"),
         ("issuebot/complete", "created"),
         ("issuebot/no-fault", "created"),
+        ("issuebot/triage-todo", "created"),
+        ("issuebot/triage-complete", "created"),
+        ("issuebot/operator-step", "created"),
     ]
     assert runner.argv(0) == [
         "label",
@@ -927,7 +947,7 @@ async def test_ensure_labels_creates_updates_and_leaves_unchanged() -> None:
         "200",
     ]
     creates = [argv for argv, _ in runner.calls if argv[:2] == ["label", "create"]]
-    assert len(creates) == 5
+    assert len(creates) == 8
     assert creates[0] == [
         "label",
         "create",
@@ -953,6 +973,9 @@ async def test_missing_labels_lists_absent_names_in_role_order() -> None:
         "issuebot/rework",
         "issuebot/complete",
         "issuebot/no-fault",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
     ]
 
 
@@ -965,6 +988,9 @@ async def test_missing_labels_reports_the_extra_names_after_the_state_ones() -> 
         "issuebot/rework",
         "issuebot/complete",
         "issuebot/no-fault",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
         "issuebot/model/sonnet",
     ]
 
@@ -1743,3 +1769,146 @@ async def test_approval_evidence_rejects_a_malformed_response(stdout: str) -> No
     assert excinfo.value.category == "response"
     # Malformed is a failed read, retried; only the ceiling is the issue's own length.
     assert not isinstance(excinfo.value, PageCeilingError)
+
+
+# --- triage: labels, comments and sub-issues (spec sections 4 and 5) -------------------------
+
+
+async def test_edit_labels_adds_and_removes_in_one_call() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).edit_labels(7, add=["a"], remove=["b", "c"])
+    assert runner.argv(0) == [
+        "issue",
+        "edit",
+        "7",
+        "-R",
+        "example/repo",
+        "--add-label",
+        "a",
+        "--remove-label",
+        "b,c",
+    ]
+
+
+async def test_edit_labels_with_only_a_removal_passes_no_add_flag() -> None:
+    runner = StubRunner()
+    runner.on(has("issue", "edit"))
+    await make_adapter(runner).edit_labels(7, remove=["b"])
+    assert runner.argv(0) == ["issue", "edit", "7", "-R", "example/repo", "--remove-label", "b"]
+
+
+async def test_edit_labels_with_nothing_to_do_runs_nothing() -> None:
+    runner = StubRunner()
+    await make_adapter(runner).edit_labels(7)
+    assert runner.calls == []
+
+
+async def test_fetch_issues_with_label_asks_for_that_label() -> None:
+    runner = StubRunner()
+    runner.on(has("label=issuebot/triage-todo"), stdout=fixture("list_triage_todo.json"))
+    issues = await make_adapter(runner).fetch_issues_with_label("issuebot/triage-todo")
+    assert [issue.number for issue in issues] == [60]
+    assert issues[0].state is None  # no state label: a triage-only issue is not on the board
+    assert "states: [OPEN]" in query_of(runner.argv(0))
+
+
+def _comments_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issue": {
+                        "comments": {
+                            "nodes": nodes,
+                            "pageInfo": {
+                                "hasNextPage": end_cursor is not None,
+                                "endCursor": end_cursor,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+async def test_fetch_comments_keeps_association_and_html() -> None:
+    runner = StubRunner()
+    runner.on(has("comments(first: 100"), stdout=fixture("triage_comments.json"))
+    comments = await make_adapter(runner).fetch_comments(60)
+    assert [(c.id, c.author, c.association) for c in comments] == [
+        (2001, "jleavers", "OWNER"),
+        (2002, None, "NONE"),
+    ]
+    assert comments[0].body_html == '<p dir="auto">Please also cover the admin view.</p>'
+    assert comments[0].created_at == datetime(2026, 10, 2, 10, 0, tzinfo=UTC)
+    assert comments[1].url.endswith("#issuecomment-2002")
+    assert "bodyHTML" in query_of(runner.argv(0))
+
+
+async def test_fetch_comments_is_capped_at_the_timeline_ceiling() -> None:
+    runner = StubRunner()
+    node = json.loads(fixture("triage_comments.json"))["data"]["repository"]["issue"]["comments"][
+        "nodes"
+    ][0]
+    runner.on(lambda argv: True, stdout=_comments_page([node], end_cursor="c"))
+    with pytest.raises(PageCeilingError):
+        await make_adapter(runner).fetch_comments(60)
+    assert len(runner.calls) == MAX_TIMELINE_PAGES
+
+
+async def test_fetch_comments_rejects_a_record_without_its_id() -> None:
+    runner = StubRunner()
+    runner.on(has("comments(first: 100"), stdout=_comments_page([{"url": "u"}], end_cursor=None))
+    with pytest.raises(GitHubError) as exc:
+        await make_adapter(runner).fetch_comments(60)
+    assert exc.value.category == "response"
+
+
+async def test_sub_issues_keeps_github_order() -> None:
+    runner = StubRunner()
+    runner.on(has("subIssues(first: 100)"), stdout=fixture("sub_issues.json"))
+    subs = await make_adapter(runner).sub_issues(60)
+    assert [(s.number, s.state) for s in subs] == [(71, "open"), (70, "closed")]
+    assert subs[0].url == "https://github.com/example/repo/issues/71"
+
+
+async def test_create_sub_issue_links_the_parent_at_creation() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("issue(number: $parent)"),
+        stdout='{"data": {"repository": {"id": "R_1", "issue": {"id": "I_parent"}}}}',
+    )
+    runner.on(
+        has("createIssue"),
+        stdout=json.dumps(
+            {
+                "data": {
+                    "createIssue": {
+                        "issue": {
+                            "number": 72,
+                            "title": "Step one",
+                            "url": "https://github.com/example/repo/issues/72",
+                            "state": "OPEN",
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    adapter = make_adapter(runner)
+
+    sub = await adapter.create_sub_issue(60, title="Step one", body="Do it.")
+    assert (sub.number, sub.title, sub.state) == (72, "Step one", "open")
+
+    mutation = runner.argv(1)
+    assert "parentIssueId: $parent" in query_of(mutation)
+    assert "parent=I_parent" in mutation and "repo=R_1" in mutation
+    assert "title=Step one" in mutation and "body=Do it." in mutation
+    assert not any(a == "-F" for a in mutation)  # every variable goes as a string
+
+    await adapter.create_sub_issue(60, title="Step two", body="Then this.")
+    # The node ids are cached (they never change): only the second mutation is a new call.
+    assert len(runner.calls) == 3
+    assert "createIssue" in query_of(runner.argv(2))

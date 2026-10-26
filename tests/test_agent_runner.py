@@ -34,6 +34,7 @@ from issuebot.agent.runner import (
     ClaudeRunner,
     RateLimitWindow,
     StreamParser,
+    TriageRunner,
     TurnEvent,
     TurnResult,
     UsageLimit,
@@ -53,6 +54,7 @@ from issuebot.agent.runner import (
     workspace_environment,
 )
 from issuebot.agent.scrub import REDACTED, Scrubber
+from issuebot.agent.verdict import verdict_schema
 from issuebot.config import Settings
 from issuebot.log import configure_logging
 
@@ -1412,7 +1414,7 @@ def test_parse_claude_version(text: str | None, expected: tuple[int, int, int] |
 
 
 def test_minimum_version_is_the_permission_prompts_release() -> None:
-    assert MIN_CLAUDE_VERSION == (2, 1, 259)
+    assert MIN_CLAUDE_VERSION == (2, 1, 303)
 
 
 @pytest.mark.parametrize(
@@ -2726,3 +2728,150 @@ async def test_run_turn_refuses_a_log_directory_that_is_not_the_workers(
     assert turn.error_category == "invalid_workspace_cwd"
     assert turn.error is not None and "a symbolic link" in turn.error
     assert list(elsewhere.iterdir()) == []
+
+
+# --- triage: a read-only, credential-free session (spec section 4) ----------------------
+
+
+def triage_settings(root: Path, **claude: object) -> Settings:
+    return Settings.model_validate(
+        {
+            "github": {"repo": "example/repo", "token": "ghp_sekret"},
+            "workspace": {"root": str(root)},
+            "claude": {"command": str(FAKE_CLAUDE), **claude},
+        }
+    )
+
+
+def test_triage_argv_is_restricted_and_read_only(tmp_path: Path) -> None:
+    # Every operator setting the triage argv ignores, set to something visible: the project
+    # source the operator allows, and a deny list whose flag a triage argv never carries.
+    cfg = triage_settings(
+        tmp_path,
+        allowed_tools=["Bash"],
+        disallowed_tools=["Write"],
+        permission_mode="bypassPermissions",
+        mcp_config=["x.json"],
+        append_system_prompt="hi",
+        setting_sources=["user", "project"],
+    )
+    runner = TriageRunner(cfg, environ={"HOME": "/home/agent"})
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    settings_doc = {
+        "claudeMdExcludes": [
+            "!{%s/**,/home/agent/.claude/rules/**,/home/agent/.claude/CLAUDE.md}"
+            % (tmp_path / "ws")
+        ],
+        "permissions": {"deny": ["Read(//proc/**)"]},
+    }
+    assert argv == [
+        str(FAKE_CLAUDE),
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+        "--strict-mcp-config",
+        "--restricted",
+        "--tools",
+        "Read,Grep,Glob",
+        "--max-budget-usd",
+        "2.0",
+        "--setting-sources",
+        "user",
+        "--settings",
+        json.dumps(settings_doc),
+        "--json-schema",
+        json.dumps(verdict_schema(8), separators=(",", ":")),
+        "--session-id",
+        SESSION_ID,
+    ]
+    operator_only = ("Bash", "Write", "bypassPermissions", "x.json", "hi", "user,project")
+    for value in (*operator_only, "--allowedTools", "--disallowedTools", "--mcp-config"):
+        assert value not in argv
+
+
+def test_triage_argv_resumes_and_takes_the_triage_model(tmp_path: Path) -> None:
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo"},
+            "workspace": {"root": str(tmp_path)},
+            "claude": {"command": str(FAKE_CLAUDE), "model": "work-model"},
+            "triage": {"model": "triage-model"},
+        }
+    )
+    argv = TriageRunner(cfg, environ={"HOME": "/h"}).build_argv(
+        session_id=SESSION_ID, resume=True, workspace=tmp_path / "ws"
+    )
+    assert argv[-4:] == ["--resume", SESSION_ID, "--model", "triage-model"]
+    cfg = cfg.model_copy(update={"triage": cfg.triage.model_copy(update={"model": None})})
+    argv = TriageRunner(cfg, environ={"HOME": "/h"}).build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
+    assert argv[-2:] == ["--model", "work-model"]
+
+
+def test_triage_settings_document_denies_proc(tmp_path: Path) -> None:
+    runner = TriageRunner(triage_settings(tmp_path), environ={"HOME": "/home/agent"})
+    argv = runner.build_argv(session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws")
+    document = json.loads(argv[argv.index("--settings") + 1])
+    assert document["permissions"]["deny"] == ["Read(//proc/**)"]
+    assert "claudeMdExcludes" in document
+
+
+def test_triage_environment_has_no_github_token(tmp_path: Path) -> None:
+    runner = TriageRunner(
+        triage_settings(tmp_path),
+        environ={"GH_TOKEN": "ghp_other", "CLAUDE_CODE_OAUTH_TOKEN": "oauth", "PATH": "/bin"},
+    )
+    env, workspace_env = runner._session_environment(tmp_path / "ws")
+    assert "GH_TOKEN" not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth"
+    assert workspace_env == []
+
+
+def test_triage_child_environment_has_no_github_token(tmp_path: Path) -> None:
+    """The base class's `child_environment` carries `GH_TOKEN`; the triage runner's never does,
+    whichever path asks for it, and it is the environment a turn actually runs with."""
+    runner = TriageRunner(triage_settings(tmp_path), environ={"PATH": "/bin", "HOME": "/h"})
+    env = runner.child_environment()
+    assert "GH_TOKEN" not in env
+    assert "ghp_sekret" not in env.values()
+    assert env == runner._session_environment(tmp_path / "ws")[0]
+
+
+def test_triage_ignores_the_workspace_env_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    (workspace / ".issuebot").mkdir(parents=True)
+    (workspace / ".issuebot" / "env").write_text("FOO=1\n")
+    runner = TriageRunner(triage_settings(tmp_path), environ={"PATH": "/bin"})
+    env, workspace_env = runner._session_environment(workspace)
+    assert "FOO" not in env
+    assert workspace_env == []
+
+
+@posix
+async def test_a_turn_keeps_the_structured_output(workspace: Path, tmp_path: Path) -> None:
+    record = tmp_path / "record.json"
+    cfg = Settings.model_validate(
+        {
+            "github": {"repo": "example/repo", "token": "ghp_sekret"},
+            "workspace": {"root": str(workspace.parent)},
+            "claude": {"command": str(FAKE_CLAUDE)},
+        }
+    )
+    environ = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GH_TOKEN": "ghp_other",
+        "CLAUDE_FAKE_SCENARIO": "triage",
+        "CLAUDE_FAKE_RECORD": str(record),
+        "CLAUDE_FAKE_RECORD_ENV": "GH_TOKEN",
+    }
+    turn = await run(TriageRunner(cfg, environ=environ), workspace)
+    assert turn.ok
+    assert turn.structured_output["verdict"] == "fits"
+    assert json.loads(record.read_text())["env"]["GH_TOKEN"] is None

@@ -74,9 +74,23 @@ NO_FAULT_LABEL_STYLE = LabelStyle(
 )
 
 
+TRIAGE_TODO_LABEL_STYLE = LabelStyle("FEF2C0", "Waiting for issuebot triage; a human sets this")
+TRIAGE_COMPLETE_LABEL_STYLE = LabelStyle(
+    "D4C5F9", "issuebot triaged this; its verdict is in a comment"
+)
+OPERATOR_STEP_LABEL_STYLE = LabelStyle(
+    "F9D0C4", "A step for the operator to do outside issuebot, then close"
+)
+
+
 def marker_label_styles(labels: GitHubLabels) -> dict[str, LabelStyle]:
     """The non-state labels issuebot owns, keyed by their configured names."""
-    return {labels.no_fault: NO_FAULT_LABEL_STYLE}
+    return {
+        labels.no_fault: NO_FAULT_LABEL_STYLE,
+        labels.triage_todo: TRIAGE_TODO_LABEL_STYLE,
+        labels.triage_complete: TRIAGE_COMPLETE_LABEL_STYLE,
+        labels.operator_step: OPERATOR_STEP_LABEL_STYLE,
+    }
 
 
 MODEL_LABEL_COLOR = "BFD4F2"

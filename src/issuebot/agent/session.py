@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from issuebot.agent.errors import AgentError, AgentErrorCategory, outcome_for
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
@@ -18,7 +18,9 @@ from issuebot.events import EventBus, RunEnded, RunOutcome, RunStarted
 from issuebot.github import Comment, GitHubAdapter, GitHubError, Issue, StateLabel
 from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
 
-StopReason = Literal["issue_moved", "max_turns", "issue_missing", "failure", "cancelled", "blocked"]
+StopReason = Literal[
+    "issue_moved", "max_turns", "issue_missing", "failure", "cancelled", "blocked", "verdict"
+]
 
 # The first line of a blocked turn's final message (prompt ground rule 2). Read by the session,
 # so the escape happens at the end of that turn rather than after max_turns.
@@ -80,6 +82,9 @@ class RunResult:
     usage_reset_at: datetime | None = None
     # Which window refused it, beside ``usage_reset_at``; None whenever that is.
     usage_window: str | None = None
+    # A triage run's raw ``structured_output`` when it ended on a verdict; None for every other
+    # stop. Unscrubbed and unvalidated: the worker parses it (``agent.verdict``) before use.
+    structured_output: Any = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -110,6 +115,7 @@ class _State:
     usage_reset_at: datetime | None = None
     usage_window: str | None = None
     workpad: Comment | None = None
+    structured_output: Any = None
 
     def fail(self, category: AgentErrorCategory, message: str | None) -> None:
         self.error_category = category
@@ -163,6 +169,7 @@ class _State:
             workspace_path=self.workspace_path,
             log_dir=self.log_dir,
             blocker=self.blocker,
+            structured_output=self.structured_output,
         )
 
 

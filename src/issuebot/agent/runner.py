@@ -22,6 +22,7 @@ from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import CLAUDE_HOME_DIR, RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.uvcache import UV_CACHE_ENV, ensure_uv_cache_dir
+from issuebot.agent.verdict import verdict_schema
 from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
@@ -30,7 +31,7 @@ from issuebot.log import get_logger
 # unattended headless run possible. A compatibility floor `validate` enforces against
 # whatever claude is on PATH, not the version the image ships: raise it only when the
 # code starts depending on something newer.
-MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 259)
+MIN_CLAUDE_VERSION: tuple[int, int, int] = (2, 1, 303)
 # `claude --version` and `claude auth status` are quick; past this they are treated as unanswered.
 CLAUDE_PROBE_TIMEOUT_S = 10
 STREAM_LINE_LIMIT = 10 * 1024 * 1024
@@ -762,6 +763,9 @@ class TurnResult:
     # Which window refused it, as claude names it (``five_hour``, ``seven_day``, ...): what the
     # hold reports beside the reset. None for every turn that was not refused.
     usage_window: str | None = None
+    # The result message's ``structured_output`` (a ``--json-schema`` session's verdict), kept
+    # as claude printed it. Unscrubbed: the verdict parser scrubs it field by field.
+    structured_output: Any = None
 
     @property
     def ok(self) -> bool:
@@ -1150,6 +1154,7 @@ class ClaudeRunner:
 
     def __init__(self, settings: Settings, *, environ: Mapping[str, str] | None = None) -> None:
         self._claude = settings.claude
+        self._triage = settings.triage
         self._token = settings.github.token
         self._root = settings.workspace.root.resolve()
         self._environ = dict(os.environ if environ is None else environ)
@@ -1317,6 +1322,10 @@ class ClaudeRunner:
         """
         return agent_environment(self._environ, token=self._token, uv_cache=self._ensure_uv_cache())
 
+    def _session_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
+        """The environment one turn runs with, and the names the workspace's env file added."""
+        return workspace_environment(self.child_environment(), workspace, boundary=self._boundary)
+
     def _ensure_uv_cache(self) -> Path | None:
         """This session account's uv cache on the workspaces volume, or ``None`` (#164).
 
@@ -1387,6 +1396,7 @@ class ClaudeRunner:
                 usage_window=(
                     parser.usage_limit.window if parser.usage_limit is not None else None
                 ),
+                structured_output=result.get("structured_output"),
             )
             self._log.info(
                 "claude_turn_finished",
@@ -1422,9 +1432,7 @@ class ClaudeRunner:
         argv = self.build_argv(session_id=session_id, resume=resume, workspace=resolved)
         # Read every turn: a `before_run` that ran once still feeds a session resumed after a
         # retry, and a hook is free to rewrite the file between turns.
-        env, workspace_env = workspace_environment(
-            self.child_environment(), resolved, boundary=self._boundary
-        )
+        env, workspace_env = self._session_environment(resolved)
         self._log.info(
             "claude_turn_started",
             turn_number=turn_number,
@@ -1602,6 +1610,83 @@ class ClaudeRunner:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         await process.wait()
+
+
+# The triage session's fixed policy (spec section 4). None of it is a setting: it is what makes
+# the session read-only, so no front-matter key widens it.
+TRIAGE_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob")
+TRIAGE_PERMISSION_MODE = "dontAsk"
+# `--restricted` confines the tools to the workspace but `/proc` is reachable through it, and
+# `/proc/<pid>/environ` of a sibling process is a credential. Denied beside the allow-list.
+TRIAGE_DENY: tuple[str, ...] = ("Read(//proc/**)",)
+
+
+class TriageRunner(ClaudeRunner):
+    """A ``claude -p`` that can read the clone and nothing else, with no GitHub credential.
+
+    The same process machinery as ``ClaudeRunner``; what differs is the argv, which ignores the
+    operator's ``claude.permission_mode``, ``allowed_tools``, ``disallowed_tools``,
+    ``mcp_config`` and ``append_system_prompt``, and the environment, which never carries
+    ``GH_TOKEN`` or anything the workspace's env file or uv cache would add.
+    """
+
+    def build_argv(self, *, session_id: str, resume: bool, workspace: Path) -> list[str]:
+        cfg = self._claude
+        triage = self._triage
+        argv = [
+            cfg.command,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            # `dontAsk` denies whatever the tool list does not allow, rather than asking.
+            "--permission-mode",
+            TRIAGE_PERMISSION_MODE,
+            "--permission-prompts",
+            "none",
+            "--strict-mcp-config",
+            "--restricted",
+            "--tools",
+            ",".join(TRIAGE_TOOLS),
+            "--max-budget-usd",
+            str(triage.max_budget_usd),
+            "--setting-sources",
+            "user",
+            "--settings",
+            self._settings_document(workspace),
+            # The verdict arrives as the result's `structured_output`, validated by claude
+            # against this schema; the worker's parser still trusts neither.
+            "--json-schema",
+            json.dumps(verdict_schema(triage.max_sub_issues), separators=(",", ":")),
+        ]
+        argv += ["--resume", session_id] if resume else ["--session-id", session_id]
+        model = triage.model or cfg.model
+        if model:
+            argv += ["--model", model]
+        return argv
+
+    def _settings_document(self, workspace: Path) -> str:
+        """One ``--settings`` JSON: the CLAUDE.md allow-list (#135) plus the ``/proc`` deny.
+
+        ``--settings`` takes one document, so the deny joins the allow-list's rather than
+        being a second flag. A path the allow-list cannot spell leaves just the deny.
+        """
+        trees, files = self._claude_md_allowed(workspace)
+        allowlist = claude_md_allowlist(trees=trees, files=files)
+        document: dict[str, Any] = json.loads(allowlist) if allowlist is not None else {}
+        document["permissions"] = {"deny": list(TRIAGE_DENY)}
+        return json.dumps(document)
+
+    def child_environment(self) -> dict[str, str]:
+        # No token and no uv cache. `token=None` here and not a nulled
+        # `settings.github.token`, which `Scrubber.for_deployment` still has to read. Overridden
+        # here, not only bypassed below, so no path into this runner reaches the base class's
+        # `GH_TOKEN` (spec section 4).
+        return agent_environment(self._environ, token=None)
+
+    def _session_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
+        # Nor the workspace's env file: triage runs no hooks to write one.
+        return self.child_environment(), []
 
 
 class _Emitter:

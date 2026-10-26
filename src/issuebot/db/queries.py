@@ -58,6 +58,7 @@ class RunRow:
     duration_s: float | None
     workspace_path: str | None
     log_dir: str | None
+    kind: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -219,8 +220,9 @@ ended AS (
            r.started_at,
            r.turns,
            r.cost_usd,
+           r.kind,
            greatest(
-               max(r.started_at) FILTER (WHERE r.outcome = 'succeeded')
+               max(r.started_at) FILTER (WHERE r.outcome = 'succeeded' AND r.kind = 'work')
                    OVER (PARTITION BY r.issue_identifier),
                max(e.escaped_at) OVER (PARTITION BY r.issue_identifier)
            ) AS chain_start
@@ -233,7 +235,7 @@ SELECT issue_identifier,
        coalesce(sum(cost_usd), 0) AS cost_usd,
        max(started_at) AS last_run_at,
        count(*) FILTER (
-           WHERE outcome IN ('failed', 'timed_out', 'stalled')
+           WHERE outcome IN ('failed', 'timed_out', 'stalled') AND kind = 'work'
              AND (chain_start IS NULL OR started_at > chain_start)
        ) AS failures
 FROM ended

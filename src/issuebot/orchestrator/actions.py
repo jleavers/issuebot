@@ -3,7 +3,7 @@
 And the one read ``run-once`` shares with it, ``assess_issue``, beside the escape it feeds.
 """
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -420,6 +420,130 @@ async def unapproved_escape(
         reason=verdict.reason,
     )
     return "applied"
+
+
+async def _hand_back(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    *,
+    prefix: str,
+    title: str,
+    reason: str,
+    way_back: str,
+    from_label: str | None,
+    write_label: Callable[[], Awaitable[None]],
+    now: datetime,
+) -> EscapeOutcome:
+    """The escapes with no workpad: the label write, a plain comment, then the events.
+
+    The label goes first and a failure of it writes nothing, so the next tick finds the issue
+    as it was; the comment is best effort, as in ``unapproved_escape``, because the issue must
+    not stay a candidate over a note. These issues have no workpad to append to -- triage
+    never makes one -- so the note is a comment of its own.
+    """
+    log = get_logger(__name__)
+    try:
+        await write_label()
+    except GitHubError as exc:
+        log.warning(
+            f"{prefix}_failed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            error=str(exc),
+            category=exc.category,
+        )
+        return "failed"
+    try:
+        await adapter.comment(
+            issue.number, f"### Issuebot {title} ({_stamp(now)})\n\n{reason}\n\n{way_back}"
+        )
+    except GitHubError as exc:
+        log.warning(
+            f"{prefix}_note_failed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            error=str(exc),
+            category=exc.category,
+        )
+    bus.publish(
+        StateChanged(
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            from_label=from_label,
+            to_label=None,
+            actor="issuebot",
+        )
+    )
+    bus.publish(
+        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
+    )
+    log.info(
+        f"{prefix}_applied",
+        issue_number=issue.number,
+        issue_identifier=issue.identifier,
+        reason=reason,
+    )
+    return "applied"
+
+
+async def triage_escape(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    *,
+    title: str,
+    reason: str,
+    way_back: str,
+    now: datetime,
+) -> EscapeOutcome:
+    """Hand a triage candidate back to a human: drop ``triage_todo``, then say why.
+
+    The triage track has no state label to clear and no workpad, so this removes only the
+    label that makes the issue a candidate. A human adds it again to try once more.
+    """
+    labels = adapter.labels
+    return await _hand_back(
+        adapter,
+        bus,
+        issue,
+        prefix="triage_escape",
+        title=title,
+        reason=reason,
+        way_back=way_back,
+        from_label=labels.triage_todo,
+        write_label=lambda: adapter.edit_labels(issue.number, remove=[labels.triage_todo]),
+        now=now,
+    )
+
+
+async def operator_step_escape(
+    adapter: GitHubAdapter, bus: EventBus, issue: Issue, *, now: datetime
+) -> EscapeOutcome:
+    """Refuse to run an operator step: clear its state label and say it is the operator's.
+
+    A step triage filed for a human carries ``operator_step``; if someone labels it ``todo``
+    anyway, no session runs it (spec section 1).
+    """
+    labels = adapter.labels
+    return await _hand_back(
+        adapter,
+        bus,
+        issue,
+        prefix="operator_step_escape",
+        title="operator step",
+        reason=(
+            f"#{issue.number} is an operator step (`{labels.operator_step}`): "
+            f"issuebot does not run it"
+        ),
+        way_back=(
+            f"Do it yourself, as the issue says, then close it. "
+            f"issuebot has removed `{labels.todo}`."
+        ),
+        from_label=state_label_name(issue),
+        write_label=lambda: adapter.clear_state(issue.number),
+        now=now,
+    )
 
 
 # The heading of the block a budget escape writes. Both ceilings share it, so it is not what

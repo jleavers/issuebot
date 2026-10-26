@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake `claude` for runner tests: replays recorded stream-json, or misbehaves on request.
 
-CLAUDE_FAKE_SCENARIO selects the behaviour (success, error_result, budget, long_line,
+CLAUDE_FAKE_SCENARIO selects the behaviour (success, triage, error_result, budget, long_line,
 crash_after_init, leaky, logged_out, no_init, silent, slow, stubborn). CLAUDE_FAKE_RECORD
 names a file that receives argv, stdin, cwd and selected environment as JSON;
 CLAUDE_FAKE_RECORD_ENV adds comma-separated names to the recorded selection, which is how a
@@ -83,6 +83,9 @@ def replay(name: str, pause: float) -> None:
 
 if scenario == "success":
     replay("success", delay)
+    sys.exit(0)
+if scenario == "triage":
+    replay("triage", delay)
     sys.exit(0)
 if scenario == "error_result":
     replay("error_result", delay)

@@ -14,6 +14,7 @@ from issuebot.github.state import (
     TERMINAL_STATES,
     TRANSITIONS,
     Actor,
+    LabelStyle,
     carries_no_fault,
     classify_closed,
     is_active,
@@ -158,11 +159,25 @@ def test_the_no_fault_marker_is_read_under_the_configured_name(
 
 def test_marker_labels_are_named_and_styled_but_are_not_states() -> None:
     """A marker must never reach `as_tuple()`: `clear_state` strips exactly those names."""
-    assert marker_label_styles(LABELS) == {"issuebot/no-fault": NO_FAULT_LABEL_STYLE}
+    assert set(marker_label_styles(LABELS)) == set(LABELS.markers())
     assert set(marker_label_styles(LABELS)).isdisjoint(LABELS.as_tuple())
     assert len(NO_FAULT_LABEL_STYLE.color) == 6
     int(NO_FAULT_LABEL_STYLE.color, 16)
     assert NO_FAULT_LABEL_STYLE.description
+
+
+def test_marker_styles_cover_the_triage_labels() -> None:
+    styles = marker_label_styles(LABELS)
+    assert tuple(styles) == LABELS.markers()
+    assert styles["issuebot/triage-todo"] == LabelStyle(
+        "FEF2C0", "Waiting for issuebot triage; a human sets this"
+    )
+    assert styles["issuebot/triage-complete"] == LabelStyle(
+        "D4C5F9", "issuebot triaged this; its verdict is in a comment"
+    )
+    assert styles["issuebot/operator-step"] == LabelStyle(
+        "F9D0C4", "A step for the operator to do outside issuebot, then close"
+    )
 
 
 def test_label_styles_cover_every_role() -> None:

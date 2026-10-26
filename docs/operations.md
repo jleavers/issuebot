@@ -183,6 +183,44 @@ An issue whose history will not read at all (GitHub down, a token that cannot se
 is not handed back: it stays in `issuebot/todo`, the log carries one `approval_check_failed`
 warning for it and another only if the error changes, and the worker asks again every poll.
 
+### Triage
+
+Triage (`issuebot/triage-todo`, by hand) never leaves an issue silently. When it cannot file a
+verdict it removes `issuebot/triage-todo`, posts a `### Issuebot <title>` comment saying why
+and publishes `blocked`. Apart from the `operator step` refusal below, which takes off the
+`issuebot/todo` someone added, it never touches a state label: a triage candidate has none. The
+one action that resumes it is in the comment:
+
+- **`unapproved edit`**: the title or body was edited after `issuebot/triage-todo` by someone
+  other than who applied it. Read the text as it stands and apply `issuebot/triage-todo` again
+  to approve it.
+- **`triage failed`**: `agent.max_attempts` failed attempts in a row, a malformed verdict
+  included. Fix the cause the comment names, then add `issuebot/triage-todo` again.
+- **`triage not filed`**: the session finished but GitHub refused the filing
+  `agent.max_attempts` times. Unlink any sub-issues it filed from this issue first, then add
+  `issuebot/triage-todo` again to triage it afresh.
+- **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
+  and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
+- **`already split`**: the issue already has sub-issues. Re-triaging a split issue is the
+  parent review, which a later release adds, so no session runs and nothing is filed twice.
+  Remove its sub-issues from it ("Remove sub-issue" on the parent; closing them does not
+  unlink them), then add `issuebot/triage-todo` again.
+- **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
+  issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
+
+A verdict that failed to file is retried on each tick from memory, without a new session.
+That memory, and the count of failed triage attempts, are the worker's process only: a restart
+resets the count and loses a verdict not yet filed, and if the label swap had not happened
+`issuebot/triage-todo` is still on the issue to triage it again. A triage run's failures do
+not count toward a work run's `agent.max_attempts`; its cost counts toward the issue's spend.
+`issuebot run-once <number> --triage` runs one in the foreground. Stop the worker first if it
+serves the issue: it dispatches its own triage of the same `issuebot/triage-todo` issue, the two
+share one triage clone, and both file.
+
+A `split` files the steps up to and including the implementation plan. Once the plan step
+merges, nothing in this release files the implementation stages -- that is the parent review,
+a later release -- so open them yourself from the merged plan.
+
 ### GitHub itself
 
 The worker reads and writes its whole state machine through `gh`, so an
@@ -401,6 +439,13 @@ registry surfaces as a failing hook or a failing test mid-run rather than as a c
 error (see [What a session may reach](security-model.md#what-a-session-may-reach)). A setting that a newer
 `WORKFLOW.md` introduces fails against a stale image at `validate`, as
 `<key>: Extra inputs are not permitted`.
+
+After upgrading to the release that adds triage, run `labels ensure` once per repository before
+using it: the worker starts without the three triage labels, but a verdict cannot be filed until
+they exist. Stop the worker before you pull that release (`docker compose stop worker`): the
+pulled `WORKFLOW.md` prompt names `labels.triage_*`, and an older worker reloads it live and
+then fails every work render until its image is rebuilt. `tools/upgrade` stops the workers
+first already.
 
 The upgrade that brings in the approval check (GHSA-jm8h-q3j6-p8xp) reads the history of every
 issue already on the board as it next dispatches it, including the edits made before the

@@ -9,8 +9,9 @@ from typing import Any, Literal
 
 from issuebot.agent import RunResult
 from issuebot.agent.runner import Credential, RateLimits, RateLimitWindow
+from issuebot.agent.verdict import TriageVerdict
 from issuebot.config import GitHubLabels
-from issuebot.events import Event, PrOpened, StateChanged
+from issuebot.events import Event, PrOpened, RunKind, StateChanged
 from issuebot.github import Issue, StateLabel
 
 RetryKind = Literal[
@@ -80,7 +81,7 @@ def claimed_snapshot(issue: Issue, labels: GitHubLabels, *, clear_markers: bool 
     ``clear_markers`` mirrors ``set_state``'s: `run-once` claims without clearing them, and
     its snapshot says what its claim did rather than what the worker's would have.
     """
-    markers = labels.markers() if clear_markers else ()
+    markers = labels.claim_clears() if clear_markers else ()
     dropped = {name.lower() for name in (*labels.as_tuple(), *markers)}
     target = labels.in_progress.lower()
     kept = tuple(name for name in issue.labels if name.lower() not in dropped)
@@ -153,6 +154,9 @@ class RunningEntry:
     stop_detail: str | None = None
     review_seen_mono: float | None = None  # first sight of `review`; the grace runs from here
     terminal_issue: Issue | None = None
+    # A work run or a triage run (spec 2026-10-25-triage-design.md, section 4): both hold a slot
+    # and an account, and only the exit and the reconcile tell them apart.
+    kind: RunKind = "work"
 
     @property
     def issue_id(self) -> str:
@@ -179,6 +183,32 @@ class BlockedContext:
     attempt: int
     turns: int
     log_dir: str | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PendingVerdict:
+    """A triage verdict, parsed and scrubbed, that GitHub would not let the worker file.
+
+    Retried from memory and never by running the session again: the comment is the last write,
+    after the label swap, so once the swap has landed the issue no longer carries
+    ``triage-todo`` and nothing on GitHub says a verdict is owed. ``tries`` counts the retries
+    that failed; a retry replaces the entry rather than mutating it. In memory only, like the
+    triage failure chain in phase 1 (spec section 4), so a restart in that window loses it.
+
+    ``swapped`` is whether that swap has landed, recorded when it does rather than read off
+    the labels: a re-triaged issue still carries its earlier ``triage-complete``, so the
+    labels cannot tell a swap that landed from one that never did, and a retry is owed after
+    a human's ``todo`` only in the first case (section 1: the comment is all that is missing).
+    """
+
+    issue: Issue
+    verdict: TriageVerdict
+    run_id: str
+    attempt: int
+    turns: int
+    cost_usd: float
+    tries: int = 0
+    swapped: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -269,6 +299,7 @@ class RunningRow:
     last_event: str | None
     turns: int
     stop_cause: StopCause | None
+    kind: str = "work"
 
     @classmethod
     def from_entry(cls, entry: RunningEntry) -> RunningRow:
@@ -288,6 +319,7 @@ class RunningRow:
             last_event=entry.last_event,
             turns=entry.turns,
             stop_cause=entry.stop_cause,
+            kind=entry.kind,
         )
 
 
