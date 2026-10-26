@@ -19,6 +19,9 @@ arguments (`GhCliAdapter.create_sub_issue`), where a NUL makes `create_subproces
 Neither is a `GitHubError`, and one escaping `apply_verdict` stopped the whole worker, so the
 parser refuses control characters (category `Cc`, bar a body's or a reason's newlines and tabs)
 and anything that is not UTF-8, as `parse_workspace_env` refuses a NUL in an environment value.
+A body's or a reason's `\\r\\n` and lone `\\r` are line endings, not junk -- HTML forms submit
+CRLF, and a session may copy such a passage -- so they become `\\n` before that check; a title
+is one line and still refuses every control character, `\\r` included.
 `GhRunner.run` maps both to a `GitHubError` as well, as the backstop.
 """
 
@@ -98,10 +101,15 @@ def _carriable(name: str, value: str, *, keep: str = "\n\t") -> None:
         raise VerdictError(f"{name} has a control character in it")
 
 
-def _text(obj: dict[str, Any], name: str, limit: int, *, required: bool = False) -> str:
+def _text(
+    obj: dict[str, Any], name: str, limit: int, *, required: bool = False, lines: bool = True
+) -> str:
     value = obj[name]
     if not isinstance(value, str):
         raise VerdictError(f"{name} must be a string")
+    if lines:
+        # Browser forms send CRLF, so text a session copies out of an issue may carry a `\r`.
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
     _carriable(name, value)
     value = value.strip()
     if len(value) > limit:
@@ -153,7 +161,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     seen: set[str] = set()
     for step in steps:
         item = _fields(step, _SUB_FIELDS, "a sub-issue", scrubber)
-        title = _text(item, "title", TITLE_LIMIT, required=True)
+        title = _text(item, "title", TITLE_LIMIT, required=True, lines=False)
         if len(title.splitlines()) != 1:
             raise VerdictError("a title is one line")
         # A title is one line already, so no control character has a reason to be in it.
