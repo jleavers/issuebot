@@ -330,7 +330,7 @@ docker compose run --rm worker labels ensure
 [ OK ] github.repo: your-org/your-repo
 [ OK ] github.token: set (from GH_TOKEN)
 [ OK ] workspace.root: /workspaces
-[ OK ] claude.command: /usr/local/bin/claude (2.1.259)
+[ OK ] claude.command: /usr/local/bin/claude (2.1.303)
 [ OK ] claude auth: logged in (CLAUDE_CODE_OAUTH_TOKEN)
 [ OK ] claude.setting_sources: user; the clone's CLAUDE.md, .claude/ and .mcp.json are data, not configuration
 [ OK ] agent.run_as: agent-1 (uid 1011), agent-2 (uid 1012), agent-3 (uid 1013); a pool of 3, one account per concurrent session; each at a uid other than this process's (1000)
@@ -344,10 +344,11 @@ docker compose run --rm worker labels ensure
 [ OK ] github.branch rules: main requires 1 approving review of the latest push from a code owner, and dismisses stale approvals
 [WARN] github.labels: missing: issuebot/todo, ...; docker compose run --rm worker labels ensure
 [ OK ] github.status: All Systems Operational
-[ OK ] database.url: connected (PostgreSQL 18.1); schema version 4
+[ OK ] database.url: connected (PostgreSQL 18.1); schema version 7
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
-[ OK ] prompt: 21444 characters, renders
-21 checks: 0 failed, 2 warnings
+[ OK ] prompt: 26632 characters, renders
+[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, at most 8 sub-issues
+22 checks: 0 failed, 2 warnings
 ```
 
 `labels ensure` creates (or recolours) the state labels and the `issuebot/no-fault` marker in
