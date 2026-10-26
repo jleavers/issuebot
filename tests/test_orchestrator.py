@@ -5787,6 +5787,115 @@ async def test_an_operator_step_with_todo_is_refused(tmp_path: Path) -> None:
     assert h.recorder.kinds == ["state_changed", "blocked"]
 
 
+def add_split(h: Harness, parent: int, *children: int, todo: tuple[int, ...] = ()) -> None:
+    """A triaged parent and its sub-issues in order; those in `todo` labelled and approved."""
+    h.github.add_issue(f"Parent {parent}", labels=(h.labels.triage_complete,), number=parent)
+    for child in children:
+        if child in todo:
+            h.add_issue(child, "todo")
+        else:
+            h.github.add_issue(f"Step {child}", number=child)
+        h.github.link_sub_issue(parent, child)
+
+
+async def test_a_batch_labelled_at_once_runs_one_step_at_a_time(tmp_path: Path) -> None:
+    """Section 5: the steps of a split run in order, however many were labelled together."""
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, 13, todo=(11, 12, 13))
+    await h.tick()
+    assert h.calls("set_state") == [(11, StateLabel.IN_PROGRESS)]
+    for held in (12, 13):
+        assert h.labels.todo in h.github.issue(held).labels
+    assert h.github.comments_for(12) == []
+    assert "blocked" not in h.recorder.kinds
+    assert all(args[0] not in (12, 13) for args in h.calls("approval_evidence"))
+    assert h.calls("parent_steps") == [([10],)]
+
+
+async def test_a_held_step_starts_on_the_poll_after_the_step_before_it_closes(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    await h.tick()
+    assert h.orchestrator.running == {}
+    h.github.close_issue(11)
+    await h.tick()
+    assert "12" in h.orchestrator.running
+
+
+async def test_an_earlier_operator_step_holds_the_next_step(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.human_add_label(11, h.labels.operator_step)
+    await h.tick()
+    assert h.orchestrator.running == {}
+
+
+async def test_an_operator_step_labelled_todo_is_refused_at_once_not_held(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.human_add_label(12, h.labels.operator_step)
+    await h.tick()
+    assert h.github.comments_for(12)[0].body.startswith("### Issuebot operator step (")
+    assert h.github.issue(12).state is None
+
+
+async def test_a_reworked_step_is_not_held(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11)
+    h.add_issue(12, "rework")
+    h.github.link_sub_issue(10, 12)
+    await h.tick()
+    assert "12" in h.orchestrator.running
+    assert h.calls("parent_steps") == [], "only a `todo` candidate causes a read"
+
+
+async def test_a_failed_parent_read_holds_sub_issues_for_that_poll_only(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.close_issue(11)
+    h.add_issue(20, "todo")
+    h.github.fail_next("transport", on="parent_steps")
+    with capture_logs() as logs:
+        await h.tick()
+    assert "20" in h.orchestrator.running and "12" not in h.orchestrator.running
+    assert any(entry["event"] == "parent_steps_failed" for entry in logs)
+    await h.tick()
+    assert "12" in h.orchestrator.running
+
+
+async def test_a_sub_issue_of_an_untriaged_parent_is_not_held(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    h.github.add_issue("Parent", number=10)
+    h.github.add_issue("Step 11", number=11)
+    h.add_issue(12, "todo")
+    h.github.link_sub_issue(10, 11)
+    h.github.link_sub_issue(10, 12)
+    await h.tick()
+    assert "12" in h.orchestrator.running
+
+
+async def test_no_todo_sub_issue_means_no_parent_read(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    h.add_issue(20, "todo")
+    await h.tick()
+    assert h.calls("parent_steps") == []
+
+
+async def test_a_held_step_is_logged_once(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    with capture_logs() as logs:
+        await h.tick()
+        await h.tick()
+    [line] = [entry for entry in logs if entry["event"] == "dispatch_held"]
+    assert line["issue_number"] == 12
+    assert line["reason"] == "waits for #11, an earlier step of #10"
+
+
 async def test_claiming_a_triaged_issue_keeps_triage_complete(tmp_path: Path) -> None:
     """`triage-complete` is a marker the claim leaves alone (section 1, refined): the verdict
     it points at stays true while the issue is worked."""

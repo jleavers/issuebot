@@ -58,6 +58,7 @@ from issuebot.github import (
     GitHubError,
     Issue,
     PageCeilingError,
+    ParentSteps,
     StateLabel,
     fetch_status_summary,
     parse_status_summary,
@@ -71,6 +72,7 @@ from issuebot.orchestrator.admission import (
     Hold,
     IssueLedger,
     Ledger,
+    OrderHold,
     RefusalKind,
     Refused,
     admit,
@@ -98,7 +100,12 @@ from issuebot.orchestrator.state import (
     observe_transition,
     sort_candidates,
 )
-from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate, plural
+from issuebot.orchestrator.triage import (
+    apply_verdict,
+    earlier_open_step,
+    is_triage_candidate,
+    plural,
+)
 
 RunSessionFn = Callable[..., Awaitable[RunResult]]
 CANDIDATE_STATES: tuple[StateLabel, ...] = (
@@ -369,6 +376,9 @@ class Orchestrator:
         self._pool = _pool_for(workflow.config)
         self._running: dict[str, RunningEntry] = {}
         self._retries: dict[str, RetryEntry] = {}
+        # Issue id -> the order-hold reason last logged for it, so a step held behind an earlier
+        # one says so once per change rather than on every poll (spec 2026-10-25, section 5).
+        self._held: dict[str, str] = {}
         self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
@@ -1180,7 +1190,13 @@ class Orchestrator:
         await self._fetch_issues()
 
     def _admit(
-        self, identifier: str, issue_id: str, issue: Issue | None, *, kind: RunKind = "work"
+        self,
+        identifier: str,
+        issue_id: str,
+        issue: Issue | None,
+        *,
+        kind: RunKind = "work",
+        order: OrderHold | None = None,
     ) -> Admission:
         """Ask the one gate (#112). Every precondition is its, and it reads the live holds.
 
@@ -1201,6 +1217,7 @@ class Orchestrator:
                 max_attempts=agent.max_attempts,
                 max_issue_cost_usd=agent.max_issue_cost_usd,
                 kind=kind,
+                order=order,
             )
         )
 
@@ -1226,6 +1243,19 @@ class Orchestrator:
         the tick that retries it; and only a run clears the mark, so the next refusal after one
         is a new fact and is announced again.
         """
+        if verdict.kind == "order":
+            # A step waiting its turn in a split (spec 2026-10-25, section 5): nothing is
+            # written on the issue and no state changes, so it stays a `todo` candidate and the
+            # next poll asks again. The log says so once per change of reason, not per poll.
+            if self._held.get(issue.id) != verdict.reason:
+                self._held[issue.id] = verdict.reason
+                self._log.info(
+                    "dispatch_held",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    reason=verdict.reason,
+                )
+            return
         if verdict.kind not in ("attempts", "spend"):
             return
         if self._ledger.refused(issue.identifier, verdict.reason):
@@ -1257,14 +1287,21 @@ class Orchestrator:
         if issues is None:
             return 0
         dispatched = 0
+        # A hold is remembered only while its issue is still a `todo` one this poll.
+        todo_ids = {issue.id for issue in issues if issue.state is StateLabel.TODO}
+        self._held = {id_: reason for id_, reason in self._held.items() if id_ in todo_ids}
+        steps = await self._read_parent_steps(issues)
         for issue in sort_candidates(issues):
-            verdict = self._admit(issue.identifier, issue.id, issue)
+            verdict = self._admit(
+                issue.identifier, issue.id, issue, order=self._order_hold(issue, steps)
+            )
             if isinstance(verdict, Refused):
                 if verdict.kind in ("slots", "hold", "stopping"):
                     # Nothing about this issue; the next candidate would be told the same.
                     break
                 await self._handle_refusal(issue, verdict)
                 continue
+            self._held.pop(issue.id, None)
             resume_session_id = None
             if issue.state is StateLabel.IN_PROGRESS:
                 plan = self._resume_plan(issue)
@@ -1294,6 +1331,53 @@ class Orchestrator:
             ):
                 dispatched += 1
         return dispatched
+
+    def _orders_by_parent(self, issue: Issue) -> bool:
+        """Whether the order hold applies to ``issue`` at all: a `todo` sub-issue that is not an
+        operator step. An operator step is never held; its `todo` comes off at once instead."""
+        return (
+            issue.state is StateLabel.TODO
+            and issue.parent is not None
+            and self._workflow.config.github.labels.operator_step.lower() not in issue.labels
+        )
+
+    async def _read_parent_steps(self, issues: Sequence[Issue]) -> dict[int, ParentSteps] | None:
+        """One read of every parent the poll's `todo` sub-issues point at, or ``None`` if it failed.
+
+        Nothing is read when no candidate is a sub-issue. A failed read holds those candidates
+        for this poll only (they are given an unreadable ``OrderHold``): running a step early is
+        the failure the hold exists to stop, and waiting one poll costs one interval. It is
+        logged, and does not feed the GitHub hold (spec 2026-10-25, section 5).
+        """
+        parents = sorted(
+            {
+                issue.parent
+                for issue in issues
+                if issue.parent is not None and self._orders_by_parent(issue)
+            }
+        )
+        if not parents:
+            return {}
+        try:
+            return await self._adapter.parent_steps(parents)
+        except GitHubError as exc:
+            self._log.warning("parent_steps_failed", error=str(exc), parents=parents)
+            return None
+
+    def _order_hold(
+        self, issue: Issue, steps: Mapping[int, ParentSteps] | None
+    ) -> OrderHold | None:
+        """The hold ``issue`` is under, if any. ``steps`` is ``None`` when the read failed."""
+        parent = issue.parent
+        if parent is None or not self._orders_by_parent(issue):
+            return None
+        if steps is None:
+            return OrderHold(parent, None)
+        found = steps.get(parent)
+        if found is None:
+            return None
+        earlier = earlier_open_step(issue, found, self._workflow.config.github.labels)
+        return None if earlier is None else OrderHold(parent, earlier)
 
     def _resume_plan(self, issue: Issue) -> tuple[str | None, int] | None:
         """How to dispatch an orphaned in_progress issue: the session to resume and the
