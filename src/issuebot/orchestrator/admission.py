@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from issuebot.events import RunKind
-from issuebot.github import ACTIVE_STATES, Issue
+from issuebot.github import ACTIVE_STATES, Issue, StateLabel
 from issuebot.orchestrator.state import DispatchHoldKind, RetryKind
 
 # How many issues the in-process ledger remembers. A worker lives for weeks and sees an
@@ -26,7 +26,7 @@ from issuebot.orchestrator.state import DispatchHoldKind, RetryKind
 # the cap is generous and the least recently *run* entry is the one that goes.
 LEDGER_LIMIT = 1024
 
-RefusalKind = Literal["stopping", "hold", "slots", "busy", "inactive", "attempts", "spend"]
+RefusalKind = Literal["stopping", "hold", "slots", "busy", "inactive", "order", "attempts", "spend"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +301,24 @@ class Ledger:
 # --- the gate ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class OrderHold:
+    """A sub-issue held behind an earlier step of its parent's split.
+
+    ``waits_for`` is that step's number, or ``None`` when the parent's order could not be
+    read: the hold fails closed, since running a step early is what it exists to stop.
+    """
+
+    parent: int
+    waits_for: int | None
+
+
+def _order_reason(hold: OrderHold) -> str:
+    if hold.waits_for is None:
+        return f"the order of #{hold.parent}'s sub-issues could not be read"
+    return f"waits for #{hold.waits_for}, an earlier step of #{hold.parent}"
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class AdmissionRequest:
     """Everything the decision to claim depends on, gathered at one instant.
@@ -316,6 +334,9 @@ class AdmissionRequest:
     neither of the other two: its candidate wears no state label by definition, and its failure
     chain is kept beside the orchestrator rather than on the ledger, which counts only work
     runs' failures -- so a triage request skips ``inactive`` and ``attempts``.
+
+    ``order`` is gathered by the orchestrator only for a ``todo`` sub-issue in the candidate
+    sweep (spec 2026-10-26, section 5); every other caller leaves it ``None``.
     """
 
     issue: Issue | None = None
@@ -327,6 +348,7 @@ class AdmissionRequest:
     max_attempts: int
     max_issue_cost_usd: float = 0.0
     kind: RunKind = "work"
+    order: OrderHold | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -361,7 +383,7 @@ def admit(request: AdmissionRequest) -> Admission:
     the issue's own budget, because a full worker is a "later", not a "no"; and the budget
     last, because it is the only answer that ends the issue's turn in the queue rather than
     postponing it -- and because acting on it means handing the issue to a human, which needs
-    the issue.
+    the issue. The order hold is a "later" as well, so it outranks the budget.
     """
     ledger = request.ledger
     if request.stopping:
@@ -382,6 +404,8 @@ def admit(request: AdmissionRequest) -> Admission:
     work = request.kind == "work"
     if work and not (issue.dispatchable and issue.state in ACTIVE_STATES):
         return Refused(kind="inactive", reason="the issue is not in a state this worker claims")
+    if work and issue.state is StateLabel.TODO and request.order is not None:
+        return Refused(kind="order", reason=_order_reason(request.order), wait="order")
     if work and ledger.failures >= request.max_attempts:
         return Refused(
             kind="attempts",
