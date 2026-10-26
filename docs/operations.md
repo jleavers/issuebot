@@ -223,6 +223,16 @@ A `split` files the steps up to and including the implementation plan. Once the 
 merges, nothing in this release files the implementation stages -- that is the parent review,
 a later release -- so open them yourself from the merged plan.
 
+A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, silently, while any
+sub-issue before it in the parent's order is open. Operator steps count, and "closed" means
+closed by any route, so a step whose pull request is still open holds the next one until it
+merges. `docker compose logs worker` shows `dispatch_held` with the step it waits for, once per
+change. To change the order, drag the sub-issues on the parent; to run a step early, remove it
+from the parent. `rework` and resumed steps are never held. A poll that cannot read the order
+holds every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>`
+refuses a held step too, naming the step it waits for, so close that first or reorder the
+parent; `--show-prompt` skips the check.
+
 ### GitHub itself
 
 The worker reads and writes its whole state machine through `gh`, so an

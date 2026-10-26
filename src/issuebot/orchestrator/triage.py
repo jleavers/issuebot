@@ -88,9 +88,10 @@ def verdict_comment(
     else:
         lines.append(
             f"**Verdict: split.** Too big for one run, so it is filed as "
-            f"{len(verdict.sub_issues)} sub-issues, in order. Start each issuebot step with "
-            f"`{labels.todo}` once the step before it has closed. Operator steps "
-            f"(`{labels.operator_step}`) are yours to do and close."
+            f"{len(verdict.sub_issues)} sub-issues, in order. Label every issuebot step "
+            f"`{labels.todo}` at once if you like: issuebot starts each only when every step "
+            f"before it has closed. Operator steps (`{labels.operator_step}`) are yours to do "
+            f"and close, and the steps after one wait for it."
         )
         lines.append("")
         for number, (sub, draft) in enumerate(zip(filed, verdict.sub_issues, strict=True), 1):

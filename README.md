@@ -66,7 +66,8 @@ files it, not the session: the sub-issues are created linked to the parent, a st
 rather than the agent carries `issuebot/operator-step`, `triage-todo` becomes
 `issuebot/triage-complete` and a `### Issuebot triage` comment says what was decided and why.
 Triage never adds `issuebot/todo` to anything: you read the verdict and label the issues you
-want worked. Run `issuebot labels ensure` once per repository first; a verdict cannot be filed
+want worked. A split's steps can be labelled together: the worker starts each only once every
+sub-issue before it, in the parent's order on GitHub, has closed. Run `issuebot labels ensure` once per repository first; a verdict cannot be filed
 until the three triage labels exist. How the session is bounded is
 [A triage session](docs/security-model.md#a-triage-session) and what to do when it hands an
 issue back is [Triage](docs/operations.md#triage).

@@ -275,3 +275,14 @@ def test_a_step_missing_from_its_parent_holds_nothing(
 def test_the_order_is_githubs(make_issue: Callable[..., Issue]) -> None:
     order = parent_order((13, "open"), (12, "open"))  # dragged on GitHub: 13 now comes first
     assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) == 13
+
+
+async def test_a_split_comment_says_the_steps_can_be_labelled_at_once() -> None:
+    github, _recorder, bus = setup()
+    await apply(github, bus, SPLIT)
+    [comment] = github.comments_for(1)
+    assert (
+        "Label every issuebot step `issuebot/todo` at once if you like: issuebot starts each "
+        "only when every step before it has closed."
+    ) in comment.body
+    assert "once the step before it has closed" not in comment.body
