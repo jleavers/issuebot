@@ -1413,7 +1413,7 @@ def test_parse_claude_version(text: str | None, expected: tuple[int, int, int] |
     assert parse_claude_version(text) == expected
 
 
-def test_minimum_version_is_the_permission_prompts_release() -> None:
+def test_minimum_version_carries_headless_prompts_and_triage_flags() -> None:
     assert MIN_CLAUDE_VERSION == (2, 1, 303)
 
 
