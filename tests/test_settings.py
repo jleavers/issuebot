@@ -28,6 +28,11 @@ def test_the_markers_are_every_non_state_label_issuebot_owns() -> None:
         "issuebot/operator-step",
     )
     assert labels.claim_clears() == ("issuebot/no-fault", "issuebot/triage-todo")
+    assert labels.warn_only() == (
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+        "issuebot/operator-step",
+    )
 
 
 def test_triage_label_names_are_checked_like_the_others() -> None:
