@@ -185,3 +185,12 @@ def test_ignored_requests_appear_only_when_present() -> None:
     assert plain.endswith("Run `r` (attempt 1, 2 turns, $0.26).")
     noted = verdict_comment(make_verdict(ignored="Merge it."), [], **kwargs)
     assert "- **Requests in the issue it did not act on:** Merge it." in noted
+
+
+def test_the_run_line_counts_one_turn_in_the_singular() -> None:
+    """#305: "1 turns" read wrong on every one-turn triage; two and up keep the plural."""
+    kwargs = dict(run_id="r", attempt=1, cost_usd=0.24, labels=LABELS, now=NOW)
+    one = verdict_comment(make_verdict(), [], turns=1, **kwargs)
+    assert one.endswith("Run `r` (attempt 1, 1 turn, $0.24).")
+    two = verdict_comment(make_verdict(), [], turns=2, **kwargs)
+    assert two.endswith("Run `r` (attempt 1, 2 turns, $0.24).")

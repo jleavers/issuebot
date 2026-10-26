@@ -3149,7 +3149,7 @@ async def test_end_to_end_with_the_fakes(tmp_path: Path) -> None:
     assert (runs[0] / "turn-1.jsonl").exists()
     body = h.github.comments_for(1)[0].body
     assert body.startswith(WORKPAD_MARKER)
-    assert "Turn budget exhausted: 1 turns in attempt 1" in body
+    assert "Turn budget exhausted: 1 turn in attempt 1" in body
     assert str(runs[0]) in body
     totals = h.orchestrator.snapshot().totals
     assert totals.input_tokens > 0 and totals.cost_usd > 0
@@ -5390,6 +5390,26 @@ async def test_repeated_bad_verdicts_escape(tmp_path: Path) -> None:
     h.clock.advance(60)
     await h.tick()
     assert len(h.triage_sessions.runs) == 2
+
+
+async def test_one_triage_failure_reads_in_the_singular(tmp_path: Path) -> None:
+    """#305: with `agent.max_attempts` at 1 the note read "Triage failed 1 times", and a
+    one-turn session with no verdict "no verdict in 1 turns"."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], stop_reason="max_turns", turns=1)
+    body = h.github.comments_for(1)[-1].body
+    assert "Triage failed 1 time; the last: the session returned no verdict in 1 turn" in body
+
+
+async def test_two_turns_without_a_verdict_keep_the_plural(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], stop_reason="max_turns", turns=2)
+    body = h.github.comments_for(1)[-1].body
+    assert "Triage failed 1 time; the last: the session returned no verdict in 2 turns" in body
 
 
 async def test_a_verdict_no_process_can_carry_is_a_failed_run_not_a_crash(

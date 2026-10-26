@@ -15,6 +15,11 @@ from issuebot.github import GitHubAdapter, Issue, SubIssue
 from issuebot.orchestrator.actions import _stamp
 
 
+def plural(count: int, noun: str) -> str:
+    """``1 turn``, ``2 turns``: a count in prose a person reads (#305)."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 def is_triage_candidate(issue: Issue, labels: GitHubLabels) -> bool:
     """Open, carrying ``triage_todo`` and no state label (``Issue.labels`` is lower-cased)."""
     return (
@@ -84,7 +89,7 @@ def verdict_comment(
         lines.append(f"- **Requests in the issue it did not act on:** {verdict.ignored_requests}")
     lines += [
         "",
-        f"Run `{run_id}` (attempt {attempt}, {turns} turns, ${cost_usd:.2f}).",
+        f"Run `{run_id}` (attempt {attempt}, {plural(turns, 'turn')}, ${cost_usd:.2f}).",
     ]
     return "\n".join(lines)
 
