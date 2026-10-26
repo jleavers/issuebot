@@ -1766,7 +1766,8 @@ otherwise go unscanned (#252)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
-runs one session, never sets `review`; `--model` beats both the label and `claude.model`;
+runs one session, never sets `review`; `--model` beats both the label and `claude.model`,
+and under `--triage` `triage.model` too (#304);
 before the claim it makes the worker's approval check through `actions.assess_issue`, and a
 refusal or an unreadable history is a `[FAIL] approval:` line and exit 1 with the label left
 where it is -- no escape, the operator being the human it would hand the issue to -- while

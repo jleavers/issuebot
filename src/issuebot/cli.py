@@ -44,6 +44,7 @@ from issuebot.agent import (
     run_session,
     settings_for_labels,
     settings_with_model,
+    settings_with_triage_model,
     workspace_key,
 )
 from issuebot.agent.accounts import (
@@ -301,7 +302,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workflow_option(run_once)
     run_once.add_argument(
         "--model",
-        help="run this session with a specific claude model, overriding claude.model_labels",
+        help=(
+            "run this session with a specific claude model, overriding claude.model_labels; "
+            "with --triage, overriding triage.model and claude.model"
+        ),
     )
     run_once.add_argument(
         "--show-prompt",
@@ -1622,10 +1626,18 @@ def _triage_check(workflow: Workflow) -> Check:
         return Check("triage", "fail", exc.message)
     source = str(workflow.triage_path) if workflow.triage_path else "shipped default"
     triage = settings.triage
+    # The model `TriageRunner` puts on the argv (#304): `triage.model`, else `claude.model`,
+    # else no `--model` at all, which leaves the choice to claude.
+    if triage.model:
+        model = f"{triage.model} (triage.model)"
+    elif settings.claude.model:
+        model = f"{settings.claude.model} (claude.model)"
+    else:
+        model = "claude's own default (neither triage.model nor claude.model is set)"
     return Check(
         "triage",
         "ok",
-        f"prompt {source}, model {triage.model or 'default'}, {triage.max_turns} turn(s) at "
+        f"prompt {source}, model {model}, {triage.max_turns} turn(s) at "
         f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues",
     )
 
@@ -2217,7 +2229,7 @@ async def _run_once_triage(
     sinks.start()
     sinks.record_issues([issue])
     try:
-        runner_settings = settings_with_model(settings, model) if model else settings
+        runner_settings = settings_with_triage_model(settings, model) if model else settings
         result = await _run_triage(
             issue,
             workflow,
