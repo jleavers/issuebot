@@ -21,6 +21,7 @@ from issuebot.github.models import (
     Issue,
     LabelApplied,
     LabelEnsured,
+    ParentSteps,
     RateLimit,
     RepoInfo,
     StateLabel,
@@ -29,7 +30,13 @@ from issuebot.github.models import (
     TrackerComment,
     is_workpad_body,
 )
-from issuebot.github.normalise import issue_from_node, label_name, optional_timestamp
+from issuebot.github.normalise import (
+    issue_from_node,
+    label_name,
+    optional_timestamp,
+    parent_steps_from_node,
+    sub_issue_from_node,
+)
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
 from issuebot.github.state import (
     LABEL_STYLES,
@@ -90,6 +97,7 @@ MAX_TERMINAL_PAGES = 150
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body bodyHTML state url createdAt updatedAt closedAt authorAssociation
+  parent { number }
   author { login }
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }
@@ -219,6 +227,21 @@ def by_ids_query(numbers: Sequence[int]) -> str:
         f"{aliases}\n"
         "  }\n"
         "}\n" + ISSUE_FIELDS
+    )
+
+
+def parent_steps_query(numbers: Sequence[int]) -> str:
+    aliases = "\n".join(
+        f"    p{n}: issue(number: {n}) {{ number labels(first: 50) {{ nodes {{ name }} }}"
+        f" subIssues(first: {PAGE_SIZE}) {{ nodes {{ number title url state }} }} }}"
+        for n in numbers
+    )
+    return (
+        "query($owner: String!, $name: String!) {\n"
+        "  repository(owner: $owner, name: $name) {\n"
+        f"{aliases}\n"
+        "  }\n"
+        "}\n"
     )
 
 
@@ -430,7 +453,30 @@ class GhCliAdapter:
         connection = _dig(data, "repository", "issue", "subIssues")
         if not isinstance(connection, Mapping):
             raise GitHubError("response", "GraphQL response has no issue.subIssues")
-        return [_sub_issue_from(node) for node in connection.get("nodes") or []]
+        return [sub_issue_from_node(node) for node in connection.get("nodes") or []]
+
+    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+        wanted = sorted(set(numbers))
+        self._log.debug("parent_steps", parents=wanted)
+        found: dict[int, ParentSteps] = {}
+        for start in range(0, len(wanted), ID_BATCH_SIZE):
+            batch = wanted[start : start + ID_BATCH_SIZE]
+            data = await self._graphql(
+                parent_steps_query(batch),
+                {"owner": self._owner, "name": self._name},
+                allow_missing_aliases=True,
+            )
+            repository = data.get("repository")
+            if not isinstance(repository, Mapping):
+                raise GitHubError("response", "GraphQL response has no repository")
+            for number in batch:
+                node = repository.get(f"p{number}")
+                if node is None:
+                    continue
+                if not isinstance(node, Mapping):
+                    raise GitHubError("response", f"malformed parent record for alias p{number}")
+                found[number] = parent_steps_from_node(node)
+        return found
 
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
         self._log.debug("create_sub_issue", issue_number=parent)
@@ -453,7 +499,7 @@ class GhCliAdapter:
                 "body": body,
             },
         )
-        return _sub_issue_from(_dig(data, "createIssue", "issue"))
+        return sub_issue_from_node(_dig(data, "createIssue", "issue"))
 
     async def find_workpad_comment(self, number: int) -> Comment | None:
         """The account's own comment whose first line is the marker, lowest id first.
@@ -1003,22 +1049,6 @@ def _parse_json(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         return None
-
-
-def _sub_issue_from(node: Any) -> SubIssue:
-    if not isinstance(node, Mapping):
-        raise GitHubError("response", "sub-issue record is not an object")
-    number, title, url, state = (node.get(k) for k in ("number", "title", "url", "state"))
-    if (
-        not isinstance(number, int)
-        or not isinstance(title, str)
-        or not isinstance(url, str)
-        or state not in ("OPEN", "CLOSED")
-    ):
-        raise GitHubError("response", "malformed sub-issue record")
-    return SubIssue(
-        number=number, title=title, url=url, state="open" if state == "OPEN" else "closed"
-    )
 
 
 def _dig(mapping: Any, *keys: str) -> Any:

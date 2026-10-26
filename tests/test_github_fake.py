@@ -521,3 +521,28 @@ async def test_fail_next_after_applies_once_before_a_run_of_failures(fake: FakeG
         with pytest.raises(GitHubError):
             await fake.auth_status()
     await fake.auth_status()
+
+
+async def test_link_sub_issue_links_both_ways(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Big thing")
+    child = fake.add_issue("Step")
+    fake.link_sub_issue(parent.number, child.number)
+    assert fake.issue(child.number).parent == parent.number
+    assert [s.number for s in await fake.sub_issues(parent.number)] == [child.number]
+    with pytest.raises(ValueError):
+        fake.link_sub_issue(parent.number, child.number)  # already has a parent
+
+
+async def test_fake_parent_steps(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Big thing", labels=("issuebot/triage-complete",))
+    first = await fake.create_sub_issue(parent.number, title="A", body="a")
+    second = await fake.create_sub_issue(parent.number, title="B", body="b")
+    fake.close_issue(first.number)
+    steps = await fake.parent_steps([parent.number, 999])
+    assert list(steps) == [parent.number]
+    assert steps[parent.number].labels == ("issuebot/triage-complete",)
+    assert [(s.number, s.state) for s in steps[parent.number].sub_issues] == [
+        (first.number, "closed"),
+        (second.number, "open"),
+    ]
+    assert fake.issue(first.number).parent == parent.number

@@ -20,6 +20,7 @@ from issuebot.github.models import (
     LabelEnsured,
     LinkedPr,
     Mergeable,
+    ParentSteps,
     PrState,
     RateLimit,
     RepoInfo,
@@ -29,7 +30,7 @@ from issuebot.github.models import (
     TrackerComment,
     is_workpad_body,
 )
-from issuebot.github.normalise import issue_from_node, label_name
+from issuebot.github.normalise import issue_from_node, label_name, parent_steps_from_node
 from issuebot.github.state import (
     LABEL_STYLES,
     TERMINAL_SWEEP_ROLES,
@@ -265,6 +266,32 @@ class FakeGitHub:
         record = self._require_issue(number)
         return [self._sub_issue(self._issues[child]) for child in record.children]
 
+    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+        wanted = sorted(set(numbers))
+        self._enter("parent_steps", wanted)
+        found: dict[int, ParentSteps] = {}
+        for number in wanted:
+            record = self._issues.get(number)
+            if record is None:
+                continue
+            node = {
+                "number": number,
+                "labels": {"nodes": [{"name": name} for name in record.labels]},
+                "subIssues": {
+                    "nodes": [
+                        {
+                            "number": child.number,
+                            "title": child.title,
+                            "url": self._issue_url(child.number),
+                            "state": "OPEN" if child.state == "open" else "CLOSED",
+                        }
+                        for child in (self._issues[n] for n in record.children)
+                    ]
+                },
+            }
+            found[number] = parent_steps_from_node(node)
+        return found
+
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
         self._enter("create_sub_issue", parent, title, body)
         record = self._require_issue(parent)
@@ -425,6 +452,15 @@ class FakeGitHub:
         )
         self._issues[number] = record
         return self._snapshot(record)
+
+    def link_sub_issue(self, parent: int, child: int) -> None:
+        """Link an existing issue under ``parent``, last in its order, as GitHub's UI does."""
+        parent_record = self._require_issue(parent)
+        child_record = self._require_issue(child)
+        if child_record.parent is not None:
+            raise ValueError(f"#{child} already has a parent: #{child_record.parent}")
+        child_record.parent = parent
+        parent_record.children.append(child)
 
     def human_set_state(self, number: int, state: StateLabel, *, actor: str = "reporter") -> None:
         """A state label set by someone else; ``actor`` is who the timeline credits."""
@@ -636,6 +672,7 @@ class FakeGitHub:
             "updatedAt": record.updated_at.isoformat(),
             "closedAt": record.closed_at.isoformat() if record.closed_at else None,
             "authorAssociation": record.author_association,
+            "parent": {"number": record.parent} if record.parent is not None else None,
             "labels": {"nodes": [{"name": name} for name in record.labels]},
             "assignees": {"nodes": [{"login": login} for login in record.assignees]},
             "closedByPullRequestsReferences": {

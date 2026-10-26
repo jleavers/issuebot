@@ -11,6 +11,7 @@ from issuebot.github.models import (
     Comment,
     Issue,
     LabelEnsured,
+    ParentSteps,
     RateLimit,
     RepoInfo,
     StateLabel,
@@ -68,6 +69,12 @@ class GitHubAdapter(Protocol):
 
     async def sub_issues(self, number: int) -> list[SubIssue]:
         """The issue's sub-issues, in GitHub's order."""
+        ...
+
+    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+        """Each parent's labels and sub-issues (in GitHub's order), one read per
+        ``ID_BATCH_SIZE`` parents. Numbers are deduplicated; one GitHub returns no issue for is
+        absent from the result."""
         ...
 
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
