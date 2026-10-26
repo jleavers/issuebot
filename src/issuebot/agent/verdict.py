@@ -102,13 +102,17 @@ def _carriable(name: str, value: str, *, keep: str = "\n\t") -> None:
 
 
 def _text(
-    obj: dict[str, Any], name: str, limit: int, *, required: bool = False, lines: bool = True
+    obj: dict[str, Any],
+    name: str,
+    limit: int,
+    *,
+    required: bool = False,
+    line_endings: bool = False,
 ) -> str:
     value = obj[name]
     if not isinstance(value, str):
         raise VerdictError(f"{name} must be a string")
-    if lines:
-        # Browser forms send CRLF, so text a session copies out of an issue may carry a `\r`.
+    if line_endings:
         value = value.replace("\r\n", "\n").replace("\r", "\n")
     _carriable(name, value)
     value = value.strip()
@@ -146,7 +150,7 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     kind = obj["verdict"]
     if kind not in ("fits", "split"):
         raise VerdictError("verdict must be fits or split")
-    reasons = {name: _text(obj, name, REASON_LIMIT) for name in _REASONS}
+    reasons = {name: _text(obj, name, REASON_LIMIT, line_endings=True) for name in _REASONS}
     steps = obj["sub_issues"]
     if not isinstance(steps, list):
         raise VerdictError("sub_issues must be an array")
@@ -161,12 +165,12 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
     seen: set[str] = set()
     for step in steps:
         item = _fields(step, _SUB_FIELDS, "a sub-issue", scrubber)
-        title = _text(item, "title", TITLE_LIMIT, required=True, lines=False)
+        title = _text(item, "title", TITLE_LIMIT, required=True)
         if len(title.splitlines()) != 1:
             raise VerdictError("a title is one line")
         # A title is one line already, so no control character has a reason to be in it.
         _carriable("title", title, keep="")
-        body = _text(item, "body", BODY_LIMIT, required=True)
+        body = _text(item, "body", BODY_LIMIT, required=True, line_endings=True)
         if item["kind"] not in _KINDS:
             raise VerdictError("kind must be issuebot or operator")
         key = title.casefold()
