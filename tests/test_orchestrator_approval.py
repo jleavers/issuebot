@@ -1,6 +1,6 @@
 """The approval check is pure: evidence in, a verdict out (GHSA-jm8h-q3j6-p8xp)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from issuebot.github import ApprovalEvidence, LabelApplied, TextEdit
 from issuebot.orchestrator.approval import Approved, Unapproved, assess
@@ -69,6 +69,25 @@ def test_the_approvers_own_edit_in_the_labels_second_is_fine() -> None:
 def test_the_authors_edit_after_the_label_un_approves() -> None:
     approval = labelled(TODO, "maintainer", 0)
     edit = edited("body", "reporter", 10)
+    result = verdict(approval, edits=(edit,))
+    assert result == Unapproved(
+        reason=(
+            "body edited at 2026-09-28T09:10:00Z by reporter, after maintainer applied "
+            "`issuebot/todo` at 2026-09-28T09:00:00Z"
+        ),
+        approval=approval,
+        edit=edit,
+    )
+
+
+def test_the_reason_stamps_a_non_utc_time_in_utc() -> None:
+    """GitHub's timestamps are UTC, but the reason says ``Z``, so a time in any other zone is
+    converted rather than printed as its own wall clock (#322): 11:10+02:00 is 09:10Z."""
+    plus_two = timezone(timedelta(hours=2))
+    approval = LabelApplied(label=TODO, actor="maintainer", at=at(0).astimezone(plus_two))
+    edit = TextEdit(
+        what="body", editor="reporter", at=datetime(2026, 9, 28, 11, 10, tzinfo=plus_two)
+    )
     result = verdict(approval, edits=(edit,))
     assert result == Unapproved(
         reason=(

@@ -1428,7 +1428,8 @@ network rather than GitHub's.
 
 `triage.py` is the worker filing a verdict: sub-issues linked to the parent, `operator_step`
 on steps for a human, `triage_todo` swapped for `triage_complete`, the comment last, under a
-heading stamped by `actions.utc_stamp` as every other `### Issuebot ...` block is. Worker
+heading stamped by `stamps.utc_stamp` as every other `### Issuebot ...` block is, and as
+`approval.py`'s refusal reasons are (#322: its own copy did not convert to UTC first). Worker
 startup refuses to start over a missing label except those `GitHubLabels.warn_only()` names --
 triage's three, which a deployment that upgraded has not got until `labels ensure` -- and only
 warns over those (`triage_labels_missing`). Runs carry

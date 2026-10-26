@@ -5,7 +5,7 @@ And the one read ``run-once`` shares with it, ``assess_issue``, beside the escap
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 
 from issuebot.agent import AgentError, WorkspaceManager
@@ -23,6 +23,7 @@ from issuebot.github import (
 )
 from issuebot.log import get_logger
 from issuebot.orchestrator.approval import Approved, Unapproved, assess
+from issuebot.orchestrator.stamps import utc_stamp
 from issuebot.orchestrator.state import (
     BlockedContext,
     claimed_snapshot,
@@ -50,11 +51,6 @@ ConflictOutcome = Literal["reworked", "limit_reached", "limit_noted", "failed", 
 # bounce number is read from the issue's label history (#104), which only GitHub writes.
 CONFLICT_HEADING = "### Issuebot merge conflict ("
 CONFLICT_LIMIT_HEADING = "### Issuebot merge conflict limit ("
-
-
-def utc_stamp(now: datetime) -> str:
-    """``now`` as the UTC timestamp every ``### Issuebot ...`` heading carries."""
-    return now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def conflict_block(
