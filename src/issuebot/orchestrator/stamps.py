@@ -9,5 +9,5 @@ from datetime import UTC, datetime
 
 
 def utc_stamp(now: datetime) -> str:
-    """``now`` as the UTC timestamp every ``### Issuebot ...`` heading carries."""
+    """``now`` in UTC, as ``### Issuebot ...`` headings and approval refusals print it."""
     return now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
