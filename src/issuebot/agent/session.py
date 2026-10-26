@@ -158,7 +158,7 @@ class RunState:
         )
         return True
 
-    def ends_on(
+    def fails_on(
         self,
         turn: TurnResult,
         *,
@@ -178,10 +178,10 @@ class RunState:
             self.fail(turn.error_category or "turn_failed", turn.error)
             return True
         # `--max-budget-usd` caps one `claude -p` process, so the next turn starts a fresh
-        # ledger: the cap is a turn boundary, not a failure. Failing here instead would end
-        # the run, and the retry after it never resumes (orchestrator `_schedule`), so the
-        # replacement session would re-read the repository from cold and pay the cap again
-        # to reach the point this one had already committed and pushed.
+        # ledger: the cap is a turn boundary, not a failure, in both loops. Failing here instead
+        # would end the run, and the retry after it never resumes (orchestrator `_schedule`), so
+        # the replacement session would re-read the repository from cold and pay the cap again
+        # -- on the work path, to reach the point this one had already committed and pushed.
         log.warning(
             "turn_budget_exhausted",
             run_id=self.run_id,
@@ -485,7 +485,7 @@ async def _turn_loop(
         )
         state.record_turn(turn)
         _save(workspaces, workspace, state.session_record(turn_number, None))
-        if state.ends_on(
+        if state.fails_on(
             turn, turn_number=turn_number, max_turns=max_turns, log=get_logger(__name__)
         ):
             return

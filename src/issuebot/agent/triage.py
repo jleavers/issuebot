@@ -200,7 +200,7 @@ async def _execute(
                 deadline=deadline,
             )
             state.record_turn(turn)
-            if state.ends_on(
+            if state.fails_on(
                 turn, turn_number=turn_number, max_turns=max_turns, log=get_logger(__name__)
             ):
                 return

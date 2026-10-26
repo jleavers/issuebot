@@ -988,12 +988,12 @@ stderr line is `HookResult.summary`, which `before_run hook failed: ...` quotes 
 run's error -- and a hook runs with the token in its environment, so `WorkspaceManager`
 owns the same `Scrubber.for_deployment` and scrubs both tails where the `HookResult` is
 built, before the cut that keeps their end.
-`budget_exceeded` is the one category the turn loop does not fail on (`RunState.ends_on`):
-`--max-budget-usd` caps one `claude -p` process, so the cap is a turn boundary and the next turn resumes the
-same session with a fresh ledger. Failing there would end the run, and the retry after it
-never resumes, so the replacement session would re-read the repository from cold and spend
-the cap again reaching what the first had already committed and pushed; a run whose every
-turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
+`budget_exceeded` is the one category the turn loop does not fail on (`RunState.fails_on`):
+`--max-budget-usd` caps one `claude -p` process, so the cap is a turn boundary and the next
+turn resumes the same session with a fresh ledger. Failing there would end the run, and the
+retry after it never resumes, so the replacement session would re-read the repository from
+cold and spend the cap again reaching what the first had already committed and pushed; a run
+whose every turn hits the cap now stops at `max_turns` and takes the blocked escape instead.
 Runtime turn events go to a `TurnObserver`, not the bus.
 Tests use `tests/fakes/claude` (replays `tests/fixtures/claude/*.jsonl`). `turnlog` (Phase 7):
 `capture_turns(log_dir, scrubber=DEFAULT_SCRUBBER)` reads a run's `turn-N.jsonl`, `.prompt.md`
@@ -1040,7 +1040,7 @@ constraint the schema states, scrubbing each string after decoding; its errors n
 never content, so they may be published. `triage.py` is `run_triage`: a hook-free throwaway
 clone, the turn loop and a run that ends in the store even when it raises. It keeps
 `session.py`'s `RunState` and reports through its `error_text`, and the blocks its loop shares
-with the work loop are `RunState` methods both call -- `past_deadline`, `ends_on` (a failed
+with the work loop are `RunState` methods both call -- `past_deadline`, `fails_on` (a failed
 turn, or a capped one as a turn boundary) and `cancelled` -- so a fix to the work path's
 deadline or budget handling cannot miss triage (#310). Its prompt context comes from
 `TriagePromptContext.for_issue` (`prompt.py`), the one constructor `run-once --triage
