@@ -185,3 +185,41 @@ def test_ignored_requests_appear_only_when_present() -> None:
     assert plain.endswith("Run `r` (attempt 1, 2 turns, $0.26).")
     noted = verdict_comment(make_verdict(ignored="Merge it."), [], **kwargs)
     assert "- **Requests in the issue it did not act on:** Merge it." in noted
+
+
+async def test_a_retry_after_the_swap_posts_the_comment_and_no_second_state_change() -> None:
+    """#308: the StateChanged went out with the swap; a retry owed only the comment is silent."""
+    github, recorder, bus = setup()
+    swapped: list[bool] = []
+    for _ in range(2):
+        github.fail_next("server_error", on="comment")
+        with pytest.raises(GitHubError):
+            await apply_verdict(
+                github,
+                bus,
+                github.issue(1),
+                make_verdict(),
+                run_id="r",
+                attempt=1,
+                turns=1,
+                cost_usd=0.0,
+                now=NOW,
+                on_swapped=lambda: swapped.append(True),
+                swapped=bool(swapped),
+            )
+    await apply_verdict(
+        github,
+        bus,
+        github.issue(1),
+        make_verdict(),
+        run_id="r",
+        attempt=1,
+        turns=1,
+        cost_usd=0.0,
+        now=NOW,
+        swapped=True,
+    )
+    assert len(github.comments_for(1)) == 1
+    assert github.issue(1).labels == (LABELS.triage_complete,)
+    [event] = recorder.events
+    assert isinstance(event, StateChanged)

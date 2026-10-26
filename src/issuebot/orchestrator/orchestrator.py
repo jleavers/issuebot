@@ -966,7 +966,10 @@ class Orchestrator:
                 # The fetch still works, so the board stays fresh while nothing is claimed
                 # (#29). The usage hold skips dispatch for the auth hold's reason rather than
                 # the GitHub hold's: the board can be read perfectly well, and it is the
-                # claiming that has nowhere to go until the window reopens.
+                # claiming that has nowhere to go until the window reopens. A verdict owed is
+                # still filed (#308): that needs only GitHub, the session is already paid for,
+                # and a usage window can last hours.
+                await self._retry_pending_verdicts()
                 await self._poll_issues()
             else:
                 # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
@@ -1761,6 +1764,7 @@ class Orchestrator:
                     cost_usd=pending.cost_usd,
                     now=self._now(),
                     on_swapped=note_swap,
+                    swapped=pending.swapped,
                 )
         except GitHubError as exc:
             self._log.warning(

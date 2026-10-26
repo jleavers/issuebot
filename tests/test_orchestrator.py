@@ -5476,6 +5476,68 @@ async def test_a_verdict_github_keeps_refusing_is_handed_back(tmp_path: Path) ->
     assert len(h.github.comments_for(1)) == 1, "dropped once handed back"
 
 
+async def test_a_retry_owed_only_the_comment_publishes_no_second_state_change(
+    tmp_path: Path,
+) -> None:
+    """#308: the swap landed on the first filing, and said so to Slack; a retry that posts
+    only the comment has no label move to announce, however many times the comment fails."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment", times=2)
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    await h.tick()
+    assert len(triage_comments(h, 1)) == 1
+    [event] = h.recorder.of(StateChanged)
+    assert (event.from_label, event.to_label) == (h.labels.triage_todo, h.labels.triage_complete)
+
+
+@pytest.mark.parametrize("hold", ["usage", "auth"])
+async def test_an_owed_verdict_is_filed_under_a_claude_hold(tmp_path: Path, hold: str) -> None:
+    """#308: filing a verdict needs only GitHub, so a hold on claude -- which can last hours
+    for a usage window -- does not keep a verdict already paid for off the issue. Nothing is
+    claimed and no session starts: the hold is still a hold."""
+    h = Harness(tmp_path, max_concurrent=2)
+    h.add_triage_issue(1)
+    h.add_issue(2, "todo")
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1 and len(h.sessions.runs) == 1
+    h.github.fail_next("transport", on="comment")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    if hold == "usage":
+        await h.exit(h.run_for(2), **USAGE_LIMITED)
+    else:
+        await h.exit(h.run_for(2), **AUTH_FAILURE)
+        h.claude_auth_output = LOGGED_OUT
+    h.add_triage_issue(3)
+    h.add_issue(4, "todo")
+    await h.tick()
+    held = h.orchestrator.snapshot().dispatch_hold
+    assert held is not None and held.kind == hold
+    assert len(triage_comments(h, 1)) == 1
+    assert h.orchestrator._triage_pending == {}
+    assert len(h.triage_sessions.runs) == 1 and len(h.sessions.runs) == 1
+    assert h.github.issue(4).state is StateLabel.TODO
+
+
+async def test_an_owed_verdict_waits_under_a_preflight_hold(tmp_path: Path) -> None:
+    """`gh` or the token missing is what a preflight hold reports, so nothing is filed."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="comment")
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    h.which_missing = {"gh"}
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    assert "1" in h.orchestrator._triage_pending
+    h.which_missing = set()
+    await h.tick()
+    assert len(triage_comments(h, 1)) == 1
+
+
 SPLIT_VERDICT = {
     "stop_reason": "verdict",
     "structured_output": {

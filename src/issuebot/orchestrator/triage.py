@@ -105,15 +105,18 @@ async def apply_verdict(
     cost_usd: float,
     now: datetime,
     on_swapped: Callable[[], None] | None = None,
+    swapped: bool = False,
 ) -> list[SubIssue]:
     """File ``verdict``; raises ``GitHubError`` from any step, so the caller retries.
 
     Each step is idempotent, and the order is what makes a retry safe: sub-issues are matched
     by title against the parent's children, the label swap is a set operation, and the comment
     -- the one write that would show twice -- is last, so a failure before it leaves at most a
-    label move to redo. A repeated StateChanged is the cost of a failed comment, not a write.
-    ``on_swapped`` is called once the swap has landed, so a caller keeping the verdict for a
-    retry knows when only the comment is left.
+    label move to redo. ``on_swapped`` is called once the swap has landed, so a caller keeping
+    the verdict for a retry knows when only the comment is left, and passes ``swapped`` on that
+    retry: the swap is still made, being a set operation, but the StateChanged that announced
+    it is not published again (#308), since a comment that fails on every tick would otherwise
+    send Slack the same move once per tick.
     """
     labels = adapter.labels
     filed: list[SubIssue] = []
@@ -139,16 +142,17 @@ async def apply_verdict(
     )
     if on_swapped is not None:
         on_swapped()
-    bus.publish(
-        StateChanged(
-            issue_number=issue.number,
-            issue_identifier=issue.identifier,
-            from_label=labels.triage_todo,
-            to_label=labels.triage_complete,
-            actor="issuebot",
-            note=verdict_note(verdict),
+    if not swapped:
+        bus.publish(
+            StateChanged(
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                from_label=labels.triage_todo,
+                to_label=labels.triage_complete,
+                actor="issuebot",
+                note=verdict_note(verdict),
+            )
         )
-    )
     await adapter.comment(
         issue.number,
         verdict_comment(
