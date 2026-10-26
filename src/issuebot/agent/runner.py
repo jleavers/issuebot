@@ -27,7 +27,7 @@ from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
 
-# The oldest claude carrying both `--permission-prompts none`, the flag that makes an
+# The oldest claude carrying `--permission-prompts none`, the flag that makes an
 # unattended headless run possible, and the triage session's `--restricted`, `--tools` and
 # `--json-schema` (docs/security-model.md, "A triage session"). A compatibility floor
 # `validate` enforces against whatever claude is on PATH, not the version the image ships:
