@@ -12,7 +12,7 @@ from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
 from issuebot.config import GitHubLabels
 from issuebot.events import EventBus, StateChanged
 from issuebot.github import GitHubAdapter, Issue, ParentSteps, SubIssue
-from issuebot.orchestrator.actions import utc_stamp
+from issuebot.orchestrator.stamps import utc_stamp
 
 
 def plural(count: int, noun: str) -> str:

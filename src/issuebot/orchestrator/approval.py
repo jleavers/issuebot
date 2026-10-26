@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from issuebot.github import ApprovalEvidence, LabelApplied, TextEdit
+from issuebot.orchestrator.stamps import utc_stamp
 
 DELETED_ACCOUNT = "an account GitHub has deleted"
 # The two ways an issue has no approval at all. The first is a deployment on a dedicated
@@ -56,10 +57,6 @@ class Unapproved:
     reason: str
     approval: LabelApplied | None
     edit: TextEdit | None
-
-
-def _stamp(at: datetime) -> str:
-    return at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def assess(
@@ -99,8 +96,8 @@ def assess(
         editor = edit.editor if edit.editor is not None else DELETED_ACCOUNT
         return Unapproved(
             reason=(
-                f"{edit.what} edited at {_stamp(edit.at)} by {editor}, after {approver} "
-                f"applied `{approval.label}` at {_stamp(approval.at)}"
+                f"{edit.what} edited at {utc_stamp(edit.at)} by {editor}, after {approver} "
+                f"applied `{approval.label}` at {utc_stamp(approval.at)}"
             ),
             approval=approval,
             edit=edit,
