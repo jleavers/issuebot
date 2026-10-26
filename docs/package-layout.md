@@ -1701,7 +1701,7 @@ passes a hold's `until` and `window` through to `/state`.
 
 ## `issuebot.cli`
 
-argparse; `validate` (twenty-one checks: the `workflow` check naming the
+argparse; `validate` (twenty-two checks: the `workflow` check naming the
 overlay and counting its overrides (`/configs/WORKFLOW.md + WORKFLOW.local.md (3
 overrides)`), a `github.token` check that warns on a classic (`ghp_`), OAuth (`gho_`) or
 App user (`ghu_`) token, whose reach is the account's while the session holds it, naming
@@ -1789,7 +1789,13 @@ the admin renders are scanned for the association half alone -- applied in that 
 stage -- since the workflow drops the exclusion there and a read inside `{% if admin %}` would
 otherwise go unscanned (#252), and a `triage` check that renders the triage prompt in force,
 first turn and continuation, from `TriagePromptContext.for_issue` with one sample maintainer
-comment and one stranger's, so a `TRIAGE.md`'s comments section is rendered too (#310)),
+comment and one stranger's, so a `TRIAGE.md`'s comments section is rendered too (#310),
+fails with the renderer's own message when either will not render, and otherwise reports
+what a triage session would run with: the prompt's source (the shipped default, also when the
+`TRIAGE.md` beside the workflow is empty, #306, or that file's path), the model `TriageRunner`
+puts on the argv and where it came from (`triage.model`, else `claude.model`, else claude's
+own default; #304), `triage.max_turns`, `triage.max_budget_usd` and the
+`triage.max_sub_issues` cap (#291)),
 `labels ensure` (the five state labels, the `no_fault` marker, and one per
 `claude.model_labels` entry),
 `issues list`, `run-once <number> [--model NAME] [--show-prompt]` (claims `in-progress`,
