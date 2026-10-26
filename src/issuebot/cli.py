@@ -142,7 +142,7 @@ from issuebot.orchestrator import (
 )
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.state import rate_limits_from_dict
-from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate
+from issuebot.orchestrator.triage import apply_verdict, earlier_open_step, is_triage_candidate
 from issuebot.web import create_app, dispatch_hold
 from issuebot.web.actions import ALLOWANCE_ENV, ActionsPoller, ActionsSettings, actions_settings
 from issuebot.web.claude_limits import ClaudeLimitsWatcher, webhook_setting
@@ -2076,6 +2076,11 @@ async def _run_once(
     if problem is not None:
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
+    if not show_prompt:
+        held = await held_reason(adapter, issue, settings.github.labels)
+        if held is not None:
+            print(f"[FAIL] issue: #{number} {held}")
+            return 1
     if not show_prompt and not await _approved_for_run_once(adapter, issue, settings.github.labels):
         return 1
     rework = issue.state is StateLabel.REWORK
@@ -2382,6 +2387,31 @@ def not_runnable(issue: Issue, labels: GitHubLabels) -> str | None:
     if issue.state not in (StateLabel.TODO, StateLabel.REWORK, StateLabel.IN_PROGRESS):
         return f"is {issue.state.value}" + hint
     return None
+
+
+async def held_reason(adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels) -> str | None:
+    """Why run-once holds this `todo` step of a split, or None when it may run.
+
+    The worker's hold, answered in the foreground (spec 2026-10-25, section 5): an operator
+    running a batch would otherwise start a step before the ones ahead of it close. An order
+    that cannot be read refuses, as the worker's does for that poll.
+    """
+    if issue.state is not StateLabel.TODO or issue.parent is None:
+        return None
+    parent = issue.parent
+    try:
+        steps = (await adapter.parent_steps([parent])).get(parent)
+    except GitHubError as exc:
+        return f"could not read the order of #{parent}'s sub-issues: {exc}"
+    if steps is None:
+        return None
+    waiting_for = earlier_open_step(issue, steps, labels)
+    if waiting_for is None:
+        return None
+    return (
+        f"waits for #{waiting_for}, an earlier step of #{parent}; close that first, "
+        f"or reorder #{parent}'s sub-issues on GitHub"
+    )
 
 
 async def _approved_for_run_once(
