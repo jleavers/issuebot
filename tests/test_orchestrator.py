@@ -33,6 +33,7 @@ from issuebot.agent.session import run_session
 from issuebot.agent.uvcache import CACHE_ROOT_MODE, UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
+from issuebot.config.workflow import default_triage_prompt
 from issuebot.events import (
     Blocked,
     Event,
@@ -2566,6 +2567,35 @@ async def test_editing_triage_md_reloads_the_workflow(tmp_path: Path) -> None:
     triage.unlink()
     await h.tick()
     assert h.orchestrator._workflow.triage_path is None
+    assert h.snapshots[-1].config_valid is True
+
+
+async def test_an_empty_triage_md_keeps_the_shipped_prompt_across_reloads(
+    tmp_path: Path,
+) -> None:
+    """#306: emptied on reload, TRIAGE.md falls back as on first load, and is still watched."""
+    h = Harness(tmp_path)
+    triage = h.path.with_name("TRIAGE.md")
+
+    def write(text: str, mtime: int) -> None:
+        triage.write_text(text, encoding="utf-8")
+        os.utime(triage, ns=(mtime * 1_000_000_000,) * 2)
+
+    write("", 1_700_000_100)
+    await h.tick()
+    assert h.orchestrator._workflow.triage_template == default_triage_prompt()
+
+    write("Mine", 1_700_000_101)
+    await h.tick()
+    assert h.orchestrator._workflow.triage_template == "Mine"
+
+    write(" \n\n", 1_700_000_102)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.orchestrator._workflow.triage_template == default_triage_prompt()
+    assert h.orchestrator._workflow.triage_empty is True
+    reloaded = next(entry for entry in logs if entry["event"] == "workflow_reloaded")
+    assert reloaded["changed"] == ["triage prompt"]
     assert h.snapshots[-1].config_valid is True
 
 

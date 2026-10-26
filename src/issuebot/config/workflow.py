@@ -58,10 +58,14 @@ class Workflow:
     overlay_config: dict[str, Any] = field(default_factory=dict)
     # The triage prompt: the shipped default unless a TRIAGE.md sits beside the workflow
     # file, in which case ``triage_path`` names it and its identity is recorded for the
-    # watcher, as the overlay's is. The default is the empty string only for a Workflow a
-    # test builds by hand; ``load_workflow`` always fills it.
+    # watcher, as the overlay's is. A TRIAGE.md with no body (empty, whitespace, or an empty
+    # front matter block) is still recorded and watched, but the shipped default stays in
+    # force and ``triage_empty`` says so (#306), as an empty overlay body falls back to the
+    # base's. The default is the empty string only for a Workflow a test builds by hand;
+    # ``load_workflow`` always fills it.
     triage_template: str = ""
     triage_path: Path | None = None
+    triage_empty: bool = False
     triage_mtime_ns: int = 0
     triage_dev: int = 0
     triage_ino: int = 0
@@ -253,8 +257,9 @@ def load_workflow(
         overlay_dev=local.st_dev if local is not None else 0,
         overlay_ino=local.st_ino if local is not None else 0,
         overlay_config=local_raw,
-        triage_template=triage_body if triage is not None else default_triage_prompt(),
+        triage_template=triage_body or default_triage_prompt(),
         triage_path=triage_path,
+        triage_empty=triage is not None and not triage_body,
         triage_mtime_ns=triage.st_mtime_ns if triage is not None else 0,
         triage_dev=triage.st_dev if triage is not None else 0,
         triage_ino=triage.st_ino if triage is not None else 0,
