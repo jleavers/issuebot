@@ -223,7 +223,7 @@ A `split` files the steps up to and including the implementation plan. Once the 
 merges, nothing in this release files the implementation stages -- that is the parent review,
 a later release -- so open them yourself from the merged plan.
 
-A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, silently, while any
+A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, with no comment or label change, while any
 sub-issue before it in the parent's order is open. Operator steps count, and "closed" means
 closed by any route, so a step whose pull request is still open holds the next one until it
 merges. `docker compose logs worker` shows `dispatch_held` with the step it waits for, once per

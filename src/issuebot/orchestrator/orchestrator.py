@@ -1332,7 +1332,7 @@ class Orchestrator:
                 dispatched += 1
         return dispatched
 
-    def _orders_by_parent(self, issue: Issue) -> bool:
+    def _order_applies(self, issue: Issue) -> bool:
         """Whether the order hold applies to ``issue`` at all: a `todo` sub-issue that is not an
         operator step. An operator step is never held; its `todo` comes off at once instead."""
         return (
@@ -1349,11 +1349,17 @@ class Orchestrator:
         the failure the hold exists to stop, and waiting one poll costs one interval. It is
         logged, and does not feed the GitHub hold (spec 2026-10-25, section 5).
         """
+        if self._slots() == 0 or self._stopping or self._current_hold() is not None:
+            # The account's GraphQL budget is shared, and `admit` ranks stopping, hold and slots
+            # above `order`: the sweep stops at the first such refusal, so nothing is admitted
+            # this tick and an empty mapping cannot let a held step through (spec 2026-10-25,
+            # section 9). The hold is read here, after the fetch that may have lifted it.
+            return {}
         parents = sorted(
             {
                 issue.parent
                 for issue in issues
-                if issue.parent is not None and self._orders_by_parent(issue)
+                if issue.parent is not None and self._order_applies(issue)
             }
         )
         if not parents:
@@ -1369,7 +1375,7 @@ class Orchestrator:
     ) -> OrderHold | None:
         """The hold ``issue`` is under, if any. ``steps`` is ``None`` when the read failed."""
         parent = issue.parent
-        if parent is None or not self._orders_by_parent(issue):
+        if parent is None or not self._order_applies(issue):
             return None
         if steps is None:
             return OrderHold(parent, None)

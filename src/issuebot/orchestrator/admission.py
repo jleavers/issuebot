@@ -336,7 +336,7 @@ class AdmissionRequest:
     runs' failures -- so a triage request skips ``inactive`` and ``attempts``.
 
     ``order`` is gathered by the orchestrator only for a ``todo`` sub-issue in the candidate
-    sweep (spec 2026-10-26, section 5); every other caller leaves it ``None``.
+    sweep (spec 2026-10-25, section 5); every other caller leaves it ``None``.
     """
 
     issue: Issue | None = None

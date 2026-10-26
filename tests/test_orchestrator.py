@@ -5896,6 +5896,50 @@ async def test_a_held_step_is_logged_once(tmp_path: Path) -> None:
     assert line["reason"] == "waits for #11, an earlier step of #10"
 
 
+async def test_a_held_step_logs_again_when_it_waits_for_a_later_step(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, 13, todo=(13,))
+    with capture_logs() as logs:
+        await h.tick()
+        h.github.close_issue(11)
+        await h.tick()
+        await h.tick()
+    reasons = [e["reason"] for e in logs if e["event"] == "dispatch_held"]
+    assert reasons == [
+        "waits for #11, an earlier step of #10",
+        "waits for #12, an earlier step of #10",
+    ]
+
+
+async def test_a_step_whose_parent_github_no_longer_returns_is_not_held(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+
+    async def nothing(numbers: Any) -> dict[int, Any]:
+        return {}
+
+    h.github.parent_steps = nothing  # type: ignore[method-assign]
+    await h.tick()
+    assert "12" in h.orchestrator.running
+
+
+async def test_a_tick_with_no_free_slot_makes_no_parent_read(tmp_path: Path) -> None:
+    """Section 9: the account's GraphQL budget is shared, and with no slot the gate refuses the
+    first candidate on `slots` whatever the order says -- the read would be spent for nothing."""
+    h = Harness(tmp_path, max_concurrent=1)
+    add_split(h, 10, 11, 12, todo=(11, 12))
+    await h.tick()
+    assert "11" in h.orchestrator.running
+    assert len(h.calls("parent_steps")) == 1
+    await h.tick()
+    assert len(h.calls("parent_steps")) == 1
+    h.github.close_issue(11)
+    await h.exit(h.run_for(11), final_issue=h.github.issue(11))
+    await h.tick()
+    assert len(h.calls("parent_steps")) == 2
+    assert "12" in h.orchestrator.running
+
+
 async def test_claiming_a_triaged_issue_keeps_triage_complete(tmp_path: Path) -> None:
     """`triage-complete` is a marker the claim leaves alone (section 1, refined): the verdict
     it points at stays true while the issue is worked."""
