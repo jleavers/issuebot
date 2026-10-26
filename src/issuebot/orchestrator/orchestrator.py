@@ -1965,7 +1965,10 @@ class Orchestrator:
                 way_back=(
                     f"Remove its sub-issues from it (closing them does not unlink them), then add "
                     f"`{labels.triage_todo}` again."
+                    f" issuebot has put `{labels.triage_complete}` back, so its steps still "
+                    "run in order."
                 ),
+                restore_complete=True,
             )
             return False
         # The issue's own binding key (#121): a later work run on the issue lands on the same
@@ -2106,7 +2109,13 @@ class Orchestrator:
             self._triage_escapes.pop(issue.id, None)
 
     async def _triage_hand_back(
-        self, issue: Issue, *, title: str, reason: str, way_back: str
+        self,
+        issue: Issue,
+        *,
+        title: str,
+        reason: str,
+        way_back: str,
+        restore_complete: bool = False,
     ) -> actions.EscapeOutcome:
         """`triage_escape`: `triage-todo` off, then a note. It never touches a state label.
 
@@ -2122,6 +2131,7 @@ class Orchestrator:
             reason=self._scrubber.scrub(reason),
             way_back=way_back,
             now=self._now(),
+            restore_complete=restore_complete,
         )
         if outcome == "applied":
             self._counters = self._counters.bump(blocked=1)

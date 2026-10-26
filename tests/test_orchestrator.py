@@ -5351,6 +5351,8 @@ async def test_an_issue_with_sub_issues_is_handed_back_as_already_split(tmp_path
     assert comment.body.startswith("### Issuebot already split (")
     assert "#1 already has sub-issues" in comment.body
     assert "Remove its sub-issues from it (closing them does not unlink them)" in comment.body
+    assert f"issuebot has put `{h.labels.triage_complete}` back" in comment.body
+    assert h.labels.triage_complete in h.github.issue(1).labels
     assert h.recorder.kinds == ["state_changed", "blocked"]
     assert h.calls("create_sub_issue") == [(1, "First step", "Do it.")]
     assert orchestrator._triage_failures == {}
@@ -5822,6 +5824,23 @@ async def test_a_held_step_starts_on_the_poll_after_the_step_before_it_closes(
     h.github.close_issue(11)
     await h.tick()
     assert "12" in h.orchestrator.running
+
+
+async def test_re_triaging_a_split_parent_keeps_its_steps_in_order(tmp_path: Path) -> None:
+    """The swap a human makes to re-triage leaves the parent with `triage-todo` only; the
+    "already split" hand-back puts `triage-complete` back, so the hold on step 12 survives."""
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.human_remove_label(10, h.labels.triage_complete)
+    h.github.human_add_label(10, h.labels.triage_todo, actor="maintainer")
+    await h.tick()
+    labels = h.github.issue(10).labels
+    assert h.labels.triage_complete in labels and h.labels.triage_todo not in labels
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot already split (")
+    assert "12" not in h.orchestrator.running
+    await h.tick()
+    assert "12" not in h.orchestrator.running
 
 
 async def test_an_earlier_operator_step_holds_the_next_step(tmp_path: Path) -> None:
