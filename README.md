@@ -562,7 +562,9 @@ without running anything.
 
 Triage has a prompt of its own. Put a `TRIAGE.md` beside `WORKFLOW.md` to replace the shipped
 one (`src/issuebot/config/triage_prompt.md`); it is plain Markdown with no front matter, and
-the worker reloads it when it appears, changes or is deleted. `issuebot run-once <number>
+the worker reloads it when it appears, changes or is deleted. An empty or whitespace-only
+`TRIAGE.md` leaves the shipped prompt in force, as an empty `WORKFLOW.local.md` body leaves
+`WORKFLOW.md`'s, and `validate` says so. `issuebot run-once <number>
 --triage` runs one triage session in the foreground, and with `--show-prompt` renders it
 without running anything; stop the worker first if it serves the issue, or it triages the same
 issue beside you and both file. `validate` renders it and warns while the triage labels are

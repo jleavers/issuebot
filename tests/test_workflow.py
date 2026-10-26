@@ -253,6 +253,29 @@ def test_a_triage_file_beside_the_workflow_replaces_it(tmp_path: Path) -> None:
     assert wf.triage_identity == (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
 
 
+@pytest.mark.parametrize("text", ["", "  \n\t\n\n"], ids=["empty", "whitespace"])
+def test_an_empty_triage_file_keeps_the_shipped_prompt(tmp_path: Path, text: str) -> None:
+    """#306: an empty body falls back, as an empty overlay body does, but the file is still
+    recorded so the watcher reloads once it gains a prompt."""
+    wf_path = _write_good(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text(text, encoding="utf-8")
+    wf = load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert wf.triage_template == default_triage_prompt()
+    assert wf.triage_empty is True
+    assert wf.triage_path == triage.resolve()
+    stat = triage.stat()
+    assert wf.triage_identity == (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+
+
+def test_a_non_empty_triage_file_is_not_marked_empty(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text("Size it\n", encoding="utf-8")
+    assert load_workflow(wf_path, environ={"TOKEN": "t"}).triage_empty is False
+    (tmp_path / "TRIAGE.md").unlink()
+    assert load_workflow(wf_path, environ={"TOKEN": "t"}).triage_empty is False
+
+
 def test_a_triage_file_with_front_matter_is_refused(tmp_path: Path) -> None:
     wf_path = _write_good(tmp_path)
     triage = tmp_path / "TRIAGE.md"

@@ -5470,6 +5470,23 @@ def test_run_once_triage_show_prompt_prints_the_triage_prompt(
     assert not (tmp_path / "ws").exists()
 
 
+def test_run_once_triage_show_prompt_with_an_empty_triage_file_prints_the_shipped_prompt(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    """#306: ``touch configs/TRIAGE.md`` used to send every triage session a blank prompt."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text("")
+    assert main(["run-once", "42", "--triage", "--workflow", str(path), "--show-prompt"]) == 0
+    assert "Add retry backoff" in capsys.readouterr().out
+    assert stub_triage.calls == []
+
+
 def test_run_once_triage_refuses_an_issue_with_a_state_label(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -5698,6 +5715,35 @@ def test_validate_reports_triage(
         "at most 8 sub-issues" in out
     )
     assert out.index("] prompt:") < out.index("] triage:")
+
+
+def test_validate_names_the_fallback_for_an_empty_triage_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("  \n")
+    main(["validate", "--workflow", str(path)])
+    out = capsys.readouterr().out
+    assert f"[ OK ] triage: prompt shipped default ({triage.resolve()} is empty), " in out
+
+
+def test_validate_names_a_non_empty_triage_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("Size #{{ issue.number }}\n")
+    main(["validate", "--workflow", str(path)])
+    assert f"[ OK ] triage: prompt {triage.resolve()}, " in capsys.readouterr().out
 
 
 def test_validate_fails_a_triage_prompt_that_does_not_render(

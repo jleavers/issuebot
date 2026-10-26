@@ -1620,7 +1620,12 @@ def _triage_check(workflow: Workflow) -> Check:
         renderer.render_continuation(replace(context, turn_number=2))
     except AgentError as exc:
         return Check("triage", "fail", exc.message)
-    source = str(workflow.triage_path) if workflow.triage_path else "shipped default"
+    if workflow.triage_path is None:
+        source = "shipped default"
+    elif workflow.triage_empty:
+        source = f"shipped default ({workflow.triage_path} is empty)"
+    else:
+        source = str(workflow.triage_path)
     triage = settings.triage
     return Check(
         "triage",
