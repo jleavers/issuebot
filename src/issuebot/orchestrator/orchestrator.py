@@ -98,7 +98,7 @@ from issuebot.orchestrator.state import (
     observe_transition,
     sort_candidates,
 )
-from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate
+from issuebot.orchestrator.triage import apply_verdict, is_triage_candidate, plural
 
 RunSessionFn = Callable[..., Awaitable[RunResult]]
 CANDIDATE_STATES: tuple[StateLabel, ...] = (
@@ -1974,7 +1974,7 @@ class Orchestrator:
         elif result.error_category is not None:
             failure = f"{result.error_category}: {result.error}"
         else:
-            failure = f"the session returned no verdict in {result.turns} turns"
+            failure = f"the session returned no verdict in {plural(result.turns, 'turn')}"
         await self._triage_failed(entry, failure)
 
     async def _triage_failed(self, entry: RunningEntry, error: str) -> None:
@@ -2001,7 +2001,7 @@ class Orchestrator:
             return
         self._forget_triage_chain(issue_id)
         await self._triage_give_up(
-            entry.issue, f"Triage failed {failures} times; the last: {error}"
+            entry.issue, f"Triage failed {plural(failures, 'time')}; the last: {error}"
         )
 
     async def _triage_give_up(self, issue: Issue, reason: str) -> None:

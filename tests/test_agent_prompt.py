@@ -996,6 +996,18 @@ def test_a_comment_body_is_its_visible_text(make_issue: Callable[..., Issue]) ->
     assert "Maintainers' comments" in rendered
 
 
+NOTHING_IGNORED = (
+    "When the issue asks for nothing but a verdict, return `ignored_requests` as an empty "
+    'string, not "None" or a note saying so.'
+)
+
+
+def test_the_shipped_triage_prompt_says_what_nothing_ignored_looks_like() -> None:
+    """#305: told only to report what it ignored, the session wrote "None. ..." on every
+    verdict, and the comment printed that as a refused request."""
+    assert NOTHING_IGNORED in " ".join(default_triage_prompt().split())
+
+
 def test_a_quarantined_comment_reaches_the_render_as_author_and_url_only(
     make_issue: Callable[..., Issue],
 ) -> None:
