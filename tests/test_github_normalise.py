@@ -8,7 +8,13 @@ import pytest
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
 from issuebot.github.models import WORKPAD_MARKER, Issue, StateLabel, is_workpad_body
-from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
+from issuebot.github.normalise import (
+    issue_from_node,
+    label_name,
+    parent_steps_from_node,
+    repo_short_name,
+    role_for,
+)
 
 LABELS = GitHubLabels()
 REPO = "example/repo"
@@ -360,3 +366,38 @@ def test_body_html_is_carried_and_required_beside_a_body() -> None:
         )
     assert excinfo.value.category == "response"
     assert "bodyHTML" in str(excinfo.value)
+
+
+def normalised(raw: dict[str, Any]) -> Issue:
+    return issue_from_node(raw, repo=REPO, labels=LABELS, login=LOGIN)
+
+
+def test_parent_is_the_parent_issue_number() -> None:
+    assert normalised(node(parent={"number": 7})).parent == 7
+    assert normalised(node(parent=None)).parent is None
+    assert normalised(node()).parent is None  # an older fixture without the field
+
+
+@pytest.mark.parametrize("parent", [{"number": "7"}, {"number": True}, {}, 7])
+def test_a_malformed_parent_is_a_response_error(parent: Any) -> None:
+    with pytest.raises(GitHubError) as info:
+        normalised(node(parent=parent))
+    assert info.value.category == "response"
+
+
+def test_parent_steps_keep_githubs_order_and_lowercase_labels() -> None:
+    steps = parent_steps_from_node(
+        {
+            "number": 5,
+            "labels": {"nodes": [{"name": "Issuebot/Triage-Complete"}]},
+            "subIssues": {
+                "nodes": [
+                    {"number": 7, "title": "b", "url": "u7", "state": "OPEN"},
+                    {"number": 6, "title": "a", "url": "u6", "state": "CLOSED"},
+                ]
+            },
+        }
+    )
+    assert steps.number == 5
+    assert steps.labels == ("issuebot/triage-complete",)
+    assert [(s.number, s.state) for s in steps.sub_issues] == [(7, "open"), (6, "closed")]

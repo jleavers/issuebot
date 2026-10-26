@@ -204,7 +204,8 @@ one action that resumes it is in the comment:
 - **`already split`**: the issue already has sub-issues. Re-triaging a split issue is the
   parent review, which a later release adds, so no session runs and nothing is filed twice.
   Remove its sub-issues from it ("Remove sub-issue" on the parent; closing them does not
-  unlink them), then add `issuebot/triage-todo` again.
+  unlink them), then add `issuebot/triage-todo` again. issuebot puts `issuebot/triage-complete`
+  back, so the split's steps keep running in order.
 - **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
   issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
 
@@ -222,6 +223,18 @@ share one triage clone, and both file.
 A `split` files the steps up to and including the implementation plan. Once the plan step
 merges, nothing in this release files the implementation stages -- that is the parent review,
 a later release -- so open them yourself from the merged plan.
+
+A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, with no comment or
+label change, while any sub-issue before it in the parent's order is open. Operator steps
+count, and "closed" means closed by any route, so a step whose pull request is still open holds
+the next one until it merges. The hold depends on that label: removing it from the parent
+releases every held step at once, so keep it there until the split's steps have closed.
+`docker compose logs worker` shows `dispatch_held` with the step it waits for, once per change.
+To change the order, drag the sub-issues on the parent; to run a step early, remove it from the
+parent. `rework` and resumed steps are never held. A poll that cannot read the order holds
+every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>` refuses a
+held step too, naming the step it waits for, so close that first or reorder the parent;
+`--show-prompt` skips the check.
 
 ### GitHub itself
 

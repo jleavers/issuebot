@@ -67,6 +67,8 @@ class Issue:
     # ...); ``None`` when the record carries none. What the prompt's envelope reports, so a
     # session can tell a maintainer's text from anyone else's (GHSA-jm8h-q3j6-p8xp).
     author_association: str | None = None
+    # The parent issue's number when this one is a sub-issue; ``None`` for a top-level issue.
+    parent: int | None = None
     # GitHub's sanitised render of `body` (`bodyHTML`): what the prompt shows a session
     # (GHSA-f3fm-r55f-2vgm). `None` exactly when `body` is.
     body_html: str | None = None
@@ -108,6 +110,16 @@ class SubIssue:
     title: str
     url: str
     state: GitHubState
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ParentSteps:
+    """A parent issue as the order of its steps needs it: its labels (lower-cased, as
+    ``Issue.labels``) and its sub-issues in GitHub's order."""
+
+    number: int
+    labels: tuple[str, ...]
+    sub_issues: tuple[SubIssue, ...]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

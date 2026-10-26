@@ -6,7 +6,15 @@ from typing import Any
 
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
-from issuebot.github.models import Issue, LinkedPr, Mergeable, PrState, StateLabel
+from issuebot.github.models import (
+    Issue,
+    LinkedPr,
+    Mergeable,
+    ParentSteps,
+    PrState,
+    StateLabel,
+    SubIssue,
+)
 
 _PR_STATES: dict[str, PrState] = {"OPEN": "open", "CLOSED": "closed", "MERGED": "merged"}
 _PR_RANK: dict[PrState, int] = {"merged": 0, "open": 1, "closed": 2}
@@ -74,6 +82,7 @@ def issue_from_node(
     )
     state = role_for(labels, state_labels[0]) if len(state_labels) == 1 else None
     github_state = "open" if raw_state == "OPEN" else "closed"
+    parent = _parent_number(node.get("parent"), number)
 
     return Issue(
         id=str(number),
@@ -95,6 +104,48 @@ def issue_from_node(
         linked_pr=_select_pr(node.get("closedByPullRequestsReferences"), login=login),
         dispatchable=github_state == "open" and state is not None,
         author_association=_association(node.get("authorAssociation")),
+        parent=parent,
+    )
+
+
+def _parent_number(value: Any, number: int) -> int | None:
+    if value is None:
+        return None
+    parent = value.get("number") if isinstance(value, Mapping) else None
+    if not isinstance(parent, int) or isinstance(parent, bool):
+        raise GitHubError("response", f"malformed issue record #{number}: parent")
+    return parent
+
+
+def sub_issue_from_node(node: Any) -> SubIssue:
+    if not isinstance(node, Mapping):
+        raise GitHubError("response", "sub-issue record is not an object")
+    number, title, url, state = (node.get(k) for k in ("number", "title", "url", "state"))
+    if (
+        not isinstance(number, int)
+        or not isinstance(title, str)
+        or not isinstance(url, str)
+        or state not in ("OPEN", "CLOSED")
+    ):
+        raise GitHubError("response", "malformed sub-issue record")
+    return SubIssue(
+        number=number, title=title, url=url, state="open" if state == "OPEN" else "closed"
+    )
+
+
+def parent_steps_from_node(node: Mapping[str, Any]) -> ParentSteps:
+    """Normalise one parent alias of the steps query. Raises ``GitHubError("response")``."""
+    number = node.get("number")
+    if not isinstance(number, int) or isinstance(number, bool):
+        raise GitHubError("response", "malformed parent record: missing number")
+    connection = node.get("subIssues")
+    nodes = connection.get("nodes") if isinstance(connection, Mapping) else None
+    if not isinstance(nodes, list):
+        raise GitHubError("response", f"malformed parent record #{number}: subIssues")
+    return ParentSteps(
+        number=number,
+        labels=_label_names(node.get("labels")),
+        sub_issues=tuple(sub_issue_from_node(item) for item in nodes),
     )
 
 

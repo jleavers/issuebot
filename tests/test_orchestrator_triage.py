@@ -1,5 +1,6 @@
 """Tests for filing a triage verdict: the worker's writes, idempotent across a retry."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -8,9 +9,10 @@ import pytest
 from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
 from issuebot.config import Settings
 from issuebot.events import Event, EventBus, StateChanged
-from issuebot.github import FakeGitHub, GitHubError
+from issuebot.github import FakeGitHub, GitHubError, Issue, ParentSteps, SubIssue
 from issuebot.orchestrator.triage import (
     apply_verdict,
+    earlier_open_step,
     is_triage_candidate,
     sub_issue_body,
     verdict_comment,
@@ -232,3 +234,55 @@ def test_the_run_line_counts_one_turn_in_the_singular() -> None:
     assert one.endswith("Run `r` (attempt 1, 1 turn, $0.24).")
     two = verdict_comment(make_verdict(), [], turns=2, **kwargs)
     assert two.endswith("Run `r` (attempt 1, 2 turns, $0.24).")
+
+
+def parent_order(
+    *states: tuple[int, str], labels: tuple[str, ...] = ("issuebot/triage-complete",)
+) -> ParentSteps:
+    subs = tuple(SubIssue(number=n, title=f"s{n}", url=f"u{n}", state=s) for n, s in states)
+    return ParentSteps(number=10, labels=labels, sub_issues=subs)
+
+
+def test_a_step_waits_for_the_first_open_step_before_it(
+    make_issue: Callable[..., Issue],
+) -> None:
+    order = parent_order((11, "closed"), (12, "open"), (13, "open"), (14, "open"))
+    assert earlier_open_step(make_issue(number=14, parent=10), order, LABELS) == 12
+
+
+def test_the_first_step_and_a_step_after_closed_ones_wait_for_nothing(
+    make_issue: Callable[..., Issue],
+) -> None:
+    order = parent_order((11, "closed"), (12, "open"), (13, "open"))
+    assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) is None
+    assert earlier_open_step(make_issue(number=11, parent=10), order, LABELS) is None
+
+
+def test_a_parent_without_triage_complete_holds_nothing(
+    make_issue: Callable[..., Issue],
+) -> None:
+    order = parent_order((11, "open"), (12, "open"), labels=())
+    assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) is None
+
+
+def test_a_step_missing_from_its_parent_holds_nothing(
+    make_issue: Callable[..., Issue],
+) -> None:
+    order = parent_order((11, "open"))
+    assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) is None
+
+
+def test_the_order_is_githubs(make_issue: Callable[..., Issue]) -> None:
+    order = parent_order((13, "open"), (12, "open"))  # dragged on GitHub: 13 now comes first
+    assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) == 13
+
+
+async def test_a_split_comment_says_the_steps_can_be_labelled_at_once() -> None:
+    github, _recorder, bus = setup()
+    await apply(github, bus, SPLIT)
+    [comment] = github.comments_for(1)
+    assert (
+        "Label every issuebot step `issuebot/todo` at once if you like: issuebot starts each "
+        "only when every step before it has closed."
+    ) in comment.body
+    assert "once the step before it has closed" not in comment.body

@@ -12,6 +12,7 @@ from issuebot.orchestrator.admission import (
     Hold,
     IssueLedger,
     Ledger,
+    OrderHold,
     Refused,
     admit,
     seeded_chain,
@@ -407,3 +408,43 @@ def test_a_triage_request_still_respects_slots_and_spend(
     assert isinstance(spent, Refused)
     assert (spent.kind, spent.wait) == ("spend", None)
     assert "agent.max_issue_cost_usd is $10.00" in spent.reason
+
+
+# --- the order of a split's steps -------------------------------------------------------
+
+HELD = OrderHold(parent=10, waits_for=11)
+
+
+def test_a_held_todo_sub_issue_waits_for_an_earlier_step(
+    make_issue: Callable[..., Issue],
+) -> None:
+    assert admit(request(issue=make_issue(), order=HELD)) == Refused(
+        kind="order", reason="waits for #11, an earlier step of #10", wait="order"
+    )
+
+
+def test_an_unreadable_order_holds_too(make_issue: Callable[..., Issue]) -> None:
+    verdict = admit(request(issue=make_issue(), order=OrderHold(parent=10, waits_for=None)))
+    assert verdict == Refused(
+        kind="order", reason="the order of #10's sub-issues could not be read", wait="order"
+    )
+
+
+@pytest.mark.parametrize(
+    "state, label",
+    [(StateLabel.REWORK, "issuebot/rework"), (StateLabel.IN_PROGRESS, "issuebot/in-progress")],
+)
+def test_a_started_step_is_never_held(
+    make_issue: Callable[..., Issue], state: StateLabel, label: str
+) -> None:
+    issue = make_issue(state=state, state_labels=(label,), labels=(label,))
+    assert isinstance(admit(request(issue=issue, order=HELD)), Admitted)
+
+
+def test_the_hold_ranks_after_the_worker_and_before_the_budget(
+    make_issue: Callable[..., Issue],
+) -> None:
+    assert admit(request(issue=make_issue(), order=HELD, slots=0)).kind == "slots"
+    over = IssueLedger(failures=9, cost_usd=99.0)
+    verdict = admit(request(issue=make_issue(), order=HELD, ledger=over, max_issue_cost_usd=1.0))
+    assert verdict.kind == "order"

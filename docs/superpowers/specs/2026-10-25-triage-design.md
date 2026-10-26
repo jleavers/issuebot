@@ -358,6 +358,10 @@ before it.
 - "Closed" means closed by any route, as in section 6. A stage whose pull request is open is
   still open, so the next stage waits for it to merge -- which is the point, since the next
   stage needs that code on the default branch.
+- Decided while planning phase 2: the order comes from the parent's sub-issue order alone, and
+  no GitHub "blocked by" dependencies are filed, so there is one source of truth that the
+  operator changes by dragging sub-issues; and a held issue's card does not change in phase 2,
+  because the board is phase 5's -- the worker logs `dispatch_held` naming the step instead.
 - Batches filed later (a `next` or `gap` verdict) go after the existing sub-issues, in the
   order the verdict gives.
 - The hold is a precondition of the admission gate (`orchestrator/admission.py`): a refusal
@@ -505,7 +509,7 @@ byte budget (`tests/test_instruction_bounds.py`).
   default branch, or the files open pull requests touch -- since it has no shell to run
   `git log` itself.
 - Whether the two prompt files are one file with two sections or two files.
-- Whether the order within a split is read from the parent's sub-issue order alone, or the
-  worker also files GitHub's "blocked by" dependencies so the order shows on GitHub; and
-  whether a held issue's card says what it is waiting for.
+- ~~Whether the order within a split is read from the parent's sub-issue order alone, or the
+  worker also files "blocked by" dependencies; and whether a held card says what it waits
+  for.~~ Resolved in section 5.
 - The default numbers in the configuration above.

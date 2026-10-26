@@ -11,7 +11,7 @@ from datetime import datetime
 from issuebot.agent.verdict import SubIssueDraft, TriageVerdict
 from issuebot.config import GitHubLabels
 from issuebot.events import EventBus, StateChanged
-from issuebot.github import GitHubAdapter, Issue, SubIssue
+from issuebot.github import GitHubAdapter, Issue, ParentSteps, SubIssue
 from issuebot.orchestrator.actions import utc_stamp
 
 
@@ -27,6 +27,23 @@ def is_triage_candidate(issue: Issue, labels: GitHubLabels) -> bool:
         and not issue.state_labels
         and labels.triage_todo.lower() in issue.labels
     )
+
+
+def earlier_open_step(issue: Issue, steps: ParentSteps, labels: GitHubLabels) -> int | None:
+    """The first open step before ``issue`` in its parent's order, or ``None`` to run now.
+
+    The order is GitHub's own (``steps.sub_issues``). Nothing is held under a parent that was
+    not triaged, nor when the issue is no longer among the parent's steps.
+    """
+    if issue.parent != steps.number or labels.triage_complete.lower() not in steps.labels:
+        return None
+    numbers = [step.number for step in steps.sub_issues]
+    if issue.number not in numbers:
+        return None
+    for step in steps.sub_issues[: numbers.index(issue.number)]:
+        if step.state == "open":
+            return step.number
+    return None
 
 
 def sub_issue_body(
@@ -71,9 +88,10 @@ def verdict_comment(
     else:
         lines.append(
             f"**Verdict: split.** Too big for one run, so it is filed as "
-            f"{len(verdict.sub_issues)} sub-issues, in order. Start each issuebot step with "
-            f"`{labels.todo}` once the step before it has closed. Operator steps "
-            f"(`{labels.operator_step}`) are yours to do and close."
+            f"{len(verdict.sub_issues)} sub-issues, in order. Label every issuebot step "
+            f"`{labels.todo}` at once if you like: issuebot starts each only when every step "
+            f"before it has closed. Operator steps (`{labels.operator_step}`) are yours to do "
+            f"and close, and the steps after one wait for it."
         )
         lines.append("")
         for number, (sub, draft) in enumerate(zip(filed, verdict.sub_issues, strict=True), 1):

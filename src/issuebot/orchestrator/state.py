@@ -24,6 +24,7 @@ RetryKind = Literal[
     "github",
     "preflight",
     "accounts",
+    "order",
 ]
 DispatchHoldKind = Literal["preflight", "auth", "usage", "github", "accounts"]
 StopCause = Literal["stalled", "moved", "closed", "missing", "shutdown"]

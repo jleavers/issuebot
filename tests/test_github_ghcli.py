@@ -1912,3 +1912,50 @@ async def test_create_sub_issue_links_the_parent_at_creation() -> None:
     # The node ids are cached (they never change): only the second mutation is a new call.
     assert len(runner.calls) == 3
     assert "createIssue" in query_of(runner.argv(2))
+
+
+# --- reads: a parent's steps ---------------------------------------------------------
+
+
+def test_the_issue_fragment_asks_for_the_parent_number() -> None:
+    assert "parent { number }" in ISSUE_FIELDS
+
+
+async def test_parent_steps_reads_every_parent_in_one_query() -> None:
+    runner = StubRunner()
+    parent = {
+        "number": 5,
+        "labels": {"nodes": [{"name": "issuebot/triage-complete"}]},
+        "subIssues": {"nodes": [{"number": 7, "title": "b", "url": "u7", "state": "OPEN"}]},
+    }
+    # What GitHub sends for a number with no issue: a null alias and a NOT_FOUND error on it.
+    missing = {"type": "NOT_FOUND", "path": ["repository", "p9"], "message": "no issue 9"}
+    runner.on(
+        has("p5: issue(number: 5)"),
+        stdout=json.dumps(
+            {"data": {"repository": {"p5": parent, "p9": None}}, "errors": [missing]}
+        ),
+    )
+    steps = await make_adapter(runner).parent_steps([9, 5, 5])
+    assert list(steps) == [5]
+    assert [s.number for s in steps[5].sub_issues] == [7]
+    assert len(runner.calls) == 1
+    query = " ".join(runner.calls[0][0])
+    assert "p9: issue(number: 9)" in query and query.count("p5: issue") == 1
+
+
+async def test_parent_steps_of_nothing_makes_no_call() -> None:
+    runner = StubRunner()
+    assert await make_adapter(runner).parent_steps([]) == {}
+    assert runner.calls == []
+
+
+async def test_a_malformed_parent_steps_record_is_a_response_error() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("p5: issue(number: 5)"),
+        stdout=json.dumps({"data": {"repository": {"p5": {"number": 5, "subIssues": 3}}}}),
+    )
+    with pytest.raises(GitHubError) as info:
+        await make_adapter(runner).parent_steps([5])
+    assert info.value.category == "response"

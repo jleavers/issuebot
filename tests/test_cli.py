@@ -2409,6 +2409,83 @@ def test_run_once_claims_a_todo_issue_and_prints_the_summary(
     assert state_changed.issue_number == 42
 
 
+def _split_with_held_step(fake: FakeGitHub) -> None:
+    """A split #10 whose step #11 is open and whose step #12 is an approved `todo`."""
+    fake.add_issue("Split", labels=("issuebot/triage-complete",), number=10)
+    fake.add_issue("Step one", number=11)
+    fake.add_issue("Step two", labels=("issuebot/todo",), number=12)
+    _approve(fake, 12)
+    fake.link_sub_issue(10, 11)
+    fake.link_sub_issue(10, 12)
+
+
+def test_run_once_refuses_a_held_step(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _split_with_held_step(fake_github)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "12", "--workflow", str(path)]) == 1
+    assert (
+        "[FAIL] issue: #12 waits for #11, an earlier step of #10; close that first, "
+        "or reorder #10's sub-issues on GitHub"
+    ) in capsys.readouterr().out
+    assert stub_session.calls == []
+    assert "set_state" not in [name for name, _ in fake_github.calls]
+
+
+def test_run_once_runs_a_step_whose_earlier_steps_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _split_with_held_step(fake_github)
+    fake_github.close_issue(11)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "12", "--workflow", str(path)]) == 0
+    assert len(stub_session.calls) == 1
+
+
+def test_run_once_fails_when_the_order_cannot_be_read(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _split_with_held_step(fake_github)
+    fake_github.fail_next("transport", on="parent_steps")
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "12", "--workflow", str(path)]) == 1
+    assert (
+        "[FAIL] issue: #12 could not read the order of #10's sub-issues:" in capsys.readouterr().out
+    )
+    assert stub_session.calls == []
+
+
+def test_run_once_show_prompt_skips_the_order_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _split_with_held_step(fake_github)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "12", "--workflow", str(path), "--show-prompt"]) == 0
+    assert "parent_steps" not in [name for name, _ in fake_github.calls]
+
+
 def test_run_once_rework_sets_the_flag(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
