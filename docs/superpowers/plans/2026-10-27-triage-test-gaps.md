@@ -75,7 +75,7 @@ lands in the same commit as the change that makes it pass.
 | 3 | Store, prompt limits, clone sweep, `TRIAGE.md` reads | 1.1, 3.1, 3.2, 4.1, 5.1 | `tests/test_db_queries.py`, `tests/test_workflow.py`, `tests/test_agent_prompt.py`, `tests/test_agent_workspace.py` | -- |
 | 4 | Triage session | 6.1 -- 6.7 | `tests/test_agent_triage.py` | -- |
 | 5 | `apply_verdict` retries and matching | 7.1 -- 7.5 | `tests/test_orchestrator_triage.py` | -- |
-| 6 | Operator-step hand-back | 8.1 | `src/issuebot/orchestrator/actions.py`, `tests/test_orchestrator_actions.py` | -- |
+| 6 | Operator-step hand-back | 8.1 | `src/issuebot/orchestrator/actions.py`, `tests/test_orchestrator_actions.py`, `docs/operations.md` | -- |
 | 7 | Worker: `TRIAGE.md` reload, exits | 3.3, 3.4, 9.1, 9.2, 9.3 | `tests/test_orchestrator.py` | -- |
 | 8 | Worker: shutdown, spend, discard | 9.4, 9.5, 9.6 | `tests/test_orchestrator.py` | 7 |
 | 9 | `run-once --triage` | 10.1 -- 10.4 | `tests/test_cli.py` | 1 |
@@ -172,7 +172,8 @@ is then the proof that 1.1 passes, and the pull request says so.
   `failures` reads 1.
 - 3.1: remove the `except (OSError, UnicodeDecodeError)` in `_read_beside`.
 - 3.2: narrow the `stat` clause to `FileNotFoundError`.
-- 4.1: read `claude.max_budget_usd` in `TriageLimits.from_settings`.
+- 4.1: in `TriageLimits.from_settings`, set `max_issue_cost_usd` from
+  `settings.claude.max_budget_usd` instead of `settings.agent.max_issue_cost_usd`.
 - 5.1: swap `is_own_dir` for `(self.root / name).is_dir()` in `triage_keys`.
 
 **Pause:** conditional. If the work run had no database, it cannot do 1.1's revert check
@@ -215,14 +216,17 @@ each call once. That is the `own_login` and `repo_info` `try` arms (6.1, 6.2),
   fails, then the retry.
 - [ ] **7.2** The swap fails, then the retry. Parametrise it over `SPLIT` with
   `after=1` and `make_verdict()` with `after=0` (ruling 4).
-- [ ] **7.3** An existing child titled `"  first STEP "`. Link it with `link_sub_issue`, from
-  stage 1's helper, which is already on `main`.
+- [ ] **7.3** An existing child titled `"  first STEP "`. Link it with
+  `FakeGitHub.link_sub_issue` (on `main` since #324).
 - [ ] **7.4** A child a human added is left untouched and stays out of the comment.
 - [ ] **7.5** No test of its own. Its box is ticked as covered by 7.2's `fits` case.
 
 **Confirm it fails when reverted:** in `apply_verdict`, delete the operator-label call
-(7.1). Publish `StateChanged` whether or not `swapped` is set, and drop the existing-child
-lookup so a retry files again (7.2). Drop `strip()` and then `casefold()` from `_key` (7.3).
+(7.1). Move the `StateChanged` publish above the swap's `edit_labels`, and then, separately,
+the comment, so the failed first call publishes or comments before it raises (7.2, both
+cases). For the `SPLIT` case only, also drop the existing-child lookup, so the retry files a
+third child. Publishing regardless of `swapped` is *not* a revert that fails 7.2: the swap
+failed, so `on_swapped` never ran and the retry has `swapped=False` either way. Drop `strip()` and then `casefold()` from `_key` (7.3).
 For 7.4, add a loop over `existing` locally that closes or relabels children not in the
 verdict, and watch the test fail.
 
@@ -233,7 +237,8 @@ verdict, and watch the test fail.
 **Spec items:** 8.1. **Production edits:** `src/issuebot/orchestrator/actions.py`, the one
 behaviour change in the whole of #311.
 
-**Files:** `src/issuebot/orchestrator/actions.py`, `tests/test_orchestrator_actions.py`.
+**Files:** `src/issuebot/orchestrator/actions.py`, `tests/test_orchestrator_actions.py`,
+`docs/operations.md`.
 
 - [ ] **8.1, test first** Parametrise `test_operator_step_escape_clears_todo_and_says_why`
   over `todo`, `rework` and `in-progress`. Each case asserts that the comment ends
@@ -244,9 +249,12 @@ behaviour change in the whole of #311.
   once. Use it both as `from_label` and in `way_back`. When it is `None`, the sentence names no
   label (e.g. "issuebot has removed its state label.") rather than `todo`. Add that case to the
   test, so the `None` branch is also covered.
-- [ ] Search the tree for the old wording outside `docs/superpowers/`
-  (`grep -rn "has removed \`" src tests docs README.md`). Today only this function and this
-  test carry it. Update any other copy found.
+- [ ] Update the operator documentation that describes the refusal. `docs/operations.md`,
+  "Triage", says it twice: the paragraph's "takes off the `issuebot/todo` someone added", and
+  the **`operator step`** bullet's "issuebot removes `issuebot/todo`". Both become "whichever
+  state label the issue carried". Before finishing, search the tree outside
+  `docs/superpowers/` for any other copy, e.g.
+  `grep -rn "has removed \`\|removes \`issuebot/todo\`\|takes off the" src tests docs README.md`.
 
 **Confirm it fails when reverted:** the fail-first run above is the check. Then put
 `labels.todo` back in `way_back` locally and watch the `rework` case fail again.
@@ -277,7 +285,10 @@ its neighbours) and uses their harness (`h.add_triage_issue`, `h.exit`).
 **Confirm it fails when reverted:** in `_reload_workflow`, catch nothing around the
 `TRIAGE.md` stat (3.3). Keep the old `triage_template` on reload, so the template still reads
 `"Second"` (3.4). In `_triage_exit`, route `auth_failed` into the failure arm (9.1). Drop the
-`stalled:` prefix (9.2). Replace `"worker crashed"` with `""` (9.3).
+`stalled:` prefix (9.2). Delete the `elif result is None:` arm, so a crash falls through to
+`result.error_category` and never escapes (9.3). Replacing the `"worker crashed"` literal is
+*not* a revert that fails 9.3: the crash path hands `_triage_exit` an `error` that already
+reads `worker crashed: ...`, so the literal is never used.
 
 **Pause:** none.
 
@@ -314,8 +325,8 @@ its neighbours) and uses their harness (`h.add_triage_issue`, `h.exit`).
 - [ ] **10.3** `StubTriage` raising `RuntimeError("boom")`: it leaves `main`, nothing is
   written, and `_Sinks.close` ran.
 - [ ] **10.4** A pooled `agent.run_as`: `StubTriage` records `workflow` (a test-only
-  addition to `StubTriage.__call__`) and receives `run_as == ("agent-1",)`, bound in the
-  registry.
+  addition to `StubTriage.__call__`) and receives `run_as == ("agent-1",)` with
+  `not run_as_pooled`, and the registry's `bound("example-42")` is `"agent-1"`.
 
 **Confirm it fails when reverted:** in `_run_once_triage`, let any `stop_reason` reach
 `apply_verdict` (10.1). File step by step before parsing the whole verdict (10.2). Turn the
@@ -354,7 +365,8 @@ its neighbours) and uses their harness (`h.add_triage_issue`, `h.exit`).
 | | | | 11.3 | 1 |
 
 43 items, each in exactly one stage. Production code changes in stage 6 alone, and in stage 1
-only if ruling 3's condition is met. Everything else is under `tests/`.
+only if ruling 3's condition is met. Everything else is under `tests/`, apart from stage 6's
+matching edit to `docs/operations.md`.
 
 ## Out of scope
 
