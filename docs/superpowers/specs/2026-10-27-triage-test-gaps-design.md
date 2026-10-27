@@ -106,7 +106,7 @@ helpers under `tests/`.
 ## 3. `TRIAGE.md` loading (`tests/test_workflow.py`, `tests/test_orchestrator.py`)
 
 The load is no longer TRIAGE.md's own code: since #306, `_read_triage`
-(`src/issuebot/config/workflow.py:284`) calls `_read_beside` (line 304), which the overlay
+(`src/issuebot/config/workflow.py:284`) calls `_read_beside` (line 292, defined at 304), which the overlay
 shares. No test reaches either failure through either caller (`test_workflow.py:151` covers
 an undecodable *workflow* file, which is another read), so both still apply and are tested
 through `TRIAGE.md`, the caller #311 names.
@@ -164,8 +164,11 @@ through `TRIAGE.md`, the caller #311 names.
   regular file named `stray.triage` but no link.
   Fails if: with `manager.root / "linked.triage"` a symlink to a real directory outside the
   root (holding a sentinel file), `manager.triage_keys()` still equals the two real triage
-  keys, and the sentinel survives. Replacing `is_own_dir` with `Path.is_dir()`, which follows
-  the link, adds `linked.triage`.
+  keys, and, after `remove_triage_key` over every key it returned (as
+  `test_the_sweep_removes_every_key_triage_keys_returns`, line 1261, does), the sentinel
+  survives. Replacing `is_own_dir` with `Path.is_dir()`, which follows the link, adds
+  `linked.triage`. `triage_keys` deletes nothing itself, so the sentinel proves something
+  only once the sweep has run over the keys.
 
 ## 6. The triage session (`tests/test_agent_triage.py`, against `src/issuebot/agent/triage.py`)
 
@@ -193,9 +196,11 @@ still applies, on the call site.
   Test: beside `test_a_failing_sweep_still_ends_the_run_and_propagates` (line 150), which
   shows only that a failing sweep ends the run.
   Fails if: with `triage_max_turns=3`, no verdict, and `sweep_agent_home` wrapped to append a
-  marker to the same list the scripted runner appends to on each turn, the sequence is
-  `[sweep, turn, sweep, turn, sweep, turn]`. Moving the sweep above the loop gives one sweep;
-  deleting it gives none.
+  marker to the same list the scripted runner appends to on each turn, every `turn` marker
+  comes directly after a `sweep` and there are three of each turn. Assert that pairing rather
+  than the whole list: under `agent.run_as`, `create_triage`'s clone also sweeps
+  (`src/issuebot/agent/workspace.py:489`), adding one before the loop. Moving the sweep above
+  the loop leaves turns 2 and 3 unswept; deleting it leaves all three.
 - [ ] **6.4 A `usage_limited` turn carries its window into the result.**
   Branch: `state.fails_on` at line 203, which sets `usage_reset_at` and `usage_window`
   (`src/issuebot/agent/session.py:176-177`) before `RunState.result` copies them (lines
@@ -298,8 +303,9 @@ them. `_triage_exit` is at line 2008.
   named line 1938.
   Fails if: with `max_attempts=1`, a triage run ending `error_category="auth_failed"` sets
   `snapshot().dispatch_hold.kind == "auth"`, leaves `triage_todo` on the issue, publishes no
-  `Blocked`, and starts no second triage run on the next tick. Counting it as a failure would
-  escape at once with one attempt allowed.
+  `Blocked`. Counting it as a failure would escape at once with one attempt allowed. (That no
+  second run starts on the next tick is context, not the proof: `_triage_not_before` holds
+  the issue a poll interval either way.)
 - [ ] **9.2 A stall counts as a failure, named `stalled: ...`.**
   Branch: lines 2060-2061, `failure = f"stalled: {entry.stop_detail}"`. #311 named line 1970.
   Fails if: with `max_attempts=1` and `claude.stall_timeout_ms` set, a triage run that stalls
@@ -310,7 +316,8 @@ them. `_triage_exit` is at line 2008.
   None` from the task's exception path (line 2517, `f"worker crashed: {exc}"`).
   Fails if: with `max_attempts=1`, a triage session that raises (as
   `test_crashed_worker_is_retried`, line 1667, scripts one) escapes, the `Blocked` reason
-  contains `worker crashed`, and the issue keeps no `triage_complete`.
+  contains `worker crashed`. (No `triage_complete` is context only: a crash files nothing
+  whatever the branch does.)
 - [ ] **9.4 A stop on `shutdown`: no failure, the verdict discarded.**
   Branch: lines 2018-2027, `"shutdown"` in `stopped`, which schedules the discard and
   returns before the verdict branch at line 2038.
@@ -319,7 +326,7 @@ them. `_triage_exit` is at line 2008.
   comment, no `Blocked`, and no failure on the chain (`_triage_failures` has no entry for the
   issue). Taking `"shutdown"` out of `stopped` files the verdict.
 - [ ] **9.5 The spend refusal hands the issue back as `triage budget limit`.**
-  Branch: lines 1762-1776, `verdict.kind == "spend"` -> `_triage_hand_back(..., title="triage
+  Branch: lines 1764-1776, `verdict.kind == "spend"` -> `_triage_hand_back(..., title="triage
   budget limit", ...)`. #311 named lines 1678-1689. `tests/test_admission.py:386` covers
   only the refusal.
   Fails if: with `agent.max_issue_cost_usd` set below what the issue's ledger already holds,
