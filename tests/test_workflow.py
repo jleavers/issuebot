@@ -1,6 +1,7 @@
 """Tests for WORKFLOW.md parsing and loading."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -290,3 +291,52 @@ def test_a_triage_path_that_is_a_directory_is_refused(tmp_path: Path) -> None:
     (tmp_path / "TRIAGE.md").mkdir()
     with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md"):
         load_workflow(wf_path, environ={"TOKEN": "t"})
+
+
+def test_an_undecodable_triage_file_is_unreadable(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    (tmp_path / "TRIAGE.md").write_bytes(b"\xff\xfe")
+    with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md unreadable") as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.path == wf_path.resolve()
+
+
+def test_a_triage_file_that_cannot_be_read_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wf_path = _write_good(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("Size it\n", encoding="utf-8")
+    forbidden = triage.resolve()
+    real_read_text = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == forbidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md unreadable") as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.path == wf_path.resolve()
+
+
+def test_a_triage_file_that_cannot_be_stated_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a missing TRIAGE.md means "use the shipped prompt"; any other answer is an error."""
+    wf_path = _write_good(tmp_path)
+    triage = tmp_path / "TRIAGE.md"
+    triage.write_text("Size it\n", encoding="utf-8")
+    forbidden = triage.resolve()
+    real_stat = Path.stat
+
+    def stat(self: Path, **kwargs: Any) -> Any:
+        if self == forbidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md unreadable") as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.path == wf_path.resolve()
