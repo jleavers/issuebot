@@ -28,7 +28,7 @@ Comments from accounts that are not maintainers were left out: {% for c in comme
 
 ## Its steps
 
-The sub-issues in their order, each with its kind and how it closed, and the merged pull request that closed it where there is one. An `issuebot` step was an unattended work run; an `operator` step was the maintainer's own, such as a design session or a pause to test by hand. Text written by an account that is not a maintainer was left out, and only who wrote it and where is given.
+The sub-issues in their order, each with its kind and how it closed, and the merged pull request that closed it where there is one. An `issuebot` step was an unattended work run; an `operator` step was the maintainer's own, such as a design session or a pause to test by hand. Every title is shown, inside its envelope with its author and association. A step's or pull request's description, or a review, written by an account that is not a maintainer was left out, and only who wrote it and where is given.
 
 {% for step in steps %}
 ### Step {{ loop.index }}: #{{ step.number }}, an {{ step.kind }} step
