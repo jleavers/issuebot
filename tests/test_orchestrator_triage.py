@@ -149,8 +149,8 @@ async def test_a_retry_after_the_swap_fails_swaps_announces_and_comments_once(
 ) -> None:
     """A failed swap leaves nothing shown: no comment and no StateChanged.
 
-    ``after`` skips the operator label, which a split's first ``edit_labels`` is and a
-    ``fits``, filing no sub-issue, never makes.
+    ``after`` skips a split's operator-label call, which comes before the swap; a ``fits``
+    makes no such call, so its first ``edit_labels`` is the swap.
     """
     github, recorder, bus = setup()
     github.fail_next("server_error", on="edit_labels", after=after)
@@ -185,7 +185,7 @@ async def test_a_child_a_human_added_is_left_alone_and_out_of_the_comment() -> N
     before = github.issue(2)
     filed = await apply(github, bus, SPLIT)
     assert github.issue(2) == before
-    assert before.github_state == "open" and before.labels == ("bug",)
+    assert github.issue(2).github_state == "open" and github.issue(2).labels == ("bug",)
     assert [s.number for s in filed] == [3, 4]
     assert [s.title for s in await github.sub_issues(1)] == [
         "Human's own step",
