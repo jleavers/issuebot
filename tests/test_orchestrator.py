@@ -6587,6 +6587,83 @@ async def test_a_failed_watch_read_skips_the_tick_and_feeds_no_hold(tmp_path: Pa
     assert [run.issue.number for run in h.triage_sessions.runs] == [10]
 
 
+@pytest.mark.parametrize("why", ["running", "backing off"])
+async def test_a_due_parent_that_cannot_start_costs_the_watch_no_issue_read(
+    tmp_path: Path, why: str
+) -> None:
+    """Ruling 16: the watch costs one `parent_steps` read a tick. A parent whose review is
+    running, or backing off after a failure, is still due, and its issue is read only once the
+    watch can act on it."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    if why == "backing off":
+        failed = {"outcome": "failed", "stop_reason": "failure", "error_category": "turn_failed"}
+        await h.exit(h.triage_sessions.runs[0], **failed, error="boom")
+    reads = len(h.calls("fetch_issues_by_ids"))
+    for _ in range(3):
+        await h.tick()
+    # The reconcile re-reads a running issue each tick; the watch adds nothing to that.
+    refreshes = 3 if why == "running" else 0
+    assert len(h.calls("fetch_issues_by_ids")) - reads == refreshes
+    assert len(h.calls("parent_steps")) == 4
+    assert len(h.triage_sessions.runs) == 1
+
+
+async def test_an_owed_note_is_written_once_its_parent_stops_being_due(tmp_path: Path) -> None:
+    """A note owed on a parent that is open but no longer due is still written, so nothing owed
+    can keep the watch reading with no slot free: once it lands, the read stops."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=1,
+        initial_parents={
+            10: ParentRecord(identifier="repo-10", reviews=6),
+            30: ParentRecord(identifier="repo-30"),
+        },
+    )
+    watched_split(h, 10, 11, 12)
+    watched_split(h, 30, 31, 32, open_=(32,))
+    h.add_issue(20, "todo")
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()  # the cap's note on 10 is refused; the work run takes the one slot
+    assert "10" in h.orchestrator._parent_handovers
+    assert [run.issue.number for run in h.sessions.runs] == [20]
+    h.github.reopen_issue(11)
+    await h.tick()
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review limit (")
+    assert h.orchestrator._parent_handovers == {}
+    assert h.orchestrator._parents[10].handed_over is not None
+    reads = len(h.calls("parent_steps"))
+    await h.tick()
+    assert len(h.calls("parent_steps")) == reads, "30 is watched, but nothing is owed and no slot"
+
+
+async def test_an_owed_note_is_not_held_up_by_a_parent_without_a_slot(tmp_path: Path) -> None:
+    """The gate refusing an earlier parent on `slots` stops the reviews for this tick, not the
+    notes owed on later ones."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=1,
+        initial_parents={
+            10: ParentRecord(identifier="repo-10"),
+            30: ParentRecord(identifier="repo-30", reviews=6),
+        },
+    )
+    watched_split(h, 10, 11, 12, open_=(12,))
+    watched_split(h, 30, 31, 32)
+    h.add_issue(20, "todo")
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()  # the cap's note on 30 is refused; the work run takes the one slot
+    assert "30" in h.orchestrator._parent_handovers
+    h.github.close_issue(12)
+    await h.tick()
+    [comment] = h.github.comments_for(30)
+    assert comment.body.startswith("### Issuebot parent review limit (")
+    assert h.orchestrator._parent_handovers == {}
+    assert h.triage_sessions.runs == [], "10 is due, but no slot is free"
+
+
 async def test_triage_takes_a_slot_before_a_review_and_a_review_before_work(
     tmp_path: Path,
 ) -> None:

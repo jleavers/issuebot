@@ -2281,9 +2281,20 @@ class Orchestrator:
         GraphQL budget (section 9). A failed read is logged and skips the watch for this tick;
         like the triage read, it does not feed the GitHub hold, which is the board's. A parent
         GitHub no longer returns, or that has closed, is finished, whoever closed it.
+
+        The parents' issues are read only for what the watch can act on this tick: an owed
+        note, written while the parent is open whether or not it is still due, so no note that
+        keeps the read going is left with nothing to write it; and a due parent that is not
+        running, not owed a verdict and not backing off. Notes go before any review, so a parent
+        the gate refuses on ``slots`` holds up no note owed on a later one.
         """
+        # A parent with a run going or a verdict owed is that run's or that verdict's this tick:
+        # `_retry_pending_verdicts` writes the note a verdict owes. Issue ids are the number
+        # (`Issue.id`); the steps' `id` is GraphQL's node id, which none of this takes.
+        busy = self._running.keys() | self._parent_pending.keys()
         watched = sorted(number for number, record in self._parents.items() if record.watched)
-        if not watched or (self._slots() == 0 and not self._parent_handovers):
+        owed = any(str(n) in self._parent_handovers and str(n) not in busy for n in watched)
+        if not watched or (self._slots() == 0 and not owed):
             return 0
         labels = self._workflow.config.github.labels
         try:
@@ -2291,38 +2302,44 @@ class Orchestrator:
         except GitHubError as exc:
             self._log.warning("parent_watch_failed", error=str(exc), parents=watched)
             return 0
+        notes: list[int] = []
         due: dict[int, tuple[int, ...]] = {}
         for number in watched:
-            steps = found.get(number)
+            steps, issue_id = found.get(number), str(number)
             if steps is None or steps.state == "closed":
                 self._record_parent(number, replace(self._parents[number], finished=True))
                 # As for a reconcile's stop: a closed or vanished parent has no chain left, and
-                # no note is owed on it. Issue ids are the number (`Issue.id`); the steps' `id`
-                # is GraphQL's node id, which neither this nor the read below takes.
-                self._forget_triage_chain(str(number))
-            elif parent_review_due(steps, labels):
+                # no note is owed on it.
+                self._forget_triage_chain(issue_id)
+            elif issue_id in busy:
+                continue
+            elif issue_id in self._parent_handovers:
+                notes.append(number)
+            elif parent_review_due(steps, labels) and self._clock() >= (
+                self._triage_not_before.get(issue_id, -math.inf)
+            ):
                 due[number] = tuple(step.number for step in steps.sub_issues)
-        if not due:
+        if not notes and not due:
             return 0
         try:
-            issues = await self._adapter.fetch_issues_by_ids([str(number) for number in due])
+            issues = await self._adapter.fetch_issues_by_ids([str(n) for n in (*notes, *due)])
         except GitHubError as exc:
-            self._log.warning("parent_watch_failed", error=str(exc), parents=sorted(due))
+            self._log.warning("parent_watch_failed", error=str(exc), parents=[*notes, *due])
             return 0
+        by_number = {issue.number: issue for issue in issues}
+        for number in notes:
+            if (issue := by_number.get(number)) is not None:
+                note = self._parent_handovers[issue.id]
+                await self._hand_over_parent(
+                    issue, title=note.title, reason=note.reason, way_back=note.way_back
+                )
         triage = self._workflow.config.triage
         dispatched = 0
-        for issue in issues:
-            record = self._parents[issue.number]
-            if issue.id in self._running or issue.id in self._parent_pending:
+        for number, seen in due.items():
+            issue = by_number.get(number)
+            if issue is None:
                 continue
-            if self._clock() < self._triage_not_before.get(issue.id, -math.inf):
-                continue
-            owed = self._parent_handovers.get(issue.id)
-            if owed is not None:
-                await self._hand_over_parent(
-                    issue, title=owed.title, reason=owed.reason, way_back=owed.way_back
-                )
-                continue
+            record = self._parents[number]
             if record.reviews >= triage.max_parent_reviews:
                 # Checked before the gate, and needing no slot: the cap is about the parent,
                 # and a chain of `next` verdicts must not run on for ever (section 6).
@@ -2358,9 +2375,7 @@ class Orchestrator:
                     )
                 continue
             attempt = self._triage_failures.get(issue.id, 0) + 1
-            if await self._dispatch_parent_review_one(
-                issue, record, due[issue.number], attempt=attempt
-            ):
+            if await self._dispatch_parent_review_one(issue, record, seen, attempt=attempt):
                 dispatched += 1
         return dispatched
 
