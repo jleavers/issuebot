@@ -6,7 +6,7 @@ import re
 import shlex
 import unicodedata
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -18,9 +18,11 @@ from issuebot.agent.visible import strip_invisible, visible_text
 from issuebot.config import GitHubLabels, Settings
 from issuebot.github.models import (
     WORKPAD_MARKER,
+    ClosingPr,
     Comment,
     Issue,
     LinkedPr,
+    ReviewStep,
     StateLabel,
     TrackerComment,
 )
@@ -263,6 +265,12 @@ TRIAGE_CONTINUATION_TEMPLATE = """\
 This is turn {{ turn_number }} of {{ max_turns }} of the triage of #{{ issue.number }}. The last \
 turn ended without a verdict. Return it now with the StructuredOutput tool, judging from what \
 you have already read.
+"""
+
+PARENT_REVIEW_CONTINUATION_TEMPLATE = """\
+This is turn {{ turn_number }} of {{ max_turns }} of the parent review of #{{ issue.number }}. \
+The last turn ended without a verdict. Return it now with the StructuredOutput tool, judging \
+from what you have already read.
 """
 
 
@@ -948,6 +956,162 @@ class TriagePromptContext:
             "turn_number": self.turn_number,
             "max_turns": self.max_turns,
             "max_sub_issues": self.max_sub_issues,
+        }
+
+
+def _in_words(value: str) -> str:
+    """GitHub's enum value as words: ``NOT_PLANNED`` -> ``not planned``."""
+    return value.lower().replace("_", " ")
+
+
+def step_variables(step: ReviewStep, labels: GitHubLabels) -> dict[str, Any]:
+    """One step of a parent as the parent-review template sees it (spec section 6).
+
+    Filtered by association as ``comment_variables`` filters comments: a maintainer's body is
+    enveloped, anyone else's is withheld, and ``author`` and ``url`` are what is left to say
+    there was more to read. The title is always enveloped, carrying its author's association,
+    as the issue's own title is. The same holds for the merged pull request that closed the
+    step, and for each of its reviews, whose source names the review's state. A body is its
+    visible text, as an issue's is. ``tests/test_agent_prompt.py`` classifies every key, as it
+    does ``issue_variables``'s.
+    """
+    number = step.number
+    shown = step.association in MAINTAINER_ASSOCIATIONS
+    return {
+        "number": number,
+        "url": step.url,
+        "title": GitHubText(
+            strip_invisible(step.title),
+            source=f"sub-issue #{number} title",
+            author=step.author,
+            association=step.association or UNKNOWN_ASSOCIATION,
+        ),
+        "kind": "operator" if labels.operator_step.lower() in step.labels else "issuebot",
+        "state_reason": _in_words(step.state_reason) if step.state_reason else "closed",
+        "body": (
+            GitHubText(
+                visible_text(step.body_html),
+                source=f"sub-issue #{number} description",
+                author=step.author,
+                association=step.association,
+            )
+            if shown
+            else None
+        ),
+        "author": step.author or UNKNOWN_AUTHOR,
+        "quarantined": not shown,
+        "pr": _closing_pr_variables(step.closed_by),
+    }
+
+
+def _closing_pr_variables(pr: ClosingPr | None) -> dict[str, Any] | None:
+    if pr is None:
+        return None
+    number = pr.number
+    shown = pr.association in MAINTAINER_ASSOCIATIONS
+    maintainers: list[Any] = []
+    quarantined: list[Any] = []
+    for review in pr.reviews:
+        if review.association in MAINTAINER_ASSOCIATIONS:
+            maintainers.append(
+                GitHubText(
+                    visible_text(review.body_html),
+                    source=f"{_in_words(review.state)} review {review.url} on pull request "
+                    f"#{number}",
+                    author=review.author,
+                    association=review.association,
+                )
+            )
+        else:
+            quarantined.append({"author": review.author or UNKNOWN_AUTHOR, "url": review.url})
+    return {
+        "number": number,
+        "url": pr.url,
+        "title": GitHubText(
+            strip_invisible(pr.title),
+            source=f"pull request #{number} title",
+            author=pr.author,
+            association=pr.association or UNKNOWN_ASSOCIATION,
+        ),
+        "body": (
+            GitHubText(
+                visible_text(pr.body_html),
+                source=f"pull request #{number} description",
+                author=pr.author,
+                association=pr.association,
+            )
+            if shown
+            else None
+        ),
+        "author": pr.author or UNKNOWN_AUTHOR,
+        "quarantined": not shown,
+        "reviews": {"maintainers": maintainers, "quarantined": quarantined},
+    }
+
+
+def _count(used: int, limit: int) -> dict[str, int]:
+    return {"used": used, "max": limit, "left": max(limit - used, 0)}
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ParentReviewPromptContext(TriagePromptContext):
+    """Everything the parent-review template can see: triage's, plus the parent's steps and how
+    much of its two limits the parent has used (spec section 6).
+
+    ``reviews`` and ``gap_rounds`` are the parent's record: the reviews acted on so far and the
+    ``gap`` verdicts filed. ``max_reviews`` and ``max_gap_rounds`` are the deployment's limits,
+    taken from the settings as ``max_sub_issues`` is.
+    """
+
+    steps: tuple[ReviewStep, ...]
+    reviews: int
+    gap_rounds: int
+    max_reviews: int
+    max_gap_rounds: int
+
+    @classmethod
+    def for_issue(  # type: ignore[override]
+        cls,
+        issue: Issue,
+        settings: Settings,
+        *,
+        login: str,
+        admin: bool,
+        comments: tuple[TrackerComment, ...],
+        steps: tuple[ReviewStep, ...],
+        reviews: int,
+        gap_rounds: int,
+        repo_instructions: tuple[RepositoryFile, ...] = (),
+        turn_number: int = 1,
+    ) -> ParentReviewPromptContext:
+        """The one way a parent-review context is built, as ``TriagePromptContext.for_issue``
+        is for a triage's: what is known about the parent is a parameter, the rest is the
+        deployment's settings. Overridden with more parameters, since a review is handed more
+        than a triage."""
+        triage = TriagePromptContext.for_issue(
+            issue,
+            settings,
+            login=login,
+            admin=admin,
+            comments=comments,
+            repo_instructions=repo_instructions,
+            turn_number=turn_number,
+        )
+        return cls(
+            **{field.name: getattr(triage, field.name) for field in fields(triage)},
+            steps=steps,
+            reviews=reviews,
+            gap_rounds=gap_rounds,
+            max_reviews=settings.triage.max_parent_reviews,
+            max_gap_rounds=settings.triage.max_gap_rounds,
+        )
+
+    def to_variables(self) -> dict[str, Any]:
+        return {
+            **TriagePromptContext.to_variables(self),
+            "steps": [step_variables(step, self.labels) for step in self.steps],
+            "reviews": _count(self.reviews, self.max_reviews),
+            "gap_rounds": _count(self.gap_rounds, self.max_gap_rounds),
         }
 
 

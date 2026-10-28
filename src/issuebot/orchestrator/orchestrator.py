@@ -50,7 +50,7 @@ from issuebot.config import (
     load_workflow,
     overlay_path_for,
 )
-from issuebot.config.workflow import triage_prompt_path_for
+from issuebot.config.workflow import parent_review_prompt_path_for, triage_prompt_path_for
 from issuebot.events import EventBus, RunKind
 from issuebot.github import (
     GhCliAdapter,
@@ -1056,20 +1056,31 @@ class Orchestrator:
         except OSError as exc:
             self._report_reload_failure(f"{triage_path.name} unreadable: {exc}")
             return
+        review_path = parent_review_prompt_path_for(path)
+        try:
+            review: os.stat_result | None = review_path.stat()
+        except FileNotFoundError:
+            # The normal case: the shipped parent-review prompt is in force.
+            review = None
+        except OSError as exc:
+            self._report_reload_failure(f"{review_path.name} unreadable: {exc}")
+            return
         loaded = (
             workflow.source_identity,
             workflow.overlay_identity if workflow.overlay_path is not None else None,
             workflow.triage_identity,
+            workflow.parent_review_identity,
         )
         found = (
             _identity(source),
             _identity(overlay) if overlay is not None else None,
             _identity(triage) if triage is not None else None,
+            _identity(review) if review is not None else None,
         )
         if loaded == found:
-            # Nothing to load: neither identity has moved and the overlay's presence has not
-            # changed. The one thing left worth saying is that this deployment may not be
-            # in a position to tell (#46), about either file. On this branch the files on
+            # Nothing to load: no identity has moved and no file has come or gone. The one
+            # thing left worth saying is that this deployment may not be in a position to
+            # tell (#46), about any of the files. On this branch the files on
             # disk are exactly what was loaded, so the error state is exactly the complaint:
             # an error an overlay caused must clear once the overlay is gone.
             complaint = _pinned_mount_complaint(path, source)
@@ -1077,6 +1088,8 @@ class Orchestrator:
                 complaint = _pinned_mount_complaint(overlay_path, overlay)
             if complaint is None and triage is not None:
                 complaint = _pinned_mount_complaint(triage_path, triage)
+            if complaint is None and review is not None:
+                complaint = _pinned_mount_complaint(review_path, review)
             if complaint is not None:
                 self._report_reload_failure(complaint)
             else:
@@ -3090,6 +3103,8 @@ def _changed_sections(old: Workflow, new: Workflow) -> list[str]:
         changed.append("prompt")
     if old.triage_template != new.triage_template:
         changed.append("triage prompt")
+    if old.parent_review_template != new.parent_review_template:
+        changed.append("parent review prompt")
     return changed
 
 

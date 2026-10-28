@@ -33,7 +33,12 @@ from issuebot.agent.session import run_session
 from issuebot.agent.uvcache import CACHE_ROOT_MODE, UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
-from issuebot.config.workflow import default_triage_prompt, triage_prompt_path_for
+from issuebot.config.workflow import (
+    default_parent_review_prompt,
+    default_triage_prompt,
+    parent_review_prompt_path_for,
+    triage_prompt_path_for,
+)
 from issuebot.events import (
     Blocked,
     Event,
@@ -2570,6 +2575,56 @@ async def test_editing_triage_md_reloads_the_workflow(tmp_path: Path) -> None:
     # The shipped prompt is back, not the last template the file held.
     assert h.orchestrator._workflow.triage_template == default_triage_prompt()
     assert h.snapshots[-1].config_valid is True
+
+
+async def test_editing_parent_review_md_reloads_the_workflow(tmp_path: Path) -> None:
+    """PARENT_REVIEW.md is watched as TRIAGE.md is, and moving it leaves the triage prompt be."""
+    h = Harness(tmp_path)
+    await h.tick()
+    review = h.path.with_name("PARENT_REVIEW.md")
+
+    def write(text: str, mtime: int) -> None:
+        review.write_text(text, encoding="utf-8")
+        os.utime(review, ns=(mtime * 1_000_000_000,) * 2)
+
+    write("First", 1_700_000_100)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.orchestrator._workflow.parent_review_template == "First"
+    assert h.orchestrator._workflow.triage_template == default_triage_prompt()
+    reloaded = next(entry for entry in logs if entry["event"] == "workflow_reloaded")
+    assert reloaded["changed"] == ["parent review prompt"]
+
+    write("Second", 1_700_000_101)
+    await h.tick()
+    assert h.orchestrator._workflow.parent_review_template == "Second"
+
+    review.unlink()
+    await h.tick()
+    assert h.orchestrator._workflow.parent_review_path is None
+    assert h.orchestrator._workflow.parent_review_template == default_parent_review_prompt()
+    assert h.snapshots[-1].config_valid is True
+
+
+async def test_a_parent_review_md_that_cannot_be_stated_is_a_reload_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    await h.tick()
+    review = parent_review_prompt_path_for(h.path)
+    real_stat = Path.stat
+
+    def forbidden_stat(self: Path, **kwargs: Any) -> Any:
+        if self == review:
+            raise PermissionError(13, "Permission denied", str(review))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", forbidden_stat)
+    await h.tick()
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is False
+    assert "PARENT_REVIEW.md unreadable" in (snapshot.config_error or "")
+    assert h.orchestrator.workflow is h.workflow
 
 
 async def test_an_empty_triage_md_keeps_the_shipped_prompt_across_reloads(

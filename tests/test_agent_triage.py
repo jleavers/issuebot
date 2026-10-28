@@ -8,9 +8,12 @@ import time
 import pytest
 import structlog
 
-from issuebot.agent.prompt import TRIAGE_CONTINUATION_TEMPLATE
+from issuebot.agent.prompt import (
+    PARENT_REVIEW_CONTINUATION_TEMPLATE,
+    TRIAGE_CONTINUATION_TEMPLATE,
+)
 from issuebot.agent.session import RunResult
-from issuebot.agent.triage import run_triage
+from issuebot.agent.triage import ParentReviewRun, run_triage
 from issuebot.config import TriageSettings
 from issuebot.events import RunEnded, RunStarted
 from test_agent_session import USAGE_RESET, Harness, ScriptedRunner
@@ -21,6 +24,11 @@ TRIAGE_TEMPLATE = (
     "Triage {{ issue.identifier }} turn {{ turn_number }}\n"
     "{% for c in comments.maintainers %}MAINT {{ c }}\n{% endfor %}"
     "{% for c in comments.quarantined %}OTHER {{ c.url }}\n{% endfor %}"
+)
+PARENT_REVIEW_TEMPLATE = (
+    "Review {{ issue.identifier }} turn {{ turn_number }}\n"
+    "{% for s in steps %}STEP {{ s.number }} {{ s.kind }} {{ s.state_reason }}\n{% endfor %}"
+    "REVIEWS {{ reviews.used }} of {{ reviews.max }}, GAPS {{ gap_rounds.used }}\n"
 )
 VERDICT = {"verdict": "ready"}
 
@@ -34,11 +42,18 @@ class TriageHarness(Harness):
             update={"triage": TriageSettings(max_turns=triage_max_turns)}
         )
         self.workflow = dataclasses.replace(
-            self.workflow, config=self.settings, triage_template=TRIAGE_TEMPLATE
+            self.workflow,
+            config=self.settings,
+            triage_template=TRIAGE_TEMPLATE,
+            parent_review_template=PARENT_REVIEW_TEMPLATE,
         )
 
     async def triage(
-        self, runner: ScriptedRunner, *, cancel: asyncio.Event | None = None
+        self,
+        runner: ScriptedRunner,
+        *,
+        cancel: asyncio.Event | None = None,
+        parent_review: ParentReviewRun | None = None,
     ) -> RunResult:
         return await run_triage(
             self.issue,
@@ -48,7 +63,15 @@ class TriageHarness(Harness):
             workspaces=self.workspaces,
             runner=runner,
             cancel=cancel,
+            parent_review=parent_review,
         )
+
+    def add_step(self, title: str, *, reason: str = "COMPLETED") -> int:
+        """A closed sub-issue of #42, last in its order."""
+        number = self.github.add_issue(title, author="issuebot").number
+        self.github.link_sub_issue(42, number)
+        self.github.close_issue(number, reason=reason)
+        return number
 
 
 async def test_a_verdict_ends_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -258,3 +281,71 @@ async def test_the_home_is_swept_before_every_turn(tmp_path, monkeypatch) -> Non
     turns = [i for i, entry in enumerate(order) if entry.startswith("turn")]
     assert [order[i] for i in turns] == ["turn1", "turn2", "turn3"]
     assert [order[i - 1] if i else None for i in turns] == ["sweep"] * 3
+
+
+# --- the parent review: the same session, its own kind, prompt and one extra read --------
+
+REVIEW = ParentReviewRun(reviews=1, gap_rounds=0)
+
+
+async def test_a_parent_review_run_is_its_own_kind(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path)
+    step = h.add_step("Write the plan")
+    runner = ScriptedRunner(outputs={1: VERDICT})
+    with structlog.testing.capture_logs() as logs:
+        result = await h.triage(runner, parent_review=REVIEW)
+    assert (result.outcome, result.stop_reason) == ("succeeded", "verdict")
+    assert result.structured_output == VERDICT
+    started, ended = h.recorder.events
+    assert isinstance(started, RunStarted)
+    assert isinstance(ended, RunEnded)
+    assert started.run_kind == ended.run_kind == "parent_review"
+    assert {entry["run_kind"] for entry in logs if "run_kind" in entry} == {"parent_review"}
+    prompt = str(runner.calls[0]["prompt"])
+    assert prompt.startswith("Review repo-42 turn 1\n")
+    assert f"STEP {step} issuebot completed" in prompt
+    assert "REVIEWS 1 of 6, GAPS 0" in prompt
+    # The same clone a triage takes (plan ruling 5).
+    assert result.workspace_path is not None
+    assert result.workspace_path.name.endswith(".triage")
+
+
+async def test_a_parent_reviews_later_turn_takes_its_own_continuation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path, triage_max_turns=2)
+    h.add_step("Write the plan")
+    runner = ScriptedRunner()
+    result = await h.triage(runner, parent_review=REVIEW)
+    assert result.stop_reason == "max_turns"
+    second = runner.calls[1]
+    assert str(second["prompt"]) == PARENT_REVIEW_CONTINUATION_TEMPLATE.replace(
+        "{{ turn_number }}", "2"
+    ).replace("{{ max_turns }}", "2").replace("{{ issue.number }}", "42")
+
+
+async def test_a_parent_review_reads_the_steps_once(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path, triage_max_turns=2)
+    h.add_step("Write the plan")
+    h.add_step("Test it by hand", reason="NOT_PLANNED")
+    await h.triage(ScriptedRunner(), parent_review=REVIEW)
+    reads = [call for call in h.github.calls if call[0] == "parent_review_steps"]
+    assert reads == [("parent_review_steps", (42,))]
+
+
+async def test_a_triage_reads_no_steps(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path)
+    await h.triage(ScriptedRunner(outputs={1: VERDICT}))
+    assert not [call for call in h.github.calls if call[0] == "parent_review_steps"]
+
+
+async def test_unreadable_steps_fail_the_review_with_github_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = TriageHarness(tmp_path)
+    h.add_step("Write the plan")
+    h.github.fail_next("server_error", on="parent_review_steps")
+    runner = ScriptedRunner()
+    result = await h.triage(runner, parent_review=REVIEW)
+    assert result.error_category == "github_error"
+    assert result.error is not None
+    assert result.error.startswith("could not read the sub-issues:")
+    assert runner.calls == []
+    assert h.kinds() == ["run_started", "run_ended"]
+    assert h.recorder.events[-1].run_kind == "parent_review"  # type: ignore[attr-defined]

@@ -15,6 +15,7 @@ from issuebot.agent.runner import (
     ClaudeAuth,
     ClaudeAuthVerdict,
     ClaudeRunner,
+    ParentReviewRunner,
     StreamParser,
     TriageRunner,
     TurnEvent,
@@ -43,7 +44,7 @@ from issuebot.agent.session import (
     new_run_id,
     run_session,
 )
-from issuebot.agent.triage import RunTriageFn, run_triage
+from issuebot.agent.triage import ParentReviewRun, RunTriageFn, run_triage
 from issuebot.agent.workspace import (
     HookResult,
     SessionRecord,
@@ -68,6 +69,8 @@ __all__ = [
     "ClaudeRunner",
     "GitHubText",
     "HookResult",
+    "ParentReviewRun",
+    "ParentReviewRunner",
     "PromptContext",
     "PromptRenderer",
     "RunResult",

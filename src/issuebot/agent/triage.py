@@ -1,15 +1,21 @@
-"""One triage session: a throwaway clone, a read-only agent, a verdict out (spec sections 4, 5)."""
+"""One triage session: a throwaway clone, a read-only agent, a verdict out (spec sections 4, 5).
+
+A parent review (section 6) is the same session with its own prompt and one more read.
+"""
 
 import asyncio
 import dataclasses
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from issuebot.agent.errors import AgentError
 from issuebot.agent.instructions import read_repository_instructions
 from issuebot.agent.prompt import (
+    PARENT_REVIEW_CONTINUATION_TEMPLATE,
     TRIAGE_CONTINUATION_TEMPLATE,
+    ParentReviewPromptContext,
     PromptRenderer,
     TriagePromptContext,
 )
@@ -17,11 +23,20 @@ from issuebot.agent.runner import TurnObserver, TurnRunner
 from issuebot.agent.session import RunResult, RunState, error_text, new_run_id
 from issuebot.agent.workspace import WorkspaceManager, run_log_dir
 from issuebot.config import Workflow
-from issuebot.events import EventBus, RunEnded, RunStarted
-from issuebot.github import GitHubAdapter, GitHubError, Issue
+from issuebot.events import EventBus, RunEnded, RunKind, RunStarted
+from issuebot.github import GitHubAdapter, GitHubError, Issue, ReviewStep
 from issuebot.log import bind_issue_context, bind_session_context, clear_context, get_logger
 
 RunTriageFn = Callable[..., Awaitable[RunResult]]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ParentReviewRun:
+    """What makes a triage session a parent review: the parent's record as the prompt states
+    it, the reviews acted on so far and the ``gap`` rounds filed."""
+
+    reviews: int
+    gap_rounds: int
 
 
 async def run_triage(
@@ -36,6 +51,7 @@ async def run_triage(
     cancel: asyncio.Event | None = None,
     observer: TurnObserver | None = None,
     run_id: str | None = None,
+    parent_review: ParentReviewRun | None = None,
 ) -> RunResult:
     """Run one triage session for ``issue`` and report what it did.
 
@@ -43,7 +59,12 @@ async def run_triage(
     the raw ``structured_output`` back and the worker files it. The shape is ``run_session``'s,
     but the clone is a fresh read-only one, there is no hook, no refresh between turns and no
     ``BLOCKED:`` escape, and the run stops as soon as a turn returns a verdict.
+
+    With ``parent_review`` it is a parent review of ``issue`` instead: a run of its own kind,
+    rendering the workflow's parent-review prompt, which is handed the parent's steps as well.
+    The clone, the turns and everything else are triage's.
     """
+    run_kind: RunKind = "triage" if parent_review is None else "parent_review"
     state = RunState(
         run_id=run_id or new_run_id(),
         session_id=str(uuid.uuid4()),
@@ -67,14 +88,16 @@ async def run_triage(
                 attempt=attempt,
                 session_id=state.session_id,
                 workspace_path=str(state.workspace_path or ""),
-                run_kind="triage",
+                run_kind=run_kind,
             )
         )
-        log.info("run_started", run_id=state.run_id, attempt=attempt, run_kind="triage")
+        log.info("run_started", run_id=state.run_id, attempt=attempt, run_kind=run_kind)
         crash: Exception | None = None
         if state.stop_reason is None:
             try:
-                await _execute(state, workflow, adapter, workspaces, runner, cancel, observer)
+                await _execute(
+                    state, workflow, adapter, workspaces, runner, cancel, observer, parent_review
+                )
             except Exception as exc:
                 # Whatever the run did not classify (an OSError reading the instructions, a
                 # runner that raised): the run still ends in the store as failed, then the
@@ -97,14 +120,14 @@ async def run_triage(
                 cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
                 log_dir=str(result.log_dir) if result.log_dir is not None else None,
-                run_kind="triage",
+                run_kind=run_kind,
             )
         )
         # The verdict itself stays out of the log: it is the agent's raw, unscrubbed output.
         log.info(
             "run_finished",
             run_id=result.run_id,
-            run_kind="triage",
+            run_kind=run_kind,
             outcome=result.outcome,
             stop_reason=result.stop_reason,
             turns=result.turns,
@@ -126,6 +149,7 @@ async def _execute(
     runner: TurnRunner,
     cancel: asyncio.Event | None,
     observer: TurnObserver | None,
+    parent_review: ParentReviewRun | None,
 ) -> None:
     settings = workflow.config
     try:
@@ -137,8 +161,13 @@ async def _execute(
     state.log_dir = run_log_dir(workspace.path, state.run_id)
     try:
         try:
-            renderer = PromptRenderer(
-                workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
+            renderer = (
+                PromptRenderer(workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE)
+                if parent_review is None
+                else PromptRenderer(
+                    workflow.parent_review_template,
+                    continuation=PARENT_REVIEW_CONTINUATION_TEMPLATE,
+                )
             )
         except AgentError as exc:
             state.fail(exc.category, exc.message)
@@ -153,6 +182,15 @@ async def _execute(
         except GitHubError as exc:
             state.fail("github_error", f"could not read the comments: {exc}")
             return
+        # A review's steps are read once, as the comments are, so every turn judges the steps
+        # as they stood when the run began.
+        steps: tuple[ReviewStep, ...] = ()
+        if parent_review is not None:
+            try:
+                steps = tuple(await adapter.parent_review_steps(state.issue.number))
+            except GitHubError as exc:
+                state.fail("github_error", f"could not read the sub-issues: {exc}")
+                return
         try:
             login = await adapter.own_login()
         except GitHubError as exc:
@@ -168,14 +206,29 @@ async def _execute(
         for turn_number in range(1, max_turns + 1):
             if state.past_deadline(settings.agent, turn_number):
                 return
-            context = TriagePromptContext.for_issue(
-                state.issue,
-                settings,
-                login=login,
-                admin=admin,
-                comments=comments,
-                repo_instructions=instructions,
-                turn_number=turn_number,
+            context = (
+                TriagePromptContext.for_issue(
+                    state.issue,
+                    settings,
+                    login=login,
+                    admin=admin,
+                    comments=comments,
+                    repo_instructions=instructions,
+                    turn_number=turn_number,
+                )
+                if parent_review is None
+                else ParentReviewPromptContext.for_issue(
+                    state.issue,
+                    settings,
+                    login=login,
+                    admin=admin,
+                    comments=comments,
+                    steps=steps,
+                    reviews=parent_review.reviews,
+                    gap_rounds=parent_review.gap_rounds,
+                    repo_instructions=instructions,
+                    turn_number=turn_number,
+                )
             )
             resume = turn_number > 1
             try:

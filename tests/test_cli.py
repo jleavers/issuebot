@@ -5989,6 +5989,78 @@ def test_validate_fails_a_triage_prompt_that_does_not_render(
     assert "[FAIL] triage:" in capsys.readouterr().out
 
 
+def test_validate_triage_reports_the_parent_review_prompt(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, executables: object
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    assert main(["validate", "--workflow", str(GOOD)]) == 0
+    [line] = [x for x in capsys.readouterr().out.splitlines() if "] triage:" in x]
+    assert line.startswith("[ OK ] triage: ")
+    assert line.endswith(
+        ", at most 8 sub-issues, "
+        "parent review prompt shipped default, 2 gap round(s), at most 6 reviews"
+    )
+
+
+def test_validate_names_a_parent_review_md_as_triage_md_is_named(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path, a="triage:", b="  max_gap_rounds: 0")
+    review = tmp_path / "PARENT_REVIEW.md"
+    review.write_text("Review #{{ issue.number }}\n")
+    main(["validate", "--workflow", str(path)])
+    out = capsys.readouterr().out
+    assert "[ OK ] triage: prompt shipped default, " in out
+    assert f", parent review prompt {review.resolve()}, 0 gap round(s), " in out
+    review.write_text(" \n")
+    main(["validate", "--workflow", str(path)])
+    out = capsys.readouterr().out
+    assert f", parent review prompt shipped default ({review.resolve()} is empty), " in out
+
+
+def test_validate_fails_a_parent_review_md_that_does_not_render(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "PARENT_REVIEW.md").write_text("Review {{ nope }}\n")
+    assert main(["validate", "--workflow", str(path)]) == 1
+    [line] = [x for x in capsys.readouterr().out.splitlines() if "] triage:" in x]
+    assert line == (
+        "[FAIL] triage: parent review prompt: template does not render: 'nope' is undefined"
+    )
+
+
+def test_validate_renders_the_parent_review_prompts_steps(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    # Each index is undefined on an empty list, and each attribute on a step without it, so
+    # this renders only when validate hands the prompt a step closed by a merged pull request
+    # with a maintainer's review, and an operator step closed as not planned.
+    monkeypatch.setenv("GH_TOKEN", "t")
+    path = _workflow_with_root(tmp_path)
+    (tmp_path / "PARENT_REVIEW.md").write_text(
+        "{% set merged, dropped = steps %}"
+        "{{ merged.pr.reviews.maintainers[0] }} {{ merged.pr.title }} "
+        "{{ dropped.kind }} {{ dropped.state_reason }} {{ comments.maintainers[0] }}\n"
+        "{% if dropped.kind != 'operator' or dropped.state_reason != 'not planned' %}"
+        "{{ nope }}{% endif %}"
+        "{% if merged.pr.reviews.quarantined %}{% else %}{{ nope }}{% endif %}"
+    )
+    assert main(["validate", "--workflow", str(path)]) == 0
+    assert "[ OK ] triage:" in capsys.readouterr().out
+
+
 def test_validate_renders_the_triage_prompts_comments_section(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

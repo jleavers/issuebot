@@ -55,7 +55,9 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import (
+    PARENT_REVIEW_CONTINUATION_TEMPLATE,
     TRIAGE_CONTINUATION_TEMPLATE,
+    ParentReviewPromptContext,
     PromptVariant,
     TriagePromptContext,
     render_variants,
@@ -107,6 +109,7 @@ from issuebot.egress import serve as serve_egress
 from issuebot.events import EventBus, EventSink, LogSink, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
+    ClosingPr,
     Comment,
     GhCliAdapter,
     GhRunner,
@@ -114,7 +117,9 @@ from issuebot.github import (
     GitHubError,
     Issue,
     LinkedPr,
+    PrReview,
     RepoInfo,
+    ReviewStep,
     StateLabel,
     TrackerComment,
     fetch_status_summary,
@@ -1602,13 +1607,17 @@ def _triage_check(workflow: Workflow) -> Check:
     """The triage prompt in force compiles and renders, first turn and continuation, against
     a placeholder issue carrying one maintainer's comment and one stranger's, so a
     ``TRIAGE.md``'s comments section is rendered too (the work prompt's check is
-    ``_prompt_check``)."""
+    ``_prompt_check``). So does the parent-review prompt, against the same issue with two
+    steps, so a ``PARENT_REVIEW.md``'s steps are rendered too: one closed by a merged pull
+    request with a maintainer's review and a stranger's, and an operator step closed as not
+    planned whose author is not a maintainer. One check for both, since a parent review is a
+    triage session with another prompt (plan ruling 13)."""
     settings = workflow.config
+    sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
     try:
         renderer = PromptRenderer(
             workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
         )
-        sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
         context = TriagePromptContext.for_issue(
             sample,
             settings,
@@ -1620,12 +1629,26 @@ def _triage_check(workflow: Workflow) -> Check:
         renderer.render_continuation(replace(context, turn_number=2))
     except AgentError as exc:
         return Check("triage", "fail", exc.message)
-    if workflow.triage_path is None:
-        source = "shipped default"
-    elif workflow.triage_empty:
-        source = f"shipped default ({workflow.triage_path} is empty)"
-    else:
-        source = str(workflow.triage_path)
+    try:
+        renderer = PromptRenderer(
+            workflow.parent_review_template, continuation=PARENT_REVIEW_CONTINUATION_TEMPLATE
+        )
+        review = ParentReviewPromptContext.for_issue(
+            sample,
+            settings,
+            login=SAMPLE_LOGIN,
+            admin=False,
+            comments=_SAMPLE_TRIAGE_COMMENTS,
+            steps=_sample_steps(settings),
+            reviews=0,
+            gap_rounds=0,
+        )
+        renderer.render(review)
+        renderer.render_continuation(replace(review, turn_number=2))
+    except AgentError as exc:
+        return Check("triage", "fail", f"parent review prompt: {exc.message}")
+    source = _prompt_source(workflow.triage_path, empty=workflow.triage_empty)
+    review_source = _prompt_source(workflow.parent_review_path, empty=workflow.parent_review_empty)
     triage = settings.triage
     # The model `TriageRunner` puts on the argv (#304): `triage.model`, else `claude.model`,
     # else no `--model` at all, which leaves the choice to claude.
@@ -1639,8 +1662,19 @@ def _triage_check(workflow: Workflow) -> Check:
         "triage",
         "ok",
         f"prompt {source}, model {model}, {triage.max_turns} turn(s) at "
-        f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues",
+        f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues, "
+        f"parent review prompt {review_source}, {triage.max_gap_rounds} gap round(s), "
+        f"at most {triage.max_parent_reviews} reviews",
     )
+
+
+def _prompt_source(path: Path | None, *, empty: bool) -> str:
+    """Which prompt is in force, for a file beside the workflow that overrides a shipped one."""
+    if path is None:
+        return "shipped default"
+    if empty:
+        return f"shipped default ({path} is empty)"
+    return str(path)
 
 
 # The login ``_sample_context`` renders, and so the one ``unfiltered_comment_reads`` must be
@@ -1764,6 +1798,68 @@ _SAMPLE_TRIAGE_COMMENTS = (
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     ),
 )
+
+
+def _sample_steps(settings: Settings) -> tuple[ReviewStep, ...]:
+    """The two steps ``_triage_check`` hands the parent-review prompt, which between them put
+    text on both sides of every filter, as ``_SAMPLE_TRIAGE_COMMENTS`` does for comments: a
+    maintainer's step closed by a merged pull request, whose body and a maintainer's review are
+    enveloped and a stranger's review only named, then a stranger's operator step closed as not
+    planned, whose body is only named. The operator label is the deployment's own, so the
+    prompt sees that step as an operator's."""
+    base = f"https://github.com/{settings.github.repo}"
+    maintainer = _SAMPLE_TRIAGE_COMMENTS[0]
+    stranger = _SAMPLE_TRIAGE_COMMENTS[1]
+    merged = ClosingPr(
+        number=3,
+        title="Sample pull request",
+        url=f"{base}/pull/3",
+        body_html='<p dir="auto">Sample pull request description.</p>',
+        author=maintainer.author,
+        association=maintainer.association,
+        reviews=(
+            PrReview(
+                author=maintainer.author,
+                association=maintainer.association,
+                state="APPROVED",
+                body_html='<p dir="auto">Sample review.</p>',
+                url=f"{base}/pull/3#pullrequestreview-987654324",
+            ),
+            PrReview(
+                author=stranger.author,
+                association=stranger.association,
+                state="COMMENTED",
+                body_html='<p dir="auto">Sample review from outside the repository.</p>',
+                url=f"{base}/pull/3#pullrequestreview-987654325",
+            ),
+        ),
+    )
+    return (
+        ReviewStep(
+            number=2,
+            title="Sample step",
+            url=f"{base}/issues/2",
+            body_html='<p dir="auto">Sample step description.</p>',
+            author=maintainer.author,
+            association=maintainer.association,
+            labels=(),
+            state="closed",
+            state_reason="COMPLETED",
+            closed_by=merged,
+        ),
+        ReviewStep(
+            number=4,
+            title="Sample operator step",
+            url=f"{base}/issues/4",
+            body_html='<p dir="auto">Sample operator step description.</p>',
+            author=stranger.author,
+            association=stranger.association,
+            labels=(settings.github.labels.operator_step.lower(),),
+            state="closed",
+            state_reason="NOT_PLANNED",
+            closed_by=None,
+        ),
+    )
 
 
 def _sample_context(settings: Settings, variant: PromptVariant) -> PromptContext:

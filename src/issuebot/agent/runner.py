@@ -22,7 +22,7 @@ from issuebot.agent.errors import AgentErrorCategory
 from issuebot.agent.runas import CLAUDE_HOME_DIR, RunAs, Spawn
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
 from issuebot.agent.uvcache import UV_CACHE_ENV, ensure_uv_cache_dir
-from issuebot.agent.verdict import verdict_schema
+from issuebot.agent.verdict import parent_review_schema, verdict_schema
 from issuebot.config import Settings
 from issuebot.egress import PROXY_ENV_NAMES
 from issuebot.log import get_logger
@@ -1668,13 +1668,17 @@ class TriageRunner(ClaudeRunner):
             # The verdict arrives as the result's `structured_output`, validated by claude
             # against this schema; the worker's parser still trusts neither.
             "--json-schema",
-            json.dumps(verdict_schema(triage.max_sub_issues), separators=(",", ":")),
+            json.dumps(self.verdict_schema(), separators=(",", ":")),
         ]
         argv += ["--resume", session_id] if resume else ["--session-id", session_id]
         model = triage.model or cfg.model
         if model:
             argv += ["--model", model]
         return argv
+
+    def verdict_schema(self) -> dict[str, Any]:
+        """The verdict this session is asked for: triage's ``fits`` or ``split``."""
+        return verdict_schema(self._triage.max_sub_issues)
 
     def _settings_document(self, workspace: Path) -> str:
         """One ``--settings`` JSON: the CLAUDE.md allow-list (#135) plus the ``/proc`` deny.
@@ -1698,6 +1702,15 @@ class TriageRunner(ClaudeRunner):
     def _session_environment(self, workspace: Path) -> tuple[dict[str, str], list[str]]:
         # Nor the workspace's env file: triage runs no hooks to write one.
         return self.child_environment(), []
+
+
+class ParentReviewRunner(TriageRunner):
+    """A parent review's ``claude -p`` (spec section 6): triage's session in every respect, the
+    restricted read-only tools and the missing credential included, asked for a review's
+    ``next``, ``met`` or ``gap`` instead of a triage's verdict."""
+
+    def verdict_schema(self) -> dict[str, Any]:
+        return parent_review_schema(self._triage.max_sub_issues)
 
 
 class _Emitter:
