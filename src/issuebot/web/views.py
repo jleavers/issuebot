@@ -780,12 +780,29 @@ def describe_event(event: EventRow) -> str:
     if kind == "issue_completed":
         if payload.get("resolution") == "no_change":
             return "completed: no change needed"
+        if payload.get("resolution") == "parent_review":
+            return "completed: the parent review found the ask met"
         return _with_pr("completed", payload.get("pr_url"))
+    if kind == "parent_review_state":
+        return _describe_parent_review(payload)
     if kind == "issue_cancelled":
         return f"cancelled: {payload.get('reason', '?')}"
     if kind == "notification_sent":
         return f"{payload.get('channel', '?')} notified about {payload.get('about_kind', '?')}"
     return kind
+
+
+def _describe_parent_review(payload: dict[str, Any]) -> str:
+    reviews = _int(payload.get("reviews"))
+    word = "review" if reviews == 1 else "reviews"
+    if payload.get("finished"):
+        return f"parent review record: finished after {reviews} {word}"
+    rounds = _int(payload.get("gap_rounds"))
+    gaps = "gap round" if rounds == 1 else "gap rounds"
+    text = f"parent review record: {reviews} {word}, {rounds} {gaps}"
+    if payload.get("handed_over"):
+        text += f", handed over: {payload['handed_over']}"
+    return text
 
 
 def _with_pr(text: str, pr_url: object) -> str:

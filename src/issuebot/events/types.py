@@ -43,8 +43,9 @@ class StateChanged(IssueEvent):
 
 
 # A run is the work session or a triage one (spec 2026-10-25, section 4); the store keeps
-# the kind, because the admission ledger's failure chain counts work runs only.
-RunKind = Literal["work", "triage"]
+# the kind, because the admission ledger's failure chain counts work runs only. A parent
+# review is the triage session over a split parent's steps (section 6).
+RunKind = Literal["work", "triage", "parent_review"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -88,7 +89,7 @@ class Blocked(IssueEvent):
     reason: str
 
 
-CompletionResolution = Literal["merged_pr", "no_change"]
+CompletionResolution = Literal["merged_pr", "no_change", "parent_review"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -115,6 +116,21 @@ class NotificationSent(IssueEvent):
     about_kind: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class ParentReviewState(IssueEvent):
+    """The worker's record of a split parent's review, published whole on every change.
+
+    The store keeps it like any event and the worker reads the latest one per parent back at
+    startup, so the counts and a hand-over survive a restart without a table.
+    """
+
+    kind: ClassVar[str] = "parent_review_state"
+    reviews: int
+    gap_rounds: int
+    handed_over: str | None = None
+    finished: bool = False
+
+
 EVENT_TYPES: tuple[type[Event], ...] = (
     StateChanged,
     RunStarted,
@@ -124,6 +140,7 @@ EVENT_TYPES: tuple[type[Event], ...] = (
     IssueCompleted,
     IssueCancelled,
     NotificationSent,
+    ParentReviewState,
 )
 
 EVENT_KINDS: frozenset[str] = frozenset(cls.kind for cls in EVENT_TYPES)

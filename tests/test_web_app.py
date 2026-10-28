@@ -919,6 +919,26 @@ def test_healthz_reports_a_held_worker_and_why(h: Harness) -> None:
             "completed (https://github.com/example/repo/pull/8)",
         ),
         (
+            "issue_completed",
+            {"pr_url": None, "resolution": "parent_review"},
+            "completed: the parent review found the ask met",
+        ),
+        (
+            "parent_review_state",
+            {"reviews": 2, "gap_rounds": 1},
+            "parent review record: 2 reviews, 1 gap round",
+        ),
+        (
+            "parent_review_state",
+            {"reviews": 2, "gap_rounds": 1, "handed_over": "the review cap"},
+            "parent review record: 2 reviews, 1 gap round, handed over: the review cap",
+        ),
+        (
+            "parent_review_state",
+            {"reviews": 3, "gap_rounds": 0, "finished": True},
+            "parent review record: finished after 3 reviews",
+        ),
+        (
             "issue_cancelled",
             {"reason": "closed without a merged pull request"},
             "cancelled: closed without a merged pull request",

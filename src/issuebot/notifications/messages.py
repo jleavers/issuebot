@@ -55,7 +55,11 @@ def _escape(text: str) -> str:
 
 
 def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None:
-    """One line of Slack mrkdwn for the seven notifiable kinds; None for anything else."""
+    """One line of Slack mrkdwn for the seven notifiable kinds; None for anything else.
+
+    A `ParentReviewState` is among the "anything else": a review's Slack line is its
+    `StateChanged` (triage design, section 7).
+    """
     if not isinstance(event, IssueEvent):
         return None
     issue = issue_link(repo, event)
@@ -80,6 +84,8 @@ def format_event(event: Event, *, repo: str, labels: GitHubLabels) -> str | None
 def _completed(event: IssueCompleted, issue: str) -> str:
     if event.resolution == "no_change":
         return f":mag: {issue} closed with no change needed"
+    if event.resolution == "parent_review":
+        return f":tada: {issue} complete · the parent review found the ask met"
     merged = f" · {pr_link(event.pr_url)} merged" if event.pr_url else ""
     return f":tada: {issue} complete{merged}"
 

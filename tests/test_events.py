@@ -16,6 +16,7 @@ from issuebot.events import (
     IssueCompleted,
     LogSink,
     NotificationSent,
+    ParentReviewState,
     PrOpened,
     RunEnded,
     RunStarted,
@@ -58,6 +59,7 @@ ALL_EVENTS: list[Event] = [
     NotificationSent(
         issue_number=1, issue_identifier="repo-1", channel="slack", about_kind="state_changed"
     ),
+    ParentReviewState(issue_number=1, issue_identifier="repo-1", reviews=2, gap_rounds=1),
 ]
 
 
@@ -81,8 +83,27 @@ def test_event_kinds_registry_matches_classes() -> None:
         "issue_completed",
         "issue_cancelled",
         "notification_sent",
+        "parent_review_state",
     } == EVENT_KINDS
     assert {event.kind for event in ALL_EVENTS} == EVENT_KINDS
+
+
+def test_parent_review_state_round_trips() -> None:
+    event = ParentReviewState(
+        issue_number=1,
+        issue_identifier="repo-1",
+        reviews=3,
+        gap_rounds=2,
+        handed_over="the review cap",
+        finished=True,
+    )
+    data = event.to_dict()
+    assert data["kind"] == "parent_review_state"
+    assert data["issue_number"] == 1
+    assert (data["reviews"], data["gap_rounds"]) == (3, 2)
+    assert (data["handed_over"], data["finished"]) == ("the review cap", True)
+    bare = ParentReviewState(issue_number=1, issue_identifier="repo-1", reviews=0, gap_rounds=0)
+    assert (bare.to_dict()["handed_over"], bare.to_dict()["finished"]) == (None, False)
 
 
 def test_at_defaults_to_aware_utc_now() -> None:

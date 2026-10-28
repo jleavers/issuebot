@@ -1,6 +1,7 @@
 """Tests for the triage verdict: its schema and the parser that trusts neither side."""
 
 import json
+from typing import Any
 
 import pytest
 
@@ -10,6 +11,8 @@ from issuebot.agent.verdict import (
     REASON_LIMIT,
     TITLE_LIMIT,
     VerdictError,
+    parent_review_schema,
+    parse_parent_review,
     parse_verdict,
     verdict_schema,
 )
@@ -289,3 +292,91 @@ def test_each_lone_carriage_return_is_one_line_ending() -> None:
     raw = {**GOOD_SPLIT, "sub_issues": [{**STEP, "body": "a\r\rb\n\rc"}]}
     verdict = parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
     assert verdict.sub_issues[0].body == "a\n\nb\n\nc"
+
+
+def review(**overrides: Any) -> dict[str, Any]:
+    raw = {
+        "verdict": "next",
+        "summary": "The plan merged.",
+        "evidence": "docs/plan.md",
+        "ignored_requests": "",
+        "sub_issues": [{"title": "Stage 1", "body": "Do it.", "kind": "issuebot"}],
+    }
+    return {**raw, **overrides}
+
+
+def test_a_next_verdict_parses() -> None:
+    v = parse_parent_review(review(), max_sub_issues=8, scrubber=SCRUB)
+    assert v.verdict == "next" and [d.title for d in v.sub_issues] == ["Stage 1"]
+
+
+def test_a_met_verdict_files_nothing() -> None:
+    v = parse_parent_review(review(verdict="met", sub_issues=[]), max_sub_issues=8, scrubber=SCRUB)
+    assert v.verdict == "met" and v.sub_issues == ()
+
+
+_ONE_STEP = [{"title": "Stage 1", "body": "Do it.", "kind": "issuebot"}]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"verdict": "fits"}, "verdict must be next, met or gap"),
+        ({"verdict": "met", "sub_issues": _ONE_STEP}, "a met verdict files no sub-issues"),
+        ({"sub_issues": []}, "a next verdict needs at least one sub-issue"),
+        ({"verdict": "gap", "sub_issues": []}, "a gap verdict needs at least one sub-issue"),
+        ({"evidence": "  "}, "evidence must not be empty"),
+    ],
+)
+def test_parse_parent_review_refuses(change: dict[str, Any], message: str) -> None:
+    with pytest.raises(VerdictError, match=message):
+        parse_parent_review(review(**change), max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_parse_parent_review_refuses_a_missing_evidence() -> None:
+    raw = review()
+    del raw["evidence"]
+    with pytest.raises(VerdictError, match="missing field evidence in the verdict"):
+        parse_parent_review(raw, max_sub_issues=8, scrubber=SCRUB)
+
+
+def _title(title: str) -> dict[str, str]:
+    return {"title": title, "body": "b", "kind": "issuebot"}
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ([_title("A"), _title("a")], "sub-issue titles must be distinct"),
+        ([_title("A\nB")], "a title is one line"),
+        ([{"title": "A", "body": "b", "kind": "robot"}], "kind must be issuebot or operator"),
+        ([_title("A"), _title("B"), _title("C")], "a verdict may carry at most 2 sub-issues"),
+        ("steps", "sub_issues must be an array"),
+    ],
+)
+def test_both_parsers_refuse_the_same_drafts(steps: Any, message: str) -> None:
+    with pytest.raises(VerdictError) as triage:
+        parse_verdict({**GOOD_SPLIT, "sub_issues": steps}, max_sub_issues=2, scrubber=SCRUB)
+    with pytest.raises(VerdictError) as parent:
+        parse_parent_review(review(sub_issues=steps), max_sub_issues=2, scrubber=SCRUB)
+    assert str(triage.value) == str(parent.value) == message
+
+
+def test_the_parent_review_schema_matches_the_parser() -> None:
+    schema = parent_review_schema(5)
+    assert schema["properties"]["verdict"]["enum"] == ["next", "met", "gap"]
+    assert set(schema["required"]) == {
+        "verdict",
+        "summary",
+        "evidence",
+        "ignored_requests",
+        "sub_issues",
+    }
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["sub_issues"]["maxItems"] == 5
+    for name in ("summary", "evidence", "ignored_requests"):
+        assert schema["properties"][name]["maxLength"] == REASON_LIMIT
+    assert (
+        schema["properties"]["sub_issues"]["items"]
+        is verdict_schema(5)["properties"]["sub_issues"]["items"]
+    )

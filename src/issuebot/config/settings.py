@@ -279,6 +279,10 @@ class TriageSettings(_Model):
     max_turns: int = Field(default=1, ge=1)
     max_budget_usd: float = Field(default=2.0, gt=0)
     max_sub_issues: int = Field(default=8, ge=1, le=20)
+    # The parent review (triage design, section 6): `gap` verdicts a parent may take, and
+    # reviews acted on automatically, before the worker hands it to a human.
+    max_gap_rounds: int = Field(default=2, ge=0)
+    max_parent_reviews: int = Field(default=6, ge=1)
 
 
 class Settings(_Model):
