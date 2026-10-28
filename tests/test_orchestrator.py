@@ -6133,6 +6133,7 @@ async def test_a_triage_workspace_due_for_discard_is_kept_while_a_new_run_reads_
 ) -> None:
     """Run 1's delay falls due while run 2 for the same issue is reading the clone: it is kept,
     and goes once run 2 has ended and its own delay is up."""
+    # No stall check: the clock jumps past the delay while run 2 is live.
     h = Harness(tmp_path, stall_timeout_ms=0)
     issue = h.add_triage_issue(1)
     await h.tick()
