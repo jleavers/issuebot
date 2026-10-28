@@ -33,7 +33,7 @@ from issuebot.agent.session import run_session
 from issuebot.agent.uvcache import CACHE_ROOT_MODE, UV_CACHE_ROOT_NAME
 from issuebot.agent.workspace import workspace_key
 from issuebot.config import Settings, load_workflow, overlay_path_for
-from issuebot.config.workflow import default_triage_prompt
+from issuebot.config.workflow import default_triage_prompt, triage_prompt_path_for
 from issuebot.events import (
     Blocked,
     Event,
@@ -2707,7 +2707,7 @@ async def test_a_triage_md_that_cannot_be_stated_is_a_reload_failure(
     """As for the overlay: only a missing TRIAGE.md means "the shipped prompt"."""
     h = Harness(tmp_path)
     await h.tick()
-    triage = h.path.with_name("TRIAGE.md")
+    triage = triage_prompt_path_for(h.path)
     real_stat = Path.stat
 
     def forbidden_stat(self: Path, **kwargs: Any) -> Any:
@@ -5815,6 +5815,7 @@ async def test_an_auth_failed_triage_run_holds_dispatch_and_counts_no_failure(
     assert h.labels.triage_todo in h.github.issue(1).labels
     assert h.recorder.of(Blocked) == []
     assert h.github.comments_for(1) == []
+    assert len(h.triage_sessions.runs) == 1
 
 
 async def test_a_stalled_triage_run_is_a_failure_named_stalled(tmp_path: Path) -> None:
