@@ -123,6 +123,80 @@ async def test_a_retry_files_only_the_missing_sub_issues() -> None:
     assert LABELS.operator_step in github.issue(3).labels
 
 
+async def test_a_retry_after_the_operator_label_fails_labels_it_and_files_nothing_new() -> None:
+    """SPLIT's second step is the operator's, so the first ``edit_labels`` is its label."""
+    github, _recorder, bus = setup()
+    github.fail_next("server_error", on="edit_labels")
+    with pytest.raises(GitHubError):
+        await apply(github, bus, SPLIT)
+    assert [s.title for s in await github.sub_issues(1)] == ["First step", "Second step"]
+    assert github.comments_for(1) == []
+    assert github.issue(1).labels == (LABELS.triage_todo,)
+    await apply(github, bus, SPLIT)
+    assert [s.title for s in await github.sub_issues(1)] == ["First step", "Second step"]
+    assert LABELS.operator_step in github.issue(3).labels
+    assert github.issue(1).labels == (LABELS.triage_complete,)
+    assert len(github.comments_for(1)) == 1
+
+
+@pytest.mark.parametrize(
+    ("verdict", "after"),
+    [(SPLIT, 1), (make_verdict(), 0)],
+    ids=["split", "fits"],
+)
+async def test_a_retry_after_the_swap_fails_swaps_announces_and_comments_once(
+    verdict: TriageVerdict, after: int
+) -> None:
+    """A failed swap leaves nothing shown: no comment and no StateChanged.
+
+    ``after`` skips the operator label, which a split's first ``edit_labels`` is and a
+    ``fits``, filing no sub-issue, never makes.
+    """
+    github, recorder, bus = setup()
+    github.fail_next("server_error", on="edit_labels", after=after)
+    with pytest.raises(GitHubError):
+        await apply(github, bus, verdict)
+    assert github.issue(1).labels == (LABELS.triage_todo,)
+    assert github.comments_for(1) == []
+    assert recorder.events == []
+    await apply(github, bus, verdict)
+    titles = [draft.title for draft in verdict.sub_issues]
+    assert [s.title for s in await github.sub_issues(1)] == titles
+    assert github.issue(1).labels == (LABELS.triage_complete,)
+    [event] = recorder.events
+    assert isinstance(event, StateChanged)
+    assert len(github.comments_for(1)) == 1
+
+
+async def test_an_existing_child_matches_its_draft_by_title_ignoring_case_and_padding() -> None:
+    github, _recorder, bus = setup()
+    github.add_issue("  first STEP ", number=2)
+    github.link_sub_issue(1, 2)
+    filed = await apply(github, bus, SPLIT)
+    assert [s.number for s in filed] == [2, 3]
+    assert filed[1].title == "Second step"
+    assert [s.number for s in await github.sub_issues(1)] == [2, 3]
+
+
+async def test_a_child_a_human_added_is_left_alone_and_out_of_the_comment() -> None:
+    github, _recorder, bus = setup()
+    github.add_issue("Human's own step", body="Mine.", labels=("bug",), number=2)
+    github.link_sub_issue(1, 2)
+    before = github.issue(2)
+    filed = await apply(github, bus, SPLIT)
+    assert github.issue(2) == before
+    assert before.github_state == "open" and before.labels == ("bug",)
+    assert [s.number for s in filed] == [3, 4]
+    assert [s.title for s in await github.sub_issues(1)] == [
+        "Human's own step",
+        "First step",
+        "Second step",
+    ]
+    [comment] = github.comments_for(1)
+    assert "Human's own step" not in comment.body and "#2 " not in comment.body
+    assert "1. #3 First step\n2. #4 Second step -- operator step\n" in comment.body
+
+
 async def test_on_swapped_reports_the_swap_and_only_the_swap() -> None:
     """A caller keeping the verdict for a retry learns when only the comment is left."""
     github, _recorder, bus = setup()
