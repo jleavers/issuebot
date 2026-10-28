@@ -540,9 +540,17 @@ async def operator_step_escape(
     """Refuse to run an operator step: clear its state label and say it is the operator's.
 
     A step triage filed for a human carries ``operator_step``; if someone labels it ``todo``
-    anyway, no session runs it (spec section 1).
+    anyway, no session runs it (spec section 1). ``_dispatch`` reaches here for ``rework`` and
+    a resumed ``in-progress`` too, so the note names the label actually taken off, the same one
+    ``StateChanged`` carries (#337).
     """
     labels = adapter.labels
+    removed = state_label_name(issue)
+    took_off = (
+        f"issuebot has removed `{removed}`."
+        if removed is not None
+        else "issuebot has removed its state label."
+    )
     return await _hand_back(
         adapter,
         bus,
@@ -553,11 +561,8 @@ async def operator_step_escape(
             f"#{issue.number} is an operator step (`{labels.operator_step}`): "
             f"issuebot does not run it"
         ),
-        way_back=(
-            f"Do it yourself, as the issue says, then close it. "
-            f"issuebot has removed `{labels.todo}`."
-        ),
-        from_label=state_label_name(issue),
+        way_back=f"Do it yourself, as the issue says, then close it. {took_off}",
+        from_label=removed,
         write_label=lambda: adapter.clear_state(issue.number),
         now=now,
     )

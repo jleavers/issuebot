@@ -187,9 +187,9 @@ warning for it and another only if the error changes, and the worker asks again 
 
 Triage (`issuebot/triage-todo`, by hand) never leaves an issue silently. When it cannot file a
 verdict it removes `issuebot/triage-todo`, posts a `### Issuebot <title>` comment saying why
-and publishes `blocked`. Apart from the `operator step` refusal below, which takes off the
-`issuebot/todo` someone added, it never touches a state label: a triage candidate has none. The
-one action that resumes it is in the comment:
+and publishes `blocked`. Apart from the `operator step` refusal below, which takes off
+whichever state label the issue carried, it never touches a state label: a triage candidate
+has none. The one action that resumes it is in the comment:
 
 - **`unapproved edit`**: the title or body was edited after `issuebot/triage-todo` by someone
   other than who applied it. Read the text as it stands and apply `issuebot/triage-todo` again
@@ -207,7 +207,8 @@ one action that resumes it is in the comment:
   unlink them), then add `issuebot/triage-todo` again. issuebot puts `issuebot/triage-complete`
   back, so the split's steps keep running in order.
 - **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
-  issuebot removes `issuebot/todo` and says the step is yours: do it, then close the issue.
+  issuebot removes whichever state label the issue carried and says the step is yours: do it,
+  then close the issue.
 
 A verdict that failed to file is retried on each tick from memory, without a new session,
 and under a Claude authentication or usage hold too, since filing needs only GitHub. A

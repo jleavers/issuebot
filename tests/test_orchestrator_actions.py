@@ -1427,17 +1427,36 @@ async def test_triage_escape_survives_a_failed_comment(tmp_path: Path) -> None:
     assert h.recorder.kinds == ["state_changed", "blocked"]
 
 
-async def test_operator_step_escape_clears_todo_and_says_why(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state", ["todo", "rework", "in-progress"])
+async def test_operator_step_escape_clears_its_state_label_and_says_why(
+    tmp_path: Path, state: str
+) -> None:
+    """`_dispatch` reaches it for any claimable state, so the note names the one it took off."""
     h = Harness(tmp_path)
-    h.github.add_issue("Task", labels=("issuebot/todo", "issuebot/operator-step"), number=42)
+    label = f"issuebot/{state}"
+    h.github.add_issue("Task", labels=(label, "issuebot/operator-step"), number=42)
     outcome = await operator_step_escape(h.github, h.bus, h.github.issue(42), now=NOW)
     assert outcome == "applied"
     assert h.github.issue(42).state is None
     body = h.github.comments_for(42)[0].body
     assert body.startswith("### Issuebot operator step (2026-09-03T14:02:11Z)\n\n")
     assert "#42 is an operator step (`issuebot/operator-step`): issuebot does not run it" in body
-    assert body.endswith("issuebot has removed `issuebot/todo`.")
+    assert body.endswith(f"issuebot has removed `{label}`.")
     changed = h.recorder.events[0]
     assert isinstance(changed, StateChanged)
-    assert (changed.from_label, changed.to_label) == ("issuebot/todo", None)
+    assert (changed.from_label, changed.to_label) == (label, None)
     assert h.recorder.kinds == ["state_changed", "blocked"]
+
+
+async def test_operator_step_escape_without_a_state_label_names_none(tmp_path: Path) -> None:
+    """`_dispatch` only reaches it with a state label, but a missing one is not `todo`."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/operator-step",), number=42)
+    outcome = await operator_step_escape(h.github, h.bus, h.github.issue(42), now=NOW)
+    assert outcome == "applied"
+    body = h.github.comments_for(42)[0].body
+    assert body.endswith("then close it. issuebot has removed its state label.")
+    assert "issuebot/todo" not in body
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == (None, None)
