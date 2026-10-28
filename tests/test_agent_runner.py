@@ -2869,7 +2869,6 @@ async def test_a_turn_keeps_the_structured_output(workspace: Path, tmp_path: Pat
         "GH_TOKEN": "ghp_other",
         "CLAUDE_FAKE_SCENARIO": "triage",
         "CLAUDE_FAKE_RECORD": str(record),
-        "CLAUDE_FAKE_RECORD_ENV": "GH_TOKEN",
     }
     turn = await run(TriageRunner(cfg, environ=environ), workspace)
     assert turn.ok

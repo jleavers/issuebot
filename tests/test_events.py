@@ -3,6 +3,7 @@
 import io
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -218,7 +219,7 @@ def test_log_sink_logs_kind_and_fields() -> None:
 
 
 def test_run_events_default_to_work_and_round_trip_the_kind() -> None:
-    common: dict[str, object] = {
+    common: dict[str, Any] = {
         "issue_number": 1,
         "issue_identifier": "repo-1",
         "run_id": "run-1",
@@ -230,8 +231,8 @@ def test_run_events_default_to_work_and_round_trip_the_kind() -> None:
         "cost_usd": 0.0,
         "duration_s": 1.0,
     }
-    assert RunEnded(**common).to_dict()["run_kind"] == "work"  # type: ignore[arg-type]
-    assert RunEnded(**common, run_kind="triage").to_dict()["run_kind"] == "triage"  # type: ignore[arg-type]
+    assert RunEnded(**common).to_dict()["run_kind"] == "work"
+    assert RunEnded(**common, run_kind="triage").to_dict()["run_kind"] == "triage"
     started = RunStarted(
         issue_number=1,
         issue_identifier="repo-1",

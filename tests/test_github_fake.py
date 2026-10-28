@@ -418,7 +418,7 @@ async def test_fake_create_sub_issue_links_both_ways(fake: FakeGitHub) -> None:
     parent = fake.add_issue("Big thing")
     sub = await fake.create_sub_issue(parent.number, title="Step one", body="Do it.")
     assert sub.state == "open" and sub.title == "Step one"
-    assert fake._issues[sub.number].parent == parent.number
+    assert fake.issue(sub.number).parent == parent.number
     assert fake.issue(sub.number).body == "Do it."
     assert [s.number for s in await fake.sub_issues(parent.number)] == [sub.number]
     # Linked at creation and carrying no label: no poll sees it parentless or on the board.
