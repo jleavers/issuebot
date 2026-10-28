@@ -5763,14 +5763,13 @@ def test_run_once_triage_that_raises_writes_nothing_and_closes_the_sinks(
     closed: list[object] = []
     close = cli._Sinks.close
 
-    async def recording_close(self: object) -> None:
+    async def recording_close(self: cli._Sinks) -> None:
         closed.append(self)
-        await close(self)  # type: ignore[arg-type]
+        await close(self)
 
     monkeypatch.setattr("issuebot.cli._Sinks.close", recording_close)
     fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
-    stub_triage.structured_output = TRIAGE_SPLIT
     stub_triage.error = RuntimeError("boom")
     path = _workflow_with_root(tmp_path)
     with pytest.raises(RuntimeError, match="boom"):
