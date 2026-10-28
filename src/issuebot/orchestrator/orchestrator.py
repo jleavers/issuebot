@@ -43,12 +43,7 @@ from issuebot.agent.accounts import (
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits, agent_environment
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
-from issuebot.agent.verdict import (
-    ParentReviewVerdict,
-    VerdictError,
-    parse_parent_review,
-    parse_verdict,
-)
+from issuebot.agent.verdict import VerdictError, parse_parent_review, parse_verdict
 from issuebot.config import (
     ConfigError,
     GitHubSettings,
@@ -1841,7 +1836,10 @@ class Orchestrator:
                 if verdict.kind in ("slots", "hold", "stopping"):
                     # Nothing about this issue; the next candidate would be told the same.
                     break
-                if verdict.kind == "spend":
+                if verdict.kind == "spend" and issue.sub_issue_count > 0:
+                    # A split parent's review, refused as the watch's would be.
+                    await self._hand_over_parent_over_budget(issue, verdict.reason)
+                elif verdict.kind == "spend":
                     # Handed back rather than refused on every tick, as a work issue is; the
                     # escape takes `triage-todo` off, which is what stops the refusal repeating.
                     await self._triage_hand_back(
@@ -2035,14 +2033,18 @@ class Orchestrator:
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):
-            outcome = await self._triage_hand_back(
-                issue,
-                title="unapproved edit",
-                reason=verdict.reason,
-                way_back=(
-                    f"Apply `{labels.triage_todo}` again to approve the text as it stands now."
-                ),
-            )
+            if issue.sub_issue_count > 0:
+                # A split parent's review, refused as the watch's would be.
+                outcome = await self._hand_over_unapproved_parent(issue, verdict.reason)
+            else:
+                outcome = await self._triage_hand_back(
+                    issue,
+                    title="unapproved edit",
+                    reason=verdict.reason,
+                    way_back=(
+                        f"Apply `{labels.triage_todo}` again to approve the text as it stands now."
+                    ),
+                )
             if outcome == "applied":
                 self._approval_verdicts.pop(issue.id, None)
             return False
@@ -2195,12 +2197,8 @@ class Orchestrator:
         self._forget_triage_chain(issue_id)
         if entry.kind == "parent_review":
             # Recorded once it lands; one GitHub refuses is owed in `_parent_handovers`.
-            labels = self._workflow.config.github.labels
-            await self._hand_over_parent(
-                entry.issue,
-                title="parent review failed",
-                reason=f"Parent review failed {plural(failures, 'time')}; the last: {error}",
-                way_back=f"Add `{labels.triage_todo}` again to review it once the cause is fixed.",
+            await self._hand_over_failed_review(
+                entry.issue, f"Parent review failed {plural(failures, 'time')}; the last: {error}"
             )
             return
         await self._triage_give_up(
@@ -2208,7 +2206,15 @@ class Orchestrator:
         )
 
     async def _triage_give_up(self, issue: Issue, reason: str) -> None:
-        """Hand back an issue whose triage chain is spent; remembered until the note lands."""
+        """Hand back an issue whose triage chain is spent; remembered until the note lands.
+
+        An issue that has gained sub-issues meanwhile is a parent, whose `triage-todo` now runs
+        its review, so it is handed over as a review that failed: the note GitHub refuses is
+        then owed as a parent's (``_parent_handovers``), never here.
+        """
+        if issue.sub_issue_count > 0:
+            await self._hand_over_failed_review(issue, reason)
+            return
         labels = self._workflow.config.github.labels
         outcome = await self._triage_hand_back(
             issue,
@@ -2232,7 +2238,10 @@ class Orchestrator:
 
         An issue with sub-issues is handed over as a parent instead (section 6, "one shape"):
         taking only `triage-todo` off a parent a human swapped to it would leave it with
-        neither triage label, and that releases every step its order holds.
+        neither triage label, and that releases every step its order holds. A cause that has a
+        parent hand-over of its own -- an unapproved edit, the spend ceiling, a spent chain --
+        is sent to that one by the caller, so it reads the same whichever pass met it; this
+        catches the rest under the caller's own title.
         """
         if issue.sub_issue_count > 0:
             return await self._hand_over_parent(
@@ -2385,16 +2394,7 @@ class Orchestrator:
                     break
                 if verdict.kind == "spend":
                     # Handed over rather than refused on every tick, as a triage candidate is.
-                    await self._hand_over_parent(
-                        issue,
-                        title="parent review budget limit",
-                        reason=verdict.reason,
-                        way_back=(
-                            "What `agent.max_issue_cost_usd` counts is what the issue has "
-                            "already cost, and that never resets: raise the ceiling, then add "
-                            f"`{labels.triage_todo}` again."
-                        ),
-                    )
+                    await self._hand_over_parent_over_budget(issue, verdict.reason)
                 continue
             attempt = self._triage_failures.get(issue.id, 0) + 1
             if await self._dispatch_parent_review_one(issue, record, seen, attempt=attempt):
@@ -2413,15 +2413,7 @@ class Orchestrator:
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):
-            outcome = await self._hand_over_parent(
-                issue,
-                title="unapproved edit",
-                reason=verdict.reason,
-                way_back=(
-                    f"Apply `{labels.triage_todo}` again to approve the text as it stands now; "
-                    "issuebot then reviews it afresh."
-                ),
-            )
+            outcome = await self._hand_over_unapproved_parent(issue, verdict.reason)
             if outcome == "applied":
                 self._approval_verdicts.pop(issue.id, None)
             return False
@@ -2538,12 +2530,9 @@ class Orchestrator:
             record = self._parents.get(entry.issue.number) or ParentRecord(
                 identifier=entry.identifier
             )
-            # The one place a verdict is judged before it is filed. Section 6's gap limit is for
-            # a `gap` alone (ruling 17): a `next` past the gap rounds is filed as usual, and
-            # `triage.max_parent_reviews` is what bounds a chain of those.
-            if verdict.verdict == "gap" and record.gap_rounds >= settings.triage.max_gap_rounds:
-                await self._hand_over_at_gap_limit(entry, verdict)
-                return
+            # The one place a verdict is judged before it is filed: the counts it would bring the
+            # parent to, which also say whether a `gap` is past the gap limit and is handed over
+            # in place of filed (`PendingParentReview.past_gap_limit`).
             gap_round = record.gap_rounds + 1 if verdict.verdict == "gap" else record.gap_rounds
             pending = PendingParentReview(
                 issue=entry.issue,
@@ -2565,21 +2554,21 @@ class Orchestrator:
             return
         await self._triage_failed(entry, _triage_failure(entry, result, error))
 
-    async def _hand_over_at_gap_limit(
-        self, entry: RunningEntry, verdict: ParentReviewVerdict
-    ) -> None:
+    async def _hand_over_at_gap_limit(self, issue: Issue, pending: PendingParentReview) -> None:
         """Section 6: a `gap` once the gap rounds are spent posts what it found, files nothing
         and hands the parent over, its would-be steps listed for the human to file or not.
 
-        The review counts, because the worker acted on its verdict (ruling 7), whether or not
-        GitHub took the note: one it refused is owed like any parent hand-over, and the count
-        is no less true for it.
+        Reached from the filing, on its fresh read of the parent (``issue``), so a verdict whose
+        steps changed while the review ran is discarded there and hands nothing over. The
+        review counts, because the worker acted on its verdict (ruling 7), whether or not GitHub
+        took the note: one it refused is owed like any parent hand-over.
         """
         settings = self._workflow.config
-        rounds = settings.triage.max_gap_rounds
+        verdict = pending.verdict
+        rounds = pending.counts.max_gap_rounds
         drafts = "\n".join(f"- {draft.title}" for draft in verdict.sub_issues)
         await self._hand_over_parent(
-            entry.issue,
+            issue,
             title="parent review gap limit",
             reason=(
                 f"The review found gaps again after {plural(rounds, 'gap round')}, so it filed "
@@ -2592,10 +2581,8 @@ class Orchestrator:
             ),
         )
         # After the hand-over, so the count keeps the `handed_over` it has just recorded.
-        number = entry.issue.number
-        record = self._parents.get(number) or ParentRecord(identifier=entry.identifier)
-        self._record_parent(number, replace(record, reviews=record.reviews + 1))
-        self._schedule_triage_discard(entry.identifier)
+        record = self._parents.get(issue.number) or ParentRecord(identifier=issue.identifier)
+        self._record_parent(issue.number, replace(record, reviews=record.reviews + 1))
 
     async def _file_parent_review(self, pending: PendingParentReview) -> GitHubError | None:
         """File one review's verdict; ``None`` once it landed or is owed no longer, else the error.
@@ -2606,6 +2593,10 @@ class Orchestrator:
         onto a row it already has. Success writes the record the review brings the parent to
         and ends its triage chain; a failure keeps the verdict, with whether its move landed,
         and the caller counts it.
+
+        A `gap` past the gap limit is acted on by a hand-over in place of the filing, after the
+        same read (ruling 15): one whose steps changed is discarded as any stale verdict is,
+        and one whose read failed is kept and tried again like any other.
         """
         issue = pending.issue
         moved = pending.moved
@@ -2616,7 +2607,7 @@ class Orchestrator:
 
         try:
             current = await self._parent_review_owed(pending)
-            if current is not None:
+            if current is not None and not pending.past_gap_limit:
                 self._report_issues([current])
                 await apply_parent_review(
                     self._adapter,
@@ -2650,6 +2641,9 @@ class Orchestrator:
         self._parent_pending.pop(issue.id, None)
         self._schedule_triage_discard(issue.identifier)
         if current is None:
+            return None
+        if pending.past_gap_limit:
+            await self._hand_over_at_gap_limit(current, pending)
             return None
         counts = pending.counts
         self._record_parent(
@@ -2751,6 +2745,51 @@ class Orchestrator:
         # The owed note goes with the chain (`_forget_triage_chain`).
         self._forget_triage_chain(issue.id)
         return outcome
+
+    # The causes both passes can meet: the watch, and the triage pass over a parent carrying a
+    # human's `triage-todo`. Each has one title and one way back wherever it is met, so the
+    # issue's history, Slack and the docs name the cause once.
+
+    async def _hand_over_unapproved_parent(
+        self, issue: Issue, reason: str
+    ) -> actions.EscapeOutcome:
+        """Section 6: a parent edited by anyone but its approver is not reviewed."""
+        labels = self._workflow.config.github.labels
+        return await self._hand_over_parent(
+            issue,
+            title="unapproved edit",
+            reason=reason,
+            way_back=(
+                f"Apply `{labels.triage_todo}` again to approve the text as it stands now; "
+                "issuebot then reviews it afresh."
+            ),
+        )
+
+    async def _hand_over_parent_over_budget(
+        self, issue: Issue, reason: str
+    ) -> actions.EscapeOutcome:
+        """The parent's spend has reached `agent.max_issue_cost_usd`, which a review counts."""
+        labels = self._workflow.config.github.labels
+        return await self._hand_over_parent(
+            issue,
+            title="parent review budget limit",
+            reason=reason,
+            way_back=(
+                "What `agent.max_issue_cost_usd` counts is what the issue has already cost, "
+                f"and that never resets: raise the ceiling, then add `{labels.triage_todo}` "
+                "again."
+            ),
+        )
+
+    async def _hand_over_failed_review(self, issue: Issue, reason: str) -> actions.EscapeOutcome:
+        """The parent's triage chain is spent: `agent.max_attempts` failed runs in a row."""
+        labels = self._workflow.config.github.labels
+        return await self._hand_over_parent(
+            issue,
+            title="parent review failed",
+            reason=reason,
+            way_back=f"Add `{labels.triage_todo}` again to review it once the cause is fixed.",
+        )
 
     # --- reconcile ----------------------------------------------------------------------
 

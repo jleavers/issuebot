@@ -7027,6 +7027,11 @@ async def test_an_unapproved_hand_back_of_a_split_parent_puts_triage_complete_ba
     assert h.triage_sessions.runs == []
     [comment] = h.github.comments_for(10)
     assert comment.body.startswith("### Issuebot unapproved edit (")
+    # The watch's own text for the same cause (`test_an_edited_parent_is_handed_over_unapproved`).
+    assert comment.body.endswith(
+        "Apply `issuebot/triage-todo` again to approve the text as it stands now; issuebot "
+        "then reviews it afresh."
+    )
     labels = h.github.issue(10).labels
     assert h.labels.triage_complete in labels and h.labels.triage_todo not in labels
     [blocked] = h.recorder.of(Blocked)
@@ -7077,4 +7082,115 @@ async def test_a_requested_review_owed_its_filing_starts_no_second_review(tmp_pa
     await h.tick()
     assert [child.number for child in await h.github.sub_issues(10)] == [11, 12, 13, 14]
     assert h.github.issue(10).labels == (h.labels.triage_complete,)
+    assert len(h.triage_sessions.runs) == 1
+
+
+async def test_a_split_parent_over_its_budget_is_handed_over_as_a_parent(tmp_path: Path) -> None:
+    """Ruling 4 and the one title per cause: a parent carrying a human's `triage-todo` that has
+    spent its ceiling is handed over exactly as the watch hands one over, `triage-complete`
+    back, and the step its order holds stays held."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=3,
+        max_issue_cost_usd=0.75,
+        initial_ledger={"repo-10": IssueLedger(runs=2, cost_usd=1.0)},
+    )
+    add_split(h, 10, 11, 12, todo=(12,))
+    re_triage(h, 10)
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review budget limit (")
+    assert "agent.max_issue_cost_usd is $0.75" in comment.body
+    # The watch's own text for the same cause (`test_a_parent_over_its_budget_is_handed_over`).
+    assert comment.body.endswith(
+        "What `agent.max_issue_cost_usd` counts is what the issue has already cost, and that "
+        "never resets: raise the ceiling, then add `issuebot/triage-todo` again."
+    )
+    labels = h.github.issue(10).labels
+    assert h.labels.triage_complete in labels and h.labels.triage_todo not in labels
+    [blocked] = h.recorder.of(Blocked)
+    assert h.orchestrator._parents[10].handed_over == blocked.reason
+    assert "12" not in h.orchestrator.running
+    await h.tick()
+    assert "12" not in h.orchestrator.running
+    assert len(h.github.comments_for(10)) == 1
+
+
+async def test_a_triage_chain_spent_on_an_issue_that_gained_sub_issues_is_a_failed_review(
+    tmp_path: Path,
+) -> None:
+    """An issue a human split while its triage ran is a parent by the time the chain is spent,
+    and its `triage-todo` now runs a review: it is handed over as a review that failed, and
+    the note is owed as a parent's, never through `_triage_escapes`."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.add_issue("Step 2", number=2)
+    h.github.link_sub_issue(1, 2)
+    await h.tick()  # the reconcile reads the sub-issue onto the running entry
+    await h.exit(h.triage_sessions.runs[0], stop_reason="max_turns", turns=2)
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot parent review failed (")
+    assert "Triage failed 1 time; the last: the session returned no verdict in 2 turns" in (
+        comment.body
+    )
+    assert comment.body.endswith(
+        "Add `issuebot/triage-todo` again to review it once the cause is fixed."
+    )
+    labels = h.github.issue(1).labels
+    assert h.labels.triage_complete in labels and h.labels.triage_todo not in labels
+    assert h.orchestrator._parents[1].handed_over is not None
+    assert h.orchestrator._triage_escapes == {}
+
+
+async def test_a_stale_gap_past_the_limit_hands_nothing_over(tmp_path: Path) -> None:
+    """Review focus 2 at the gap limit: a step reopened while the review ran makes its verdict
+    stale, so a `gap` past the limit is discarded as any stale verdict is -- no note, no
+    `Blocked`, the record as it was -- and the parent waits for its steps to close again."""
+    record = ParentRecord(identifier="repo-10", gap_rounds=2)
+    h = Harness(tmp_path, initial_parents={10: record})
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.reopen_issue(11)
+    with capture_logs() as logs:
+        await h.exit(h.triage_sessions.runs[0], **review_verdict("gap", "First gap", "Second gap"))
+    assert h.github.comments_for(10) == []
+    assert h.calls("edit_labels") == [] and h.calls("create_sub_issue") == []
+    assert h.recorder.of(Blocked) == []
+    [line] = [entry for entry in logs if entry["event"] == "parent_review_discarded"]
+    assert (line["issue_number"], line["reason"]) == (10, "steps changed")
+    assert h.orchestrator._parents[10] == record
+    assert parent_states(h, 10) == []
+    assert h.orchestrator._parent_pending == {} and h.orchestrator._parent_handovers == {}
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    h.github.close_issue(11)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.triage_sessions.runs[-1].kwargs["parent_review"] == ParentReviewRun(
+        reviews=0, gap_rounds=2
+    )
+
+
+async def test_a_gap_past_the_limit_whose_read_failed_is_handed_over_on_the_retry(
+    tmp_path: Path,
+) -> None:
+    """The gap limit is acted on after the filing's fresh read, so a read GitHub refused keeps
+    the verdict as a failed filing is kept; the retry hands the parent over, and files
+    nothing."""
+    h = Harness(tmp_path, initial_parents={10: ParentRecord(identifier="repo-10", gap_rounds=2)})
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.fail_next("transport", on="parent_steps")
+    await h.exit(h.triage_sessions.runs[0], **review_verdict("gap", "First gap"))
+    assert "10" in h.orchestrator._parent_pending
+    assert h.github.comments_for(10) == [] and h.recorder.of(Blocked) == []
+    await h.tick()
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review gap limit (")
+    assert h.calls("create_sub_issue") == []
+    assert h.orchestrator._parent_pending == {}
+    record = h.orchestrator._parents[10]
+    assert (record.reviews, record.gap_rounds) == (1, 2) and record.handed_over is not None
     assert len(h.triage_sessions.runs) == 1

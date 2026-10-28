@@ -240,6 +240,15 @@ class PendingParentReview:
     tries: int = 0
     moved: bool = False
 
+    @property
+    def past_gap_limit(self) -> bool:
+        """A ``gap`` once the gap rounds are spent, handed over in place of filed (section 6).
+
+        A ``gap`` alone: a ``next`` past the rounds is filed as usual, and
+        ``triage.max_parent_reviews`` is what bounds a chain of those.
+        """
+        return self.verdict.verdict == "gap" and self.counts.gap_round > self.counts.max_gap_rounds
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RetryEntry:
