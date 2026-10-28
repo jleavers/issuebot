@@ -2567,6 +2567,8 @@ async def test_editing_triage_md_reloads_the_workflow(tmp_path: Path) -> None:
     triage.unlink()
     await h.tick()
     assert h.orchestrator._workflow.triage_path is None
+    # The shipped prompt is back, not the last template the file held.
+    assert h.orchestrator._workflow.triage_template == default_triage_prompt()
     assert h.snapshots[-1].config_valid is True
 
 
@@ -2696,6 +2698,28 @@ async def test_an_overlay_that_cannot_be_stated_is_a_reload_failure(
     snapshot = h.snapshots[-1]
     assert snapshot.config_valid is False
     assert "workflow overlay unreadable" in (snapshot.config_error or "")
+    assert h.orchestrator.workflow is h.workflow
+
+
+async def test_a_triage_md_that_cannot_be_stated_is_a_reload_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As for the overlay: only a missing TRIAGE.md means "the shipped prompt"."""
+    h = Harness(tmp_path)
+    await h.tick()
+    triage = h.path.with_name("TRIAGE.md")
+    real_stat = Path.stat
+
+    def forbidden_stat(self: Path, **kwargs: Any) -> Any:
+        if self == triage:
+            raise PermissionError(13, "Permission denied", str(triage))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", forbidden_stat)
+    await h.tick()
+    snapshot = h.snapshots[-1]
+    assert snapshot.config_valid is False
+    assert "TRIAGE.md unreadable" in (snapshot.config_error or "")
     assert h.orchestrator.workflow is h.workflow
 
 
@@ -5769,6 +5793,60 @@ async def test_a_usage_limited_triage_run_holds_dispatch_and_counts_no_failure(
     await h.tick()
     assert len(h.triage_sessions.runs) == 2
     assert h.triage_sessions.runs[-1].kwargs["attempt"] == 1
+
+
+async def test_an_auth_failed_triage_run_holds_dispatch_and_counts_no_failure(
+    tmp_path: Path,
+) -> None:
+    """The credential is the account's: a triage run that met it broken takes the auth hold
+    and waits, where a work run would escalate its issue."""
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    auth = {key: value for key, value in AUTH_FAILURE.items() if key != "final_state"}
+    await h.exit(h.triage_sessions.runs[0], **auth)
+    # The hold is published by the next tick, whose probe still finds no login.
+    h.claude_auth_output = LOGGED_OUT
+    await h.tick()
+    hold = h.orchestrator.snapshot().dispatch_hold
+    assert hold is not None and hold.kind == "auth"
+    # With one attempt allowed, a counted failure would have escaped; nothing did.
+    assert h.orchestrator._triage_failures == {}
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.recorder.of(Blocked) == []
+    assert h.github.comments_for(1) == []
+
+
+async def test_a_stalled_triage_run_is_a_failure_named_stalled(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=1, stall_timeout_ms=300_000)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.clock.advance(301)
+    await h.tick()
+    entry = h.entry(1)
+    assert (entry.stop_cause, entry.stop_detail) == ("stalled", "no activity for 301 s")
+    await h.drain()
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    body = h.github.comments_for(1)[-1].body
+    assert body.startswith("### Issuebot triage failed (")
+    assert "the last: stalled: no activity for 301 s" in body
+    [blocked] = h.recorder.of(Blocked)
+    assert "stalled: no activity for 301 s" in blocked.reason
+
+
+async def test_a_crashed_triage_run_is_a_failure_named_worker_crashed(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.triage_sessions.runs[0].fail(RuntimeError("kaboom"))
+    await h.drain()
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.labels.triage_complete not in h.github.issue(1).labels
+    body = h.github.comments_for(1)[-1].body
+    assert body.startswith("### Issuebot triage failed (")
+    assert "the last: worker crashed: kaboom" in body
+    [blocked] = h.recorder.of(Blocked)
+    assert "worker crashed: kaboom" in blocked.reason
 
 
 async def test_an_operator_step_with_todo_is_refused(tmp_path: Path) -> None:
