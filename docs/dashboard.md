@@ -155,8 +155,12 @@ is kept in the `claude_limit_alerts` table, one row per window and reset time, s
 
 The hero's 1d/7d closed tiles, the closed series on the
 30-day chart and `issuebot stats` all count issues the worker resolved: closed by a merged
-pull request, or closed after a session found no fault. Both end up labelled
+pull request, closed after a session found no fault, or closed as completed by a parent
+review that found a split issue's ask met. All three end up labelled
 `issuebot/complete`, so they are the issues that end up in that column (the tiles are windowed
 on the GitHub close time; the column itself is not). An issue closed
 without either — abandoned rather than investigated — loses its state label and is counted
 nowhere; the `issue_cancelled` event on its timeline is the record of it.
+
+On an issue's page, a parent review's record reads "parent review record: ...", and a parent
+it closed reads "completed: the parent review found the ask met".

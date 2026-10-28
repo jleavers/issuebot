@@ -1,7 +1,7 @@
 # Triage: issuebot sizes an issue before anyone starts it
 
 Date: 2026-10-25
-Status: approved 2026-10-25; phase 1 planned in
+Status: approved 2026-10-25; phase 3 (the parent review) built; phase 1 planned in
 [`../plans/2026-10-25-triage-phase-1.md`](../plans/2026-10-25-triage-phase-1.md), with the
 refinements found while planning folded in below (sections 1, 4 and 7, and "Phases")
 
@@ -413,6 +413,35 @@ The operator resumes it with one action: adding `triage-todo`, which runs a pare
 applied label re-approves the text, under section 3's first rule) and resets the parent's gap
 rounds and review count, since a human has re-authorised it. This is the design's call.
 
+Decided while planning phase 3:
+
+- The per-parent record is a `parent_review_state` event, not a table: the worker seeds itself
+  from the latest one per parent at startup, so there is no migration. Without a store a
+  restart forgets the records.
+- A parent is watched only once it has a record: triage filed its split, or a human added
+  `triage-todo` to an issue that already has sub-issues. Earlier splits are opted in by one
+  `triage-todo` each; nothing is backfilled.
+- `triage-todo` on an issue with sub-issues resets the record and runs a parent review, or, with
+  a step open, puts `triage-complete` back and posts a note. That note is not a hand-over.
+- Every hand-back of an issue with sub-issues is a parent hand-over, whatever the trigger, so
+  `triage-complete` always stays and the held steps stay held.
+- A review counts when the worker acts on its verdict, filing it or handing over at the gap
+  limit; a failed run counts only on the failure chain. `max_parent_reviews` is checked before an
+  automatic review, and a `triage-todo` review starts from a reset record, so is never capped.
+- `met` adds `issuebot/complete` beside `triage-complete`, closes the parent as completed and
+  publishes `StateChanged(None -> complete)` and `IssueCompleted(resolution="parent_review")`,
+  so it counts in "issues closed".
+- The gap limit applies to `gap` verdicts only. A `next` after the rounds are used is still
+  filed (else `max_gap_rounds: 0` would hand over the first `next`), and `max_parent_reviews`
+  bounds a chain of them.
+- Approval is section 3's first rule until phase 4: the latest `triage-todo` a person applied,
+  and any later edit by someone else, through the same assessment as triage.
+- `run-once --triage` refuses an issue with sub-issues, since the records are the worker's.
+- A filing GitHub fails part-way stays owed until its comment posts; steps whose titles match
+  the verdict's drafts count as its own.
+- A verdict whose steps changed while it ran, including a `gap` past the limit, is discarded and
+  files nothing.
+
 ### 7. Where the operator sees it
 
 - **The issue.** One comment per triage verdict and per parent review, written by the worker:
@@ -502,13 +531,16 @@ byte budget (`tests/test_instruction_bounds.py`).
 ## Left to the builder
 
 - Label colours and descriptions; the sub-issue title format; the exact verdict schema.
-- The store's schema for the triage track, the watermark and the run kind.
-- How triage and parent reviews are ordered against work runs for free slots.
+- ~~The store's schema for the triage track, the watermark and the run kind.~~ The parent review's
+  record is an event, not a table (phase 3 ruling 1).
+- ~~How triage and parent reviews are ordered against work runs for free slots.~~ Triage first,
+  then parent reviews, then work (phase 3 ruling 6).
 - What happens to a triage run in flight when the operator adds `todo` (section 1).
 - Whether to hand triage extra signal for the "lands fast" question -- recent churn on the
   default branch, or the files open pull requests touch -- since it has no shell to run
   `git log` itself.
-- Whether the two prompt files are one file with two sections or two files.
+- ~~Whether the two prompt files are one file with two sections or two files.~~ Two files:
+  `PARENT_REVIEW.md` beside `TRIAGE.md` (phase 3 ruling 10).
 - ~~Whether the order within a split is read from the parent's sub-issue order alone, or the
   worker also files "blocked by" dependencies; and whether a held card says what it waits
   for.~~ Resolved in section 5.
