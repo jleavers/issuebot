@@ -1428,7 +1428,9 @@ async def test_triage_escape_survives_a_failed_comment(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("state", ["todo", "rework", "in-progress"])
-async def test_operator_step_escape_clears_its_state_label_and_says_why(tmp_path: Path, state: str) -> None:
+async def test_operator_step_escape_clears_its_state_label_and_says_why(
+    tmp_path: Path, state: str
+) -> None:
     """`_dispatch` reaches it for any claimable state, so the note names the one it took off."""
     h = Harness(tmp_path)
     label = f"issuebot/{state}"
