@@ -432,6 +432,7 @@ async def _hand_back(
     write_label: Callable[[], Awaitable[None]],
     now: datetime,
     to_label: str | None = None,
+    blocked: bool = True,
 ) -> EscapeOutcome:
     """The escapes with no workpad: the label write, a plain comment, then the events.
 
@@ -473,9 +474,10 @@ async def _hand_back(
             actor="issuebot",
         )
     )
-    bus.publish(
-        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
-    )
+    if blocked:
+        bus.publish(
+            Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
+        )
     log.info(
         f"{prefix}_applied",
         issue_number=issue.number,
@@ -531,6 +533,48 @@ async def triage_escape(
         from_label=labels.triage_todo,
         write_label=lambda: adapter.edit_labels(issue.number, remove=[labels.triage_todo]),
         now=now,
+    )
+
+
+async def parent_hand_over(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    *,
+    title: str,
+    reason: str,
+    way_back: str,
+    now: datetime,
+    blocked: bool = True,
+) -> EscapeOutcome:
+    """Hand a split parent to a human: ``triage_complete`` back, a note, then the events.
+
+    Every hand-over of a parent takes this one shape (spec 2026-10-25, section 6). The write
+    adds ``triage_complete`` as it removes ``triage_todo``, so a parent a human swapped to
+    ``triage_todo`` never ends with neither, which would release every held step. ``blocked``
+    is false for a note that is not a block, such as steps still open. ``reason`` is
+    published as given: the caller scrubs it.
+    """
+    labels = adapter.labels
+    return await _hand_back(
+        adapter,
+        bus,
+        issue,
+        prefix="parent_hand_over",
+        title=title,
+        reason=reason,
+        way_back=way_back,
+        from_label=(
+            labels.triage_todo
+            if labels.triage_todo.lower() in issue.labels
+            else labels.triage_complete
+        ),
+        write_label=lambda: adapter.edit_labels(
+            issue.number, add=[labels.triage_complete], remove=[labels.triage_todo]
+        ),
+        now=now,
+        to_label=labels.triage_complete,
+        blocked=blocked,
     )
 
 

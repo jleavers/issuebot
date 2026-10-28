@@ -45,6 +45,7 @@ from issuebot.orchestrator.actions import (
     conflict_rework,
     finish_terminal,
     operator_step_escape,
+    parent_hand_over,
     remove_workspace,
     triage_escape,
     unapproved_block,
@@ -1460,3 +1461,66 @@ async def test_operator_step_escape_without_a_state_label_names_none(tmp_path: P
     changed = h.recorder.events[0]
     assert isinstance(changed, StateChanged)
     assert (changed.from_label, changed.to_label) == (None, None)
+
+
+# --- the parent hand-over ---------------------------------------------------------------
+
+
+async def hand_over(h: Harness, *, blocked: bool = True) -> str:
+    return await parent_hand_over(
+        h.github,
+        h.bus,
+        h.github.issue(42),
+        title="parent review limit",
+        reason="Six reviews.",
+        way_back="Add the label again.",
+        now=NOW,
+        blocked=blocked,
+    )
+
+
+async def test_parent_hand_over_puts_triage_complete_back(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    assert await hand_over(h) == "applied"
+    assert h.github.issue(42).labels == ("issuebot/triage-complete",)
+    assert h.github.comments_for(42)[0].body.startswith(
+        "### Issuebot parent review limit (2026-09-03T14:02:11Z)\n\nSix reviews."
+    )
+    assert h.recorder.kinds == ["state_changed", "blocked"]
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == (
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
+    )
+
+
+async def test_parent_hand_over_on_an_automatic_review(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-complete",), number=42)
+    assert await hand_over(h) == "applied"
+    assert h.github.issue(42).labels == ("issuebot/triage-complete",)
+    changed = h.recorder.events[0]
+    assert isinstance(changed, StateChanged)
+    assert (changed.from_label, changed.to_label) == (
+        "issuebot/triage-complete",
+        "issuebot/triage-complete",
+    )
+
+
+async def test_a_waiting_note_is_not_blocked(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    assert await hand_over(h, blocked=False) == "applied"
+    assert h.recorder.kinds == ["state_changed"]
+
+
+async def test_parent_hand_over_whose_label_write_fails_writes_nothing(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
+    h.github.fail_next("server_error", on="edit_labels")
+    assert await hand_over(h) == "failed"
+    assert h.github.comments_for(42) == []
+    assert h.recorder.events == []
+    assert h.github.issue(42).labels == ("issuebot/triage-todo",)
