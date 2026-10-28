@@ -1650,8 +1650,9 @@ class Orchestrator:
 
     async def _dispatch(self, issue: Issue, *, attempt: int, resume_session_id: str | None) -> bool:
         # Before anything about the issue is read (spec 2026-10-25, section 1): a step triage
-        # filed for the operator is never a work run, so a `todo` on one comes off again with a
-        # note, the way an unapproved issue is handed back. `Issue.labels` is lower-cased.
+        # filed for the operator is never a work run, so whichever state label brought it here
+        # -- `todo`, `rework`, or a resumed `in-progress` -- comes off again with a note, the way
+        # an unapproved issue is handed back (#346). `Issue.labels` is lower-cased.
         if self._workflow.config.github.labels.operator_step.lower() in issue.labels:
             outcome = await actions.operator_step_escape(
                 self._adapter, self._bus, issue, now=self._now()

@@ -6018,6 +6018,22 @@ async def test_an_operator_step_with_todo_is_refused(tmp_path: Path) -> None:
     assert h.recorder.kinds == ["state_changed", "blocked"]
 
 
+async def test_an_operator_step_with_two_state_labels_never_reaches_the_refusal(
+    tmp_path: Path,
+) -> None:
+    """#346: the refusal's note names one state label, and that is enough because an issue
+    carrying two has no state, so admission refuses it before `_dispatch` is reached."""
+    h = Harness(tmp_path)
+    h.add_issue(1, "todo", extra_labels=(h.labels.rework, h.labels.operator_step))
+    issue = h.github.issue(1)
+    assert issue.state is None and len(issue.state_labels) == 2
+    await h.tick()
+    assert h.sessions.runs == [] and h.orchestrator.running == {}
+    assert h.github.comments_for(1) == []
+    assert {h.labels.todo, h.labels.rework} <= set(h.github.issue(1).labels)
+    assert "blocked" not in h.recorder.kinds
+
+
 def add_split(h: Harness, parent: int, *children: int, todo: tuple[int, ...] = ()) -> None:
     """A triaged parent and its sub-issues in order; those in `todo` labelled and approved."""
     h.github.add_issue(f"Parent {parent}", labels=(h.labels.triage_complete,), number=parent)
