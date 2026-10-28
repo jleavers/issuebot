@@ -182,6 +182,13 @@ by the prompt or by anything in `WORKFLOW.md` the operator has widened for work 
   `triage-todo` by someone other than who applied it hands the issue back before any session
   reads it ([Triage](operations.md#triage)).
 
+A parent review ([The parent review](operations.md#the-parent-review)) is this same session:
+the same flags, clone, absent credential and worker-side writes. What it adds is text to read.
+Each step's title, kind, close reason and body, and for a step closed by a merged pull request
+that pull request's title, body and reviews, are filtered by association as comments are. A
+title is always shown, enveloped with its author and association; a body or review written by
+someone who is not a maintainer is withheld, leaving the author and URL.
+
 ## One account per concurrent session
 
 `agent.run_as` names the accounts a session runs as, and the image's default is the pool

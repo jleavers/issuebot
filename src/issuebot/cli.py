@@ -55,7 +55,9 @@ from issuebot.agent.accounts import (
 )
 from issuebot.agent.instructions import RepositoryFile, read_repository_instructions
 from issuebot.agent.prompt import (
+    PARENT_REVIEW_CONTINUATION_TEMPLATE,
     TRIAGE_CONTINUATION_TEMPLATE,
+    ParentReviewPromptContext,
     PromptVariant,
     TriagePromptContext,
     render_variants,
@@ -104,9 +106,10 @@ from issuebot.egress import DEFAULT_BIND as EGRESS_DEFAULT_BIND
 from issuebot.egress import DEFAULT_PORT as EGRESS_DEFAULT_PORT
 from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
 from issuebot.egress import serve as serve_egress
-from issuebot.events import EventBus, EventSink, LogSink, StateChanged
+from issuebot.events import EventBus, EventSink, LogSink, ParentReviewState, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
+    ClosingPr,
     Comment,
     GhCliAdapter,
     GhRunner,
@@ -114,7 +117,9 @@ from issuebot.github import (
     GitHubError,
     Issue,
     LinkedPr,
+    PrReview,
     RepoInfo,
+    ReviewStep,
     StateLabel,
     TrackerComment,
     fetch_status_summary,
@@ -141,6 +146,7 @@ from issuebot.orchestrator import (
     probe_run_as,
 )
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
+from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.orchestrator.triage import apply_verdict, earlier_open_step, is_triage_candidate
 from issuebot.web import create_app, dispatch_hold
@@ -1602,13 +1608,17 @@ def _triage_check(workflow: Workflow) -> Check:
     """The triage prompt in force compiles and renders, first turn and continuation, against
     a placeholder issue carrying one maintainer's comment and one stranger's, so a
     ``TRIAGE.md``'s comments section is rendered too (the work prompt's check is
-    ``_prompt_check``)."""
+    ``_prompt_check``). So does the parent-review prompt, against the same issue with two
+    steps, so a ``PARENT_REVIEW.md``'s steps are rendered too: one closed by a merged pull
+    request with a maintainer's review and a stranger's, and an operator step closed as not
+    planned whose author is not a maintainer. One check for both, since a parent review is a
+    triage session with another prompt (plan ruling 13)."""
     settings = workflow.config
+    sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
     try:
         renderer = PromptRenderer(
             workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
         )
-        sample = replace(_sample_context(settings, PromptVariant()).issue, state=None)
         context = TriagePromptContext.for_issue(
             sample,
             settings,
@@ -1620,12 +1630,26 @@ def _triage_check(workflow: Workflow) -> Check:
         renderer.render_continuation(replace(context, turn_number=2))
     except AgentError as exc:
         return Check("triage", "fail", exc.message)
-    if workflow.triage_path is None:
-        source = "shipped default"
-    elif workflow.triage_empty:
-        source = f"shipped default ({workflow.triage_path} is empty)"
-    else:
-        source = str(workflow.triage_path)
+    try:
+        renderer = PromptRenderer(
+            workflow.parent_review_template, continuation=PARENT_REVIEW_CONTINUATION_TEMPLATE
+        )
+        review = ParentReviewPromptContext.for_issue(
+            sample,
+            settings,
+            login=SAMPLE_LOGIN,
+            admin=False,
+            comments=_SAMPLE_TRIAGE_COMMENTS,
+            steps=_sample_steps(settings),
+            reviews=0,
+            gap_rounds=0,
+        )
+        renderer.render(review)
+        renderer.render_continuation(replace(review, turn_number=2))
+    except AgentError as exc:
+        return Check("triage", "fail", f"parent review prompt: {exc.message}")
+    source = _prompt_source(workflow.triage_path, empty=workflow.triage_empty)
+    review_source = _prompt_source(workflow.parent_review_path, empty=workflow.parent_review_empty)
     triage = settings.triage
     # The model `TriageRunner` puts on the argv (#304): `triage.model`, else `claude.model`,
     # else no `--model` at all, which leaves the choice to claude.
@@ -1639,8 +1663,19 @@ def _triage_check(workflow: Workflow) -> Check:
         "triage",
         "ok",
         f"prompt {source}, model {model}, {triage.max_turns} turn(s) at "
-        f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues",
+        f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues, "
+        f"parent review prompt {review_source}, {triage.max_gap_rounds} gap round(s), "
+        f"at most {triage.max_parent_reviews} reviews",
     )
+
+
+def _prompt_source(path: Path | None, *, empty: bool) -> str:
+    """Which prompt is in force, for a file beside the workflow that overrides a shipped one."""
+    if path is None:
+        return "shipped default"
+    if empty:
+        return f"shipped default ({path} is empty)"
+    return str(path)
 
 
 # The login ``_sample_context`` renders, and so the one ``unfiltered_comment_reads`` must be
@@ -1764,6 +1799,68 @@ _SAMPLE_TRIAGE_COMMENTS = (
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     ),
 )
+
+
+def _sample_steps(settings: Settings) -> tuple[ReviewStep, ...]:
+    """The two steps ``_triage_check`` hands the parent-review prompt, which between them put
+    text on both sides of every filter, as ``_SAMPLE_TRIAGE_COMMENTS`` does for comments: a
+    maintainer's step closed by a merged pull request, whose body and a maintainer's review are
+    enveloped and a stranger's review only named, then a stranger's operator step closed as not
+    planned, whose body is only named. The operator label is the deployment's own, so the
+    prompt sees that step as an operator's."""
+    base = f"https://github.com/{settings.github.repo}"
+    maintainer = _SAMPLE_TRIAGE_COMMENTS[0]
+    stranger = _SAMPLE_TRIAGE_COMMENTS[1]
+    merged = ClosingPr(
+        number=3,
+        title="Sample pull request",
+        url=f"{base}/pull/3",
+        body_html='<p dir="auto">Sample pull request description.</p>',
+        author=maintainer.author,
+        association=maintainer.association,
+        reviews=(
+            PrReview(
+                author=maintainer.author,
+                association=maintainer.association,
+                state="APPROVED",
+                body_html='<p dir="auto">Sample review.</p>',
+                url=f"{base}/pull/3#pullrequestreview-987654324",
+            ),
+            PrReview(
+                author=stranger.author,
+                association=stranger.association,
+                state="COMMENTED",
+                body_html='<p dir="auto">Sample review from outside the repository.</p>',
+                url=f"{base}/pull/3#pullrequestreview-987654325",
+            ),
+        ),
+    )
+    return (
+        ReviewStep(
+            number=2,
+            title="Sample step",
+            url=f"{base}/issues/2",
+            body_html='<p dir="auto">Sample step description.</p>',
+            author=maintainer.author,
+            association=maintainer.association,
+            labels=(),
+            state="closed",
+            state_reason="COMPLETED",
+            closed_by=merged,
+        ),
+        ReviewStep(
+            number=4,
+            title="Sample operator step",
+            url=f"{base}/issues/4",
+            body_html='<p dir="auto">Sample operator step description.</p>',
+            author=stranger.author,
+            association=stranger.association,
+            labels=(settings.github.labels.operator_step.lower(),),
+            state="closed",
+            state_reason="NOT_PLANNED",
+            closed_by=None,
+        ),
+    )
 
 
 def _sample_context(settings: Settings, variant: PromptVariant) -> PromptContext:
@@ -2172,9 +2269,9 @@ async def _run_once_triage(
     """`run-once --triage`: one triage session in the foreground, its verdict filed (spec §4).
 
     The worker's path without the queue: the same candidate test, the same approval check on
-    ``triage_todo`` (no escape, as for a work run), the same refusal of an issue that already
-    has sub-issues, the same ``run_triage`` and the same ``apply_verdict``. Nothing is
-    claimed, since a triage run moves no state label.
+    ``triage_todo`` (no escape, as for a work run), the refusal of an issue that already
+    has sub-issues (its parent review is the worker's), the same ``run_triage`` and the same
+    ``apply_verdict``. Nothing is claimed, since a triage run moves no state label.
     """
     settings = workflow.config
     labels = settings.github.labels
@@ -2183,25 +2280,21 @@ async def _run_once_triage(
     if problem is not None:
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
+    split = issue.sub_issue_count > 0
+    if split and not show_prompt:
+        # Section 1: a split issue's re-triage is the parent review, and the worker keeps its
+        # records. A review run here would leave it with stale counts, so this is a refusal,
+        # before the approval check and with nothing written. A preview runs nothing.
+        print(
+            f"[FAIL] issue: #{number} already has sub-issues; its parent review runs on the "
+            "worker, by itself once every step has closed, or when you add "
+            f"`{labels.triage_todo}` with the worker running"
+        )
+        return 1
     if not show_prompt and not await _approved_for_run_once(
         adapter, issue, labels, todo_label=labels.triage_todo
     ):
         return 1
-    if not show_prompt:
-        # Section 1: a split issue's re-triage is the parent review, a later phase. The worker
-        # hands such an issue back as `already split`; the operator typed this command, so
-        # here it is a refusal, and nothing is written. A preview runs nothing, so skips it.
-        try:
-            split = bool(await adapter.sub_issues(number))
-        except GitHubError as exc:
-            print(f"[FAIL] sub-issues: {exc}")
-            return 1
-        if split:
-            print(
-                f"[FAIL] issue: #{number} already has sub-issues; re-triaging a split issue "
-                "is the parent review, a later phase"
-            )
-            return 1
     try:
         workflow = _with_bound_account(workflow, issue)
         settings = workflow.config
@@ -2227,13 +2320,35 @@ async def _run_once_triage(
             return 1
         # The preview touches no workspace, so there is no clone to carry instruction files
         # from; the real session reads them out of its fresh clone.
-        context = TriagePromptContext.for_issue(
-            issue, settings, login=login, admin=admin, comments=comments
-        )
-        try:
-            renderer = PromptRenderer(
-                workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
+        context: TriagePromptContext
+        if split:
+            # The preview of a split parent is the review's prompt, with a reset record: what
+            # `triage-todo` on it would start.
+            try:
+                steps = tuple(await adapter.parent_review_steps(number))
+            except GitHubError as exc:
+                print(f"[FAIL] steps: {exc}")
+                return 1
+            context = ParentReviewPromptContext.for_issue(
+                issue,
+                settings,
+                login=login,
+                admin=admin,
+                comments=comments,
+                steps=steps,
+                reviews=0,
+                gap_rounds=0,
             )
+            template = workflow.parent_review_template
+            continuation = PARENT_REVIEW_CONTINUATION_TEMPLATE
+        else:
+            context = TriagePromptContext.for_issue(
+                issue, settings, login=login, admin=admin, comments=comments
+            )
+            template = workflow.triage_template
+            continuation = TRIAGE_CONTINUATION_TEMPLATE
+        try:
+            renderer = PromptRenderer(template, continuation=continuation)
             print(renderer.render(context).rstrip("\n"))
         except AgentError as exc:
             print(f"[FAIL] prompt: {exc.message}")
@@ -2288,6 +2403,16 @@ async def _run_once_triage(
                 if verdict.verdict == "fits":
                     print("triage: fits")
                 else:
+                    # The worker's record of the new parent: it reads the store back at its
+                    # next restart (a running worker does not look), as it does for its own.
+                    sinks.bus.publish(
+                        ParentReviewState(
+                            issue_number=number,
+                            issue_identifier=issue.identifier,
+                            reviews=0,
+                            gap_rounds=0,
+                        )
+                    )
                     numbers = ", ".join(f"#{sub.number}" for sub in filed)
                     print(f"triage: split into {len(filed)} sub-issues ({numbers})")
                 return 0
@@ -2577,6 +2702,40 @@ async def _initial_ledger(database: Database | None, repo: str) -> dict[str, Iss
     return ledger
 
 
+async def _initial_parents(database: Database | None, repo: str) -> dict[int, ParentRecord]:
+    """What the worker remembers of each split parent, read back from the store.
+
+    The worker publishes every change to a parent's record as an event and the store keeps
+    it, so a restart picks up the counts and a hand-over where they were left, and a parent
+    whose steps closed while the worker was down is reviewed on its first tick. Like the
+    ledger it is a convenience, never a reason to refuse to start: a parent left unwatched
+    until a human adds ``triage-todo`` is the cost of a read that failed.
+    """
+    if database is None:
+        return {}
+    try:
+        async with database.queries() as queries:
+            rows = await queries.scoped(repo).parent_records()
+    except DatabaseError as exc:
+        get_logger(__name__).warning("parent_records_seed_failed", error=exc.message)
+        return {}
+    parents = {
+        row.number: ParentRecord(
+            identifier=row.identifier,
+            reviews=row.reviews,
+            gap_rounds=row.gap_rounds,
+            handed_over=row.handed_over,
+        )
+        for row in rows
+    }
+    get_logger(__name__).info(
+        "parent_records_seeded",
+        parents=len(parents),
+        handed_over=sum(1 for record in parents.values() if record.handed_over is not None),
+    )
+    return parents
+
+
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     scrubber = _deployment_scrubber(workflow.config, os.environ)
@@ -2597,6 +2756,7 @@ async def _run_worker(workflow: Workflow) -> int:
         claude_auth=_claude_auth,
         initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         initial_ledger=await _initial_ledger(sinks.database, workflow.config.github.repo),
+        initial_parents=await _initial_parents(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,

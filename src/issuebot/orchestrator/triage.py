@@ -47,7 +47,13 @@ def earlier_open_step(issue: Issue, steps: ParentSteps, labels: GitHubLabels) ->
 
 
 def sub_issue_body(
-    draft: SubIssueDraft, *, parent: int, step: int, steps: int, labels: GitHubLabels
+    draft: SubIssueDraft,
+    *,
+    parent: int,
+    step: int,
+    steps: int,
+    labels: GitHubLabels,
+    filed_by: str = "issuebot triage",
 ) -> str:
     """The draft's body, with the operator preamble when it is one and the parent footer."""
     preamble = ""
@@ -58,7 +64,7 @@ def sub_issue_body(
         )
     return (
         f"{preamble}{draft.body}\n\n---\n"
-        f"Part of #{parent}: step {step} of {steps}, filed by issuebot triage."
+        f"Part of #{parent}: step {step} of {steps}, filed by {filed_by}."
     )
 
 

@@ -72,6 +72,9 @@ class Issue:
     # GitHub's sanitised render of `body` (`bodyHTML`): what the prompt shows a session
     # (GHSA-f3fm-r55f-2vgm). `None` exactly when `body` is.
     body_html: str | None = None
+    # How many sub-issues it has (`subIssuesSummary { total }`), open or closed: what tells the
+    # worker an issue is a parent without a read of its own.
+    sub_issue_count: int = 0
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -120,6 +123,53 @@ class ParentSteps:
     number: int
     labels: tuple[str, ...]
     sub_issues: tuple[SubIssue, ...]
+    id: str  # the parent's GraphQL node id
+    state: GitHubState
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PrReview:
+    """One review of a pull request. ``association`` is GitHub's ``CommentAuthorAssociation``,
+    upper-case; ``state`` is GitHub's ``PullRequestReviewState`` (``APPROVED``, ...)."""
+
+    author: str | None  # None once GitHub has deleted the account
+    association: str | None
+    state: str
+    body_html: str
+    url: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ClosingPr:
+    """The merged pull request that closed a step, with its reviews."""
+
+    number: int
+    title: str
+    url: str
+    body_html: str
+    author: str | None
+    association: str | None
+    reviews: tuple[PrReview, ...]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ReviewStep:
+    """One sub-issue as a parent's review needs it: what it asked, how it closed and, when a
+    merged pull request closed it, that pull request. ``labels`` are lower-cased;
+    ``state_reason`` is GitHub's ``stateReason`` (``COMPLETED``, ``NOT_PLANNED``, ``DUPLICATE``)
+    and ``None`` while the step is open. ``closed_by`` is set only for a merged pull request:
+    a closing commit, an unmerged pull request or no closer is ``None``."""
+
+    number: int
+    title: str
+    url: str
+    body_html: str
+    author: str | None
+    association: str | None
+    labels: tuple[str, ...]
+    state: GitHubState
+    state_reason: str | None
+    closed_by: ClosingPr | None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

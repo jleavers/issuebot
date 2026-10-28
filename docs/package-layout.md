@@ -258,6 +258,9 @@ the billing page shows), `next_period`, and `describe_failure`, issuebot's own w
 failure, since `gh`'s stderr never reaches a page. `errors.categorise` is the stderr
 classification it shares with `ghcli`.
 
+`parent_steps` is the watch's one batched read (1 point a tick), and `parent_review_steps` a
+review's own, carrying each step's close reason and the merged pull request that closed it.
+
 ## `issuebot.agent`
 
 `runas.py` (#75, spec `2026-09-14-session-privilege-domain-design.md`): the
@@ -1053,6 +1056,9 @@ prompt is given. `TriageRunner`
 (`runner.py`) is `ClaudeRunner` with its own flags, built from nothing of the operator's
 widening.
 
+`parent_review_prompt.md` is the shipped parent-review prompt, `PARENT_REVIEW.md` its override
+(`workflow.py`, as `TRIAGE.md`). `prompt.py` withholds a non-maintainer's step body or review.
+
 ## `issuebot.orchestrator`
 
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
@@ -1438,6 +1444,11 @@ a kind (`work` or `triage`, migration 0007); a triage failure does not extend a 
 while an earlier one is open, ranked after the worker-wide checks and `inactive`, before
 `attempts` and `spend`. The tick reads parents once; a failed read holds that poll only.
 
+`parent_review.py` holds `ParentRecord` (reviews, gap rounds, hand-over, finished), the verdict's
+comment and `apply_parent_review`. The records are `parent_review_state` events, seeded at
+startup (no table). `_dispatch_parent_reviews` is the watch; a `gap` past the limit and
+a step set that changed mid-run are discarded or handed over at filing, on a fresh read.
+
 ## `issuebot.notifications`
 
 the Slack sink, imported by `cli`, and by `web` for two messages. `messages.py` (pure):
@@ -1553,6 +1564,8 @@ it raises the stored percent, and `release_claude_limit_alert` gives a failed po
 `RunEnded` as `run_kind`. `ISSUE_LEDGERS` counts only work runs toward the failure chain, while the
 cost of every run is the issue's spend; `apply_event` leaves `issues.state` alone for a move on
 the triage labels (`_on_the_triage_track`), though the `events` row is still written.
+
+`PARENT_RECORDS` returns each parent's latest `parent_review_state` for that seed.
 
 ## `issuebot.web`
 

@@ -13,6 +13,7 @@ from issuebot.github.normalise import (
     label_name,
     parent_steps_from_node,
     repo_short_name,
+    review_step_from_node,
     role_for,
 )
 
@@ -388,6 +389,8 @@ def test_a_malformed_parent_is_a_response_error(parent: Any) -> None:
 def test_parent_steps_keep_githubs_order_and_lowercase_labels() -> None:
     steps = parent_steps_from_node(
         {
+            "id": "I_5",
+            "state": "OPEN",
             "number": 5,
             "labels": {"nodes": [{"name": "Issuebot/Triage-Complete"}]},
             "subIssues": {
@@ -401,3 +404,105 @@ def test_parent_steps_keep_githubs_order_and_lowercase_labels() -> None:
     assert steps.number == 5
     assert steps.labels == ("issuebot/triage-complete",)
     assert [(s.number, s.state) for s in steps.sub_issues] == [(7, "open"), (6, "closed")]
+
+
+def test_sub_issue_count_is_the_summary_total() -> None:
+    assert normalised(node(subIssuesSummary={"total": 3})).sub_issue_count == 3
+    assert normalised(node()).sub_issue_count == 0
+
+
+def test_parent_steps_carry_the_parents_id_and_state() -> None:
+    steps = parent_steps_from_node(
+        {"number": 5, "id": "I_9", "state": "CLOSED", "subIssues": {"nodes": []}}
+    )
+    assert (steps.id, steps.state) == ("I_9", "closed")
+
+
+def step_node(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "number": 11,
+        "title": "Step one",
+        "url": "https://github.com/example/repo/issues/11",
+        "bodyHTML": "<p>do it</p>",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "authorAssociation": "member",
+        "author": {"login": "issuebot-agent"},
+        "labels": {"nodes": [{"name": "Bug"}]},
+        "timelineItems": {"nodes": []},
+    }
+    return {**base, **overrides}
+
+
+def closed_by(closer: dict[str, Any]) -> dict[str, Any]:
+    return {"nodes": [{"closer": closer}]}
+
+
+def test_a_step_closed_by_a_merged_pr_carries_it_and_its_reviews() -> None:
+    closer = {
+        "__typename": "PullRequest",
+        "merged": True,
+        "number": 20,
+        "title": "Do step one",
+        "url": "https://github.com/example/repo/pull/20",
+        "bodyHTML": "<p>done</p>",
+        "authorAssociation": "OWNER",
+        "author": {"login": "issuebot-agent"},
+        "reviews": {
+            "nodes": [
+                {
+                    "url": "u1",
+                    "state": "CHANGES_REQUESTED",
+                    "bodyHTML": "<p>no</p>",
+                    "authorAssociation": "member",
+                    "author": {"login": "alice"},
+                },
+                {
+                    "url": "u2",
+                    "state": "APPROVED",
+                    "bodyHTML": "",
+                    "authorAssociation": "CONTRIBUTOR",
+                    "author": None,
+                },
+            ]
+        },
+    }
+    step = review_step_from_node(step_node(timelineItems=closed_by(closer)))
+    assert (step.number, step.title, step.body_html) == (11, "Step one", "<p>do it</p>")
+    assert step.url == "https://github.com/example/repo/issues/11"
+    assert (step.author, step.association) == ("issuebot-agent", "MEMBER")
+    assert step.labels == ("bug",)
+    assert (step.state, step.state_reason) == ("closed", "COMPLETED")
+    pr = step.closed_by
+    assert pr is not None
+    assert (pr.number, pr.title, pr.url) == (20, "Do step one", closer["url"])
+    assert (pr.body_html, pr.author, pr.association) == ("<p>done</p>", "issuebot-agent", "OWNER")
+    assert [(r.author, r.association, r.state, r.body_html, r.url) for r in pr.reviews] == [
+        ("alice", "MEMBER", "CHANGES_REQUESTED", "<p>no</p>", "u1"),
+        (None, "CONTRIBUTOR", "APPROVED", "", "u2"),
+    ]
+    assert pr.reviews[1].association == "CONTRIBUTOR"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"timelineItems": closed_by({"__typename": "Commit"})},
+        {"timelineItems": closed_by({"__typename": "PullRequest", "merged": False})},
+        {"timelineItems": {"nodes": []}},
+        {"stateReason": "NOT_PLANNED"},
+    ],
+)
+def test_a_step_closed_without_a_merged_pr_has_no_closer(overrides: dict[str, Any]) -> None:
+    step = review_step_from_node(step_node(**overrides))
+    assert step.closed_by is None
+    if "stateReason" in overrides:
+        assert step.state_reason == "NOT_PLANNED"
+
+
+def test_a_malformed_step_is_a_response_error() -> None:
+    bad = step_node()
+    del bad["number"]
+    with pytest.raises(GitHubError) as info:
+        review_step_from_node(bad)
+    assert info.value.category == "response"

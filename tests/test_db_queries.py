@@ -17,6 +17,7 @@ from issuebot.db.queries import (
     DailyPoint,
     EventRow,
     IssueRow,
+    ParentRecordRow,
     RepoQueries,
     RunRow,
     RunTotals,
@@ -24,7 +25,14 @@ from issuebot.db.queries import (
     TurnSummaryRow,
 )
 from issuebot.db.store import IssueSnapshot, PostgresStore
-from issuebot.events import Blocked, IssueCompleted, RunEnded, RunStarted, StateChanged
+from issuebot.events import (
+    Blocked,
+    IssueCompleted,
+    ParentReviewState,
+    RunEnded,
+    RunStarted,
+    StateChanged,
+)
 from issuebot.github import Issue, StateLabel
 
 NOW = datetime.now(UTC)
@@ -893,3 +901,45 @@ async def test_issue_ledgers_on_an_empty_store_is_empty(db_url: str) -> None:
     await migrate(db_url)
     async with scoped(Database(db_url)) as queries:
         assert await queries.issue_ledgers() == []
+
+
+async def test_parent_records_are_each_parents_latest_state(db_url: str) -> None:
+    """The worker's per-parent records come back from the store at startup: the latest state
+    of each parent, minus the finished ones, in this repository only, however old."""
+    await migrate(db_url)
+
+    def state(number: int, at: datetime, **overrides: Any) -> ParentReviewState:
+        fields: dict[str, Any] = {
+            "issue_number": number,
+            "issue_identifier": f"repo-{number}",
+            "reviews": 0,
+            "gap_rounds": 0,
+            "at": at,
+        }
+        fields.update(overrides)
+        return ParentReviewState(**fields)
+
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    other = PostgresStore(db_url, repo="other/repo", labels=GitHubLabels())
+    await store.connect()
+    await other.connect()
+    try:
+        # Older than the ledger's window: a parent can wait weeks for its steps.
+        await store.apply_event(state(10, NOW - 200 * DAY))
+        await store.apply_event(state(10, NOW - 100 * DAY, reviews=1, handed_over="gap limit"))
+        await store.apply_event(state(11, NOW - 2 * DAY))
+        await store.apply_event(state(11, NOW - DAY, reviews=2, finished=True))
+        await other.apply_event(state(12, NOW - DAY))
+    finally:
+        await store.close()
+        await other.close()
+    async with scoped(Database(db_url)) as queries:
+        assert await queries.parent_records() == [
+            ParentRecordRow(
+                number=10,
+                identifier="repo-10",
+                reviews=1,
+                gap_rounds=0,
+                handed_over="gap limit",
+            )
+        ]

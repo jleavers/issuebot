@@ -314,7 +314,7 @@ def parent_order(
     *states: tuple[int, str], labels: tuple[str, ...] = ("issuebot/triage-complete",)
 ) -> ParentSteps:
     subs = tuple(SubIssue(number=n, title=f"s{n}", url=f"u{n}", state=s) for n, s in states)
-    return ParentSteps(number=10, labels=labels, sub_issues=subs)
+    return ParentSteps(number=10, id="I_10", state="open", labels=labels, sub_issues=subs)
 
 
 def test_a_step_waits_for_the_first_open_step_before_it(

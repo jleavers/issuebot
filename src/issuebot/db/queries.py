@@ -62,6 +62,21 @@ class RunRow:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class ParentRecordRow:
+    """One split parent's latest ``parent_review_state``, as the worker's parent records read it.
+
+    Finished parents are not here: a record that is finished is never read again, so a seed
+    that carried it would only be memory.
+    """
+
+    number: int
+    identifier: str
+    reviews: int
+    gap_rounds: int
+    handed_over: str | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LedgerRow:
     """One issue's durable run history, as the orchestrator's admission ledger reads it.
 
@@ -242,6 +257,24 @@ FROM ended
 GROUP BY issue_identifier
 ORDER BY max(started_at) DESC
 LIMIT %(limit)s
+"""
+
+PARENT_RECORDS = """
+SELECT number, identifier, reviews, gap_rounds, handed_over
+FROM (
+    SELECT DISTINCT ON (issue_number)
+           issue_number AS number,
+           payload ->> 'issue_identifier' AS identifier,
+           (payload ->> 'reviews')::int AS reviews,
+           (payload ->> 'gap_rounds')::int AS gap_rounds,
+           payload ->> 'handed_over' AS handed_over,
+           coalesce((payload ->> 'finished')::boolean, false) AS finished
+    FROM events
+    WHERE repo = %(repo)s AND kind = 'parent_review_state'
+    ORDER BY issue_number, at DESC, id DESC
+) latest
+WHERE NOT finished
+ORDER BY number
 """
 
 DAILY_SERIES = """
@@ -426,6 +459,24 @@ class RepoQueries(_Reader):
                 turns=int(row["turns"]),
                 cost_usd=float(row["cost_usd"]),
                 last_run_at=row["last_run_at"],
+            )
+            for row in rows
+        ]
+
+    async def parent_records(self) -> list[ParentRecordRow]:
+        """Each split parent's latest record, finished ones left out, for the worker's seed.
+
+        No time window, unlike ``issue_ledgers``: a parent can wait weeks for its steps, and
+        a record dropped for being old is a parent the worker stops watching.
+        """
+        rows = await self._rows(PARENT_RECORDS, self._params())
+        return [
+            ParentRecordRow(
+                number=row["number"],
+                identifier=row["identifier"],
+                reviews=int(row["reviews"]),
+                gap_rounds=int(row["gap_rounds"]),
+                handed_over=row["handed_over"],
             )
             for row in rows
         ]

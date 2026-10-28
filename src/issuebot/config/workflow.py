@@ -25,6 +25,8 @@ from issuebot.config.settings import Settings
 FRONT_MATTER_DELIMITER = "---"
 TRIAGE_FILE_NAME = "TRIAGE.md"
 """The triage prompt's override, beside WORKFLOW.md: replaces the shipped default whole."""
+PARENT_REVIEW_FILE_NAME = "PARENT_REVIEW.md"
+"""The parent-review prompt's override, beside WORKFLOW.md: replaces the shipped default whole."""
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,15 @@ class Workflow:
     triage_mtime_ns: int = 0
     triage_dev: int = 0
     triage_ino: int = 0
+    # The parent review's prompt, from PARENT_REVIEW.md, read, recorded and watched exactly as
+    # TRIAGE.md is. The two are independent: an operator who overrides one keeps the shipped
+    # version of the other.
+    parent_review_template: str = ""
+    parent_review_path: Path | None = None
+    parent_review_empty: bool = False
+    parent_review_mtime_ns: int = 0
+    parent_review_dev: int = 0
+    parent_review_ino: int = 0
 
     @property
     def source_identity(self) -> tuple[int, int, int]:
@@ -90,6 +101,13 @@ class Workflow:
         if self.triage_path is None:
             return None
         return (self.triage_dev, self.triage_ino, self.triage_mtime_ns)
+
+    @property
+    def parent_review_identity(self) -> tuple[int, int, int] | None:
+        """``(dev, ino, mtime_ns)`` of PARENT_REVIEW.md, or ``None`` with the default in force."""
+        if self.parent_review_path is None:
+            return None
+        return (self.parent_review_dev, self.parent_review_ino, self.parent_review_mtime_ns)
 
 
 def overlay_path_for(path: Path) -> Path:
@@ -115,6 +133,19 @@ def triage_prompt_path_for(path: Path) -> Path:
 def default_triage_prompt() -> str:
     """The triage prompt issuebot ships, read from the package so an installed wheel has it."""
     return (resources.files("issuebot.config") / "triage_prompt.md").read_text(encoding="utf-8")
+
+
+def parent_review_prompt_path_for(path: Path) -> Path:
+    """The parent-review prompt override's path: ``PARENT_REVIEW.md`` beside the workflow file,
+    derived for the reason ``triage_prompt_path_for`` is."""
+    return path.with_name(PARENT_REVIEW_FILE_NAME)
+
+
+def default_parent_review_prompt() -> str:
+    """The parent-review prompt issuebot ships, read from the package as the triage one is."""
+    return (resources.files("issuebot.config") / "parent_review_prompt.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def merge_front_matter(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
@@ -225,8 +256,13 @@ def load_workflow(
         )
         if local_body:
             body = local_body
-    triage_path, triage, triage_body = _read_triage(
-        triage_prompt_path_for(resolved_path), base=resolved_path
+    triage_path, triage, triage_body = _read_prompt(
+        triage_prompt_path_for(resolved_path), base=resolved_path, name=TRIAGE_FILE_NAME
+    )
+    review_path, review, review_body = _read_prompt(
+        parent_review_prompt_path_for(resolved_path),
+        base=resolved_path,
+        name=PARENT_REVIEW_FILE_NAME,
     )
     merged = merge_front_matter(raw, local_raw) if local_path is not None else raw
 
@@ -263,6 +299,12 @@ def load_workflow(
         triage_mtime_ns=triage.st_mtime_ns if triage is not None else 0,
         triage_dev=triage.st_dev if triage is not None else 0,
         triage_ino=triage.st_ino if triage is not None else 0,
+        parent_review_template=review_body or default_parent_review_prompt(),
+        parent_review_path=review_path,
+        parent_review_empty=review is not None and not review_body,
+        parent_review_mtime_ns=review.st_mtime_ns if review is not None else 0,
+        parent_review_dev=review.st_dev if review is not None else 0,
+        parent_review_ino=review.st_ino if review is not None else 0,
     )
 
 
@@ -281,31 +323,31 @@ def _read_overlay(
     return overlay_path, local, raw, body
 
 
-def _read_triage(
-    triage_path: Path, *, base: Path
+def _read_prompt(
+    path: Path, *, base: Path, name: str
 ) -> tuple[Path | None, os.stat_result | None, str]:
-    """``(path, stat, body)`` of TRIAGE.md; ``(None, None, "")`` without one.
+    """``(path, stat, body)`` of a prompt override (TRIAGE.md, PARENT_REVIEW.md); ``(None,
+    None, "")`` without one. ``name`` is the file's name, as the messages give it.
 
     Read as the overlay is read. It is a prompt and nothing else: front matter would be a
     second place for settings to hide, and one that never merged into anything.
     """
-    found = _read_beside(triage_path, base=base, what=TRIAGE_FILE_NAME)
+    found = _read_beside(path, base=base, what=name)
     if found is None:
         return None, None, ""
     stat_result, raw, body = found
     if raw:
         raise WorkflowParseError(
-            f"{TRIAGE_FILE_NAME} takes no front matter; settings belong in WORKFLOW.md",
-            path=triage_path,
+            f"{name} takes no front matter; settings belong in WORKFLOW.md", path=path
         )
-    return triage_path, stat_result, body
+    return path, stat_result, body
 
 
 def _read_beside(
     path: Path, *, base: Path, what: str
 ) -> tuple[os.stat_result, dict[str, Any], str] | None:
     """``(stat, front_matter, body)`` of a file read beside the base workflow; ``None`` when
-    there is none, which is the normal case for both the overlay and ``TRIAGE.md``.
+    there is none, which is the normal case for the overlay and for both prompt files.
 
     One that exists but is not a regular file is an error naming it, rather than an
     "unreadable" from reading a directory; an error reading it names the base workflow, and a

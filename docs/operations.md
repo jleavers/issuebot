@@ -201,11 +201,6 @@ has none. The one action that resumes it is in the comment:
   `issuebot/triage-todo` again to triage it afresh.
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
-- **`already split`**: the issue already has sub-issues. Re-triaging a split issue is the
-  parent review, which a later release adds, so no session runs and nothing is filed twice.
-  Remove its sub-issues from it ("Remove sub-issue" on the parent; closing them does not
-  unlink them), then add `issuebot/triage-todo` again. issuebot puts `issuebot/triage-complete`
-  back, so the split's steps keep running in order.
 - **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
   issuebot removes whichever state label the issue carried and says the step is yours: do it,
   then close the issue.
@@ -222,8 +217,7 @@ serves the issue: it dispatches its own triage of the same `issuebot/triage-todo
 share one triage clone, and both file.
 
 A `split` files the steps up to and including the implementation plan. Once the plan step
-merges, nothing in this release files the implementation stages -- that is the parent review,
-a later release -- so open them yourself from the merged plan.
+merges, the parent review files the next batch ([The parent review](#the-parent-review)).
 
 A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, with no comment or
 label change, while any sub-issue before it in the parent's order is open. Operator steps
@@ -236,6 +230,80 @@ parent. `rework` and resumed steps are never held. A poll that cannot read the o
 every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>` refuses a
 held step too, naming the step it waits for, so close that first or reorder the parent;
 `--show-prompt` skips the check.
+
+### The parent review
+
+A split parent is watched by the worker. Once every one of its steps has closed (any close
+counts, "not planned" included) it is reviewed on the first tick with a free slot, with no
+label from anyone. A parent is watched when it has a record: triage filed its split, or you
+added `issuebot/triage-todo` to an issue that already has sub-issues. A parent with neither
+is never reviewed on its own. The review is the triage session with a prompt of its own
+(`PARENT_REVIEW.md` beside `WORKFLOW.md` replaces the shipped one), and it answers with one of:
+
+- **`next`**: the steps so far were a phase. The worker files the next batch after the
+  existing steps, as it files a split.
+- **`gap`**: something the ask needs is missing. The worker files one sub-issue per gap and
+  counts a gap round. Those steps wait for your `issuebot/todo` like any other, and when they
+  close the parent is reviewed again.
+- **`met`**: the ask is met. The worker adds `issuebot/complete` beside
+  `issuebot/triage-complete`, closes the parent as completed and counts it in "issues closed".
+
+Two limits bound the loops. `triage.max_gap_rounds` (default 2): a `gap` once the rounds are
+spent files nothing and hands the parent over as `parent review gap limit`, while a `next` is
+still filed. At `0` the first `gap` is handed over. `triage.max_parent_reviews` (default 6) is
+checked before an automatic review starts: a parent that has had that many reviews is handed
+over as `parent review limit` instead.
+
+`issuebot/triage-todo` on an issue with sub-issues resets both counts and runs a review. With
+every step closed it starts at once. With a step still open the worker puts
+`issuebot/triage-complete` back and posts a `parent review waiting` note; the review then runs
+by itself once the steps close. That note is not a hand-over: no `blocked`, nothing recorded.
+
+Every hand-over of a parent leaves it the same way: `issuebot/triage-complete` stays, so its
+steps stay held, a note says why, `blocked` is published, and the worker stops watching it.
+Each has one way back, adding `issuebot/triage-todo`, which resets both counts and runs a
+review. The title says which:
+
+- **`parent review limit`**: `triage.max_parent_reviews` reviews have run.
+- **`parent review gap limit`**: a `gap` after `triage.max_gap_rounds` rounds. The note says
+  what the review found and lists what it would have filed. File what is still needed
+  yourself; nothing reviews the parent again until you add `issuebot/triage-todo`.
+- **`parent review failed`**: `agent.max_attempts` failed runs in a row. Fix the cause the
+  note names first.
+- **`parent review not filed`**: GitHub refused the filing `agent.max_attempts` times. Unlink
+  any sub-issues the review filed from the parent first.
+- **`parent review budget limit`**: the issue's cost reached `agent.max_issue_cost_usd`. Raise
+  the ceiling first.
+- **`unapproved edit`**: the parent was edited after `issuebot/triage-todo` by someone other
+  than who applied it. Read the text and apply the label again.
+
+A review whose steps changed while it ran (one reopened, added or unlinked) is discarded and
+files nothing; the parent waits for its steps to close again. A filing GitHub fails part-way is
+retried from memory, without running the session again, and handed over as `parent review not
+filed` after `agent.max_attempts` tries. A parent closed by a human, or with
+`issuebot/triage-complete` taken off, is left alone.
+
+The records are published as `parent_review_state` events and read back by the worker at
+startup, so the counts and a hand-over survive a restart. There is no migration. Without a
+store a restart forgets them, and such a parent waits for your `issuebot/triage-todo`. Two
+cases need that label once:
+
+- **Splits filed before this release** have no record. Add `issuebot/triage-todo` to each open
+  split parent to opt it in; one whose steps have all closed is reviewed on that tick.
+- **A split filed by `run-once --triage`** is watched from the worker's next restart, since the
+  foreground run cannot tell the worker. For the same reason `run-once --triage` refuses an
+  issue with sub-issues: its review runs on the worker.
+
+A verdict being filed is held in memory only. A restart between its first write and its
+comment leaves the steps it filed without a comment, and neither that review nor a `gap`'s
+round is counted. A `met` restarted between its label write and its close leaves the parent
+open with `issuebot/complete`: close it yourself, or take that label off and add
+`issuebot/triage-todo` to review it again.
+
+The watch costs one GraphQL point a tick (a `parent_steps` read) while any parent is watched,
+and only when a slot is free or a hand-over note is owed. A review's own read of the steps
+measured 3 points on a parent with 11 merged steps. `validate`'s triage check reports both
+limits.
 
 ### GitHub itself
 

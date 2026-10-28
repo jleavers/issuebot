@@ -73,6 +73,12 @@ the session is bounded is
 [A triage session](docs/security-model.md#a-triage-session) and what to do when it hands an
 issue back is [Triage](docs/operations.md#triage).
 
+**A split is reviewed once its steps have closed.** The worker reviews the parent by itself
+when every step has closed, in the same read-only session, and files the next batch (`next`),
+files a sub-issue per gap (`gap`) or closes the parent as complete (`met`). Two limits bound
+it, and every hand-over comes back with `issuebot/triage-todo`: see
+[The parent review](docs/operations.md#the-parent-review).
+
 ## Quick start
 
 Docker with Compose (Engine 28.0 or newer), a GitHub token for the account the agent will act
@@ -509,6 +515,8 @@ first issue running; it is what to consult once one has.
 | `triage.max_turns` | `claude -p` invocations per triage run | `1` |
 | `triage.max_budget_usd` | spend cap per triage turn (its cost counts toward `agent.max_issue_cost_usd`) | `2.0` |
 | `triage.max_sub_issues` | the most sub-issues one verdict may ask for, at most 20; a longer one is refused as malformed | `8` |
+| `triage.max_gap_rounds` | the `gap` verdicts a parent review acts on before a further `gap` is handed over instead of filed | `2` |
+| `triage.max_parent_reviews` | the parent reviews the worker starts on a parent by itself, at least 1; `issuebot/triage-todo` resets the count | `6` |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
 
@@ -572,6 +580,12 @@ the worker reloads it when it appears, changes or is deleted. An empty or whites
 without running anything; stop the worker first if it serves the issue, or it triages the same
 issue beside you and both file. `validate` renders it and warns while the triage labels are
 missing. Work sessions are told never to touch the triage labels.
+
+The parent review has a prompt of its own, `PARENT_REVIEW.md` beside `WORKFLOW.md`
+(shipped: `src/issuebot/config/parent_review_prompt.md`), read, reloaded and left in force when
+empty exactly as `TRIAGE.md` is. Overriding one keeps the shipped version of the other.
+`run-once --triage --show-prompt` renders the parent-review prompt for an issue with
+sub-issues, and `validate` renders both.
 
 ### Choosing the model for an issue
 

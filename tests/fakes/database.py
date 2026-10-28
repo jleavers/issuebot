@@ -15,6 +15,7 @@ from issuebot.db.queries import (
     EventRow,
     IssueRow,
     LedgerRow,
+    ParentRecordRow,
     RepoRow,
     RunRow,
     RunTotals,
@@ -76,6 +77,7 @@ class FakeQueries:
         self.counts: dict[str, int] = {role.value: 0 for role in StateLabel}
         self.issue_list: list[IssueRow] = []
         self.ledger_rows: list[LedgerRow] = []
+        self.parent_rows: list[ParentRecordRow] = []
         self.state_asked: str | None = None
         self.series: list[DailyPoint] = []
         self.issue_rows: dict[int, IssueRow] = {}
@@ -153,6 +155,10 @@ class FakeRepoQueries:
     async def issue_ledgers(self, *, limit: int = 500, days: int = 90) -> list[LedgerRow]:
         self._check("issue_ledgers")
         return self._parent.ledger_rows
+
+    async def parent_records(self) -> list[ParentRecordRow]:
+        self._check("parent_records")
+        return self._parent.parent_rows
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
         self._check("issues_by_state")

@@ -355,7 +355,7 @@ anything reading or writing issue state goes through these:
 | `issuebot/no-fault` | agent, beside `review`, when it found no fault (a marker, not a state) |
 | `issuebot/triage-todo` | human (phase 1); a later phase adds opt-in auto-triage |
 | `issuebot/triage-complete` | issuebot, after a triage verdict; beside a state label, not instead of one |
-| `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault` |
+| `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault`, or when a parent review finds a split issue's ask met |
 
 GitHub is reached through the `gh` CLI, not a REST/GraphQL client library.
 

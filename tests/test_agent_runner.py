@@ -32,6 +32,7 @@ from issuebot.agent.runner import (
     WORKSPACE_ENV_LIMIT,
     ClaudeAuth,
     ClaudeRunner,
+    ParentReviewRunner,
     RateLimitWindow,
     StreamParser,
     TriageRunner,
@@ -54,7 +55,7 @@ from issuebot.agent.runner import (
     workspace_environment,
 )
 from issuebot.agent.scrub import REDACTED, Scrubber
-from issuebot.agent.verdict import verdict_schema
+from issuebot.agent.verdict import parent_review_schema, verdict_schema
 from issuebot.config import Settings
 from issuebot.log import configure_logging
 
@@ -2812,6 +2813,25 @@ def test_triage_argv_resumes_and_takes_the_triage_model(tmp_path: Path) -> None:
         session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
     )
     assert argv[-2:] == ["--model", "work-model"]
+
+
+def test_the_parent_review_runner_asks_for_its_own_schema(tmp_path: Path) -> None:
+    """The same restricted, read-only session as triage's (plan ruling 5); only the verdict
+    it is asked for differs."""
+    cfg = triage_settings(tmp_path)
+    environ = {"HOME": "/home/agent"}
+    triage = TriageRunner(cfg, environ=environ).build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
+    review = ParentReviewRunner(cfg, environ=environ).build_argv(
+        session_id=SESSION_ID, resume=False, workspace=tmp_path / "ws"
+    )
+    at = triage.index("--json-schema") + 1
+    assert review.index("--json-schema") + 1 == at
+    assert review[:at] == triage[:at]
+    assert review[at + 1 :] == triage[at + 1 :]
+    assert review[at] == json.dumps(parent_review_schema(8), separators=(",", ":"))
+    assert triage[at] == json.dumps(verdict_schema(8), separators=(",", ":"))
 
 
 def test_triage_settings_document_denies_proc(tmp_path: Path) -> None:

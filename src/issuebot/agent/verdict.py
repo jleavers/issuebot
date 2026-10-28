@@ -37,6 +37,8 @@ REASON_LIMIT = 2_000
 
 _REASONS = ("summary", "fits_caps", "lands_fast", "needs_human", "ignored_requests")
 _FIELDS = ("verdict", *_REASONS, "sub_issues")
+_REVIEW_REASONS = ("summary", "evidence", "ignored_requests")
+_REVIEW_FIELDS = ("verdict", *_REVIEW_REASONS, "sub_issues")
 _SUB_FIELDS = ("title", "body", "kind")
 _KINDS = ("issuebot", "operator")
 
@@ -59,8 +61,29 @@ class TriageVerdict:
     sub_issues: tuple[SubIssueDraft, ...]
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ParentReviewVerdict:
+    verdict: Literal["next", "met", "gap"]
+    summary: str
+    evidence: str
+    ignored_requests: str
+    sub_issues: tuple[SubIssueDraft, ...]
+
+
 class VerdictError(ValueError):
     """A verdict the worker refuses; the message is one line and safe to publish."""
+
+
+_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(_SUB_FIELDS),
+    "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": TITLE_LIMIT},
+        "body": {"type": "string", "minLength": 1, "maxLength": BODY_LIMIT},
+        "kind": {"type": "string", "enum": list(_KINDS)},
+    },
+}
 
 
 def verdict_schema(max_sub_issues: int) -> dict[str, Any]:
@@ -76,17 +99,23 @@ def verdict_schema(max_sub_issues: int) -> dict[str, Any]:
             "sub_issues": {
                 "type": "array",
                 "maxItems": max_sub_issues,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": list(_SUB_FIELDS),
-                    "properties": {
-                        "title": {"type": "string", "minLength": 1, "maxLength": TITLE_LIMIT},
-                        "body": {"type": "string", "minLength": 1, "maxLength": BODY_LIMIT},
-                        "kind": {"type": "string", "enum": list(_KINDS)},
-                    },
-                },
+                "items": _ITEM_SCHEMA,
             },
+        },
+    }
+
+
+def parent_review_schema(max_sub_issues: int) -> dict[str, Any]:
+    """The JSON Schema for a parent review's `--json-schema`: next, met or gap."""
+    reason = {"type": "string", "maxLength": REASON_LIMIT}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(_REVIEW_FIELDS),
+        "properties": {
+            "verdict": {"type": "string", "enum": ["next", "met", "gap"]},
+            **{name: dict(reason) for name in _REVIEW_REASONS},
+            "sub_issues": {"type": "array", "maxItems": max_sub_issues, "items": _ITEM_SCHEMA},
         },
     }
 
@@ -142,25 +171,12 @@ def _fields(obj: object, names: tuple[str, ...], what: str, scrubber: Scrubber) 
     return obj
 
 
-def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> TriageVerdict:
-    """Validate `raw` (a decoded `structured_output`) and return it scrubbed."""
-    if raw is None:
-        raise VerdictError("the session returned no verdict")
-    obj = _fields(raw, _FIELDS, "the verdict", scrubber)
-    kind = obj["verdict"]
-    if kind not in ("fits", "split"):
-        raise VerdictError("verdict must be fits or split")
-    reasons = {name: _text(obj, name, REASON_LIMIT, line_endings=True) for name in _REASONS}
-    steps = obj["sub_issues"]
+def _drafts(steps: object, *, max_sub_issues: int, scrubber: Scrubber) -> tuple[SubIssueDraft, ...]:
+    """Check a verdict's `sub_issues` and return the drafts scrubbed; both parsers call this."""
     if not isinstance(steps, list):
         raise VerdictError("sub_issues must be an array")
     if len(steps) > max_sub_issues:
         raise VerdictError(f"a verdict may carry at most {max_sub_issues} sub-issues")
-    if kind == "split" and not steps:
-        raise VerdictError("a split needs at least one sub-issue")
-    if kind == "fits" and steps:
-        raise VerdictError("a fits verdict files no sub-issues")
-
     drafts: list[SubIssueDraft] = []
     seen: set[str] = set()
     for step in steps:
@@ -178,16 +194,61 @@ def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> Tr
             raise VerdictError("sub-issue titles must be distinct")
         seen.add(key)
         drafts.append(SubIssueDraft(title=title, body=body, kind=item["kind"]))
+    # Scrub last, field by field: scrubbing can shorten a string but never lengthens it past
+    # a limit already checked, and a title scrubbed to a mask is still a title.
+    return tuple(
+        SubIssueDraft(
+            title=scrubber.scrub(d.title).strip(), body=scrubber.scrub(d.body), kind=d.kind
+        )
+        for d in drafts
+    )
+
+
+def parse_verdict(raw: object, *, max_sub_issues: int, scrubber: Scrubber) -> TriageVerdict:
+    """Validate `raw` (a decoded `structured_output`) and return it scrubbed."""
+    if raw is None:
+        raise VerdictError("the session returned no verdict")
+    obj = _fields(raw, _FIELDS, "the verdict", scrubber)
+    kind = obj["verdict"]
+    if kind not in ("fits", "split"):
+        raise VerdictError("verdict must be fits or split")
+    reasons = {name: _text(obj, name, REASON_LIMIT, line_endings=True) for name in _REASONS}
+    drafts = _drafts(obj["sub_issues"], max_sub_issues=max_sub_issues, scrubber=scrubber)
+    if kind == "split" and not drafts:
+        raise VerdictError("a split needs at least one sub-issue")
+    if kind == "fits" and drafts:
+        raise VerdictError("a fits verdict files no sub-issues")
 
     # Scrub last, field by field: scrubbing can shorten a string but never lengthens it past
     # a limit already checked, and a title scrubbed to a mask is still a title.
     return TriageVerdict(
         verdict=kind,
         **{name: scrubber.scrub(text) for name, text in reasons.items()},
-        sub_issues=tuple(
-            SubIssueDraft(
-                title=scrubber.scrub(d.title).strip(), body=scrubber.scrub(d.body), kind=d.kind
-            )
-            for d in drafts
-        ),
+        sub_issues=drafts,
+    )
+
+
+def parse_parent_review(
+    raw: object, *, max_sub_issues: int, scrubber: Scrubber
+) -> ParentReviewVerdict:
+    """Validate a parent review's decoded `structured_output` and return it scrubbed."""
+    if raw is None:
+        raise VerdictError("the session returned no verdict")
+    obj = _fields(raw, _REVIEW_FIELDS, "the verdict", scrubber)
+    kind = obj["verdict"]
+    if kind not in ("next", "met", "gap"):
+        raise VerdictError("verdict must be next, met or gap")
+    reasons = {
+        name: _text(obj, name, REASON_LIMIT, required=name == "evidence", line_endings=True)
+        for name in _REVIEW_REASONS
+    }
+    drafts = _drafts(obj["sub_issues"], max_sub_issues=max_sub_issues, scrubber=scrubber)
+    if kind == "met" and drafts:
+        raise VerdictError("a met verdict files no sub-issues")
+    if kind != "met" and not drafts:
+        raise VerdictError(f"a {kind} verdict needs at least one sub-issue")
+    return ParentReviewVerdict(
+        verdict=kind,
+        **{name: scrubber.scrub(text) for name, text in reasons.items()},
+        sub_issues=drafts,
     )

@@ -7,11 +7,14 @@ from typing import Any
 from issuebot.config import GitHubLabels
 from issuebot.github.errors import GitHubError
 from issuebot.github.models import (
+    ClosingPr,
     Issue,
     LinkedPr,
     Mergeable,
     ParentSteps,
+    PrReview,
     PrState,
+    ReviewStep,
     StateLabel,
     SubIssue,
 )
@@ -105,6 +108,7 @@ def issue_from_node(
         dispatchable=github_state == "open" and state is not None,
         author_association=_association(node.get("authorAssociation")),
         parent=parent,
+        sub_issue_count=_sub_issue_total(node.get("subIssuesSummary"), number),
     )
 
 
@@ -115,6 +119,15 @@ def _parent_number(value: Any, number: int) -> int | None:
     if not isinstance(parent, int) or isinstance(parent, bool):
         raise GitHubError("response", f"malformed issue record #{number}: parent")
     return parent
+
+
+def _sub_issue_total(value: Any, number: int) -> int:
+    if value is None:
+        return 0
+    total = value.get("total") if isinstance(value, Mapping) else None
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise GitHubError("response", f"malformed issue record #{number}: subIssuesSummary")
+    return total
 
 
 def sub_issue_from_node(node: Any) -> SubIssue:
@@ -142,10 +155,96 @@ def parent_steps_from_node(node: Mapping[str, Any]) -> ParentSteps:
     nodes = connection.get("nodes") if isinstance(connection, Mapping) else None
     if not isinstance(nodes, list):
         raise GitHubError("response", f"malformed parent record #{number}: subIssues")
+    node_id = node.get("id")
+    raw_state = node.get("state")
+    if not isinstance(node_id, str) or not node_id or raw_state not in ("OPEN", "CLOSED"):
+        raise GitHubError("response", f"malformed parent record #{number}: id or state")
     return ParentSteps(
         number=number,
+        id=node_id,
+        state="open" if raw_state == "OPEN" else "closed",
         labels=_label_names(node.get("labels")),
         sub_issues=tuple(sub_issue_from_node(item) for item in nodes),
+    )
+
+
+def review_step_from_node(node: Mapping[str, Any]) -> ReviewStep:
+    """Normalise one step of the review query. Raises ``GitHubError("response")``."""
+    if not isinstance(node, Mapping):
+        raise GitHubError("response", "review step record is not an object")
+    number, title, url = (node.get(k) for k in ("number", "title", "url"))
+    body_html, state = node.get("bodyHTML"), node.get("state")
+    if (
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or not isinstance(title, str)
+        or not isinstance(url, str)
+        or not isinstance(body_html, str)
+        or state not in ("OPEN", "CLOSED")
+    ):
+        raise GitHubError("response", "malformed review step record")
+    reason = node.get("stateReason")
+    return ReviewStep(
+        number=number,
+        title=title,
+        url=url,
+        body_html=body_html,
+        author=_login(node.get("author")),
+        association=_association(node.get("authorAssociation")),
+        labels=_label_names(node.get("labels")),
+        state="open" if state == "OPEN" else "closed",
+        state_reason=reason if isinstance(reason, str) and reason else None,
+        closed_by=_closing_pr(node.get("timelineItems"), number),
+    )
+
+
+def _closing_pr(connection: Any, number: int) -> ClosingPr | None:
+    """The merged pull request behind the step's last close, else ``None``."""
+    events = _nodes(connection)
+    closer = events[-1].get("closer") if events and isinstance(events[-1], Mapping) else None
+    if not isinstance(closer, Mapping) or closer.get("__typename") != "PullRequest":
+        return None
+    if closer.get("merged") is not True:
+        return None
+    pr_number, title, url, body_html = (
+        closer.get(k) for k in ("number", "title", "url", "bodyHTML")
+    )
+    if (
+        not isinstance(pr_number, int)
+        or isinstance(pr_number, bool)
+        or not isinstance(title, str)
+        or not isinstance(url, str)
+        or not isinstance(body_html, str)
+    ):
+        raise GitHubError("response", f"malformed review step record #{number}: closer")
+    reviews: list[PrReview] = []
+    for item in _nodes(closer.get("reviews")):
+        state, review_url, review_html = (
+            item.get(k) if isinstance(item, Mapping) else None for k in ("state", "url", "bodyHTML")
+        )
+        if (
+            not isinstance(state, str)
+            or not isinstance(review_url, str)
+            or not isinstance(review_html, str)
+        ):
+            raise GitHubError("response", f"malformed review step record #{number}: review")
+        reviews.append(
+            PrReview(
+                author=_login(item.get("author")),
+                association=_association(item.get("authorAssociation")),
+                state=state,
+                body_html=review_html,
+                url=review_url,
+            )
+        )
+    return ClosingPr(
+        number=pr_number,
+        title=title,
+        url=url,
+        body_html=body_html,
+        author=_login(closer.get("author")),
+        association=_association(closer.get("authorAssociation")),
+        reviews=tuple(reviews),
     )
 
 

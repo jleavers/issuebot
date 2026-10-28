@@ -1925,6 +1925,8 @@ async def test_parent_steps_reads_every_parent_in_one_query() -> None:
     runner = StubRunner()
     parent = {
         "number": 5,
+        "id": "I_5",
+        "state": "OPEN",
         "labels": {"nodes": [{"name": "issuebot/triage-complete"}]},
         "subIssues": {"nodes": [{"number": 7, "title": "b", "url": "u7", "state": "OPEN"}]},
     }
@@ -1959,3 +1961,54 @@ async def test_a_malformed_parent_steps_record_is_a_response_error() -> None:
     with pytest.raises(GitHubError) as info:
         await make_adapter(runner).parent_steps([5])
     assert info.value.category == "response"
+
+
+def _review_step(number: int) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"s{number}",
+        "url": f"u{number}",
+        "bodyHTML": "",
+        "state": "OPEN",
+        "stateReason": None,
+        "authorAssociation": "OWNER",
+        "author": {"login": "issuebot-agent"},
+        "labels": {"nodes": []},
+        "timelineItems": {"nodes": []},
+    }
+
+
+async def test_parent_review_steps_reads_the_parents_steps_in_one_query() -> None:
+    runner = StubRunner()
+    nodes = [_review_step(9), _review_step(7)]
+    runner.on(
+        has("issue(number: 5)"),
+        stdout=json.dumps({"data": {"repository": {"issue": {"subIssues": {"nodes": nodes}}}}}),
+    )
+    steps = await make_adapter(runner).parent_review_steps(5)
+    assert [s.number for s in steps] == [9, 7]
+    assert len(runner.calls) == 1
+    query = query_of(runner.argv(0))
+    for needle in ("subIssues(first: 100)", "stateReason", "CLOSED_EVENT", "reviews(first: 30)"):
+        assert needle in query
+
+
+async def test_a_parent_review_read_of_a_missing_parent_is_a_response_error() -> None:
+    runner = StubRunner()
+    runner.on(has("issue(number: 5)"), stdout=json.dumps({"data": {"repository": {"issue": None}}}))
+    with pytest.raises(GitHubError) as info:
+        await make_adapter(runner).parent_review_steps(5)
+    assert info.value.category == "response"
+
+
+async def test_close_as_completed_patches_the_issue() -> None:
+    runner = StubRunner()
+    runner.on(has("PATCH", "repos/example/repo/issues/5"), stdout="{}")
+    await make_adapter(runner).close_as_completed(5)
+    argv, stdin = runner.calls[0]
+    assert argv == ["api", "-X", "PATCH", "repos/example/repo/issues/5", "--input", "-"]
+    assert json.loads(stdin or "") == {"state": "closed", "state_reason": "completed"}
+
+
+def test_the_poll_fragment_asks_for_the_sub_issue_total() -> None:
+    assert "subIssuesSummary { total }" in ISSUE_FIELDS

@@ -432,6 +432,7 @@ async def _hand_back(
     write_label: Callable[[], Awaitable[None]],
     now: datetime,
     to_label: str | None = None,
+    blocked: bool = True,
 ) -> EscapeOutcome:
     """The escapes with no workpad: the label write, a plain comment, then the events.
 
@@ -464,18 +465,23 @@ async def _hand_back(
             error=str(exc),
             category=exc.category,
         )
-    bus.publish(
-        StateChanged(
-            issue_number=issue.number,
-            issue_identifier=issue.identifier,
-            from_label=from_label,
-            to_label=to_label,
-            actor="issuebot",
+    # A parent hand-over finding `triage_complete` already there moves no label, and Slack
+    # would read it as that label → itself ahead of the `blocked` line (spec 2026-10-25,
+    # section 7).
+    if to_label is None or from_label != to_label:
+        bus.publish(
+            StateChanged(
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                from_label=from_label,
+                to_label=to_label,
+                actor="issuebot",
+            )
         )
-    )
-    bus.publish(
-        Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
-    )
+    if blocked:
+        bus.publish(
+            Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
+        )
     log.info(
         f"{prefix}_applied",
         issue_number=issue.number,
@@ -494,32 +500,15 @@ async def triage_escape(
     reason: str,
     way_back: str,
     now: datetime,
-    restore_complete: bool = False,
 ) -> EscapeOutcome:
     """Hand a triage candidate back to a human: drop ``triage_todo``, then say why.
 
     The triage track has no state label to clear and no workpad, so this removes only the
-    label that makes the issue a candidate. A human adds it again to try once more.
-    ``restore_complete`` adds ``triage_complete`` in the same write: a split parent keeps it,
-    because its steps' order is keyed on it (spec 2026-10-25, section 5).
+    label that makes the issue a candidate. A human adds it again to try once more. An issue
+    with sub-issues is handed over by ``parent_hand_over`` instead, which keeps
+    ``triage_complete`` on it (spec 2026-10-25, section 6).
     """
     labels = adapter.labels
-    if restore_complete:
-        return await _hand_back(
-            adapter,
-            bus,
-            issue,
-            prefix="triage_escape",
-            title=title,
-            reason=reason,
-            way_back=way_back,
-            from_label=labels.triage_todo,
-            write_label=lambda: adapter.edit_labels(
-                issue.number, add=[labels.triage_complete], remove=[labels.triage_todo]
-            ),
-            now=now,
-            to_label=labels.triage_complete,
-        )
     return await _hand_back(
         adapter,
         bus,
@@ -531,6 +520,49 @@ async def triage_escape(
         from_label=labels.triage_todo,
         write_label=lambda: adapter.edit_labels(issue.number, remove=[labels.triage_todo]),
         now=now,
+    )
+
+
+async def parent_hand_over(
+    adapter: GitHubAdapter,
+    bus: EventBus,
+    issue: Issue,
+    *,
+    title: str,
+    reason: str,
+    way_back: str,
+    now: datetime,
+    blocked: bool = True,
+) -> EscapeOutcome:
+    """Hand a split parent to a human: ``triage_complete`` back, a note, then the events.
+
+    Every hand-over of a parent takes this one shape (spec 2026-10-25, section 6). The write
+    adds ``triage_complete`` as it removes ``triage_todo``, so a parent a human swapped to
+    ``triage_todo`` never ends with neither, which would release every held step. A parent
+    already wearing only ``triage_complete`` -- a hand-over from the watch -- moves no label,
+    so it publishes no ``StateChanged``. ``blocked`` is false for a note that is not a block,
+    such as steps still open. ``reason`` is published as given: the caller scrubs it.
+    """
+    labels = adapter.labels
+    return await _hand_back(
+        adapter,
+        bus,
+        issue,
+        prefix="parent_hand_over",
+        title=title,
+        reason=reason,
+        way_back=way_back,
+        from_label=(
+            labels.triage_todo
+            if labels.triage_todo.lower() in issue.labels
+            else labels.triage_complete
+        ),
+        write_label=lambda: adapter.edit_labels(
+            issue.number, add=[labels.triage_complete], remove=[labels.triage_todo]
+        ),
+        now=now,
+        to_label=labels.triage_complete,
+        blocked=blocked,
     )
 
 

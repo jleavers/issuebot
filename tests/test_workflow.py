@@ -14,7 +14,11 @@ from issuebot.config.errors import (
     SettingsValidationError,
     WorkflowParseError,
 )
-from issuebot.config.workflow import default_triage_prompt, parse_workflow_text
+from issuebot.config.workflow import (
+    default_parent_review_prompt,
+    default_triage_prompt,
+    parse_workflow_text,
+)
 
 # --- parse_workflow_text -------------------------------------------------------
 
@@ -340,3 +344,64 @@ def test_a_triage_file_that_cannot_be_stated_is_unreadable(
     with pytest.raises(MissingWorkflowFile, match=r"TRIAGE\.md unreadable") as info:
         load_workflow(wf_path, environ={"TOKEN": "t"})
     assert info.value.path == wf_path.resolve()
+
+
+# --- PARENT_REVIEW.md ------------------------------------------------------------
+
+
+def test_without_parent_review_md_the_shipped_prompt_is_used(tmp_path: Path) -> None:
+    wf = load_workflow(_write_good(tmp_path), environ={"TOKEN": "t"})
+    assert wf.parent_review_path is None
+    assert wf.parent_review_template == default_parent_review_prompt()
+    assert wf.parent_review_template != default_triage_prompt()
+    assert wf.parent_review_empty is False
+    assert wf.parent_review_identity is None
+
+
+def test_parent_review_md_replaces_the_shipped_prompt(tmp_path: Path) -> None:
+    """Beside TRIAGE.md or not: an operator who overrides one prompt keeps the shipped other."""
+    wf_path = _write_good(tmp_path)
+    review = tmp_path / "PARENT_REVIEW.md"
+    review.write_text("Review #{{ issue.number }}\n", encoding="utf-8")
+    wf = load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert wf.parent_review_path == review.resolve()
+    assert wf.parent_review_template == "Review #{{ issue.number }}"
+    assert wf.parent_review_empty is False
+    stat = review.stat()
+    assert wf.parent_review_identity == (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+    assert wf.triage_path is None
+    assert wf.triage_template == default_triage_prompt()
+
+
+@pytest.mark.parametrize("text", ["", "  \n\t\n\n"], ids=["empty", "whitespace"])
+def test_an_empty_parent_review_md_falls_back_and_says_so(tmp_path: Path, text: str) -> None:
+    """As an empty TRIAGE.md does (#306): the shipped prompt, and the file still watched."""
+    wf_path = _write_good(tmp_path)
+    review = tmp_path / "PARENT_REVIEW.md"
+    review.write_text(text, encoding="utf-8")
+    wf = load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert wf.parent_review_template == default_parent_review_prompt()
+    assert wf.parent_review_empty is True
+    assert wf.parent_review_path == review.resolve()
+    stat = review.stat()
+    assert wf.parent_review_identity == (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+
+
+def test_parent_review_md_takes_no_front_matter(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    review = tmp_path / "PARENT_REVIEW.md"
+    review.write_text("---\ntriage:\n  max_gap_rounds: 9\n---\nbody\n", encoding="utf-8")
+    with pytest.raises(WorkflowParseError) as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.message == (
+        "PARENT_REVIEW.md takes no front matter; settings belong in WORKFLOW.md"
+    )
+    assert info.value.path == review.resolve()
+
+
+def test_triage_md_front_matter_is_still_refused_in_its_own_words(tmp_path: Path) -> None:
+    wf_path = _write_good(tmp_path)
+    (tmp_path / "TRIAGE.md").write_text("---\nx: 1\n---\nbody\n", encoding="utf-8")
+    with pytest.raises(WorkflowParseError) as info:
+        load_workflow(wf_path, environ={"TOKEN": "t"})
+    assert info.value.message == "TRIAGE.md takes no front matter; settings belong in WORKFLOW.md"

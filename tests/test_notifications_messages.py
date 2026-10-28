@@ -11,6 +11,7 @@ from issuebot.events import (
     IssueCancelled,
     IssueCompleted,
     NotificationSent,
+    ParentReviewState,
     PrOpened,
     RunEnded,
     RunStarted,
@@ -233,6 +234,18 @@ def test_issue_completed_with_no_change_reads_differently_from_a_merge() -> None
         issue_number=42, issue_identifier="repo-42", pr_url=None, resolution="no_change"
     )
     assert fmt(event) == f":mag: {ISSUE} closed with no change needed"
+
+
+def test_a_parent_review_completion() -> None:
+    event = IssueCompleted(
+        issue_number=42, issue_identifier="repo-42", pr_url=None, resolution="parent_review"
+    )
+    assert fmt(event) == f":tada: {ISSUE} complete · the parent review found the ask met"
+
+
+def test_a_parent_review_state_has_no_slack_line() -> None:
+    event = ParentReviewState(issue_number=42, issue_identifier="repo-42", reviews=1, gap_rounds=0)
+    assert fmt(event) is None
 
 
 def test_issue_cancelled() -> None:

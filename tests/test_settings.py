@@ -51,6 +51,17 @@ def test_triage_settings_defaults() -> None:
         Settings.model_validate({**MINIMAL, "triage": {"max_sub_issues": 21}})
 
 
+def test_parent_review_defaults() -> None:
+    triage = Settings.model_validate(MINIMAL).triage
+    assert (triage.max_gap_rounds, triage.max_parent_reviews) == (2, 6)
+
+
+@pytest.mark.parametrize("change", [{"max_gap_rounds": -1}, {"max_parent_reviews": 0}])
+def test_parent_review_limits_are_bounded(change: dict[str, int]) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**MINIMAL, "triage": change})
+
+
 def test_minimal_config_applies_every_default() -> None:
     s = Settings.model_validate(MINIMAL)
     assert s.github.repo == "owner/repo"
