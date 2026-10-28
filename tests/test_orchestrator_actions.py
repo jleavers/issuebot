@@ -1372,37 +1372,6 @@ async def test_triage_escape_removes_the_label_first_then_comments(tmp_path: Pat
     assert (changed.from_label, changed.to_label) == ("issuebot/triage-todo", None)
 
 
-async def test_triage_escape_can_put_triage_complete_back(tmp_path: Path) -> None:
-    """A split parent keeps `triage-complete`: its steps' order is keyed on it (spec 2026-10-25,
-    section 5), so the hand-back that drops `triage-todo` restores it in the same write."""
-    h = Harness(tmp_path)
-    h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)
-    h.github.calls.clear()
-    outcome = await triage_escape(
-        h.github,
-        h.bus,
-        h.github.issue(42),
-        title="already split",
-        reason="Already split.",
-        way_back="Remove its sub-issues.",
-        now=NOW,
-        restore_complete=True,
-    )
-    assert outcome == "applied"
-    assert [name for name, _ in h.github.calls if name in ("edit_labels", "comment")] == [
-        "edit_labels",
-        "comment",
-    ]
-    assert h.github.issue(42).labels == ("issuebot/triage-complete",)
-    assert h.recorder.kinds == ["state_changed", "blocked"]
-    changed = h.recorder.events[0]
-    assert isinstance(changed, StateChanged)
-    assert (changed.from_label, changed.to_label) == (
-        "issuebot/triage-todo",
-        "issuebot/triage-complete",
-    )
-
-
 async def test_triage_escape_whose_label_write_fails_writes_nothing(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/triage-todo",), number=42)

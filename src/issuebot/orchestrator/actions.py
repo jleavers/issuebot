@@ -496,32 +496,15 @@ async def triage_escape(
     reason: str,
     way_back: str,
     now: datetime,
-    restore_complete: bool = False,
 ) -> EscapeOutcome:
     """Hand a triage candidate back to a human: drop ``triage_todo``, then say why.
 
     The triage track has no state label to clear and no workpad, so this removes only the
-    label that makes the issue a candidate. A human adds it again to try once more.
-    ``restore_complete`` adds ``triage_complete`` in the same write: a split parent keeps it,
-    because its steps' order is keyed on it (spec 2026-10-25, section 5).
+    label that makes the issue a candidate. A human adds it again to try once more. An issue
+    with sub-issues is handed over by ``parent_hand_over`` instead, which keeps
+    ``triage_complete`` on it (spec 2026-10-25, section 6).
     """
     labels = adapter.labels
-    if restore_complete:
-        return await _hand_back(
-            adapter,
-            bus,
-            issue,
-            prefix="triage_escape",
-            title=title,
-            reason=reason,
-            way_back=way_back,
-            from_label=labels.triage_todo,
-            write_label=lambda: adapter.edit_labels(
-                issue.number, add=[labels.triage_complete], remove=[labels.triage_todo]
-            ),
-            now=now,
-            to_label=labels.triage_complete,
-        )
     return await _hand_back(
         adapter,
         bus,
