@@ -5751,8 +5751,7 @@ def test_run_once_triage_refuses_an_issue_that_already_has_sub_issues(
     fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
     fake_github.add_issue("Step one", number=43)
-    fake_github._issues[42].children.append(43)
-    fake_github._issues[43].parent = 42
+    fake_github.link_sub_issue(42, 43)
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
     out = capsys.readouterr().out
