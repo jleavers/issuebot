@@ -5,7 +5,14 @@ import json
 import pytest
 
 from issuebot.agent.scrub import Scrubber
-from issuebot.agent.verdict import VerdictError, parse_verdict, verdict_schema
+from issuebot.agent.verdict import (
+    BODY_LIMIT,
+    REASON_LIMIT,
+    TITLE_LIMIT,
+    VerdictError,
+    parse_verdict,
+    verdict_schema,
+)
 
 SCRUB = Scrubber(secrets=["s3cret-token"])
 GOOD_SPLIT = {
@@ -52,6 +59,31 @@ def test_parse_accepts_a_fits_with_no_sub_issues() -> None:
             {"sub_issues": [{**GOOD_SPLIT["sub_issues"][0], "kind": "human"}]},
             "kind must be issuebot or operator",
         ),
+        # Distinct is compared stripped and casefolded: either half alone lets this pair through.
+        (
+            {
+                "sub_issues": [
+                    {**GOOD_SPLIT["sub_issues"][1], "title": " Write the plan "},
+                    {**GOOD_SPLIT["sub_issues"][1], "title": "write the plan"},
+                ]
+            },
+            "sub-issue titles must be distinct",
+        ),
+        (
+            {"sub_issues": [{"title": "Write the plan", "body": "From the spec."}]},
+            "missing field kind in a sub-issue",
+        ),
+        ({"sub_issues": {}}, "sub_issues must be an array"),
+        ({"sub_issues": [{**GOOD_SPLIT["sub_issues"][1], "title": ""}]}, "title must not be empty"),
+        (
+            {"sub_issues": [{**GOOD_SPLIT["sub_issues"][1], "title": "   "}]},
+            "title must not be empty",
+        ),
+        ({"sub_issues": [{**GOOD_SPLIT["sub_issues"][1], "body": ""}]}, "body must not be empty"),
+        (
+            {"sub_issues": [{**GOOD_SPLIT["sub_issues"][1], "body": "\n\t "}]},
+            "body must not be empty",
+        ),
         ({"summary": 7}, "summary must be a string"),
         ({"extra": "x"}, "unexpected field extra"),
     ],
@@ -59,6 +91,42 @@ def test_parse_accepts_a_fits_with_no_sub_issues() -> None:
 def test_parse_refuses_malformed_verdicts(change: dict, message: str) -> None:
     with pytest.raises(VerdictError, match=message):
         parse_verdict({**GOOD_SPLIT, **change}, max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_parse_refuses_a_verdict_that_is_not_an_object() -> None:
+    with pytest.raises(VerdictError, match="the verdict must be an object"):
+        parse_verdict([], max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_parse_refuses_a_sub_issue_that_is_not_an_object() -> None:
+    raw = {**GOOD_SPLIT, "sub_issues": ["a string"]}
+    with pytest.raises(VerdictError, match="a sub-issue must be an object"):
+        parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_parse_refuses_a_verdict_missing_a_field() -> None:
+    raw = {name: value for name, value in GOOD_SPLIT.items() if name != "summary"}
+    with pytest.raises(VerdictError, match="missing field summary in the verdict"):
+        parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_a_body_may_be_as_long_as_the_limit_and_no_longer() -> None:
+    step = GOOD_SPLIT["sub_issues"][1]
+    at_limit = {**GOOD_SPLIT, "sub_issues": [{**step, "body": "x" * BODY_LIMIT}]}
+    verdict = parse_verdict(at_limit, max_sub_issues=8, scrubber=SCRUB)
+    assert len(verdict.sub_issues[0].body) == BODY_LIMIT
+    over = {**GOOD_SPLIT, "sub_issues": [{**step, "body": "x" * (BODY_LIMIT + 1)}]}
+    with pytest.raises(VerdictError, match=f"body is longer than {BODY_LIMIT} characters"):
+        parse_verdict(over, max_sub_issues=8, scrubber=SCRUB)
+
+
+def test_a_reason_may_be_as_long_as_the_limit_and_no_longer() -> None:
+    at_limit = {**GOOD_SPLIT, "summary": "x" * REASON_LIMIT}
+    verdict = parse_verdict(at_limit, max_sub_issues=8, scrubber=SCRUB)
+    assert len(verdict.summary) == REASON_LIMIT
+    over = {**GOOD_SPLIT, "summary": "x" * (REASON_LIMIT + 1)}
+    with pytest.raises(VerdictError, match=f"summary is longer than {REASON_LIMIT} characters"):
+        parse_verdict(over, max_sub_issues=8, scrubber=SCRUB)
 
 
 def test_parse_refuses_more_steps_than_the_cap() -> None:
@@ -115,6 +183,16 @@ def test_the_schema_matches_the_parser() -> None:
         "ignored_requests",
         "sub_issues",
     }
+    for name in ("summary", "fits_caps", "lands_fast", "needs_human", "ignored_requests"):
+        assert schema["properties"][name]["maxLength"] == REASON_LIMIT
+    item = schema["properties"]["sub_issues"]["items"]
+    fields = item["properties"]
+    assert fields["title"]["maxLength"] == TITLE_LIMIT
+    assert fields["body"]["maxLength"] == BODY_LIMIT
+    assert fields["title"]["minLength"] == fields["body"]["minLength"] == 1
+    assert set(item["required"]) == {"title", "body", "kind"}
+    assert item["additionalProperties"] is False
+    assert fields["kind"]["enum"] == ["issuebot", "operator"]
 
 
 def test_an_unknown_key_that_is_a_credential_is_not_echoed() -> None:
@@ -122,6 +200,17 @@ def test_an_unknown_key_that_is_a_credential_is_not_echoed() -> None:
         with pytest.raises(VerdictError) as info:
             parse_verdict({**GOOD_SPLIT, key: "x"}, max_sub_issues=8, scrubber=SCRUB)
         assert key not in str(info.value)
+
+
+def test_an_unknown_key_short_enough_to_name_is_scrubbed_first() -> None:
+    # An identifier of at most 40 characters is named, so this is the key that reaches the
+    # scrub: `ghp_` and 36 alphanumerics, which the GitHub-token shape masks.
+    key = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    assert key.isidentifier() and len(key) == 40
+    with pytest.raises(VerdictError) as info:
+        parse_verdict({**GOOD_SPLIT, key: "x"}, max_sub_issues=8, scrubber=SCRUB)
+    assert key not in str(info.value)
+    assert "unexpected field *** in the verdict" in str(info.value)
 
 
 def test_a_non_string_key_is_a_verdict_error() -> None:
