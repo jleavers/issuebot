@@ -1258,6 +1258,27 @@ async def test_triage_keys_lists_only_triage_directories(
 
 
 @posix
+async def test_a_triage_named_link_to_a_directory_is_not_a_key(
+    tmp_path: Path, make_issue: Callable[..., Issue]
+) -> None:
+    """The startup sweep removes whatever ``triage_keys`` returns, so a link that is named
+    like a triage clone must not be one, or the sweep would empty its target."""
+    manager, _ = make_manager(tmp_path)
+    await manager.create_triage(make_issue(identifier="example-2"))
+    await manager.create_triage(make_issue(identifier="example-3"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep"
+    sentinel.write_text("not the worker's", encoding="utf-8")
+    (manager.root / "linked.triage").symlink_to(outside)
+    keys = manager.triage_keys()
+    assert keys == [triage_key("example-2"), triage_key("example-3")]
+    for key in keys:
+        assert await manager.remove_triage_key(key) is True
+    assert sentinel.is_file()
+
+
+@posix
 async def test_the_sweep_removes_every_key_triage_keys_returns(
     tmp_path: Path, make_issue: Callable[..., Issue]
 ) -> None:

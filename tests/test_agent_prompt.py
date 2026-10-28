@@ -942,7 +942,13 @@ def test_triage_limits_come_from_the_work_runs_settings() -> None:
     settings = Settings.model_validate(
         {
             "github": {"repo": "o/r"},
-            "agent": {"max_turns": 7, "run_timeout_ms": 90 * 60_000, "max_conflict_reworks": 2},
+            "agent": {
+                "max_turns": 7,
+                "run_timeout_ms": 90 * 60_000,
+                "max_conflict_reworks": 2,
+                # A value no other limit here carries, so reading the wrong field fails.
+                "max_issue_cost_usd": 12.5,
+            },
             "claude": {"max_budget_usd": 3.5},
             "triage": {"max_turns": 1, "max_budget_usd": 2.0},
         }
@@ -952,7 +958,7 @@ def test_triage_limits_come_from_the_work_runs_settings() -> None:
         max_budget_usd=3.5,
         run_timeout_minutes=90,
         max_conflict_reworks=2,
-        max_issue_cost_usd=0.0,
+        max_issue_cost_usd=12.5,
     )
 
 
