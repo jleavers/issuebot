@@ -465,15 +465,19 @@ async def _hand_back(
             error=str(exc),
             category=exc.category,
         )
-    bus.publish(
-        StateChanged(
-            issue_number=issue.number,
-            issue_identifier=issue.identifier,
-            from_label=from_label,
-            to_label=to_label,
-            actor="issuebot",
+    # A parent hand-over finding `triage_complete` already there moves no label, and Slack
+    # would read it as that label → itself ahead of the `blocked` line (spec 2026-10-25,
+    # section 7).
+    if to_label is None or from_label != to_label:
+        bus.publish(
+            StateChanged(
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                from_label=from_label,
+                to_label=to_label,
+                actor="issuebot",
+            )
         )
-    )
     if blocked:
         bus.publish(
             Blocked(issue_number=issue.number, issue_identifier=issue.identifier, reason=reason)
@@ -534,9 +538,10 @@ async def parent_hand_over(
 
     Every hand-over of a parent takes this one shape (spec 2026-10-25, section 6). The write
     adds ``triage_complete`` as it removes ``triage_todo``, so a parent a human swapped to
-    ``triage_todo`` never ends with neither, which would release every held step. ``blocked``
-    is false for a note that is not a block, such as steps still open. ``reason`` is
-    published as given: the caller scrubs it.
+    ``triage_todo`` never ends with neither, which would release every held step. A parent
+    already wearing only ``triage_complete`` -- a hand-over from the watch -- moves no label,
+    so it publishes no ``StateChanged``. ``blocked`` is false for a note that is not a block,
+    such as steps still open. ``reason`` is published as given: the caller scrubs it.
     """
     labels = adapter.labels
     return await _hand_back(

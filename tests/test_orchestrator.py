@@ -6377,6 +6377,34 @@ async def test_a_parent_without_a_record_is_not_reviewed(tmp_path: Path) -> None
     assert h.calls("parent_steps") == []
 
 
+async def test_a_fits_on_a_watched_parent_ends_its_watch(tmp_path: Path) -> None:
+    """Section 6: a parent whose steps a human unlinked and re-triaged as `fits` is no longer a
+    split, so its record is finished. Sub-issues linked and closed by hand later wait for a
+    human's `triage-todo`, as on any parent triage did not split."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    h.add_triage_issue(10)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    [state] = parent_states(h, 10)
+    assert (state.finished, state.handed_over) == (True, None)
+    assert h.orchestrator._parents[10].finished
+    for child in (11, 12):
+        h.github.add_issue(f"Step {child}", number=child)
+        h.github.link_sub_issue(10, child)
+        h.github.close_issue(child)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    assert h.orchestrator.running == {}
+
+
+async def test_a_fits_files_no_record_on_an_issue_without_one(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(10)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    assert parent_states(h, 10) == [] and 10 not in h.orchestrator._parents
+
+
 async def test_a_split_filed_by_triage_is_watched(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.add_triage_issue(10)
@@ -6568,6 +6596,39 @@ async def test_a_met_whose_close_failed_is_closed_on_the_retry(tmp_path: Path) -
     assert h.orchestrator._parents[10].finished
 
 
+async def test_a_met_whose_close_landed_but_errored_is_still_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rulings 8 and 15: a close GitHub applied but answered with an error, a 502 that landed.
+    The retry finds the parent closed and wearing `complete`, the filing's own writes, so the
+    verdict is still owed: it comments and announces the close once, and the review counts."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    close = h.github.close_as_completed
+
+    async def close_then_fail(number: int) -> None:
+        await close(number)
+        monkeypatch.setattr(h.github, "close_as_completed", close)
+        raise GitHubError("transport", "HTTP 502: Bad Gateway")
+
+    monkeypatch.setattr(h.github, "close_as_completed", close_then_fail)
+    await h.exit(h.triage_sessions.runs[0], **MET_REVIEW)
+    assert h.github.issue(10).github_state == "closed"
+    assert h.github.comments_for(10) == [] and "10" in h.orchestrator._parent_pending
+    await h.tick()
+    issue = h.github.issue(10)
+    assert (issue.github_state, issue.state) == ("closed", StateLabel.COMPLETE)
+    assert len(h.github.comments_for(10)) == 1
+    [changed] = h.recorder.of(StateChanged)
+    assert (changed.from_label, changed.to_label) == (None, h.labels.complete)
+    [completed] = h.recorder.of(IssueCompleted)
+    assert completed.resolution == "parent_review"
+    record = h.orchestrator._parents[10]
+    assert (record.finished, record.reviews) == (True, 1)
+    assert h.orchestrator._parent_pending == {}
+
+
 async def test_a_closed_parent_is_no_longer_watched(tmp_path: Path) -> None:
     """Review focus 5: a parent a human closes gets no review and no comment. Its record is
     finished, and the watch stops reading it."""
@@ -6737,6 +6798,8 @@ async def test_the_review_cap_hands_the_parent_over(tmp_path: Path) -> None:
     assert comment.body.endswith(
         "It has had 6 reviews. Add `issuebot/triage-todo` to review it again with its count reset."
     )
+    # Section 7: a hand-over the watch makes moves no label, so it reaches Slack as `blocked`.
+    assert h.recorder.of(StateChanged) == []
     [blocked] = h.recorder.of(Blocked)
     assert blocked.issue_number == 10
     assert h.labels.triage_complete in h.github.issue(10).labels
@@ -6916,16 +6979,18 @@ async def test_the_gap_limit_files_nothing_and_hands_over(tmp_path: Path) -> Non
     assert [child.number for child in await h.github.sub_issues(10)] == [11, 12]
     [comment] = h.github.comments_for(10)
     assert comment.body.startswith("### Issuebot parent review gap limit (")
-    assert (
-        "The review found gaps again after 2 gap rounds, so it filed nothing: What the review "
-        "found."
-    ) in comment.body
     assert comment.body.endswith(
-        "What it would have filed:\n- First gap\n- Second gap\n\nFile what is still needed "
-        "yourself, or add `issuebot/triage-todo` to review it afresh with its rounds reset."
+        "\n\nThe review found gaps again after 2 gap rounds, so it filed nothing.\n\n"
+        "What it found: What the review found.\n\n"
+        "What it would have filed:\n- First gap\n- Second gap\n\n"
+        "File what is still needed yourself. issuebot will not review this issue again until "
+        "`issuebot/triage-todo` is added, which reviews it afresh with its rounds reset."
     )
     assert h.github.issue(10).labels == (h.labels.triage_complete,)
+    # The model's summary is the note's, not the reason every later record event carries.
     [blocked] = h.recorder.of(Blocked)
+    assert blocked.reason == "The review found gaps again after 2 gap rounds, so it filed nothing."
+    assert h.recorder.of(StateChanged) == []
     record = h.orchestrator._parents[10]
     assert (record.reviews, record.gap_rounds, record.handed_over) == (1, 2, blocked.reason)
     state = parent_states(h, 10)[-1]
@@ -6934,6 +6999,26 @@ async def test_the_gap_limit_files_nothing_and_hands_over(tmp_path: Path) -> Non
     await h.tick()
     assert len(h.calls("parent_steps")) == reads
     assert len(h.triage_sessions.runs) == 1
+
+
+async def test_with_no_gap_rounds_the_first_gap_is_handed_over(tmp_path: Path) -> None:
+    """`triage.max_gap_rounds: 0` hands over the first `gap`, and the note does not say "again"
+    of a review that found gaps for the first time."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    h.write_overlay("---\ntriage:\n  max_gap_rounds: 0\n---\n")
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **GAP_REVIEW)
+    assert h.calls("create_sub_issue") == []
+    [blocked] = h.recorder.of(Blocked)
+    assert blocked.reason == (
+        "The review found gaps, and `triage.max_gap_rounds` is 0, so it filed nothing."
+    )
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review gap limit (")
+    assert "What it would have filed:\n- The gap\n\n" in comment.body
+    record = h.orchestrator._parents[10]
+    assert (record.reviews, record.gap_rounds, record.handed_over) == (1, 0, blocked.reason)
 
 
 async def test_a_next_past_the_gap_rounds_is_still_filed(tmp_path: Path) -> None:
@@ -7171,6 +7256,27 @@ async def test_a_stale_gap_past_the_limit_hands_nothing_over(tmp_path: Path) -> 
     assert h.triage_sessions.runs[-1].kwargs["parent_review"] == ParentReviewRun(
         reviews=0, gap_rounds=2
     )
+
+
+async def test_a_gap_past_the_limit_is_stale_once_a_human_files_one_of_its_steps(
+    tmp_path: Path,
+) -> None:
+    """A gap past the limit never writes, so a step after the ones the review saw is a human's
+    whatever its title. Filed under a draft's title while the review ran, it makes the verdict
+    stale, and no note lists as still needed a step that is already there."""
+    record = ParentRecord(identifier="repo-10", gap_rounds=2)
+    h = Harness(tmp_path, initial_parents={10: record})
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.add_issue("First gap", number=13, author="maintainer")
+    h.github.link_sub_issue(10, 13)
+    with capture_logs() as logs:
+        await h.exit(h.triage_sessions.runs[0], **review_verdict("gap", "First gap", "Second gap"))
+    assert h.github.comments_for(10) == [] and h.recorder.of(Blocked) == []
+    [line] = [entry for entry in logs if entry["event"] == "parent_review_discarded"]
+    assert (line["issue_number"], line["reason"]) == (10, "steps changed")
+    assert h.orchestrator._parents[10] == record
+    assert h.orchestrator._parent_pending == {} and h.orchestrator._parent_handovers == {}
 
 
 async def test_a_gap_past_the_limit_whose_read_failed_is_handed_over_on_the_retry(

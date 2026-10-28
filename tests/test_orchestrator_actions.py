@@ -1466,16 +1466,13 @@ async def test_parent_hand_over_puts_triage_complete_back(tmp_path: Path) -> Non
 
 
 async def test_parent_hand_over_on_an_automatic_review(tmp_path: Path) -> None:
+    """Section 7: a hand-over from the watch moves no label, so Slack hears it as `blocked`
+    alone, not as `triage-complete` → `triage-complete` first."""
     h = Harness(tmp_path)
     h.github.add_issue("Task", labels=("issuebot/triage-complete",), number=42)
     assert await hand_over(h) == "applied"
     assert h.github.issue(42).labels == ("issuebot/triage-complete",)
-    changed = h.recorder.events[0]
-    assert isinstance(changed, StateChanged)
-    assert (changed.from_label, changed.to_label) == (
-        "issuebot/triage-complete",
-        "issuebot/triage-complete",
-    )
+    assert h.recorder.kinds == ["blocked"]
 
 
 async def test_a_waiting_note_is_not_blocked(tmp_path: Path) -> None:

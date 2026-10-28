@@ -189,15 +189,15 @@ CLOSED = ((11, "Step 11", "closed"), (12, "Step 12", "closed"))
 
 
 def test_steps_as_seen_when_unchanged() -> None:
-    assert steps_as_seen(titled_steps(*CLOSED), SEEN, NEXT)
-    assert steps_as_seen(titled_steps(*CLOSED), SEEN, MET)
+    assert steps_as_seen(titled_steps(*CLOSED), SEEN, NEXT.sub_issues)
+    assert steps_as_seen(titled_steps(*CLOSED), SEEN, MET.sub_issues)
 
 
 def test_steps_a_failed_try_created_are_the_verdicts_own() -> None:
     """Ruling 15: once the first write has landed the verdict is owed, and the first writes of a
     `next` are its steps. A retry matches them by title, as `apply_parent_review` does."""
     created = (13, "third STEP", "open")
-    assert steps_as_seen(titled_steps(*CLOSED, created), SEEN, NEXT)
+    assert steps_as_seen(titled_steps(*CLOSED, created), SEEN, NEXT.sub_issues)
 
 
 @pytest.mark.parametrize(
@@ -211,11 +211,16 @@ def test_steps_a_failed_try_created_are_the_verdicts_own() -> None:
     ids=["a step reopened", "a step added", "a step unlinked", "reordered"],
 )
 def test_steps_changed(children: tuple[tuple[int, str, str], ...]) -> None:
-    assert not steps_as_seen(titled_steps(*children), SEEN, NEXT)
+    assert not steps_as_seen(titled_steps(*children), SEEN, NEXT.sub_issues)
 
 
-def test_a_met_verdict_owns_no_new_step() -> None:
-    assert not steps_as_seen(titled_steps(*CLOSED, (13, "Third step", "open")), SEEN, MET)
+def test_a_filing_that_writes_no_step_owns_no_new_step() -> None:
+    """A `met`, or a `gap` past the gap limit: a step after the seen ones is a human's, even one
+    filed under a draft's title."""
+    added = titled_steps(*CLOSED, (13, "The gap", "open"))
+    assert not steps_as_seen(added, SEEN, MET.sub_issues)
+    assert steps_as_seen(added, SEEN, GAP.sub_issues)
+    assert not steps_as_seen(added, SEEN, ())
 
 
 def test_the_record_is_watched_until_handed_over_or_finished() -> None:
@@ -357,6 +362,19 @@ async def test_met_retried_after_the_close_only_comments() -> None:
     assert len(github.comments_for(10)) == 1
     assert len([n for n, _ in github.calls if n == "close_as_completed"]) == 1
     assert recorder.kinds == ["state_changed", "issue_completed"]
+
+
+def test_the_next_line_counts_its_drafts_in_prose() -> None:
+    kwargs = dict(
+        counts=COUNTS, run_id="r", attempt=1, turns=1, cost_usd=0.1, labels=LABELS, now=NOW
+    )
+    one = make_verdict("next", SubIssueDraft(title="Third step", body="b", kind="issuebot"))
+    filed = [SubIssue(number=13, title="Third step", url="u13", state="open")]
+    single = parent_review_comment(one, filed, **kwargs)  # type: ignore[arg-type]
+    assert "has filed the next 1 sub-issue, in order," in single
+    filed.append(SubIssue(number=14, title="Fourth step", url="u14", state="open"))
+    pair = parent_review_comment(NEXT, filed, **kwargs)  # type: ignore[arg-type]
+    assert "has filed the next 2 sub-issues, in order," in pair
 
 
 def test_comment_lists_ignored_requests_only_when_present() -> None:

@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from issuebot.agent.verdict import ParentReviewVerdict
+from issuebot.agent.verdict import ParentReviewVerdict, SubIssueDraft
 from issuebot.config import GitHubLabels
 from issuebot.events import EventBus, IssueCompleted, ParentReviewState, StateChanged
 from issuebot.github import GitHubAdapter, Issue, ParentSteps, SubIssue
@@ -82,16 +82,18 @@ def parent_review_due(steps: ParentSteps, labels: GitHubLabels) -> bool:
     )
 
 
-def steps_as_seen(steps: ParentSteps, seen: Sequence[int], verdict: ParentReviewVerdict) -> bool:
+def steps_as_seen(steps: ParentSteps, seen: Sequence[int], filing: Sequence[SubIssueDraft]) -> bool:
     """Whether ``steps`` are still the ones a review saw (``seen``), every one closed.
 
-    Steps after those pass only when ``verdict`` files them, matched by title as
-    ``apply_parent_review`` matches them: an earlier try at filing it created them before it
-    failed, and the verdict is owed once its first write has landed. Anything else -- a step
-    reopened, added or unlinked -- makes the verdict stale.
+    Steps after those pass only when they are among ``filing``, the drafts the filing writes,
+    matched by title as ``apply_parent_review`` matches them: an earlier try at filing created
+    them before it failed, and the verdict is owed once its first write has landed. A filing
+    that writes no step -- a ``met``, or a ``gap`` past the gap limit -- passes none, so a step
+    a human filed under a draft's title is a change too. Anything else -- a step reopened,
+    added or unlinked -- makes the verdict stale.
     """
     head, rest = steps.sub_issues[: len(seen)], steps.sub_issues[len(seen) :]
-    drafts = {_key(draft.title) for draft in verdict.sub_issues}
+    drafts = {_key(draft.title) for draft in filing}
     return (
         tuple(step.number for step in head) == tuple(seen)
         and all(step.state == "closed" for step in head)
@@ -121,9 +123,9 @@ def parent_review_comment(
     if verdict.verdict == "next":
         lines.append(
             f"**Verdict: next.** The steps so far were a phase, so issuebot has filed the "
-            f"next {len(verdict.sub_issues)} sub-issues, in order, after the others. Label "
-            f"every issuebot step `{labels.todo}` at once if you like: issuebot starts each "
-            f"only when every step before it has closed."
+            f"next {plural(len(verdict.sub_issues), 'sub-issue')}, in order, after the others. "
+            f"Label every issuebot step `{labels.todo}` at once if you like: issuebot starts "
+            f"each only when every step before it has closed."
         )
     elif verdict.verdict == "gap":
         lines.append(

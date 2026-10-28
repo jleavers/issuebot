@@ -1973,6 +1973,10 @@ class Orchestrator:
         if pending.verdict.verdict == "split":
             # Section 6: a parent whose triage filed its steps is watched from here on.
             self._record_parent(issue.number, ParentRecord(identifier=issue.identifier))
+        elif (record := self._parents.get(issue.number)) is not None and not record.finished:
+            # A `fits` on a former split, its steps unlinked: no longer a parent triage split,
+            # so sub-issues linked by hand later wait for a human's `triage-todo` (section 6).
+            self._record_parent(issue.number, replace(record, finished=True))
         self._log.info(
             "triage_filed",
             issue_number=issue.number,
@@ -2562,22 +2566,28 @@ class Orchestrator:
         steps changed while the review ran is discarded there and hands nothing over. The
         review counts, because the worker acted on its verdict (ruling 7), whether or not GitHub
         took the note: one it refused is owed like any parent hand-over.
+
+        The reason is a fixed sentence, since it is the `Blocked` line Slack shows and every
+        later record event carries; the review's own summary goes in the note's body.
         """
         settings = self._workflow.config
         verdict = pending.verdict
         rounds = pending.counts.max_gap_rounds
+        found = (
+            f"The review found gaps again after {plural(rounds, 'gap round')}"
+            if rounds
+            else "The review found gaps, and `triage.max_gap_rounds` is 0"
+        )
         drafts = "\n".join(f"- {draft.title}" for draft in verdict.sub_issues)
         await self._hand_over_parent(
             issue,
             title="parent review gap limit",
-            reason=(
-                f"The review found gaps again after {plural(rounds, 'gap round')}, so it filed "
-                f"nothing: {verdict.summary}"
-            ),
+            reason=f"{found}, so it filed nothing.",
             way_back=(
-                f"What it would have filed:\n{drafts}\n\nFile what is still needed yourself, or "
-                f"add `{settings.github.labels.triage_todo}` to review it afresh with its rounds "
-                "reset."
+                f"What it found: {verdict.summary}\n\nWhat it would have filed:\n{drafts}\n\n"
+                "File what is still needed yourself. issuebot will not review this issue again "
+                f"until `{settings.github.labels.triage_todo}` is added, which reviews it afresh "
+                "with its rounds reset."
             ),
         )
         # After the hand-over, so the count keeps the `handed_over` it has just recorded.
@@ -2680,7 +2690,10 @@ class Orchestrator:
 
         A failed try's own writes are not changes. The steps it created before failing are the
         verdict's (``steps_as_seen``), and so is ``complete`` on a ``met`` parent: that label is
-        the close's first write, and its retry must still close the parent and say so.
+        the close's first write, and its retry must still close the parent and say so. A
+        ``met`` parent closed and wearing it is the close itself landing under an error (a 502
+        that still applied), so its events and comment are owed too, and the retry's label
+        write and close repeat what is already there.
         """
         labels = self._workflow.config.github.labels
         triage_labels = {labels.triage_todo.lower(), labels.triage_complete.lower()}
@@ -2692,6 +2705,8 @@ class Orchestrator:
         elif pending.moved:
             return current
         elif current.github_state != "open":
+            if own and own.issubset(current.state_labels):
+                return current
             reason = "closed"
         elif set(current.state_labels) - own:
             reason = "state label"
@@ -2699,7 +2714,9 @@ class Orchestrator:
             reason = "triage labels removed"
         else:
             steps = (await self._adapter.parent_steps([current.number])).get(current.number)
-            if steps is not None and steps_as_seen(steps, pending.seen, pending.verdict):
+            # A gap past the gap limit is handed over and files no step, so it owns none.
+            filing = () if pending.past_gap_limit else pending.verdict.sub_issues
+            if steps is not None and steps_as_seen(steps, pending.seen, filing):
                 return current
             reason = "steps changed"
         if reason in ("closed", "missing"):

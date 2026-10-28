@@ -249,8 +249,10 @@ is never reviewed on its own. The review is the triage session with a prompt of 
   `issuebot/triage-complete`, closes the parent as completed and counts it in "issues closed".
 
 Two limits bound the loops. `triage.max_gap_rounds` (default 2): a `gap` once the rounds are
-spent files nothing and hands the parent over, while a `next` is still filed.
-`triage.max_parent_reviews` (default 6) is checked before an automatic review starts.
+spent files nothing and hands the parent over as `parent review gap limit`, while a `next` is
+still filed. At `0` the first `gap` is handed over. `triage.max_parent_reviews` (default 6) is
+checked before an automatic review starts: a parent that has had that many reviews is handed
+over as `parent review limit` instead.
 
 `issuebot/triage-todo` on an issue with sub-issues resets both counts and runs a review. With
 every step closed it starts at once. With a step still open the worker puts
@@ -263,8 +265,9 @@ Each has one way back, adding `issuebot/triage-todo`, which resets both counts a
 review. The title says which:
 
 - **`parent review limit`**: `triage.max_parent_reviews` reviews have run.
-- **`parent review gap limit`**: a `gap` after `triage.max_gap_rounds` rounds. The note lists
-  what it would have filed; file what is still needed yourself, or add `issuebot/triage-todo`.
+- **`parent review gap limit`**: a `gap` after `triage.max_gap_rounds` rounds. The note says
+  what the review found and lists what it would have filed. File what is still needed
+  yourself; nothing reviews the parent again until you add `issuebot/triage-todo`.
 - **`parent review failed`**: `agent.max_attempts` failed runs in a row. Fix the cause the
   note names first.
 - **`parent review not filed`**: GitHub refused the filing `agent.max_attempts` times. Unlink
@@ -290,6 +293,12 @@ cases need that label once:
 - **A split filed by `run-once --triage`** is watched from the worker's next restart, since the
   foreground run cannot tell the worker. For the same reason `run-once --triage` refuses an
   issue with sub-issues: its review runs on the worker.
+
+A verdict being filed is held in memory only. A restart between its first write and its
+comment leaves the steps it filed without a comment, and neither that review nor a `gap`'s
+round is counted. A `met` restarted between its label write and its close leaves the parent
+open with `issuebot/complete`: close it yourself, or take that label off and add
+`issuebot/triage-todo` to review it again.
 
 The watch costs one GraphQL point a tick (a `parent_steps` read) while any parent is watched,
 and only when a slot is free or a hand-over note is owed. A review's own read of the steps
