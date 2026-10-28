@@ -59,7 +59,7 @@ def test_parse_accepts_a_fits_with_no_sub_issues() -> None:
             {"sub_issues": [{**GOOD_SPLIT["sub_issues"][0], "kind": "human"}]},
             "kind must be issuebot or operator",
         ),
-        # Distinct is compared stripped and casefolded: either half alone lets this pair through.
+        # Distinct is compared stripped and casefolded: drop either and this pair gets through.
         (
             {
                 "sub_issues": [
@@ -105,6 +105,7 @@ def test_parse_refuses_a_sub_issue_that_is_not_an_object() -> None:
 
 
 def test_parse_refuses_a_verdict_missing_a_field() -> None:
+    # Its own test: the parametrisation above can add or replace a field but not delete one.
     raw = {name: value for name, value in GOOD_SPLIT.items() if name != "summary"}
     with pytest.raises(VerdictError, match="missing field summary in the verdict"):
         parse_verdict(raw, max_sub_issues=8, scrubber=SCRUB)
