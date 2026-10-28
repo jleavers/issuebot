@@ -14,6 +14,7 @@ from issuebot.github.models import (
     ParentSteps,
     RateLimit,
     RepoInfo,
+    ReviewStep,
     StateLabel,
     SubIssue,
     TrackerComment,
@@ -75,6 +76,16 @@ class GitHubAdapter(Protocol):
         """Each parent's labels and sub-issues (in GitHub's order), one read per
         ``ID_BATCH_SIZE`` parents. Numbers are deduplicated; one GitHub returns no issue for is
         absent from the result."""
+        ...
+
+    async def parent_review_steps(self, number: int) -> list[ReviewStep]:
+        """The parent's steps in GitHub's order, at most ``PAGE_SIZE``, in one query. Each
+        carries its close reason and, when a merged pull request closed it, that pull request
+        and its reviews. A parent GitHub does not return is ``GitHubError("response")``."""
+        ...
+
+    async def close_as_completed(self, number: int) -> None:
+        """Close the issue with the reason ``completed``."""
         ...
 
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:

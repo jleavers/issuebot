@@ -24,6 +24,7 @@ from issuebot.github.models import (
     ParentSteps,
     RateLimit,
     RepoInfo,
+    ReviewStep,
     StateLabel,
     SubIssue,
     TextEdit,
@@ -35,6 +36,7 @@ from issuebot.github.normalise import (
     label_name,
     optional_timestamp,
     parent_steps_from_node,
+    review_step_from_node,
     sub_issue_from_node,
 )
 from issuebot.github.runner import GhResult, GhRunner, GhRunnerLike
@@ -98,6 +100,7 @@ MAX_TERMINAL_PAGES = 150
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body bodyHTML state url createdAt updatedAt closedAt authorAssociation
   parent { number }
+  subIssuesSummary { total }
   author { login }
   labels(first: 50) { nodes { name } }
   assignees(first: 20) { nodes { login } }
@@ -232,7 +235,7 @@ def by_ids_query(numbers: Sequence[int]) -> str:
 
 def parent_steps_query(numbers: Sequence[int]) -> str:
     aliases = "\n".join(
-        f"    p{n}: issue(number: {n}) {{ number labels(first: 50) {{ nodes {{ name }} }}"
+        f"    p{n}: issue(number: {n}) {{ id number state labels(first: 50) {{ nodes {{ name }} }}"
         f" subIssues(first: {PAGE_SIZE}) {{ nodes {{ number title url state }} }} }}"
         for n in numbers
     )
@@ -240,6 +243,37 @@ def parent_steps_query(numbers: Sequence[int]) -> str:
         "query($owner: String!, $name: String!) {\n"
         "  repository(owner: $owner, name: $name) {\n"
         f"{aliases}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def parent_review_steps_query(number: int) -> str:
+    """One parent's steps with what a review reads of each: the close reason and, from the
+    last ``ClosedEvent``, the pull request that closed it with its reviews."""
+    return (
+        "query($owner: String!, $name: String!) {\n"
+        "  repository(owner: $owner, name: $name) {\n"
+        f"    issue(number: {number}) {{\n"
+        f"      subIssues(first: {PAGE_SIZE}) {{\n"
+        "        nodes {\n"
+        "          number title url bodyHTML state stateReason authorAssociation\n"
+        "          author { login }\n"
+        "          labels(first: 20) { nodes { name } }\n"
+        "          timelineItems(itemTypes: [CLOSED_EVENT], last: 1) {\n"
+        "            nodes { ... on ClosedEvent { closer { __typename\n"
+        "              ... on PullRequest {\n"
+        "                number title url bodyHTML merged authorAssociation\n"
+        "                author { login }\n"
+        "                reviews(first: 30) {\n"
+        "                  nodes { url state bodyHTML authorAssociation author { login } }\n"
+        "                }\n"
+        "              }\n"
+        "            } } }\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
         "  }\n"
         "}\n"
     )
@@ -477,6 +511,24 @@ class GhCliAdapter:
                     raise GitHubError("response", f"malformed parent record for alias p{number}")
                 found[number] = parent_steps_from_node(node)
         return found
+
+    async def parent_review_steps(self, number: int) -> list[ReviewStep]:
+        self._log.debug("parent_review_steps", issue_number=number)
+        data = await self._graphql(
+            parent_review_steps_query(number), {"owner": self._owner, "name": self._name}
+        )
+        connection = _dig(data, "repository", "issue", "subIssues")
+        nodes = connection.get("nodes") if isinstance(connection, Mapping) else None
+        if not isinstance(nodes, list):
+            raise GitHubError("response", f"GraphQL response has no issue #{number} subIssues")
+        return [review_step_from_node(node) for node in nodes]
+
+    async def close_as_completed(self, number: int) -> None:
+        self._log.debug("close_as_completed", issue_number=number)
+        await self._gh(
+            ["api", "-X", "PATCH", f"repos/{self.repo}/issues/{number}", "--input", "-"],
+            stdin=json.dumps({"state": "closed", "state_reason": "completed"}),
+        )
 
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
         self._log.debug("create_sub_issue", issue_number=parent)

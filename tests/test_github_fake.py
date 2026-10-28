@@ -546,3 +546,46 @@ async def test_fake_parent_steps(fake: FakeGitHub) -> None:
         (second.number, "open"),
     ]
     assert fake.issue(first.number).parent == parent.number
+
+
+async def test_fake_parent_review_steps(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Big thing", number=10)
+    for n in (11, 12, 13):
+        fake.add_issue(f"Step {n}", number=n)
+        fake.link_sub_issue(10, n)
+    pr = fake.open_pr(11, title="T", body="B")
+    fake.add_pr_review(pr.number, author="alice", association="MEMBER", body="fine")
+    fake.merge_pr(pr.number)
+    fake.close_issue(12, reason="NOT_PLANNED")
+    steps = await fake.parent_review_steps(parent.number)
+    assert [(s.number, s.state, s.state_reason) for s in steps] == [
+        (11, "closed", "COMPLETED"),
+        (12, "closed", "NOT_PLANNED"),
+        (13, "open", None),
+    ]
+    closer = steps[0].closed_by
+    assert closer is not None and (closer.number, closer.title) == (pr.number, "T")
+    assert "B" in closer.body_html
+    assert [(r.author, r.association, r.state) for r in closer.reviews] == [
+        ("alice", "MEMBER", "APPROVED")
+    ]
+    assert steps[1].closed_by is None and steps[2].closed_by is None
+    assert fake.calls[-1] == ("parent_review_steps", (10,))
+
+
+async def test_fake_close_as_completed(fake: FakeGitHub) -> None:
+    fake.add_issue("x", number=5)
+    await fake.close_as_completed(5)
+    assert fake.issue(5).github_state == "closed"
+    assert fake.calls[-1] == ("close_as_completed", (5,))
+
+
+async def test_fake_sub_issue_count_and_parent_steps_id_and_state(fake: FakeGitHub) -> None:
+    parent = fake.add_issue("Big thing")
+    assert fake.issue(parent.number).sub_issue_count == 0
+    await fake.create_sub_issue(parent.number, title="A", body="a")
+    assert fake.issue(parent.number).sub_issue_count == 1
+    steps = (await fake.parent_steps([parent.number]))[parent.number]
+    assert steps.id and steps.state == "open"
+    fake.close_issue(parent.number)
+    assert (await fake.parent_steps([parent.number]))[parent.number].state == "closed"

@@ -21,16 +21,23 @@ from issuebot.github.models import (
     LinkedPr,
     Mergeable,
     ParentSteps,
+    PrReview,
     PrState,
     RateLimit,
     RepoInfo,
+    ReviewStep,
     StateLabel,
     SubIssue,
     TextEdit,
     TrackerComment,
     is_workpad_body,
 )
-from issuebot.github.normalise import issue_from_node, label_name, parent_steps_from_node
+from issuebot.github.normalise import (
+    issue_from_node,
+    label_name,
+    parent_steps_from_node,
+    review_step_from_node,
+)
 from issuebot.github.state import (
     LABEL_STYLES,
     TERMINAL_SWEEP_ROLES,
@@ -86,6 +93,8 @@ class _FakeIssue:
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None = None
+    # GitHub's `stateReason`: set when the issue closes, `None` while it is open.
+    state_reason: str | None = None
     author_association: str = "NONE"
     comments: list[Comment] = field(default_factory=list)
     # (actor, label, at) for every label added, oldest first: GitHub's timeline, in miniature.
@@ -108,6 +117,9 @@ class _FakePr:
     merged_at: datetime | None = None
     mergeable: Mergeable = "mergeable"
     cross_repository: bool = False
+    title: str = ""
+    body: str = ""
+    reviews: list[PrReview] = field(default_factory=list)
 
 
 class FakeGitHub:
@@ -275,7 +287,9 @@ class FakeGitHub:
             if record is None:
                 continue
             node = {
+                "id": self._node_id(number),
                 "number": number,
+                "state": "OPEN" if record.state == "open" else "CLOSED",
                 "labels": {"nodes": [{"name": name} for name in record.labels]},
                 "subIssues": {
                     "nodes": [
@@ -291,6 +305,19 @@ class FakeGitHub:
             }
             found[number] = parent_steps_from_node(node)
         return found
+
+    async def parent_review_steps(self, number: int) -> list[ReviewStep]:
+        self._enter("parent_review_steps", number)
+        record = self._require_issue(number)
+        return [
+            review_step_from_node(copy.deepcopy(self._step_node(self._issues[child])))
+            for child in record.children
+        ]
+
+    async def close_as_completed(self, number: int) -> None:
+        self._enter("close_as_completed", number)
+        self._require_issue(number)
+        self.close_issue(number)
 
     async def create_sub_issue(self, parent: int, *, title: str, body: str) -> SubIssue:
         self._enter("create_sub_issue", parent, title, body)
@@ -535,6 +562,8 @@ class FakeGitHub:
         pr_number: int | None = None,
         author: str | None = None,
         cross_repository: bool = False,
+        title: str = "",
+        body: str = "",
     ) -> LinkedPr:
         """A pull request whose body closes ``issue_number``; issuebot's own unless said otherwise.
 
@@ -553,6 +582,8 @@ class FakeGitHub:
             closes=issue_number,
             author=self.login if author is None else author,
             cross_repository=cross_repository,
+            title=title,
+            body=body,
         )
         return self._linked_pr(self._prs[pr_number])
 
@@ -569,15 +600,40 @@ class FakeGitHub:
         """What GitHub's test merge would answer for the pull request from now on."""
         self._require_pr(pr_number).mergeable = mergeable
 
-    def close_issue(self, number: int) -> None:
+    def add_pr_review(
+        self,
+        pr_number: int,
+        *,
+        author: str,
+        association: str,
+        state: str = "APPROVED",
+        body: str = "",
+    ) -> None:
+        """A review of the pull request by someone else."""
+        pr = self._require_pr(pr_number)
+        anchor = f"pullrequestreview-{len(pr.reviews) + 1}"
+        pr.reviews.append(
+            PrReview(
+                author=author,
+                association=association,
+                state=state,
+                body_html=render_body_html(body) or "",
+                url=f"https://github.com/{self.repo}/pull/{pr_number}#{anchor}",
+            )
+        )
+
+    def close_issue(self, number: int, *, reason: str = "COMPLETED") -> None:
+        """Close the issue, recording GitHub's ``stateReason`` (``COMPLETED``, ``NOT_PLANNED``)."""
         record = self._require_issue(number)
         record.state = "closed"
+        record.state_reason = reason
         record.closed_at = self._now()
         record.updated_at = record.closed_at
 
     def reopen_issue(self, number: int) -> None:
         record = self._require_issue(number)
         record.state = "open"
+        record.state_reason = None
         record.closed_at = None
         record.updated_at = self._now()
 
@@ -649,6 +705,61 @@ class FakeGitHub:
             state="open" if record.state == "open" else "closed",
         )
 
+    def _node_id(self, number: int) -> str:
+        return f"I_{number}"
+
+    def _step_node(self, record: _FakeIssue) -> dict[str, Any]:
+        """A GraphQL-shaped step of ``parent_review_steps_query``: the issue, how it closed and,
+        when a merged pull request that closes it did, that pull request."""
+        closer = next(
+            (
+                pr
+                for pr in reversed(list(self._prs.values()))
+                if pr.closes == record.number and pr.state == "merged"
+            ),
+            None,
+        )
+        events: list[dict[str, Any]] = []
+        if record.state == "closed" and closer is not None:
+            events.append(
+                {
+                    "closer": {
+                        "__typename": "PullRequest",
+                        "number": closer.number,
+                        "title": closer.title,
+                        "url": f"https://github.com/{self.repo}/pull/{closer.number}",
+                        "bodyHTML": render_body_html(closer.body) or "",
+                        "merged": True,
+                        "authorAssociation": "NONE",
+                        "author": {"login": closer.author},
+                        "reviews": {
+                            "nodes": [
+                                {
+                                    "url": review.url,
+                                    "state": review.state,
+                                    "bodyHTML": review.body_html,
+                                    "authorAssociation": review.association,
+                                    "author": {"login": review.author},
+                                }
+                                for review in closer.reviews
+                            ]
+                        },
+                    }
+                }
+            )
+        return {
+            "number": record.number,
+            "title": record.title,
+            "url": self._issue_url(record.number),
+            "bodyHTML": render_body_html(record.body) or "",
+            "state": "OPEN" if record.state == "open" else "CLOSED",
+            "stateReason": record.state_reason,
+            "authorAssociation": record.author_association,
+            "author": {"login": record.author} if record.author is not None else None,
+            "labels": {"nodes": [{"name": name} for name in record.labels]},
+            "timelineItems": {"nodes": events},
+        }
+
     def _linked_pr(self, pr: _FakePr) -> LinkedPr:
         return LinkedPr(
             number=pr.number,
@@ -673,6 +784,7 @@ class FakeGitHub:
             "closedAt": record.closed_at.isoformat() if record.closed_at else None,
             "authorAssociation": record.author_association,
             "parent": {"number": record.parent} if record.parent is not None else None,
+            "subIssuesSummary": {"total": len(record.children)},
             "labels": {"nodes": [{"name": name} for name in record.labels]},
             "assignees": {"nodes": [{"login": login} for login in record.assignees]},
             "closedByPullRequestsReferences": {
