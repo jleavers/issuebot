@@ -5466,6 +5466,15 @@ TRIAGE_FITS = {
     "sub_issues": [],
 }
 
+TRIAGE_SPLIT = {
+    **TRIAGE_FITS,
+    "verdict": "split",
+    "sub_issues": [
+        {"title": "Part one", "body": "Do one.", "kind": "issuebot"},
+        {"title": "Part two", "body": "Do two.", "kind": "operator"},
+    ],
+}
+
 
 class StubTriage:
     """Stands in for run_triage: records the call and returns a configurable RunResult."""
@@ -5474,6 +5483,7 @@ class StubTriage:
         self.calls: list[dict[str, object]] = []
         self.stop_reason = "verdict"
         self.structured_output: object = TRIAGE_FITS
+        self.error: Exception | None = None
 
     async def __call__(
         self,
@@ -5487,7 +5497,9 @@ class StubTriage:
         attempt: int = 1,
         **kwargs: object,
     ) -> RunResult:
-        self.calls.append({"issue": issue, "attempt": attempt})
+        self.calls.append({"issue": issue, "workflow": workflow, "attempt": attempt})
+        if self.error is not None:
+            raise self.error
         return RunResult(
             run_id="20261025T081200Z-abc123",
             issue_number=issue.number,
@@ -5668,14 +5680,7 @@ def test_run_once_triage_files_a_split_verdict(
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
-    stub_triage.structured_output = {
-        **TRIAGE_FITS,
-        "verdict": "split",
-        "sub_issues": [
-            {"title": "Part one", "body": "Do one.", "kind": "issuebot"},
-            {"title": "Part two", "body": "Do two.", "kind": "operator"},
-        ],
-    }
+    stub_triage.structured_output = TRIAGE_SPLIT
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
     out = capsys.readouterr().out
@@ -5694,13 +5699,36 @@ def test_run_once_triage_without_a_verdict_writes_nothing(
     fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
     stub_triage.stop_reason = "max_turns"
+    # A valid split, so a run that filed whatever output it had would create sub-issues; a
+    # `fits` would prove nothing, since filing it creates none either.
+    stub_triage.structured_output = TRIAGE_SPLIT
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
     assert "triage: no verdict: max_turns" in capsys.readouterr().out
     assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
     assert fake_github.comments_for(42) == []
+    assert "create_sub_issue" not in [name for name, _ in fake_github.calls]
+    assert asyncio.run(fake_github.sub_issues(42)) == []
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        pytest.param({"verdict": "maybe"}, id="unknown-verdict"),
+        # A split whose *second* step is refused: a parse that filed step by step would have
+        # created the first child before it reached it.
+        pytest.param(
+            {
+                **TRIAGE_SPLIT,
+                "sub_issues": [
+                    {"title": "Part one", "body": "Do one.", "kind": "issuebot"},
+                    {"title": "", "body": "Do two.", "kind": "issuebot"},
+                ],
+            },
+            id="split-second-step-refused",
+        ),
+    ],
+)
 def test_run_once_triage_with_a_refused_verdict_writes_nothing(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -5708,15 +5736,49 @@ def test_run_once_triage_with_a_refused_verdict_writes_nothing(
     fake_github: FakeGitHub,
     stub_triage: StubTriage,
     recording_sink: type[RecordingSink],
+    output: dict[str, object],
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
-    stub_triage.structured_output = {"verdict": "maybe"}
+    stub_triage.structured_output = output
     path = _workflow_with_root(tmp_path)
     assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
     assert "triage: no verdict: verdict refused:" in capsys.readouterr().out
     assert fake_github.comments_for(42) == []
+    assert "create_sub_issue" not in [name for name, _ in fake_github.calls]
+    assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
+
+
+def test_run_once_triage_that_raises_writes_nothing_and_closes_the_sinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """Nothing catches a raising `run_triage`: the exception leaves `main`, nothing is filed,
+    and the `finally` still closes the sinks."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    closed: list[object] = []
+    close = cli._Sinks.close
+
+    async def recording_close(self: cli._Sinks) -> None:
+        closed.append(self)
+        await close(self)
+
+    monkeypatch.setattr("issuebot.cli._Sinks.close", recording_close)
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    stub_triage.error = RuntimeError("boom")
+    path = _workflow_with_root(tmp_path)
+    with pytest.raises(RuntimeError, match="boom"):
+        main(["run-once", "42", "--triage", "--workflow", str(path)])
+    assert len(stub_triage.calls) == 1
+    assert len(closed) == 1
+    assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
+    assert fake_github.comments_for(42) == []
+    assert "create_sub_issue" not in [name for name, _ in fake_github.calls]
 
 
 def test_run_once_triage_reports_a_github_failure_filing_the_verdict(
@@ -5762,6 +5824,31 @@ def test_run_once_triage_refuses_an_issue_that_already_has_sub_issues(
     assert stub_triage.calls == []
     assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
     assert fake_github.comments_for(42) == []
+
+
+def test_run_once_triage_runs_as_the_issues_bound_pool_account(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """Under a pooled `agent.run_as` the triage session gets the issue's bound account, as a
+    work run does (#121), not the pool."""
+    from issuebot.agent.accounts import AccountRegistry
+
+    monkeypatch.setenv("GH_TOKEN", "t")
+    issue = fake_github.add_issue("Add retry backoff", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    path = _workflow_with_root(tmp_path, a="agent:", b="  run_as: [agent-1, agent-2]")
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
+    [call] = stub_triage.calls
+    workflow = call["workflow"]
+    assert isinstance(workflow, Workflow)
+    assert workflow.config.agent.run_as == ("agent-1",)
+    assert not workflow.config.agent.run_as_pooled
+    registry = AccountRegistry(tmp_path / "ws", ("agent-1", "agent-2"))
+    assert registry.bound(issue.identifier) == "agent-1"
 
 
 def test_run_once_triage_fails_when_the_sub_issues_cannot_be_read(
