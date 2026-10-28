@@ -5334,6 +5334,26 @@ async def test_a_triage_run_stopped_by_a_close_is_no_failure_when_the_issue_reop
     assert h.triage_sessions.runs[-1].kwargs["attempt"] == 1
 
 
+async def test_a_triage_run_stopped_by_shutdown_files_nothing_and_counts_no_failure(
+    tmp_path: Path,
+) -> None:
+    """A verdict the run reaches once the worker is stopping is discarded, and the stop is no
+    failure of the issue's: the next process starts its triage again from attempt 1."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(1)
+    await h.tick()
+    # The session has its verdict, but its exit is handled only after the stop is recorded.
+    h.triage_sessions.runs[0].finish(**VERDICT)
+    await h.orchestrator.shutdown()
+    assert h.orchestrator.running == {}
+    issue = h.github.issue(1)
+    assert h.labels.triage_todo in issue.labels
+    assert h.labels.triage_complete not in issue.labels
+    assert h.github.comments_for(1) == []
+    assert h.recorder.of(Blocked) == []
+    assert "1" not in h.orchestrator._triage_failures
+
+
 async def test_an_edit_after_triage_todo_escapes_without_a_session(tmp_path: Path) -> None:
     """Section 3: the latest `triage-todo` a person applied approves the text as it stood, and
     an edit after it by anyone else hands the issue back before a session reads it."""
@@ -5774,6 +5794,31 @@ async def test_an_owed_triage_escape_keeps_the_read_with_no_free_slot(tmp_path: 
     assert h.github.comments_for(1)[-1].body.startswith("### Issuebot triage failed (")
 
 
+async def test_a_triage_candidate_over_the_spend_ceiling_is_handed_back_once(
+    tmp_path: Path,
+) -> None:
+    """The spend refusal takes `triage-todo` off with a note, rather than refusing the issue
+    silently on every tick: what the ceiling counts never resets."""
+    h = Harness(
+        tmp_path,
+        max_issue_cost_usd=0.75,
+        initial_ledger={"repo-1": IssueLedger(runs=2, cost_usd=1.0)},
+    )
+    h.add_triage_issue(1)
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot triage budget limit (")
+    assert "agent.max_issue_cost_usd" in comment.body
+    assert len(h.recorder.of(Blocked)) == 1
+    h.clock.advance(60)
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert len(h.github.comments_for(1)) == 1
+    assert len(h.recorder.of(Blocked)) == 1
+
+
 async def test_a_usage_limited_triage_run_holds_dispatch_and_counts_no_failure(
     tmp_path: Path,
 ) -> None:
@@ -6079,6 +6124,33 @@ async def test_a_triage_workspace_is_discarded_after_the_delay(tmp_path: Path) -
     await h.tick()
     assert clone.exists()
     h.clock.advance(2)
+    await h.tick()
+    assert not clone.exists()
+
+
+async def test_a_triage_workspace_due_for_discard_is_kept_while_a_new_run_reads_it(
+    tmp_path: Path,
+) -> None:
+    """Run 1's delay falls due while run 2 for the same issue is reading the clone: it is kept,
+    and goes once run 2 has ended and its own delay is up."""
+    h = Harness(tmp_path, stall_timeout_ms=0)
+    issue = h.add_triage_issue(1)
+    await h.tick()
+    clone = h.root / f"{workspace_key(issue.identifier)}.triage"
+    clone.mkdir(parents=True)
+    failed = {"outcome": "failed", "stop_reason": "failure", "error_category": "turn_failed"}
+    await h.exit(h.triage_sessions.runs[0], **failed, error="boom")
+    h.clock.advance(11)  # past the first backoff
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    h.clock.advance(orchestrator_module.TRIAGE_DISCARD_DELAY_S)
+    await h.tick()
+    assert h.orchestrator.running, "run 2 is still going"
+    assert clone.exists()
+    await h.exit(h.triage_sessions.runs[1], **VERDICT)
+    await h.tick()
+    assert clone.exists(), "run 2's exit starts a delay of its own"
+    h.clock.advance(orchestrator_module.TRIAGE_DISCARD_DELAY_S + 1)
     await h.tick()
     assert not clone.exists()
 
