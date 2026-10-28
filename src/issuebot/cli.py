@@ -106,7 +106,7 @@ from issuebot.egress import DEFAULT_BIND as EGRESS_DEFAULT_BIND
 from issuebot.egress import DEFAULT_PORT as EGRESS_DEFAULT_PORT
 from issuebot.egress import SHUTDOWN_DRAIN_S as EGRESS_SHUTDOWN_DRAIN_S
 from issuebot.egress import serve as serve_egress
-from issuebot.events import EventBus, EventSink, LogSink, StateChanged
+from issuebot.events import EventBus, EventSink, LogSink, ParentReviewState, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
     ClosingPr,
@@ -146,6 +146,7 @@ from issuebot.orchestrator import (
     probe_run_as,
 )
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
+from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import rate_limits_from_dict
 from issuebot.orchestrator.triage import apply_verdict, earlier_open_step, is_triage_candidate
 from issuebot.web import create_app, dispatch_hold
@@ -2268,9 +2269,9 @@ async def _run_once_triage(
     """`run-once --triage`: one triage session in the foreground, its verdict filed (spec §4).
 
     The worker's path without the queue: the same candidate test, the same approval check on
-    ``triage_todo`` (no escape, as for a work run), the same refusal of an issue that already
-    has sub-issues, the same ``run_triage`` and the same ``apply_verdict``. Nothing is
-    claimed, since a triage run moves no state label.
+    ``triage_todo`` (no escape, as for a work run), the refusal of an issue that already
+    has sub-issues (its parent review is the worker's), the same ``run_triage`` and the same
+    ``apply_verdict``. Nothing is claimed, since a triage run moves no state label.
     """
     settings = workflow.config
     labels = settings.github.labels
@@ -2279,25 +2280,21 @@ async def _run_once_triage(
     if problem is not None:
         print(f"[FAIL] issue: #{number} {problem}")
         return 1
+    split = issue.sub_issue_count > 0
+    if split and not show_prompt:
+        # Section 1: a split issue's re-triage is the parent review, and the worker keeps its
+        # records. A review run here would leave it with stale counts, so this is a refusal,
+        # before the approval check and with nothing written. A preview runs nothing.
+        print(
+            f"[FAIL] issue: #{number} already has sub-issues; its parent review runs on the "
+            "worker, by itself once every step has closed, or when you add "
+            f"`{labels.triage_todo}` with the worker running"
+        )
+        return 1
     if not show_prompt and not await _approved_for_run_once(
         adapter, issue, labels, todo_label=labels.triage_todo
     ):
         return 1
-    if not show_prompt:
-        # Section 1: a split issue's re-triage is the parent review, a later phase. The worker
-        # hands such an issue back as `already split`; the operator typed this command, so
-        # here it is a refusal, and nothing is written. A preview runs nothing, so skips it.
-        try:
-            split = bool(await adapter.sub_issues(number))
-        except GitHubError as exc:
-            print(f"[FAIL] sub-issues: {exc}")
-            return 1
-        if split:
-            print(
-                f"[FAIL] issue: #{number} already has sub-issues; re-triaging a split issue "
-                "is the parent review, a later phase"
-            )
-            return 1
     try:
         workflow = _with_bound_account(workflow, issue)
         settings = workflow.config
@@ -2323,13 +2320,35 @@ async def _run_once_triage(
             return 1
         # The preview touches no workspace, so there is no clone to carry instruction files
         # from; the real session reads them out of its fresh clone.
-        context = TriagePromptContext.for_issue(
-            issue, settings, login=login, admin=admin, comments=comments
-        )
-        try:
-            renderer = PromptRenderer(
-                workflow.triage_template, continuation=TRIAGE_CONTINUATION_TEMPLATE
+        context: TriagePromptContext
+        if split:
+            # The preview of a split parent is the review's prompt, with a reset record: what
+            # `triage-todo` on it would start.
+            try:
+                steps = tuple(await adapter.parent_review_steps(number))
+            except GitHubError as exc:
+                print(f"[FAIL] steps: {exc}")
+                return 1
+            context = ParentReviewPromptContext.for_issue(
+                issue,
+                settings,
+                login=login,
+                admin=admin,
+                comments=comments,
+                steps=steps,
+                reviews=0,
+                gap_rounds=0,
             )
+            template = workflow.parent_review_template
+            continuation = PARENT_REVIEW_CONTINUATION_TEMPLATE
+        else:
+            context = TriagePromptContext.for_issue(
+                issue, settings, login=login, admin=admin, comments=comments
+            )
+            template = workflow.triage_template
+            continuation = TRIAGE_CONTINUATION_TEMPLATE
+        try:
+            renderer = PromptRenderer(template, continuation=continuation)
             print(renderer.render(context).rstrip("\n"))
         except AgentError as exc:
             print(f"[FAIL] prompt: {exc.message}")
@@ -2384,6 +2403,16 @@ async def _run_once_triage(
                 if verdict.verdict == "fits":
                     print("triage: fits")
                 else:
+                    # The worker's record of the new parent: it reads the store back at its
+                    # next restart (a running worker does not look), as it does for its own.
+                    sinks.bus.publish(
+                        ParentReviewState(
+                            issue_number=number,
+                            issue_identifier=issue.identifier,
+                            reviews=0,
+                            gap_rounds=0,
+                        )
+                    )
                     numbers = ", ".join(f"#{sub.number}" for sub in filed)
                     print(f"triage: split into {len(filed)} sub-issues ({numbers})")
                 return 0
@@ -2673,6 +2702,40 @@ async def _initial_ledger(database: Database | None, repo: str) -> dict[str, Iss
     return ledger
 
 
+async def _initial_parents(database: Database | None, repo: str) -> dict[int, ParentRecord]:
+    """What the worker remembers of each split parent, read back from the store.
+
+    The worker publishes every change to a parent's record as an event and the store keeps
+    it, so a restart picks up the counts and a hand-over where they were left, and a parent
+    whose steps closed while the worker was down is reviewed on its first tick. Like the
+    ledger it is a convenience, never a reason to refuse to start: a parent left unwatched
+    until a human adds ``triage-todo`` is the cost of a read that failed.
+    """
+    if database is None:
+        return {}
+    try:
+        async with database.queries() as queries:
+            rows = await queries.scoped(repo).parent_records()
+    except DatabaseError as exc:
+        get_logger(__name__).warning("parent_records_seed_failed", error=exc.message)
+        return {}
+    parents = {
+        row.number: ParentRecord(
+            identifier=row.identifier,
+            reviews=row.reviews,
+            gap_rounds=row.gap_rounds,
+            handed_over=row.handed_over,
+        )
+        for row in rows
+    }
+    get_logger(__name__).info(
+        "parent_records_seeded",
+        parents=len(parents),
+        handed_over=sum(1 for record in parents.values() if record.handed_over is not None),
+    )
+    return parents
+
+
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     scrubber = _deployment_scrubber(workflow.config, os.environ)
@@ -2693,6 +2756,7 @@ async def _run_worker(workflow: Workflow) -> int:
         claude_auth=_claude_auth,
         initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         initial_ledger=await _initial_ledger(sinks.database, workflow.config.github.repo),
+        initial_parents=await _initial_parents(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,

@@ -55,9 +55,9 @@ from issuebot.db import (
     StoreUnavailableError,
     refresh_channel,
 )
-from issuebot.db.queries import DailyPoint, LedgerRow, SnapshotRow
+from issuebot.db.queries import DailyPoint, LedgerRow, ParentRecordRow, SnapshotRow
 from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_rules
-from issuebot.events import Event, StateChanged
+from issuebot.events import Event, ParentReviewState, StateChanged
 from issuebot.github import (
     WORKPAD_MARKER,
     BranchRules,
@@ -71,6 +71,7 @@ from issuebot.github import (
 )
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
+from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 from issuebot.web.actions import ActionsPoller
 from issuebot.web.claude_limits import ClaudeLimitsWatcher
@@ -4185,6 +4186,50 @@ def test_worker_starts_when_the_ledger_seed_read_fails(
     assert stub_orchestrator.instances[0].kwargs["initial_ledger"] == {}
 
 
+def test_worker_seeds_its_parent_records_from_the_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """Review focus 1: the counts and a hand-over survive a restart."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.parent_rows = [
+        ParentRecordRow(number=7, identifier="repo-7", reviews=2, gap_rounds=1, handed_over=None),
+        ParentRecordRow(
+            number=8, identifier="repo-8", reviews=1, gap_rounds=2, handed_over="gap limit"
+        ),
+    ]
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_parents"] == {
+        7: ParentRecord(identifier="repo-7", reviews=2, gap_rounds=1),
+        8: ParentRecord(identifier="repo-8", reviews=1, gap_rounds=2, handed_over="gap limit"),
+    }
+
+
+def test_worker_without_a_database_has_no_parent_records(
+    tmp_path: Path, stub_orchestrator: type[StubOrchestrator], fake_database: FakeDatabase
+) -> None:
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_parents"] == {}
+
+
+def test_initial_parents_maps_the_rows(fake_database: FakeDatabase) -> None:
+    fake_database.queries_obj.parent_rows = [
+        ParentRecordRow(number=7, identifier="repo-7", reviews=2, gap_rounds=1, handed_over="x")
+    ]
+    seeded = asyncio.run(cli._initial_parents(fake_database, "example/repo"))
+    assert seeded == {
+        7: ParentRecord(identifier="repo-7", reviews=2, gap_rounds=1, handed_over="x")
+    }
+
+
+def test_initial_parents_survives_a_failed_read(fake_database: FakeDatabase) -> None:
+    """A parent left unwatched until a human's `triage-todo` is better than no worker."""
+    fake_database.queries_obj.error = DatabaseError("connection refused")
+    assert asyncio.run(cli._initial_parents(fake_database, "example/repo")) == {}
+
+
 def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=SEED_AT,
@@ -5806,9 +5851,8 @@ def test_run_once_triage_refuses_an_issue_that_already_has_sub_issues(
     stub_triage: StubTriage,
     recording_sink: type[RecordingSink],
 ) -> None:
-    """Section 1: a split issue's re-triage is the parent review, a later phase. The worker
-    hands it back; here the operator typed the command, so it is a refusal that writes
-    nothing."""
+    """The records are the worker's memory, so a foreground review would leave it with stale
+    counts: the refusal comes before the approval check and writes nothing."""
     monkeypatch.setenv("GH_TOKEN", "t")
     fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
     _approve_triage(fake_github)
@@ -5818,12 +5862,59 @@ def test_run_once_triage_refuses_an_issue_that_already_has_sub_issues(
     assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
     out = capsys.readouterr().out
     assert out.splitlines() == [
-        "[FAIL] issue: #42 already has sub-issues; re-triaging a split issue is the parent "
-        "review, a later phase"
+        "[FAIL] issue: #42 already has sub-issues; its parent review runs on the worker, by "
+        "itself once every step has closed, or when you add `issuebot/triage-todo` with the "
+        "worker running"
     ]
     assert stub_triage.calls == []
+    assert "approval_evidence" not in [name for name, _ in fake_github.calls]
     assert fake_github.issue(42).labels == ("issuebot/triage-todo",)
     assert fake_github.comments_for(42) == []
+
+
+def test_run_once_triage_show_prompt_on_a_split_parent_renders_the_review(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    fake_github.add_issue("Step one", number=43)
+    fake_github.link_sub_issue(42, 43)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path), "--show-prompt"]) == 0
+    out = capsys.readouterr().out
+    assert "Step one" in out
+    assert ("parent_review_steps", (42,)) in fake_github.calls
+    assert stub_triage.calls == []
+
+
+def test_run_once_triage_split_records_the_parent(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """A split filed here is watched by the worker after its next restart, so the store
+    must hold the record the worker would have written."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
+    _approve_triage(fake_github)
+    stub_triage.structured_output = TRIAGE_SPLIT
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
+    [state] = [e for e in recording_sink.events if isinstance(e, ParentReviewState)]
+    assert (state.issue_number, state.issue_identifier) == (42, fake_github.issue(42).identifier)
+    assert (state.reviews, state.gap_rounds, state.handed_over, state.finished) == (
+        0,
+        0,
+        None,
+        False,
+    )
 
 
 def test_run_once_triage_runs_as_the_issues_bound_pool_account(
@@ -5849,24 +5940,6 @@ def test_run_once_triage_runs_as_the_issues_bound_pool_account(
     assert not workflow.config.agent.run_as_pooled
     registry = AccountRegistry(tmp_path / "ws", ("agent-1", "agent-2"))
     assert registry.bound(issue.identifier) == "agent-1"
-
-
-def test_run_once_triage_fails_when_the_sub_issues_cannot_be_read(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_github: FakeGitHub,
-    stub_triage: StubTriage,
-    recording_sink: type[RecordingSink],
-) -> None:
-    monkeypatch.setenv("GH_TOKEN", "t")
-    fake_github.add_issue("Big change", labels=("issuebot/triage-todo",), number=42)
-    _approve_triage(fake_github)
-    fake_github.fail_next("transport", on="sub_issues")
-    path = _workflow_with_root(tmp_path)
-    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
-    assert "[FAIL] sub-issues: " in capsys.readouterr().out
-    assert stub_triage.calls == []
 
 
 def test_validate_reports_triage(
