@@ -16,6 +16,8 @@ from issuebot.agent import (
     AgentError,
     ClaudeAuth,
     ClaudeRunner,
+    ParentReviewRun,
+    ParentReviewRunner,
     RunResult,
     RunTriageFn,
     TriageRunner,
@@ -41,7 +43,7 @@ from issuebot.agent.accounts import (
 from issuebot.agent.runas import RunAs
 from issuebot.agent.runner import TERMINATE_GRACE_S, Credential, RateLimits, agent_environment
 from issuebot.agent.scrub import DEFAULT_SCRUBBER, Scrubber
-from issuebot.agent.verdict import VerdictError, parse_verdict
+from issuebot.agent.verdict import VerdictError, parse_parent_review, parse_verdict
 from issuebot.config import (
     ConfigError,
     GitHubSettings,
@@ -79,6 +81,14 @@ from issuebot.orchestrator.admission import (
     seeded_chain,
 )
 from issuebot.orchestrator.approval import Approved, Unapproved
+from issuebot.orchestrator.parent_review import (
+    ParentHandOver,
+    ParentRecord,
+    ReviewCounts,
+    apply_parent_review,
+    parent_review_due,
+    steps_as_seen,
+)
 from issuebot.orchestrator.state import (
     CONTINUATION_DELAY_MS,
     TERMINAL_SWEEP_EVERY_TICKS,
@@ -87,6 +97,7 @@ from issuebot.orchestrator.state import (
     Counters,
     DispatchHold,
     DispatchHoldKind,
+    PendingParentReview,
     PendingVerdict,
     RetryEntry,
     RetryKind,
@@ -153,6 +164,12 @@ MAX_HOLD_ERROR_CHARS = 300
 # directory after `RunEnded`, so removing the clone at the exit would race it; ten minutes is
 # far past any capture, and the startup sweep is the backstop for a worker that stops first.
 TRIAGE_DISCARD_DELAY_S = 600.0
+# What each kind of run's task and its dispatch log line are called.
+RUN_NAMES: Mapping[RunKind, tuple[str, str]] = {
+    "work": ("worker", "dispatched"),
+    "triage": ("triage", "triage_dispatched"),
+    "parent_review": ("parent-review", "parent_review_dispatched"),
+}
 
 
 # `claude auth status --json` as the startup probe runs it: the resolved command and the parent
@@ -234,6 +251,17 @@ def _github_hold_reason(error: GitHubError, status_note: str | None) -> str:
         reason = f"GitHub is not answering this worker: {detail}"
     # The note carries its own stamp, so it joins with a space: "githubstatus.com at 12:01Z: ...".
     return f"{reason} \u2014 githubstatus.com {status_note}" if status_note else reason
+
+
+def _triage_failure(entry: RunningEntry, result: RunResult | None, error: str | None) -> str:
+    """What a triage session that reached no verdict failed with, as its chain records it."""
+    if entry.stop_cause == "stalled":
+        return f"stalled: {entry.stop_detail}"
+    if result is None:
+        return error or "worker crashed"
+    if result.error_category is not None:
+        return f"{result.error_category}: {result.error}"
+    return f"the session returned no verdict in {plural(result.turns, 'turn')}"
 
 
 def _clipped(text: str, limit: int) -> str:
@@ -332,6 +360,7 @@ class Orchestrator:
         run_session: RunSessionFn = run_session,
         triage_runner_factory: Callable[[Settings], TurnRunner] = TriageRunner,
         run_triage: RunTriageFn = run_triage,
+        parent_review_runner_factory: Callable[[Settings], TurnRunner] = ParentReviewRunner,
         which: Callable[[str], str | None] = shutil.which,
         claude_auth: ClaudeAuthProbe = claude_auth_status,
         github_status: GitHubStatusProbe = fetch_status_summary,
@@ -341,6 +370,7 @@ class Orchestrator:
         environ: Mapping[str, str] | None = None,
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
+        initial_parents: Mapping[int, ParentRecord] | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
@@ -358,6 +388,7 @@ class Orchestrator:
         self._run_session = run_session
         self._triage_runner_factory = triage_runner_factory
         self._run_triage = run_triage
+        self._parent_review_runner_factory = parent_review_runner_factory
         self._which = which
         self._claude_auth = claude_auth
         self._github_status = github_status
@@ -484,6 +515,18 @@ class Orchestrator:
         self._triage_escapes: dict[str, str] = {}
         # Identifier to the monotonic moment its triage clone is removed (TRIAGE_DISCARD_DELAY_S).
         self._triage_discard: dict[str, float] = {}
+        # The parent review (spec section 6). A split parent's record, keyed by issue number: the
+        # watch is the records neither handed over nor finished. Seeded from the store by the
+        # caller that has one, as the ledger is, so steps that closed while the worker was down
+        # are reviewed on its first tick; without a store a restart forgets them, and such a
+        # parent waits for a human's `triage-todo`.
+        self._parents: dict[int, ParentRecord] = dict(initial_parents or {})
+        # Parent review verdicts GitHub would not let the worker file, retried from memory as
+        # triage's are, by issue id.
+        self._parent_pending: dict[str, PendingParentReview] = {}
+        # A parent hand-over GitHub refused to write, by issue id. The note is written again on a
+        # later pass over the parent, before anything else is decided about it.
+        self._parent_handovers: dict[str, ParentHandOver] = {}
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._refresh_pending = False
         self._stopping = False
@@ -977,7 +1020,10 @@ class Orchestrator:
             else:
                 # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
                 # short and what it unblocks is a human, so it takes a free slot before work.
+                # A parent review next (section 6): it is short too, and what it unblocks is the
+                # parent's next batch.
                 dispatched = await self._dispatch_triage()
+                dispatched += await self._dispatch_parent_reviews()
                 dispatched += await self._dispatch_candidates()
         # Whatever the holds: removing a clone asks nothing of GitHub or of claude.
         await self._discard_triage_workspaces()
@@ -1662,13 +1708,15 @@ class Orchestrator:
         account: str | None,
         rework: bool = False,
         resumed: bool = False,
+        steps_seen: tuple[int, ...] = (),
     ) -> None:
-        """Start one run, work or triage, and everything a run's start owes: the one place.
+        """Start one run, of any kind, and everything a run's start owes: the one place.
 
-        Both kinds share a slot, an account and the issue's ledger (spec 2026-10-25, section
-        4), so the bookkeeping is one block rather than one per kind: a step added to a run's
-        start reaches both. ``worker`` builds the run's coroutine from its entry; beyond that the
-        kinds differ only in what the task and the log line are called.
+        Every kind shares a slot, an account and the issue's ledger (spec 2026-10-25, sections 4
+        and 6), so the bookkeeping is one block rather than one per kind: a step added to a run's
+        start reaches them all. ``worker`` builds the run's coroutine from its entry; beyond that
+        the kinds differ only in what the task and the log line are called, and in the steps a
+        parent review was started on (``steps_seen``).
 
         A pending retry is dropped for either kind. Admission's ``busy`` refuses a claim for an
         issue with one, so today there is never one to drop; the line is what keeps a retry
@@ -1685,8 +1733,9 @@ class Orchestrator:
             cancel=asyncio.Event(),
             account=account,
             kind=kind,
+            steps_seen=steps_seen,
         )
-        role = "worker" if kind == "work" else "triage"
+        role, event = RUN_NAMES[kind]
         entry.task = asyncio.create_task(worker(entry), name=f"issuebot-{role}-{issue.number}")
         entry.task.add_done_callback(
             lambda _task, issue_id=issue.id: self._queue.put_nowait(_WorkerExited(issue_id))
@@ -1696,7 +1745,7 @@ class Orchestrator:
         self._counters = self._counters.bump(runs_started=1)
         ledger = self._ledger.dispatched(issue.identifier, at=self._now())
         self._log.info(
-            "dispatched" if kind == "work" else "triage_dispatched",
+            event,
             issue_number=issue.number,
             issue_identifier=issue.identifier,
             attempt=attempt,
@@ -1801,7 +1850,9 @@ class Orchestrator:
         drops a verdict that is owed no longer without a write (``_verdict_owed``).
         ``agent.max_attempts`` failed retries hand the issue back; an entry is dropped only once
         that note has landed, so a GitHub that refuses the note as well as the filing leaves the
-        verdict to be tried again rather than forgotten.
+        verdict to be tried again rather than forgotten. A parent review's verdict is retried the
+        same way, through ``apply_parent_review`` and ``_parent_review_owed``, and its hand-back
+        is a parent hand-over.
         """
         agent = self._workflow.config.agent
         labels = self._workflow.config.github.labels
@@ -1829,6 +1880,28 @@ class Orchestrator:
                 # The note ends the chain (`_triage_hand_back`), and the verdict with it.
                 del self._triage_pending[issue_id]
                 self._schedule_triage_discard(pending.issue.identifier)
+        for issue_id in list(self._parent_pending):
+            failure = await self._file_parent_review(self._parent_pending[issue_id])
+            if failure is None:
+                continue
+            review = self._parent_pending[issue_id]
+            review = replace(review, tries=review.tries + 1)
+            self._parent_pending[issue_id] = review
+            if review.tries < agent.max_attempts:
+                continue
+            error = _clipped(str(failure), MAX_HOLD_ERROR_CHARS)
+            outcome = await self._hand_over_parent(
+                review.issue,
+                title="parent review not filed",
+                reason=f"issuebot could not file the parent review's verdict on GitHub: {error}",
+                way_back=(
+                    "Unlink any sub-issues this review filed from this issue, then add "
+                    f"`{labels.triage_todo}` again."
+                ),
+            )
+            if outcome != "failed":
+                del self._parent_pending[issue_id]
+                self._schedule_triage_discard(review.issue.identifier)
 
     async def _file_verdict(self, pending: PendingVerdict) -> GitHubError | None:
         """File one verdict; ``None`` once it landed or is owed no longer, else GitHub's error.
@@ -1881,6 +1954,9 @@ class Orchestrator:
         if current is None:
             return None
         self._forget_triage_chain(issue.id)
+        if pending.verdict.verdict == "split":
+            # Section 6: a parent whose triage filed its steps is watched from here on.
+            self._record_parent(issue.number, ParentRecord(identifier=issue.identifier))
         self._log.info(
             "triage_filed",
             issue_number=issue.number,
@@ -2026,28 +2102,9 @@ class Orchestrator:
         The slot, the account and the spend were settled by ``handle_worker_exit`` before it
         came here, exactly as for a work run.
         """
+        if self._triage_run_settled(entry, result):
+            return
         settings = self._workflow.config
-        issue_id = entry.issue_id
-        stopped = ("moved", "closed", "missing", "shutdown")
-        if entry.terminal_issue is not None or entry.stop_cause in stopped:
-            # Section 1: a state label won, `triage-todo` went, or the issue did. Any verdict
-            # the run reached is discarded, and the reconcile's own cancel is no failure of the
-            # issue's -- `closed` included, for an issue reopened before the run ended, which
-            # clears `terminal_issue`. A closed or vanished issue has no chain left.
-            if entry.terminal_issue is not None or entry.stop_cause in ("closed", "missing"):
-                self._forget_triage_chain(issue_id)
-            self._schedule_triage_discard(entry.identifier)
-            return
-        if result is not None and result.error_category in ("usage_limited", "auth_failed"):
-            # Account-wide, and nothing about this issue: the same hold a work run takes, with
-            # no failure counted, no escape and no requeue -- the label is what brings it back.
-            if result.error_category == "usage_limited":
-                self._hold_for_usage_limit(entry, result)
-            else:
-                self._hold_for_auth_failure(entry, result)
-            self._triage_not_before[issue_id] = self._clock() + settings.polling.interval_ms / 1000
-            self._schedule_triage_discard(entry.identifier)
-            return
         if result is not None and result.stop_reason == "verdict":
             try:
                 verdict = parse_verdict(
@@ -2070,15 +2127,37 @@ class Orchestrator:
             # A failure is kept for the next tick by `_file_verdict` itself.
             await self._file_verdict(pending)
             return
-        if entry.stop_cause == "stalled":
-            failure = f"stalled: {entry.stop_detail}"
-        elif result is None:
-            failure = error or "worker crashed"
-        elif result.error_category is not None:
-            failure = f"{result.error_category}: {result.error}"
-        else:
-            failure = f"the session returned no verdict in {plural(result.turns, 'turn')}"
-        await self._triage_failed(entry, failure)
+        await self._triage_failed(entry, _triage_failure(entry, result, error))
+
+    def _triage_run_settled(self, entry: RunningEntry, result: RunResult | None) -> bool:
+        """Whether a triage session's end is settled before any verdict is read; if so, settle it.
+
+        A triage run and a parent review end alike here (spec 2026-10-25, sections 4 and 6): a
+        stop the reconcile made, and an account-wide hold, discard whatever the run reached.
+        """
+        issue_id = entry.issue_id
+        stopped = ("moved", "closed", "missing", "shutdown")
+        if entry.terminal_issue is not None or entry.stop_cause in stopped:
+            # Section 1: a state label won, the triage label went, or the issue did. Any verdict
+            # the run reached is discarded, and the reconcile's own cancel is no failure of the
+            # issue's -- `closed` included, for an issue reopened before the run ended, which
+            # clears `terminal_issue`. A closed or vanished issue has no chain left.
+            if entry.terminal_issue is not None or entry.stop_cause in ("closed", "missing"):
+                self._forget_triage_chain(issue_id)
+            self._schedule_triage_discard(entry.identifier)
+            return True
+        if result is not None and result.error_category in ("usage_limited", "auth_failed"):
+            # Account-wide, and nothing about this issue: the same hold a work run takes, with
+            # no failure counted, no escape and no requeue -- the label is what brings it back.
+            if result.error_category == "usage_limited":
+                self._hold_for_usage_limit(entry, result)
+            else:
+                self._hold_for_auth_failure(entry, result)
+            interval_s = self._workflow.config.polling.interval_ms / 1000
+            self._triage_not_before[issue_id] = self._clock() + interval_s
+            self._schedule_triage_discard(entry.identifier)
+            return True
+        return False
 
     async def _triage_failed(self, entry: RunningEntry, error: str) -> None:
         """One more failure on the issue's triage chain: back off, or hand it back (section 4)."""
@@ -2152,9 +2231,12 @@ class Orchestrator:
         return outcome
 
     def _forget_triage_chain(self, issue_id: str) -> None:
+        # An owed parent hand-over is the parent review's `_triage_escapes`: whatever ends the
+        # chain -- a verdict filed, a note that landed, a parent closed -- makes it moot too.
         self._triage_failures.pop(issue_id, None)
         self._triage_not_before.pop(issue_id, None)
         self._triage_escapes.pop(issue_id, None)
+        self._parent_handovers.pop(issue_id, None)
 
     def _schedule_triage_discard(self, identifier: str) -> None:
         self._triage_discard[identifier] = self._clock() + TRIAGE_DISCARD_DELAY_S
@@ -2181,6 +2263,369 @@ class Orchestrator:
                     issue_identifier=identifier,
                     error=exc.message,
                 )
+
+    # --- the parent review (spec 2026-10-25-triage-design.md, section 6) -------------------
+
+    def _record_parent(self, number: int, record: ParentRecord) -> None:
+        """Keep ``record`` and publish it whole. The one place a parent's record changes, so the
+        latest ``parent_review_state`` the store holds for it is always the one this worker
+        acts on, and a restart reads back exactly that."""
+        self._parents[number] = record
+        self._bus.publish(record.state_event(number))
+
+    async def _dispatch_parent_reviews(self) -> int:
+        """Review each watched parent whose every step has closed, with no label from anyone.
+
+        The watch is one ``parent_steps`` read of every watched parent, made only when a review
+        could start or a hand-over note is owed: every deployment shares the account's hourly
+        GraphQL budget (section 9). A failed read is logged and skips the watch for this tick;
+        like the triage read, it does not feed the GitHub hold, which is the board's. A parent
+        GitHub no longer returns, or that has closed, is finished, whoever closed it.
+        """
+        watched = sorted(number for number, record in self._parents.items() if record.watched)
+        if not watched or (self._slots() == 0 and not self._parent_handovers):
+            return 0
+        labels = self._workflow.config.github.labels
+        try:
+            found = await self._adapter.parent_steps(watched)
+        except GitHubError as exc:
+            self._log.warning("parent_watch_failed", error=str(exc), parents=watched)
+            return 0
+        due: dict[int, tuple[int, ...]] = {}
+        for number in watched:
+            steps = found.get(number)
+            if steps is None or steps.state == "closed":
+                self._record_parent(number, replace(self._parents[number], finished=True))
+                # As for a reconcile's stop: a closed or vanished parent has no chain left, and
+                # no note is owed on it. Issue ids are the number (`Issue.id`); the steps' `id`
+                # is GraphQL's node id, which neither this nor the read below takes.
+                self._forget_triage_chain(str(number))
+            elif parent_review_due(steps, labels):
+                due[number] = tuple(step.number for step in steps.sub_issues)
+        if not due:
+            return 0
+        try:
+            issues = await self._adapter.fetch_issues_by_ids([str(number) for number in due])
+        except GitHubError as exc:
+            self._log.warning("parent_watch_failed", error=str(exc), parents=sorted(due))
+            return 0
+        triage = self._workflow.config.triage
+        dispatched = 0
+        for issue in issues:
+            record = self._parents[issue.number]
+            if issue.id in self._running or issue.id in self._parent_pending:
+                continue
+            if self._clock() < self._triage_not_before.get(issue.id, -math.inf):
+                continue
+            owed = self._parent_handovers.get(issue.id)
+            if owed is not None:
+                await self._hand_over_parent(
+                    issue, title=owed.title, reason=owed.reason, way_back=owed.way_back
+                )
+                continue
+            if record.reviews >= triage.max_parent_reviews:
+                # Checked before the gate, and needing no slot: the cap is about the parent,
+                # and a chain of `next` verdicts must not run on for ever (section 6).
+                await self._hand_over_parent(
+                    issue,
+                    title="parent review limit",
+                    reason=(
+                        f"#{issue.number} has reached `triage.max_parent_reviews`, the most "
+                        "reviews issuebot runs on a parent by itself"
+                    ),
+                    way_back=(
+                        f"It has had {triage.max_parent_reviews} reviews. Add "
+                        f"`{labels.triage_todo}` to review it again with its count reset."
+                    ),
+                )
+                continue
+            verdict = self._admit(issue.identifier, issue.id, issue, kind="parent_review")
+            if isinstance(verdict, Refused):
+                if verdict.kind in ("slots", "hold", "stopping"):
+                    # Nothing about this parent; the next one would be told the same.
+                    break
+                if verdict.kind == "spend":
+                    # Handed over rather than refused on every tick, as a triage candidate is.
+                    await self._hand_over_parent(
+                        issue,
+                        title="parent review budget limit",
+                        reason=verdict.reason,
+                        way_back=(
+                            "What `agent.max_issue_cost_usd` counts is what the issue has "
+                            "already cost, and that never resets: raise the ceiling, then add "
+                            f"`{labels.triage_todo}` again."
+                        ),
+                    )
+                continue
+            attempt = self._triage_failures.get(issue.id, 0) + 1
+            if await self._dispatch_parent_review_one(
+                issue, record, due[issue.number], attempt=attempt
+            ):
+                dispatched += 1
+        return dispatched
+
+    async def _dispatch_parent_review_one(
+        self, issue: Issue, record: ParentRecord, steps: tuple[int, ...], *, attempt: int
+    ) -> bool:
+        """Start one parent review on ``steps``. Like triage, it claims nothing (section 6)."""
+        labels = self._workflow.config.github.labels
+        # Section 3's first rule, as for triage: the latest `triage-todo` a person applied
+        # approves the text as it stood, and an edit after it by anyone else hands the parent
+        # over before a session reads it.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        if verdict is None:
+            return False
+        if isinstance(verdict, Unapproved):
+            outcome = await self._hand_over_parent(
+                issue,
+                title="unapproved edit",
+                reason=verdict.reason,
+                way_back=(
+                    f"Apply `{labels.triage_todo}` again to approve the text as it stands now; "
+                    "issuebot then reviews it afresh."
+                ),
+            )
+            if outcome == "applied":
+                self._approval_verdicts.pop(issue.id, None)
+            return False
+        account, ready = self._bind_account(issue)
+        if not ready:
+            return False
+        workflow = self._workflow
+        self._start_run(
+            issue,
+            lambda entry: self._parent_review_worker(entry, workflow, record),
+            kind="parent_review",
+            attempt=attempt,
+            account=account,
+            steps_seen=steps,
+        )
+        return True
+
+    async def _parent_review_worker(
+        self, entry: RunningEntry, workflow: Workflow, record: ParentRecord
+    ) -> RunResult:
+        # Triage's session but for its prompt, its schema and the steps it reads (section 6),
+        # narrowed to the one account bound to the issue as a triage run is.
+        settings = settings_with_run_as(workflow.config, entry.account)
+        return await self._run_triage(
+            entry.issue,
+            workflow,
+            self._adapter,
+            self._bus,
+            workspaces=self._workspaces_factory(settings),
+            runner=self._parent_review_runner_factory(settings),
+            attempt=entry.attempt,
+            cancel=entry.cancel,
+            observer=RunObserver(
+                entry, clock=self._clock, now=self._now, on_rate_limits=self._record_rate_limits
+            ),
+            run_id=entry.run_id,
+            parent_review=ParentReviewRun(reviews=record.reviews, gap_rounds=record.gap_rounds),
+        )
+
+    async def _parent_review_exit(
+        self, entry: RunningEntry, result: RunResult | None, error: str | None
+    ) -> None:
+        """What a parent review's end means: ``_triage_exit``'s, but for the verdict it files.
+
+        Its failures count on the issue's triage chain (section 6: the session is triage's), so
+        a stop, a hold and a failed run end it exactly as they end a triage run.
+        """
+        if self._triage_run_settled(entry, result):
+            return
+        settings = self._workflow.config
+        if result is not None and result.stop_reason == "verdict":
+            try:
+                verdict = parse_parent_review(
+                    result.structured_output,
+                    max_sub_issues=settings.triage.max_sub_issues,
+                    scrubber=self._scrubber,
+                )
+            except VerdictError as exc:
+                await self._triage_failed(entry, f"verdict refused: {exc}")
+                return
+            record = self._parents.get(entry.issue.number) or ParentRecord(
+                identifier=entry.identifier
+            )
+            # The one place a verdict is judged before it is filed. Section 6's gap limit is to
+            # hand over a `gap` past `triage.max_gap_rounds` here; until it does, every `gap` is
+            # filed.
+            gap_round = record.gap_rounds + 1 if verdict.verdict == "gap" else record.gap_rounds
+            pending = PendingParentReview(
+                issue=entry.issue,
+                verdict=verdict,
+                seen=entry.steps_seen,
+                counts=ReviewCounts(
+                    review=record.reviews + 1,
+                    max_reviews=settings.triage.max_parent_reviews,
+                    gap_round=gap_round,
+                    max_gap_rounds=settings.triage.max_gap_rounds,
+                ),
+                run_id=entry.run_id,
+                attempt=entry.attempt,
+                turns=result.turns,
+                cost_usd=result.cost_usd,
+            )
+            # A failure is kept for the next tick by `_file_parent_review` itself.
+            await self._file_parent_review(pending)
+            return
+        await self._triage_failed(entry, _triage_failure(entry, result, error))
+
+    async def _file_parent_review(self, pending: PendingParentReview) -> GitHubError | None:
+        """File one review's verdict; ``None`` once it landed or is owed no longer, else the error.
+
+        ``_file_verdict``'s shape, on a fresh read of the parent (``_parent_review_owed``). That
+        read is handed to the store before the first write: a split parent wears no state
+        label, so the board's poll never reports it, and the store writes a ``met`` close only
+        onto a row it already has. Success writes the record the review brings the parent to
+        and ends its triage chain; a failure keeps the verdict, with whether its move landed,
+        and the caller counts it.
+        """
+        issue = pending.issue
+        moved = pending.moved
+
+        def note_moved() -> None:
+            nonlocal moved
+            moved = True
+
+        try:
+            current = await self._parent_review_owed(pending)
+            if current is not None:
+                self._report_issues([current])
+                await apply_parent_review(
+                    self._adapter,
+                    self._bus,
+                    current,
+                    pending.verdict,
+                    seen=pending.seen,
+                    counts=pending.counts,
+                    run_id=pending.run_id,
+                    attempt=pending.attempt,
+                    turns=pending.turns,
+                    cost_usd=pending.cost_usd,
+                    now=self._now(),
+                    on_moved=note_moved,
+                    moved=pending.moved,
+                )
+        except GitHubError as exc:
+            self._log.warning(
+                "parent_review_file_failed",
+                issue_number=issue.number,
+                issue_identifier=issue.identifier,
+                run_id=pending.run_id,
+                tries=pending.tries,
+                error=str(exc),
+                category=exc.category,
+            )
+            # The session's work is kept: the next tick files it from memory, never by running
+            # the session again.
+            self._parent_pending[issue.id] = replace(pending, moved=moved)
+            return exc
+        self._parent_pending.pop(issue.id, None)
+        self._schedule_triage_discard(issue.identifier)
+        if current is None:
+            return None
+        counts = pending.counts
+        self._record_parent(
+            issue.number,
+            ParentRecord(
+                identifier=issue.identifier,
+                reviews=counts.review,
+                gap_rounds=counts.gap_round,
+                finished=pending.verdict.verdict == "met",
+            ),
+        )
+        self._forget_triage_chain(issue.id)
+        self._log.info(
+            "parent_review_filed",
+            issue_number=issue.number,
+            issue_identifier=issue.identifier,
+            run_id=pending.run_id,
+            verdict=pending.verdict.verdict,
+            sub_issues=len(pending.verdict.sub_issues),
+            reviews=counts.review,
+            gap_rounds=counts.gap_round,
+        )
+        return None
+
+    async def _parent_review_owed(self, pending: PendingParentReview) -> Issue | None:
+        """The parent as it stands now while its verdict is owed; ``None``, logged, once not.
+
+        ``_verdict_owed``'s reasoning: the reconcile sees a change only at the start of a tick,
+        so the parent and its steps are read again right before the first write. Before the
+        move it is owed only while the parent is open, carries a triage label and no state
+        label, and has the steps the review saw, every one closed: a step reopened, added or
+        unlinked since makes the verdict stale. Once the move has landed it is owed while the
+        parent exists, since only the comment saying what was filed is missing.
+
+        A failed try's own writes are not changes. The steps it created before failing are the
+        verdict's (``steps_as_seen``), and so is ``complete`` on a ``met`` parent: that label is
+        the close's first write, and its retry must still close the parent and say so.
+        """
+        labels = self._workflow.config.github.labels
+        triage_labels = {labels.triage_todo.lower(), labels.triage_complete.lower()}
+        own = {labels.complete.lower()} if pending.verdict.verdict == "met" else set()
+        found = await self._adapter.fetch_issues_by_ids([pending.issue.id])
+        current = next((issue for issue in found if issue.id == pending.issue.id), None)
+        if current is None:
+            reason = "missing"
+        elif pending.moved:
+            return current
+        elif current.github_state != "open":
+            reason = "closed"
+        elif set(current.state_labels) - own:
+            reason = "state label"
+        elif not triage_labels.intersection(current.labels):
+            reason = "triage labels removed"
+        else:
+            steps = (await self._adapter.parent_steps([current.number])).get(current.number)
+            if steps is not None and steps_as_seen(steps, pending.seen, pending.verdict):
+                return current
+            reason = "steps changed"
+        if reason in ("closed", "missing"):
+            # As for a reconcile's stop: a closed or vanished parent has no chain left.
+            self._forget_triage_chain(pending.issue.id)
+        self._log.info(
+            "parent_review_discarded",
+            issue_number=pending.issue.number,
+            issue_identifier=pending.issue.identifier,
+            run_id=pending.run_id,
+            reason=reason,
+        )
+        return None
+
+    async def _hand_over_parent(
+        self, issue: Issue, *, title: str, reason: str, way_back: str
+    ) -> actions.EscapeOutcome:
+        """`parent_hand_over`: the one shape every hand-over of a parent takes (section 6).
+
+        One that landed is recorded, so the watch leaves a parent that is a human's now, and it
+        ends the triage chain, as a triage hand-back does: the `triage-todo` that resumes the
+        parent starts again at attempt 1. One GitHub refused is kept to write again.
+        """
+        # Scrubbed once, here (#91): it becomes a public note, a Slack message and the record.
+        reason = self._scrubber.scrub(reason)
+        outcome = await actions.parent_hand_over(
+            self._adapter,
+            self._bus,
+            issue,
+            title=title,
+            reason=reason,
+            way_back=way_back,
+            now=self._now(),
+        )
+        if outcome == "failed":
+            self._parent_handovers[issue.id] = ParentHandOver(
+                title=title, reason=reason, way_back=way_back
+            )
+            return outcome
+        self._counters = self._counters.bump(blocked=1)
+        record = self._parents.get(issue.number) or ParentRecord(identifier=issue.identifier)
+        self._record_parent(issue.number, replace(record, handed_over=reason))
+        # The owed note goes with the chain (`_forget_triage_chain`).
+        self._forget_triage_chain(issue.id)
+        return outcome
 
     # --- reconcile ----------------------------------------------------------------------
 
@@ -2235,7 +2680,9 @@ class Orchestrator:
             return
         self._report_issues(refreshed)
         by_id = {issue.id: issue for issue in refreshed}
-        triage_todo = self._workflow.config.github.labels.triage_todo.lower()
+        labels = self._workflow.config.github.labels
+        triage_todo = labels.triage_todo.lower()
+        triage_labels = {triage_todo, labels.triage_complete.lower()}
         for issue_id in ids:
             entry = self._running.get(issue_id)
             if entry is None:
@@ -2260,6 +2707,15 @@ class Orchestrator:
                     self._stop_entry(entry, "moved", "state label")
                 elif triage_todo not in current.labels:
                     self._stop_entry(entry, "moved", "triage-todo removed")
+                continue
+            if entry.kind == "parent_review":
+                # Section 6, as for triage: a state label wins, and a parent carrying neither
+                # triage label is one a human has taken off the track. A `triage-todo` added
+                # meanwhile stops nothing: the review running is the one it asks for.
+                if current.state_labels:
+                    self._stop_entry(entry, "moved", "state label")
+                elif not triage_labels.intersection(current.labels):
+                    self._stop_entry(entry, "moved", "triage labels removed")
                 continue
             if current.state is StateLabel.IN_PROGRESS and current.dispatchable:
                 continue
@@ -2549,9 +3005,13 @@ class Orchestrator:
             error=error or (result.error if result is not None else None),
         )
         # After the slot, the account and the spend are settled above, which every run shares;
-        # what the end of a triage run means is its own (spec 2026-10-25, section 4).
+        # what the end of a triage run or a parent review means is its own (spec 2026-10-25,
+        # sections 4 and 6).
         if entry.kind == "triage":
             await self._triage_exit(entry, result, error)
+            return
+        if entry.kind == "parent_review":
+            await self._parent_review_exit(entry, result, error)
             return
         if entry.terminal_issue is not None:
             await self._finish(entry.terminal_issue)

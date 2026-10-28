@@ -48,6 +48,16 @@ class ParentRecord:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class ParentHandOver:
+    """A parent hand-over GitHub would not let the worker write, kept to write again: its
+    title, its reason (already scrubbed) and the way back the note gives."""
+
+    title: str
+    reason: str
+    way_back: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class ReviewCounts:
     """The counts after this review: a ``gap`` has already added one to the gap rounds."""
 
@@ -69,6 +79,23 @@ def parent_review_due(steps: ParentSteps, labels: GitHubLabels) -> bool:
         and not held.intersection(steps.labels)
         and bool(steps.sub_issues)
         and all(step.state == "closed" for step in steps.sub_issues)
+    )
+
+
+def steps_as_seen(steps: ParentSteps, seen: Sequence[int], verdict: ParentReviewVerdict) -> bool:
+    """Whether ``steps`` are still the ones a review saw (``seen``), every one closed.
+
+    Steps after those pass only when ``verdict`` files them, matched by title as
+    ``apply_parent_review`` matches them: an earlier try at filing it created them before it
+    failed, and the verdict is owed once its first write has landed. Anything else -- a step
+    reopened, added or unlinked -- makes the verdict stale.
+    """
+    head, rest = steps.sub_issues[: len(seen)], steps.sub_issues[len(seen) :]
+    drafts = {_key(draft.title) for draft in verdict.sub_issues}
+    return (
+        tuple(step.number for step in head) == tuple(seen)
+        and all(step.state == "closed" for step in head)
+        and all(_key(step.title) in drafts for step in rest)
     )
 
 

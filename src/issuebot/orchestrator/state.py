@@ -9,10 +9,11 @@ from typing import Any, Literal
 
 from issuebot.agent import RunResult
 from issuebot.agent.runner import Credential, RateLimits, RateLimitWindow
-from issuebot.agent.verdict import TriageVerdict
+from issuebot.agent.verdict import ParentReviewVerdict, TriageVerdict
 from issuebot.config import GitHubLabels
 from issuebot.events import Event, PrOpened, RunKind, StateChanged
 from issuebot.github import Issue, StateLabel
+from issuebot.orchestrator.parent_review import ReviewCounts
 
 RetryKind = Literal[
     "continuation",
@@ -155,9 +156,14 @@ class RunningEntry:
     stop_detail: str | None = None
     review_seen_mono: float | None = None  # first sight of `review`; the grace runs from here
     terminal_issue: Issue | None = None
-    # A work run or a triage run (spec 2026-10-25-triage-design.md, section 4): both hold a slot
-    # and an account, and only the exit and the reconcile tell them apart.
+    # A work run, a triage run or a parent review (spec 2026-10-25-triage-design.md, sections 4
+    # and 6): each holds a slot and an account, and only the exit and the reconcile tell them
+    # apart.
     kind: RunKind = "work"
+    # A parent review's steps as the watch read them when it started, in GitHub's order: what
+    # its verdict is about, so a filing finds out whether a step was reopened, added or unlinked
+    # since (spec section 6). Empty for the other kinds.
+    steps_seen: tuple[int, ...] = ()
 
     @property
     def issue_id(self) -> str:
@@ -210,6 +216,29 @@ class PendingVerdict:
     cost_usd: float
     tries: int = 0
     swapped: bool = False
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PendingParentReview:
+    """A parent review's verdict, parsed and scrubbed, that GitHub would not let the worker file.
+
+    ``PendingVerdict``'s shape and reasons, for the parent review (spec section 6). ``seen`` is
+    the steps the review read, which a retry before the move checks the parent against, and
+    which ``apply_parent_review`` keeps out of its title match. ``counts`` are the record's
+    counts once this review is acted on. ``moved`` is whether the move has landed -- the swap
+    for a ``next`` or ``gap``, the close for a ``met`` -- after which only the comment is owed.
+    """
+
+    issue: Issue
+    verdict: ParentReviewVerdict
+    seen: tuple[int, ...]
+    counts: ReviewCounts
+    run_id: str
+    attempt: int
+    turns: int
+    cost_usd: float
+    tries: int = 0
+    moved: bool = False
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

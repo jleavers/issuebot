@@ -20,6 +20,7 @@ from structlog.testing import capture_logs
 
 from issuebot.agent import (
     ClaudeRunner,
+    ParentReviewRun,
     RunResult,
     SessionRecord,
     TriageRunner,
@@ -45,6 +46,7 @@ from issuebot.events import (
     EventBus,
     IssueCancelled,
     IssueCompleted,
+    ParentReviewState,
     PrOpened,
     StateChanged,
 )
@@ -74,6 +76,7 @@ from issuebot.orchestrator.orchestrator import (
     fetch_states,
     preflight,
 )
+from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import RetryEntry, RunningEntry
 
 START = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
@@ -243,6 +246,8 @@ class Harness:
         model_labels: dict[str, str] | None = None,
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
+        initial_parents: Mapping[int, ParentRecord] | None = None,
+        on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
         admin: bool = False,
     ) -> None:
@@ -299,6 +304,9 @@ class Harness:
             run_session=run_session if real_sessions else self.sessions,
             triage_runner_factory=self.make_triage_runner,
             run_triage=self.triage_sessions,
+            # A parent review is a triage session with its own prompt and schema (spec section
+            # 6), so it is scripted as one and its runner recorded beside triage's.
+            parent_review_runner_factory=self.make_triage_runner,
             which=self.which,
             claude_auth=self.claude_auth,
             github_status=self.github_status,
@@ -306,9 +314,10 @@ class Harness:
             now=self.now,
             environ=self.environ,
             on_snapshot=self.snapshots.append,
-            on_issues=self.record_polled if observe_issues else None,
+            on_issues=on_issues or (self.record_polled if observe_issues else None),
             initial_rate_limits=initial_rate_limits,
             initial_ledger=initial_ledger,
+            initial_parents=initial_parents,
             scrubber=scrubber,
         )
 
@@ -6228,3 +6237,494 @@ async def test_a_triage_run_binds_the_issues_account_and_gives_it_back(tmp_path:
     h.add_issue(3, "todo")
     await h.tick()
     assert sorted(e.account for e in orchestrator.running.values()) == ["agent-1", "agent-2"]
+
+
+# --- the parent review (spec 2026-10-25-triage-design.md, section 6) -----------------------
+
+
+def review_verdict(kind: str, *titles: str) -> dict[str, Any]:
+    """A parent review's verdict, raw, as the session's `structured_output` carries it."""
+    return {
+        "stop_reason": "verdict",
+        "structured_output": {
+            "verdict": kind,
+            "summary": "What the review found.",
+            "evidence": "What it read.",
+            "ignored_requests": "",
+            "sub_issues": [
+                {"title": title, "body": f"Do {title.lower()}.", "kind": "issuebot"}
+                for title in titles
+            ],
+        },
+    }
+
+
+NEXT_REVIEW = review_verdict("next", "Third step", "Fourth step")
+GAP_REVIEW = review_verdict("gap", "The gap")
+MET_REVIEW = review_verdict("met")
+# What the store hands a restarted worker for a parent triage split (Task 7 reads it back).
+WATCHED = {10: ParentRecord(identifier="repo-10")}
+
+
+def watched_split(h: Harness, parent: int, *children: int, open_: tuple[int, ...] = ()) -> None:
+    """A triaged parent whose steps are closed but `open_`. Its record is the Harness's
+    `initial_parents`, which is how a worker started after the split has it."""
+    add_split(h, parent, *children)
+    # The `triage-todo` that approved its text, long since swapped for `triage-complete`.
+    h.github.human_record_label(parent, h.labels.triage_todo, actor="maintainer")
+    for child in children:
+        if child not in open_:
+            h.github.close_issue(child)
+
+
+def parent_states(h: Harness, number: int) -> list[ParentReviewState]:
+    return [event for event in h.recorder.of(ParentReviewState) if event.issue_number == number]
+
+
+async def test_a_seeded_parent_is_reviewed_on_the_first_tick(tmp_path: Path) -> None:
+    """Review focus 1: steps that closed while the worker was down. The record is read back at
+    startup, so the first tick reviews the parent with no label from anyone."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    labels = h.github.issue(10).labels
+    await h.tick()
+    [run] = h.triage_sessions.runs
+    assert run.issue.number == 10
+    assert run.kwargs["parent_review"] == ParentReviewRun(reviews=0, gap_rounds=0)
+    assert (h.entry(10).kind, h.entry(10).steps_seen) == ("parent_review", (11, 12))
+    assert h.github.issue(10).labels == labels
+    assert h.calls("parent_steps") == [([10],)]
+    assert h.sessions.runs == []
+    assert len(h.triage_runner_settings) == 1
+
+
+async def test_a_parent_with_an_open_step_is_not_reviewed(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12, open_=(12,))
+    await h.tick()
+    assert h.triage_sessions.runs == [] and h.orchestrator.running == {}
+    assert h.github.comments_for(10) == []
+
+
+async def test_a_step_closed_as_not_planned_counts_as_closed(tmp_path: Path) -> None:
+    """Section 6: any close counts as done. Whether a dropped step matters is the review's call."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12, open_=(12,))
+    h.github.close_issue(12, reason="NOT_PLANNED")
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [10]
+
+
+async def test_a_parent_without_a_record_is_not_reviewed(tmp_path: Path) -> None:
+    """Section 6: only a parent whose triage filed its steps is watched. A `fits` issue a human
+    later split by hand waits for a human's `triage-todo`, and the watch reads nothing."""
+    h = Harness(tmp_path)
+    h.add_triage_issue(10)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    for child in (11, 12):
+        h.github.add_issue(f"Step {child}", number=child)
+        h.github.link_sub_issue(10, child)
+        h.github.close_issue(child)
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    assert h.orchestrator.running == {}
+    assert h.calls("parent_steps") == []
+
+
+async def test_a_split_filed_by_triage_is_watched(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.add_triage_issue(10)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **SPLIT_VERDICT)
+    assert [h.github.issue(n).title for n in (11, 12)] == ["First step", "Second step"]
+    [state] = parent_states(h, 10)
+    assert (state.reviews, state.gap_rounds, state.handed_over, state.finished) == (
+        0,
+        0,
+        None,
+        False,
+    )
+    for child in (11, 12):
+        h.github.close_issue(child)
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [10, 10]
+    assert h.entry(10).kind == "parent_review"
+    assert h.triage_sessions.runs[-1].kwargs["parent_review"] == ParentReviewRun(
+        reviews=0, gap_rounds=0
+    )
+
+
+async def test_a_next_verdict_files_the_next_batch_and_keeps_watching(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert [child.number for child in await h.github.sub_issues(10)] == [11, 12, 13, 14]
+    assert "Part of #10: step 3 of 4, filed by issuebot's parent review." in (
+        h.github.issue(13).body or ""
+    )
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review (")
+    assert h.orchestrator._parents[10] == ParentRecord(identifier="repo-10", reviews=1)
+    [state] = parent_states(h, 10)
+    assert (state.reviews, state.gap_rounds) == (1, 0)
+    # Both new steps labelled at once: phase 2 runs them in order.
+    for step in (13, 14):
+        h.github.human_set_state(step, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [13]
+    assert "14" not in h.orchestrator.running
+    # Once both have closed, the parent is reviewed again, its count carried.
+    for step in (13, 14):
+        h.github.close_issue(step)
+    await h.exit(h.run_for(13), final_issue=h.github.issue(13))
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 2
+    assert h.entry(10).steps_seen == (11, 12, 13, 14)
+    assert h.triage_sessions.runs[-1].kwargs["parent_review"] == ParentReviewRun(
+        reviews=1, gap_rounds=0
+    )
+
+
+async def test_a_gap_verdict_counts_a_round(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **GAP_REVIEW)
+    assert [args[1] for args in h.calls("create_sub_issue")] == ["The gap"]
+    assert "This is gap round 1 of 2." in h.github.comments_for(10)[0].body
+    assert h.orchestrator._parents[10] == ParentRecord(
+        identifier="repo-10", reviews=1, gap_rounds=1
+    )
+
+
+async def test_a_met_verdict_closes_the_parent_and_ends_the_watch(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    await h.exit(h.triage_sessions.runs[0], **MET_REVIEW)
+    issue = h.github.issue(10)
+    assert issue.github_state == "closed"
+    assert issue.state is StateLabel.COMPLETE
+    assert h.labels.triage_complete in issue.labels
+    [completed] = h.recorder.of(IssueCompleted)
+    assert completed.resolution == "parent_review"
+    assert h.orchestrator._parents[10].finished
+    assert parent_states(h, 10)[-1].finished
+    reads = len(h.calls("parent_steps"))
+    await h.tick()
+    assert len(h.calls("parent_steps")) == reads
+
+
+async def test_a_met_parent_reaches_the_store_before_it_closes(tmp_path: Path) -> None:
+    """A split parent wears no state label, so the board's poll never reports it, and the store
+    writes a close only onto a row it already has. The filing reports the parent first, or a
+    `met` parent would never count among the issues closed."""
+    reported: list[tuple[int, str, int]] = []
+
+    def observe(issues: Sequence[Issue]) -> None:
+        completed = len(h.recorder.of(IssueCompleted))
+        reported.extend((issue.number, issue.github_state, completed) for issue in issues)
+
+    h = Harness(tmp_path, initial_parents=WATCHED, on_issues=observe)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    assert all(number != 10 for number, _, _ in reported)
+    await h.exit(h.triage_sessions.runs[0], **MET_REVIEW)
+    assert (10, "open", 0) in reported
+    assert len(h.recorder.of(IssueCompleted)) == 1
+
+
+async def test_a_review_whose_steps_changed_is_discarded(tmp_path: Path) -> None:
+    """Review focus 2: a step reopened while the review ran. Nothing stale is filed, and the
+    next tick waits for the steps to close again."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.reopen_issue(11)
+    with capture_logs() as logs:
+        await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert h.calls("create_sub_issue") == [] and h.calls("comment") == []
+    assert h.calls("edit_labels") == []
+    [line] = [entry for entry in logs if entry["event"] == "parent_review_discarded"]
+    assert (line["issue_number"], line["reason"]) == (10, "steps changed")
+    assert h.orchestrator._parents[10] == WATCHED[10]
+    assert parent_states(h, 10) == []
+    assert h.orchestrator._parent_pending == {}
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+
+
+async def test_a_review_stops_when_the_parent_gains_a_state_label(tmp_path: Path) -> None:
+    """Ruling 14: a state label wins over the triage track, as it does over triage."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.human_set_state(10, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert (h.entry(10).stop_cause, h.entry(10).stop_detail) == ("moved", "state label")
+    await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert h.calls("create_sub_issue") == [] and h.github.comments_for(10) == []
+    assert h.orchestrator._parents[10] == WATCHED[10]
+    assert h.orchestrator._triage_failures == {}
+
+
+async def test_a_review_stops_when_the_parent_loses_both_triage_labels(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.human_remove_label(10, h.labels.triage_complete)
+    await h.tick()
+    entry = h.entry(10)
+    assert (entry.stop_cause, entry.stop_detail) == ("moved", "triage labels removed")
+    await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert h.calls("create_sub_issue") == [] and h.calls("edit_labels") == []
+    assert h.github.comments_for(10) == []
+    assert h.orchestrator._parents[10] == WATCHED[10]
+
+
+async def test_a_failed_filing_is_retried_from_memory(tmp_path: Path) -> None:
+    """Review focus 3: GitHub failing part-way through filing. The retry files nothing twice,
+    comments once and tells Slack once, and never runs the session again."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.fail_next("transport", on="create_sub_issue", after=1)
+    await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert "10" in h.orchestrator._parent_pending
+    assert h.orchestrator._parents[10] == WATCHED[10]
+    await h.tick()
+    assert [child.number for child in await h.github.sub_issues(10)] == [11, 12, 13, 14]
+    assert len(h.recorder.of(StateChanged)) == 1
+    assert len(h.github.comments_for(10)) == 1
+    assert len(h.triage_sessions.runs) == 1
+    assert h.orchestrator._parent_pending == {}
+    assert h.orchestrator._parents[10].reviews == 1
+
+
+async def test_a_met_whose_close_failed_is_closed_on_the_retry(tmp_path: Path) -> None:
+    """Review focus 3 for `met`: the labels landed, so the parent wears `complete`, but the close
+    did not. That label is the filing's own first write, not a state label a human added, so
+    the retry closes the parent and says so once."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.fail_next("transport", on="close_as_completed")
+    await h.exit(h.triage_sessions.runs[0], **MET_REVIEW)
+    issue = h.github.issue(10)
+    assert (issue.github_state, issue.state) == ("open", StateLabel.COMPLETE)
+    await h.tick()
+    issue = h.github.issue(10)
+    assert (issue.github_state, issue.state) == ("closed", StateLabel.COMPLETE)
+    assert len(h.github.comments_for(10)) == 1
+    assert len(h.recorder.of(StateChanged)) == 1
+    assert len(h.recorder.of(IssueCompleted)) == 1
+    assert h.orchestrator._parents[10].finished
+
+
+async def test_a_closed_parent_is_no_longer_watched(tmp_path: Path) -> None:
+    """Review focus 5: a parent a human closes gets no review and no comment. Its record is
+    finished, and the watch stops reading it."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    h.github.close_issue(10)
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert h.github.comments_for(10) == []
+    [state] = parent_states(h, 10)
+    assert state.finished and state.handed_over is None
+    await h.tick()
+    assert h.calls("parent_steps") == [([10],)]
+
+
+async def test_a_parent_without_triage_complete_is_left_alone(tmp_path: Path) -> None:
+    """Review focus 5: taking `triage-complete` off means "leave this alone". No review, no
+    comment, and the record stands: putting the label back resumes the watch."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    h.github.human_remove_label(10, h.labels.triage_complete)
+    await h.tick()
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    assert h.github.comments_for(10) == []
+    assert parent_states(h, 10) == []
+    assert h.orchestrator._parents[10] == WATCHED[10]
+    assert len(h.calls("parent_steps")) == 2, "still watched"
+
+
+async def test_the_watch_is_skipped_without_a_free_slot(tmp_path: Path) -> None:
+    """Ruling 16: every deployment shares the account's GraphQL budget, so the watch reads only
+    when a review could start."""
+    h = Harness(tmp_path, max_concurrent=1, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12, open_=(12,))
+    h.add_issue(20, "todo")
+    await h.tick()
+    assert [run.issue.number for run in h.sessions.runs] == [20]
+    assert len(h.calls("parent_steps")) == 1
+    h.github.close_issue(12)
+    await h.tick()
+    assert len(h.calls("parent_steps")) == 1
+    assert h.triage_sessions.runs == []
+
+
+async def test_a_failed_watch_read_skips_the_tick_and_feeds_no_hold(tmp_path: Path) -> None:
+    """Like the triage read, the watch's failure is not the board's: it is logged, and the
+    GitHub hold is left to the poll. The poll fails too here, one tick short of holding, which
+    the watch's failures would have made up had they been counted."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    ticks = MAX_FETCH_FAILURES - 1
+    h.github.fail_next("transport", on="parent_steps", times=ticks)
+    h.github.fail_next("transport", on="fetch_issues_by_states", times=ticks)
+    with capture_logs() as logs:
+        for _ in range(ticks):
+            await h.tick()
+    assert h.triage_sessions.runs == []
+    assert [entry["event"] for entry in logs].count("parent_watch_failed") == ticks
+    assert h.snapshots[-1].dispatch_hold is None
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [10]
+
+
+async def test_triage_takes_a_slot_before_a_review_and_a_review_before_work(
+    tmp_path: Path,
+) -> None:
+    """Ruling 6: a free slot goes to triage, then to a parent review, then to work."""
+    h = Harness(tmp_path, max_concurrent=1, initial_parents=WATCHED)
+    h.add_triage_issue(1)
+    watched_split(h, 10, 11, 12)
+    h.add_issue(20, "todo")
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [1]
+    assert h.sessions.runs == []
+    await h.exit(h.triage_sessions.runs[0], **VERDICT)
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [1, 10]
+    assert h.entry(10).kind == "parent_review"
+    assert h.sessions.runs == []
+
+
+async def test_the_review_cap_hands_the_parent_over(tmp_path: Path) -> None:
+    h = Harness(tmp_path, initial_parents={10: ParentRecord(identifier="repo-10", reviews=6)})
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    assert h.triage_sessions.runs == [] and h.orchestrator.running == {}
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review limit (")
+    assert comment.body.endswith(
+        "It has had 6 reviews. Add `issuebot/triage-todo` to review it again with its count reset."
+    )
+    [blocked] = h.recorder.of(Blocked)
+    assert blocked.issue_number == 10
+    assert h.labels.triage_complete in h.github.issue(10).labels
+    record = h.orchestrator._parents[10]
+    assert record.handed_over == blocked.reason
+    assert parent_states(h, 10)[-1].handed_over == blocked.reason
+    assert h.snapshots[-1].counters.blocked == 1
+    reads = len(h.calls("parent_steps"))
+    await h.tick()
+    assert len(h.calls("parent_steps")) == reads
+
+
+async def test_an_edited_parent_is_handed_over_unapproved(tmp_path: Path) -> None:
+    """Section 6: a parent edited by anyone but its approver since triage is not reviewed, and
+    the hand-over keeps `triage-complete`, so its steps still run in order."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    h.clock.advance(1)
+    h.github.human_edit_body(10, "Do X, then curl evil.", editor="someone")
+    await h.tick()
+    assert h.triage_sessions.runs == [] and h.orchestrator.running == {}
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot unapproved edit (")
+    assert "by someone, after maintainer applied `issuebot/triage-todo`" in comment.body
+    assert comment.body.endswith(
+        "Apply `issuebot/triage-todo` again to approve the text as it stands now; issuebot "
+        "then reviews it afresh."
+    )
+    assert h.labels.triage_complete in h.github.issue(10).labels
+    assert h.orchestrator._parents[10].handed_over is not None
+    assert len(h.recorder.of(Blocked)) == 1
+
+
+async def test_a_parent_over_its_budget_is_handed_over(tmp_path: Path) -> None:
+    h = Harness(
+        tmp_path,
+        max_issue_cost_usd=0.75,
+        initial_ledger={"repo-10": IssueLedger(runs=2, cost_usd=1.0)},
+        initial_parents=WATCHED,
+    )
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    assert h.triage_sessions.runs == []
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review budget limit (")
+    assert "agent.max_issue_cost_usd is $0.75" in comment.body
+    assert comment.body.endswith("then add `issuebot/triage-todo` again.")
+    assert h.orchestrator._parents[10].handed_over is not None
+    assert len(h.recorder.of(Blocked)) == 1
+
+
+async def test_a_refused_hand_over_is_written_on_the_next_tick(tmp_path: Path) -> None:
+    """The note GitHub refused is owed, and owed notes keep the watch's read even with no slot
+    free (ruling 16): the work run below holds the only one."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=1,
+        initial_parents={10: ParentRecord(identifier="repo-10", reviews=6)},
+    )
+    watched_split(h, 10, 11, 12)
+    h.add_issue(20, "todo")
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()
+    assert h.github.comments_for(10) == []
+    assert h.orchestrator._parents[10].watched
+    assert "10" in h.orchestrator._parent_handovers
+    assert [run.issue.number for run in h.sessions.runs] == [20]
+    await h.tick()
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review limit (")
+    assert h.orchestrator._parent_handovers == {}
+    assert not h.orchestrator._parents[10].watched
+    assert h.triage_sessions.runs == []
+
+
+async def test_an_owed_hand_over_is_dropped_once_the_parent_closes(tmp_path: Path) -> None:
+    """A closed parent has no chain left: the note GitHub refused is not written on it, and it
+    no longer keeps the watch's read going."""
+    h = Harness(tmp_path, initial_parents={10: ParentRecord(identifier="repo-10", reviews=6)})
+    watched_split(h, 10, 11, 12)
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()
+    assert "10" in h.orchestrator._parent_handovers
+    h.github.close_issue(10)
+    await h.tick()
+    assert h.orchestrator._parent_handovers == {}
+    assert h.github.comments_for(10) == []
+    assert parent_states(h, 10)[-1].finished
+
+
+async def test_a_filing_that_keeps_failing_is_handed_over(tmp_path: Path) -> None:
+    h = Harness(tmp_path, max_attempts=2, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    # The first filing and both retries fail; the hand-over's own writes do not.
+    h.github.fail_next("transport", on="create_sub_issue", times=3)
+    await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    await h.tick()
+    assert h.github.comments_for(10) == []
+    await h.tick()
+    [note] = h.github.comments_for(10)
+    assert note.body.startswith("### Issuebot parent review not filed (")
+    assert "issuebot could not file the parent review's verdict on GitHub: " in note.body
+    assert note.body.endswith(
+        "Unlink any sub-issues this review filed from this issue, then add "
+        "`issuebot/triage-todo` again."
+    )
+    assert h.labels.triage_complete in h.github.issue(10).labels
+    assert h.orchestrator._parent_pending == {}
+    assert h.orchestrator._parents[10].handed_over is not None
+    assert len(h.triage_sessions.runs) == 1
+    await h.tick()
+    assert len(h.github.comments_for(10)) == 1

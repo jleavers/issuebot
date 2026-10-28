@@ -21,6 +21,7 @@ from issuebot.orchestrator.parent_review import (
     parent_review_comment,
     parent_review_due,
     parent_review_note,
+    steps_as_seen,
 )
 
 NOW = datetime(2026, 10, 28, 9, 30, 0, tzinfo=UTC)
@@ -167,6 +168,54 @@ def test_not_due(change: str) -> None:
         case "a state label":
             kwargs["labels"] = (complete, "issuebot/review")
     assert not parent_review_due(steps(**kwargs), LABELS)
+
+
+def titled_steps(*children: tuple[int, str, str]) -> ParentSteps:
+    """A parent's steps, each ``(number, title, state)``."""
+    return ParentSteps(
+        number=10,
+        id="I_10",
+        state="open",
+        labels=("issuebot/triage-complete",),
+        sub_issues=tuple(
+            SubIssue(number=n, title=title, url=f"u{n}", state=state)  # type: ignore[arg-type]
+            for n, title, state in children
+        ),
+    )
+
+
+SEEN = (11, 12)
+CLOSED = ((11, "Step 11", "closed"), (12, "Step 12", "closed"))
+
+
+def test_steps_as_seen_when_unchanged() -> None:
+    assert steps_as_seen(titled_steps(*CLOSED), SEEN, NEXT)
+    assert steps_as_seen(titled_steps(*CLOSED), SEEN, MET)
+
+
+def test_steps_a_failed_try_created_are_the_verdicts_own() -> None:
+    """Ruling 15: once the first write has landed the verdict is owed, and the first writes of a
+    `next` are its steps. A retry matches them by title, as `apply_parent_review` does."""
+    created = (13, "third STEP", "open")
+    assert steps_as_seen(titled_steps(*CLOSED, created), SEEN, NEXT)
+
+
+@pytest.mark.parametrize(
+    "children",
+    [
+        ((11, "Step 11", "open"), (12, "Step 12", "closed")),
+        (*CLOSED, (13, "Something else", "closed")),
+        ((11, "Step 11", "closed"),),
+        ((12, "Step 12", "closed"), (11, "Step 11", "closed")),
+    ],
+    ids=["a step reopened", "a step added", "a step unlinked", "reordered"],
+)
+def test_steps_changed(children: tuple[tuple[int, str, str], ...]) -> None:
+    assert not steps_as_seen(titled_steps(*children), SEEN, NEXT)
+
+
+def test_a_met_verdict_owns_no_new_step() -> None:
+    assert not steps_as_seen(titled_steps(*CLOSED, (13, "Third step", "open")), SEEN, MET)
 
 
 def test_the_record_is_watched_until_handed_over_or_finished() -> None:
