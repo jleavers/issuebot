@@ -201,9 +201,10 @@ has none. The one action that resumes it is in the comment:
   `issuebot/triage-todo` again to triage it afresh.
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
-- **`operator step`**: someone labelled an `issuebot/operator-step` issue `issuebot/todo`.
-  issuebot removes whichever state label the issue carried and says the step is yours: do it,
-  then close the issue.
+- **`operator step`**: an `issuebot/operator-step` issue came up for a work run under any
+  state label -- `issuebot/todo`, `issuebot/rework`, or `issuebot/in-progress` on a resume
+  after a restart or a retry. issuebot removes whichever state label the issue carried and
+  says the step is yours: do it, then close the issue.
 
 A verdict that failed to file is retried on each tick from memory, without a new session,
 and under a Claude authentication or usage hold too, since filing needs only GitHub. A

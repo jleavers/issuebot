@@ -576,6 +576,10 @@ async def operator_step_escape(
     a resumed ``in-progress`` too, so the note names the label actually taken off, the same one
     ``StateChanged`` carries (#337).
     """
+    # One label named, though ``clear_state`` removes every state label, and that is enough
+    # (#346): only an issue with exactly one state label reaches here. One that carries two
+    # has no ``state`` (``issue_from_node``), so admission refuses it as ``inactive`` and it
+    # never gets as far as ``_dispatch``; nothing else calls this.
     labels = adapter.labels
     removed = state_label_name(issue)
     took_off = (
