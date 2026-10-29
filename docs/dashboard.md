@@ -6,11 +6,11 @@ the optional [GitHub Actions minutes](#github-actions-minutes) settings, and not
 workflow file, and no GitHub token but that billing one -- so it can run somewhere the worker
 does not.
 
-![The issuebot dashboard: a worker status line, six hero tiles, a table of running agents, the Kanban board of the five label columns, and thirty-day charts, in the dark theme. The data shown is fabricated.](images/dashboard.png)
+![The issuebot dashboard: a worker status line, six hero tiles, a table of running agents, the Kanban board, from Triage and Triaged through the five state labels, and thirty-day charts, in the dark theme. The data shown is fabricated.](images/dashboard.png)
 
 The dashboard (`issuebot web`; the compose `web` service publishes it on the host's loopback
 at `ISSUEBOT_WEB_PORT`, default 8080) serves every registered repository under
-`/r/<owner>/<name>/`: the Kanban of the five label columns, the hero stats, two 30-day
+`/r/<owner>/<name>/`: the Kanban of the label columns, the hero stats, two 30-day
 charts, the running agents and, per issue, its runs with the transcript of every captured
 turn (scrubbed before it is stored: issuebot's own token, keys and webhook, anything shaped
 like a credential, and the operator's home directory never reach the database). `/` redirects to the repository you last picked (a cookie) or the first registered
@@ -61,6 +61,24 @@ there and no `web_auth_rejected` beside it, because nothing was presented to rej
 credentials in the URL get round it, since `AuthSchemes` lists schemes rather than restricting
 the transport (that is `BasicAuthOverHttpEnabled`, a separate policy); another browser, or
 cookie-based authentication in front of the dashboard, is the way in.
+
+## The board
+
+The Kanban has seven columns, in this order: `issuebot/triage-todo`, `issuebot/triage-complete`,
+`issuebot/todo`, `issuebot/in-progress`, `issuebot/review`, `issuebot/rework` and
+`issuebot/complete`. The first two are the Triage and Triaged columns, left of Todo.
+
+- **Triage** holds the open issues labelled `triage-todo`, waiting or being triaged. **Triaged**
+  holds those labelled `triage-complete` that carry no state label, so their verdict is filed
+  and they wait for your `todo`. A split parent stays in Triaged until it closes.
+- A state label wins: an issue with `todo` and `triage-complete` is in Todo, so an issue is in
+  one column only and is counted once in the headers and in `/stats`.
+- A triage run, and a review of a split parent, show in Running marked `(triage)` or
+  `(parent review)`. The cards themselves carry no progress.
+- A worker with a store reads the triage track once a poll, for 1 GraphQL point a page of 33,
+  and an issue closed or unlabelled on GitHub leaves its column on the next poll.
+- `/stats`'s `by_state` and `/issues?state=` take `triage_todo` and `triage_complete`, and
+  `/state`'s `running[]` carries `kind`.
 
 ## The hero's six tiles
 

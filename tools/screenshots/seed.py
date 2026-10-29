@@ -10,9 +10,10 @@ Two things are seeded, and they are separate because they run a different number
 ``history``  thirty days of closed issues and finished runs, so the dashboard's two charts and
              its 1-day and 7-day tiles carry figures rather than zeroes. Run once; running it
              again would multiply every count behind the tiles.
-``stage N``  the board with issue #42 in the Nth column of its journey (1 todo, 2 in-progress,
-             3 review, 4 complete). Run once per frame of the journey animation; it upserts by
-             issue number, so a later stage replaces the earlier one rather than adding to it.
+``stage N``  the board with issue #42 in the Nth stage of its journey (1 triage-todo,
+             2 triage-complete, 3 todo, 4 in-progress, 5 review, 6 complete). Run once per
+             frame of the journey animation; it upserts by issue number, so a later stage
+             replaces the earlier one rather than adding to it.
 
 ``DATABASE_URL`` must point at a throwaway. See ``README.md`` beside this file.
 """
@@ -64,6 +65,10 @@ ARCHIVE_TITLES = (
 
 JOURNEY_TITLE = "Focus ring is invisible on the dark theme's primary button"
 
+# The stage the hero image is taken at: #42 in progress, so two agents are running. The
+# capture.py's HERO_STAGE must match it.
+HERO_STAGE = 4
+
 
 def _issue(
     number: int,
@@ -113,6 +118,19 @@ def _issue(
 
 # The standing board: every column but the one issue #42 moves through.
 BOARD = (
+    _issue(
+        60,
+        "Dark-mode toggle forgets the choice on reload",
+        None,
+        markers=(LABELS.triage_todo,),
+    ),
+    _issue(
+        59,
+        "Export the activity feed as CSV",
+        None,
+        markers=(LABELS.triage_complete,),
+    ),
+    _issue(58, "Checkout redesign", None, markers=(LABELS.triage_complete,)),
     _issue(57, "Debounce the search box so typing does not fire a request a keystroke", "todo"),
     _issue(56, "Add a skip-to-content link for keyboard users", "todo"),
     _issue(55, "Locale-aware date formatting in the activity feed", "todo"),
@@ -158,10 +176,12 @@ BOARD = (
 )
 
 STAGES = {
-    1: _issue(42, JOURNEY_TITLE, "todo", age_h=4),
-    2: _issue(42, JOURNEY_TITLE, "in_progress", age_h=4),
-    3: _issue(42, JOURNEY_TITLE, "review", pr=121, age_h=4),
-    4: _issue(
+    1: _issue(42, JOURNEY_TITLE, None, age_h=4, markers=(LABELS.triage_todo,)),
+    2: _issue(42, JOURNEY_TITLE, None, age_h=4, markers=(LABELS.triage_complete,)),
+    3: _issue(42, JOURNEY_TITLE, "todo", age_h=4, markers=(LABELS.triage_complete,)),
+    4: _issue(42, JOURNEY_TITLE, "in_progress", age_h=4, markers=(LABELS.triage_complete,)),
+    5: _issue(42, JOURNEY_TITLE, "review", pr=121, age_h=4, markers=(LABELS.triage_complete,)),
+    6: _issue(
         42,
         JOURNEY_TITLE,
         "complete",
@@ -179,16 +199,19 @@ def _snapshot(running: int) -> RuntimeSnapshot:
     from issuebot.agent.runner import RateLimits, RateLimitWindow
 
     candidates = (
-        (51, 7, 2, "Cart total drops the currency symbol on the summary step"),
-        (42, 3, 1, JOURNEY_TITLE),
+        (51, 7, 2, "Cart total drops the currency symbol on the summary step", "work"),
+        (42, 3, 1, JOURNEY_TITLE, "work"),
     )
+    # A triage run is always in flight, so the hero's Running panel shows `(triage)`.
+    triage = (60, 1, 1, "Dark-mode toggle forgets the choice on reload", "triage")
     rows = tuple(
         RunningRow(
             issue_number=number,
             identifier=f"{REPO}#{number}",
             title=title,
             url=f"https://github.com/{REPO}/issues/{number}",
-            state="in_progress",
+            state=None if kind == "triage" else "in_progress",
+            kind=kind,
             attempt=1,
             rework=False,
             resumed=False,
@@ -200,7 +223,7 @@ def _snapshot(running: int) -> RuntimeSnapshot:
             turns=turns,
             stop_cause=None,
         )
-        for number, minutes, turns, title in candidates[:running]
+        for number, minutes, turns, title, kind in (*candidates[:running], triage)
     )
     return RuntimeSnapshot(
         at=NOW,
@@ -351,7 +374,7 @@ async def main(command: str) -> None:
         stage = int(command)
         board = [*BOARD, STAGES[stage]]
         await store.upsert_issues([IssueSnapshot(issue=i, seen_at=NOW) for i in board])
-        snapshot = _snapshot(running=2 if stage == 2 else 1)
+        snapshot = _snapshot(running=2 if stage == HERO_STAGE else 1)
         await store.write_snapshot(snapshot.at, snapshot.to_dict())
         print(f"stage {stage}: issue #42 in {STAGES[stage].state}")
     finally:

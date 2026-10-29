@@ -44,10 +44,11 @@ them from that repository's checkout.
 
 Tokens that belong to one GitHub account share one budget. GitHub allows 5,000 GraphQL
 points an hour *per account*, not per token, and the sessions' own `gh` calls and yours spend
-from it too. An idle worker at the default `polling.interval_ms` spends about 530 of them an
-hour -- one point per state label per poll while no label holds more than 33 open issues,
-plus the terminal sweep -- and a worker with sessions running up to 120 more, so one account
-carries seven to nine workers before the polls alone use it up. Past that, lengthen
+from it too. An idle worker at the default `polling.interval_ms` spends about 650 of them an
+hour -- one point per state label per poll, and one for the two triage labels together, while
+no label holds more than 33 open issues, plus the terminal sweep -- and a worker with sessions
+running up to 120 more, so one account
+carries six to seven workers before the polls alone use it up. Past that, lengthen
 `polling.interval_ms` in each checkout's `configs/WORKFLOW.local.md`, which reloads without a
 restart, or give the extra deployments a token from another account. What a spent budget
 looks like is under ["GitHub itself"](#github-itself).
