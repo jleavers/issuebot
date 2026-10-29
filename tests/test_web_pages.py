@@ -117,7 +117,7 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     assert '<link rel="icon" href="data:,">' in text
     assert '"code": "503", "swap": true' in text
     for label in GitHubLabels().as_tuple():
-        assert label in text
+        assert label.replace("/", "/<wbr>") in text
     assert f'href="{BASE}/issues/7"' in text and f'href="{BASE}/issues/3"' in text
     assert "javascript:" not in text and "PR#4" in text
     assert "<script>" not in text and ' style="' not in text  # the CSP forbids inline code
@@ -295,7 +295,7 @@ def test_the_board_has_a_column_per_board_column_in_order(h: Harness) -> None:
     text = html(h.client.get(f"{BASE}/partials/dashboard"))
     classes = re.findall(r'<div class="column ([a-z_]+)">', text)
     assert classes == list(BOARD_COLUMNS)
-    assert "issuebot/triage-todo" in text and "issuebot/triage-complete" in text
+    assert "issuebot/<wbr>triage-todo" in text and "issuebot/<wbr>triage-complete" in text
 
 
 def test_the_running_title_is_still_escaped(h: Harness) -> None:
@@ -1010,7 +1010,20 @@ def test_the_scripts_load_in_an_order_app_js_can_work_in(h: Harness) -> None:
 def test_the_board_uses_the_repositorys_own_labels(h: Harness) -> None:
     h.register("acme/frontend", labels={**GitHubLabels().model_dump(), "review": "team/check"})
     text = html(h.client.get("/r/acme/frontend/"))
-    assert "team/check" in text and "issuebot/review" not in text
+    assert "team/<wbr>check" in text and "issuebot/review" not in text
+
+
+def test_a_column_heading_may_break_after_each_slash(h: Harness) -> None:
+    """``issuebot/complete`` has no hyphen, so without a ``<wbr>`` it overran its count."""
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
+    assert '<span class="name">issuebot/<wbr>complete</span>' in text
+
+
+def test_a_column_heading_is_escaped_before_the_break_is_added(h: Harness) -> None:
+    h.register("acme/frontend", labels={**GitHubLabels().model_dump(), "complete": "a<b>/c"})
+    text = html(h.client.get("/r/acme/frontend/"))
+    assert '<span class="name">a&lt;b&gt;/<wbr>c</span>' in text
+    assert "<b>" not in text
 
 
 # --- the pure helpers -------------------------------------------------------------------------

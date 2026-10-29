@@ -358,7 +358,7 @@ def test_the_column_heading_names_its_state_in_words_too() -> None:
     markup = (files("issuebot.web") / "templates" / "partials" / "dashboard.html").read_text(
         encoding="utf-8"
     )
-    assert '<h3><span class="name">{{ column.label }}</span>' in markup
+    assert '<h3><span class="name">{{ column.label|' in markup
 
 
 def test_the_light_state_tokens_are_githubs_label_hexes_where_they_can_be() -> None:

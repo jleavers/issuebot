@@ -184,7 +184,7 @@ async def test_the_dashboard_renders_the_seeded_rows(client: TestClient) -> None
     response = client.get(f"{BASE}/")
     assert response.status_code == 200
     for label in GitHubLabels().as_tuple():
-        assert label in response.text
+        assert label.replace("/", "/<wbr>") in response.text
     assert (
         "Issue 7 &lt;b&gt;title&lt;/b&gt;" in response.text and "<b>title</b>" not in response.text
     )
