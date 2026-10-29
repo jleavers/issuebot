@@ -40,6 +40,15 @@ class GitHubAdapter(Protocol):
         """Open issues carrying ``label``, oldest first, whatever other labels they carry."""
         ...
 
+    async def fetch_issues_with_any_label(self, labels: Sequence[str]) -> list[Issue]:
+        """Open issues carrying any of ``labels``, each once, oldest first.
+
+        Ordered by ``(created_at, number)``. One read however many labels; ``[]`` for none,
+        with no request. Past the board poll's page ceiling it fails as
+        ``fetch_issues_with_label`` does.
+        """
+        ...
+
     async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
         """Open issues created strictly after ``since``, oldest first by ``(created_at, number)``.
 

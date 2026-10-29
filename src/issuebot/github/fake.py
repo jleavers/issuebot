@@ -191,6 +191,15 @@ class FakeGitHub:
             if record.state == "open" and label.lower() in {name.lower() for name in record.labels}
         )
 
+    async def fetch_issues_with_any_label(self, labels: Sequence[str]) -> list[Issue]:
+        self._enter("fetch_issues_with_any_label", tuple(labels))
+        wanted = {label.lower() for label in labels}
+        return self._snapshots(
+            record
+            for record in self._issues.values()
+            if record.state == "open" and wanted & {name.lower() for name in record.labels}
+        )
+
     async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
         self._enter("fetch_issues_opened_since", since)
         return self._snapshots(

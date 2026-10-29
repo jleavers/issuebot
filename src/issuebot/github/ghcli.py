@@ -110,11 +110,20 @@ ISSUE_FIELDS = """fragment IssueFields on Issue {
 }"""
 
 
-def _issues_query(states: str) -> str:
+def _issues_query(states: str, labels: int = 1) -> str:
+    """The label-filtered issues read; ``labels > 1`` asks for any of that many labels.
+
+    GraphQL variables here are strings and ints only (``_graphql``), so several labels are
+    several numbered string variables rather than one list. One label keeps the plain
+    ``$label``, which is the query every existing read sends.
+    """
+    names = ["label"] if labels == 1 else [f"label{i}" for i in range(labels)]
+    declared = "".join(f"${name}: String!, " for name in names)
+    wanted = ", ".join(f"${name}" for name in names)
     return (
-        "query($owner: String!, $name: String!, $label: String!, $cursor: String) {\n"
+        f"query($owner: String!, $name: String!, {declared}$cursor: String) {{\n"
         "  repository(owner: $owner, name: $name) {\n"
-        f"    issues(labels: [$label], states: [{states}], first: {ISSUE_PAGE_SIZE},"
+        f"    issues(labels: [{wanted}], states: [{states}], first: {ISSUE_PAGE_SIZE},"
         " after: $cursor,\n"
         "           orderBy: {field: CREATED_AT, direction: ASC}) {\n"
         "      nodes { ...IssueFields }\n"
@@ -360,7 +369,30 @@ class GhCliAdapter:
     async def fetch_issues_with_label(self, label: str) -> list[Issue]:
         """Open issues carrying ``label``, oldest first; the ceiling is the board poll's."""
         login = await self.own_login()
-        return await self._issues_with_label(label, OPEN_ISSUES_QUERY, login, MAX_ISSUE_PAGES)
+        return await self._issues_with_label(
+            {"label": label}, OPEN_ISSUES_QUERY, login, MAX_ISSUE_PAGES
+        )
+
+    async def fetch_issues_with_any_label(self, labels: Sequence[str]) -> list[Issue]:
+        """Open issues carrying any of ``labels``, each once, oldest first, in one read.
+
+        GitHub's ``labels:`` filter matches an issue carrying *any* of the labels given, so
+        the triage track's two labels cost one query rather than two. Measured read-only on
+        2026-10-29: 1 point a page, as the single-label read costs. Past ``MAX_ISSUE_PAGES``
+        it fails exactly as ``fetch_issues_with_label`` does.
+        """
+        names = list(dict.fromkeys(labels))
+        if not names:
+            return []
+        if len(names) == 1:
+            return await self.fetch_issues_with_label(names[0])
+        login = await self.own_login()
+        return await self._issues_with_label(
+            {f"label{i}": name for i, name in enumerate(names)},
+            _issues_query("OPEN", len(names)),
+            login,
+            MAX_ISSUE_PAGES,
+        )
 
     async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
         """Open issues opened strictly after ``since``, oldest first.
@@ -1026,7 +1058,7 @@ class GhCliAdapter:
         for role in roles:
             label = label_name(self.labels, role)
             try:
-                page = await self._issues_with_label(label, query, login, max_pages)
+                page = await self._issues_with_label({"label": label}, query, login, max_pages)
             except PageCeilingError as exc:
                 if not per_role:
                     raise
@@ -1041,9 +1073,11 @@ class GhCliAdapter:
         return sorted(found.values(), key=lambda issue: (issue.created_at, issue.number))
 
     async def _issues_with_label(
-        self, label: str, query: str, login: str, max_pages: int
+        self, label_variables: Mapping[str, str], query: str, login: str, max_pages: int
     ) -> list[Issue]:
-        """Every issue carrying ``label``, oldest first, at most ``max_pages`` pages of them.
+        """Every issue carrying any of ``label_variables``' labels, at most ``max_pages`` pages.
+
+        Oldest first. ``label_variables`` maps the query's variable names to label names.
 
         Past the ceiling the read *fails* with a ``response`` error, as the workpad and
         timeline reads do (#110, #139), rather than returning what it has. The decision is
@@ -1059,8 +1093,9 @@ class GhCliAdapter:
         """
         issues: list[Issue] = []
         cursor: str | None = None
+        labels = " or ".join(label_variables.values())
         for _page_number in range(max_pages):
-            variables = {"owner": self._owner, "name": self._name, "label": label}
+            variables = {"owner": self._owner, "name": self._name, **label_variables}
             if cursor:
                 variables["cursor"] = cursor
             data = await self._graphql(query, variables)
@@ -1087,7 +1122,7 @@ class GhCliAdapter:
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
-        raise PageCeilingError(f"more than {max_pages * ISSUE_PAGE_SIZE} issues carry {label}")
+        raise PageCeilingError(f"more than {max_pages * ISSUE_PAGE_SIZE} issues carry {labels}")
 
     # --- plumbing ----------------------------------------------------------------
 
