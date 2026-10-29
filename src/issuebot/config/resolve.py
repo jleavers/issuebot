@@ -24,6 +24,10 @@ WORKSPACE_ROOT_FALLBACK = "ISSUEBOT_WORKSPACE_ROOT"
 WORKSPACE_ROOT_DEFAULT = "/workspaces"
 AGENT_RUN_AS_FIELD: tuple[str, ...] = ("agent", "run_as")
 AGENT_RUN_AS_FALLBACK = "ISSUEBOT_AGENT_USER"
+# Auto-triage's switch may come from the env file, like the account; the text is left for
+# pydantic to parse as a bool.
+TRIAGE_AUTO_FIELD: tuple[str, ...] = ("triage", "auto")
+TRIAGE_AUTO_FALLBACK = "ISSUEBOT_AUTO_TRIAGE"
 # The accounts the worker image built, written by the same ``useradd`` loop that creates them
 # (#142). Below the variable and above the host route, so the image's default is the accounts
 # it actually has and a pool raised at build time cannot disagree with the names the worker
@@ -172,6 +176,15 @@ def resolve_config(
     if run_as is None:
         run_as = built_session_accounts()
     _set(config, AGENT_RUN_AS_FIELD, run_as)
+
+    # An explicit ``triage.auto`` in WORKFLOW.md, true or false, wins over the variable.
+    auto = resolve_env_value(
+        _get(config, TRIAGE_AUTO_FIELD),
+        field=".".join(TRIAGE_AUTO_FIELD),
+        fallback=TRIAGE_AUTO_FALLBACK,
+        environ=environ,
+    )
+    _set(config, TRIAGE_AUTO_FIELD, auto)
 
     entries = _get(config, MCP_CONFIG_FIELD)
     if isinstance(entries, list):

@@ -9,11 +9,13 @@ import pytest
 
 from issuebot.events import (
     EVENT_KINDS,
+    AutoTriageState,
     Blocked,
     Event,
     EventBus,
     IssueCancelled,
     IssueCompleted,
+    IssueEvent,
     LogSink,
     NotificationSent,
     ParentReviewState,
@@ -84,8 +86,10 @@ def test_event_kinds_registry_matches_classes() -> None:
         "issue_cancelled",
         "notification_sent",
         "parent_review_state",
+        "auto_triage_state",
     } == EVENT_KINDS
-    assert {event.kind for event in ALL_EVENTS} == EVENT_KINDS
+    # ALL_EVENTS holds the issue events; the repository-level one is tested on its own.
+    assert {event.kind for event in ALL_EVENTS} | {AutoTriageState.kind} == EVENT_KINDS
 
 
 def test_parent_review_state_round_trips() -> None:
@@ -275,3 +279,20 @@ def test_state_changed_note_defaults_to_none() -> None:
     )
     assert event.note is None
     assert event.to_dict()["note"] is None
+
+
+def test_auto_triage_state_is_a_repository_event() -> None:
+    """Not an issue's: no number, and ``to_dict`` writes the watermark as ISO 8601 too."""
+    at = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+    watermark = datetime(2026, 10, 29, 11, 30, tzinfo=UTC)
+    event = AutoTriageState(auto=True, watermark=watermark, at=at)
+    assert not isinstance(event, IssueEvent)
+    assert "auto_triage_state" in EVENT_KINDS
+    data = event.to_dict()
+    assert data == {
+        "kind": "auto_triage_state",
+        "at": at.isoformat(),
+        "auto": True,
+        "watermark": watermark.isoformat(),
+    }
+    json.dumps(data)

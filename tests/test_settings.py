@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from issuebot.config import load_workflow
+from issuebot.config.errors import SettingsValidationError
 from issuebot.config.settings import (
     DEFAULT_DISALLOWED_TOOLS,
     GitHubLabels,
@@ -345,3 +347,38 @@ def test_the_tool_policy_ships_restrictive_and_is_widened_by_a_setting() -> None
     assert default.claude.mcp_config == []
     with pytest.raises(ValidationError):
         Settings.model_validate({"github": {"repo": "o/r"}, "claude": {"mcp_config": [""]}})
+
+
+def _auto_triage(tmp_path: Path, value: str, environ: dict[str, str] | None = None) -> bool:
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text(
+        f'---\ngithub:\n  repo: o/r\ntriage:\n  auto: "{value}"\n---\nBody', encoding="utf-8"
+    )
+    return load_workflow(path, environ=environ or {}).config.triage.auto
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("false", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+    ],
+)
+def test_triage_auto_parses_the_usual_spellings(tmp_path: Path, text: str, expected: bool) -> None:
+    assert _auto_triage(tmp_path, text) is expected
+
+
+def test_triage_auto_is_off_by_default() -> None:
+    assert Settings.model_validate(MINIMAL).triage.auto is False
+
+
+def test_an_unreadable_auto_triage_value_names_the_field(tmp_path: Path) -> None:
+    with pytest.raises(SettingsValidationError) as exc:
+        _auto_triage(tmp_path, "maybe")
+    assert [field for field, _ in exc.value.errors] == ["triage.auto"]

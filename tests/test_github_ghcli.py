@@ -4,7 +4,7 @@ import io
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1811,6 +1811,100 @@ async def test_fetch_issues_with_label_asks_for_that_label() -> None:
     assert [issue.number for issue in issues] == [60]
     assert issues[0].state is None  # no state label: a triage-only issue is not on the board
     assert "states: [OPEN]" in query_of(runner.argv(0))
+
+
+def _opened_node(number: int, created_at: datetime) -> dict[str, object]:
+    stamp = created_at.isoformat().replace("+00:00", "Z")
+    return {
+        "number": number,
+        "title": "t",
+        "body": "b",
+        "bodyHTML": '<p dir="auto">b</p>',
+        "state": "OPEN",
+        "url": f"https://example/{number}",
+        "createdAt": stamp,
+        "updatedAt": stamp,
+        "closedAt": None,
+        "author": {"login": "someone"},
+        "labels": {"nodes": []},
+        "assignees": {"nodes": []},
+        "closedByPullRequestsReferences": {"nodes": []},
+    }
+
+
+def _opened_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": nodes,
+                        "pageInfo": {
+                            "hasNextPage": end_cursor is not None,
+                            "endCursor": end_cursor,
+                        },
+                    }
+                }
+            }
+        }
+    )
+
+
+WATERMARK = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+
+
+def _at(minutes: int) -> datetime:
+    return WATERMARK + timedelta(minutes=minutes)
+
+
+async def test_fetch_issues_opened_since_reads_newest_first_and_stops_at_the_watermark() -> None:
+    runner = StubRunner()
+    nodes = [_opened_node(3, _at(5)), _opened_node(2, _at(3)), _opened_node(1, _at(-1))]
+    runner.on(has("api"), stdout=_opened_page(nodes, end_cursor="c1"))
+
+    issues = await make_adapter(runner).fetch_issues_opened_since(WATERMARK)
+
+    assert [issue.number for issue in issues] == [2, 3]
+    assert len(runner.calls) == 1
+    argv = runner.argv(0)
+    query = query_of(argv)
+    assert "states: [OPEN]" in query
+    assert "orderBy: {field: CREATED_AT, direction: DESC}" in query
+    assert "filterBy: {since: $since}" in query
+    assert f"since={WATERMARK.isoformat()}" in argv
+
+
+async def test_fetch_issues_opened_since_pages_until_it_passes_the_watermark() -> None:
+    runner = StubRunner()
+    runner.on(
+        lacks("cursor="),
+        stdout=_opened_page([_opened_node(3, _at(5)), _opened_node(2, _at(3))], end_cursor="c1"),
+    )
+    runner.on(
+        arg("cursor=c1"),
+        stdout=_opened_page([_opened_node(1, _at(0))], end_cursor="c2"),
+    )
+
+    issues = await make_adapter(runner).fetch_issues_opened_since(WATERMARK)
+
+    assert [issue.number for issue in issues] == [2, 3]
+    assert len(runner.calls) == 2
+
+
+async def test_fetch_issues_opened_since_past_the_ceiling_fails() -> None:
+    runner = StubRunner()
+    runner.on(
+        has("api"),
+        stdout=_opened_page([_opened_node(1, _at(5))], end_cursor="c"),
+    )
+
+    with pytest.raises(PageCeilingError) as excinfo:
+        await make_adapter(runner).fetch_issues_opened_since(WATERMARK)
+
+    assert f"more than {MAX_ISSUE_PAGES * ISSUE_PAGE_SIZE} issues were opened since" in str(
+        excinfo.value
+    )
+    assert len(runner.calls) == MAX_ISSUE_PAGES
 
 
 def _comments_page(nodes: list[dict[str, object]], *, end_cursor: str | None) -> str:

@@ -1,6 +1,7 @@
 """The protocol every GitHub implementation satisfies (the gh-backed adapter and the fake)."""
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 from typing import Protocol
 
 from issuebot.config import GitHubLabels
@@ -37,6 +38,14 @@ class GitHubAdapter(Protocol):
 
     async def fetch_issues_with_label(self, label: str) -> list[Issue]:
         """Open issues carrying ``label``, oldest first, whatever other labels they carry."""
+        ...
+
+    async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
+        """Open issues created strictly after ``since``, oldest first by ``(created_at, number)``.
+
+        One bounded read, newest first, that stops at the first issue at or before ``since``;
+        past the page ceiling it is a ``PageCeilingError``.
+        """
         ...
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:

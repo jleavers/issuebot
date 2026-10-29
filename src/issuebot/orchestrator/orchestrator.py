@@ -53,7 +53,7 @@ from issuebot.config import (
     overlay_path_for,
 )
 from issuebot.config.workflow import parent_review_prompt_path_for, triage_prompt_path_for
-from issuebot.events import EventBus, RunKind
+from issuebot.events import AutoTriageState, EventBus, RunKind, StateChanged
 from issuebot.github import (
     GhCliAdapter,
     GitHubAdapter,
@@ -82,6 +82,14 @@ from issuebot.orchestrator.admission import (
     seeded_chain,
 )
 from issuebot.orchestrator.approval import Approved, Unapproved
+from issuebot.orchestrator.auto_triage import (
+    CEILING_RETRY_S,
+    SCAN_INTERVAL_S,
+    SETTLE,
+    AutoTriageRecord,
+    settle,
+    skip_reason,
+)
 from issuebot.orchestrator.parent_review import (
     ParentHandOver,
     ParentRecord,
@@ -372,6 +380,7 @@ class Orchestrator:
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
         initial_parents: Mapping[int, ParentRecord] | None = None,
+        initial_auto_triage: AutoTriageRecord | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
@@ -493,9 +502,16 @@ class Orchestrator:
         # the text before it -- the same-second race the tie rule in `approval.py` closes.
         # The approving label is in the key too: `todo` and `triage-todo` approve the same
         # text independently (spec 2026-10-25, section 3), so a verdict about one is not one
-        # about the other.
+        # about the other -- and so is whether authorship was asked, since a verdict under
+        # rule 1 alone is not one under both. The author's association is there because
+        # authorship rests on it and losing write access does not move `updatedAt`: without
+        # it a remembered `Approved` would outlive the standing it was given for.
         self._approval_verdicts: dict[
-            str, tuple[tuple[str, datetime, str, str | None], Approved | Unapproved]
+            str,
+            tuple[
+                tuple[str, bool, datetime, str, str | None, str | None],
+                Approved | Unapproved,
+            ],
         ] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
@@ -522,6 +538,19 @@ class Orchestrator:
         # are reviewed on its first tick; without a store a restart forgets them, and such a
         # parent waits for a human's `triage-todo`.
         self._parents: dict[int, ParentRecord] = dict(initial_parents or {})
+        # Auto-triage's record (spec section 2): whether it was on and the watermark behind which
+        # no issue is looked at again. Seeded from the store like the parents; without one a
+        # restart counts as never having run, so the watermark moves to the present.
+        self._auto_triage_record: AutoTriageRecord | None = initial_auto_triage
+        # The monotonic moment before which the scan does not read again: `SCAN_INTERVAL_S` after
+        # the last read, failed or not, and `CEILING_RETRY_S` after one past its page ceiling.
+        self._auto_triage_not_before: float = -math.inf
+        # Every issue this process has auto-labelled, by number, and the tick whose scan did it.
+        # The watermark is the record that outlives a restart, but a refused write leaves it
+        # behind an issue labelled in the same second, and an escape may take that label off
+        # before the retry reads the issue again: this is what keeps it to once (phase 4
+        # ruling 2). The tick is what this tick's triage pass leaves for the next one.
+        self._auto_labelled: dict[int, int] = {}
         # Parent review verdicts GitHub would not let the worker file, retried from memory as
         # triage's are, by issue id.
         self._parent_pending: dict[str, PendingParentReview] = {}
@@ -986,6 +1015,8 @@ class Orchestrator:
         """Symphony §8.1: reconcile, reload, preflight, fetch, dispatch, snapshot."""
         await self.reconcile()
         self._reload_workflow()
+        # Every tick, holds or not: a reload can switch auto-triage on or off (phase 4 ruling 3).
+        self._settle_auto_triage()
         await self._settle_run_as()
         # Before any hold is decided, and not inside `_dispatch_candidates`, which a preflight
         # or auth hold skips: a reason `fire_due_retries` quotes has to be about this tick.
@@ -1022,7 +1053,9 @@ class Orchestrator:
                 # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
                 # short and what it unblocks is a human, so it takes a free slot before work.
                 # A parent review next (section 6): it is short too, and what it unblocks is the
-                # parent's next batch.
+                # parent's next batch. Auto-triage's scan before both, though an issue it labels
+                # is left by this tick's triage pass and started on the next.
+                await self._scan_for_auto_triage()
                 dispatched = await self._dispatch_triage()
                 dispatched += await self._dispatch_parent_reviews()
                 dispatched += await self._dispatch_candidates()
@@ -1058,6 +1091,10 @@ class Orchestrator:
 
     def _slots(self) -> int:
         return max(self._workflow.config.agent.max_concurrent_agents - len(self._running), 0)
+
+    def _cannot_dispatch(self) -> bool:
+        """Whether this tick can admit nothing: no slot free, the worker stopping, or a hold."""
+        return self._slots() == 0 or self._stopping or self._current_hold() is not None
 
     def _publish_snapshot(self) -> None:
         if self._on_snapshot is None:
@@ -1409,7 +1446,7 @@ class Orchestrator:
         the failure the hold exists to stop, and waiting one poll costs one interval. It is
         logged, and does not feed the GitHub hold (spec 2026-10-25, section 5).
         """
-        if self._slots() == 0 or self._stopping or self._current_hold() is not None:
+        if self._cannot_dispatch():
             # The account's GraphQL budget is shared, and `admit` ranks stopping, hold and slots
             # above `order`: the sweep stops at the first such refusal, so nothing is admitted
             # this tick and an empty mapping cannot let a held step through (spec 2026-10-25,
@@ -1595,12 +1632,15 @@ class Orchestrator:
         return account, True
 
     async def _assess_approval(
-        self, issue: Issue, *, label: str | None = None
+        self, issue: Issue, *, label: str | None = None, authorship: bool = False
     ) -> Approved | Unapproved | None:
         """Is the issue's text the text a human approved? ``None`` when GitHub would not say.
 
         ``label`` is the one that approves: ``todo`` unless the caller names another, which
         the triage dispatch does with ``triage-todo`` (spec 2026-10-25, section 3).
+        ``authorship`` adds that section's second rule, for a ``triage-todo`` issuebot applied
+        itself: the triage and parent-review dispatch ask for it, and the work dispatch never
+        does, so it cannot approve a session that holds a shell or a GitHub credential.
 
         Read at dispatch rather than at poll: one issue is dispatched at a time, where every
         poll reads the whole board. A verdict is remembered for as long as the issue is
@@ -1612,19 +1652,34 @@ class Orchestrator:
         It is a verdict, so the escape takes the label off and the spin stops.
         """
         label = label or self._adapter.labels.todo
-        key = (label, issue.updated_at, issue.title, issue.body)
+        key = (
+            label,
+            authorship,
+            issue.updated_at,
+            issue.title,
+            issue.body,
+            issue.author_association,
+        )
         remembered = self._approval_verdicts.get(issue.id)
         if remembered is not None and remembered[0] == key:
             return remembered[1]
         try:
             if self._own_labels_approve is None:
                 self._own_labels_approve = (await self._adapter.repo_info()).admin
-            verdict = await actions.assess_issue(
-                self._adapter,
-                issue.number,
-                todo_label=label,
-                own_labels_approve=self._own_labels_approve,
-            )
+            if authorship:
+                verdict = await actions.assess_triage_issue(
+                    self._adapter,
+                    issue,
+                    triage_label=label,
+                    own_labels_approve=self._own_labels_approve,
+                )
+            else:
+                verdict = await actions.assess_issue(
+                    self._adapter,
+                    issue.number,
+                    todo_label=label,
+                    own_labels_approve=self._own_labels_approve,
+                )
         except PageCeilingError as exc:
             # The message names the ceiling; the orchestrator does not import the adapter's
             # constants to say it again.
@@ -1786,6 +1841,149 @@ class Orchestrator:
             run_id=entry.run_id,
         )
 
+    # --- auto-triage (spec 2026-10-25-triage-design.md, section 2) -------------------------
+
+    def _settle_auto_triage(self) -> None:
+        """Read ``triage.auto`` against the record, on every tick rather than only at start.
+
+        ``WORKFLOW.md`` reloads live, so a reload switching it on moves the watermark to the
+        present as a start with it on does, and one switching it off is recorded: the issues
+        opened during the spell off are then behind the watermark the next switch on sets, and
+        never auto-triaged (spec 2026-10-25, section 2; phase 4 ruling 3).
+        """
+        record = settle(
+            self._auto_triage_record, auto=self._workflow.config.triage.auto, now=self._now()
+        )
+        if record is None:
+            return
+        self._record_auto_triage(record)
+        if record.auto:
+            # A new watermark, so any wait the old one earned is over: a scan past its page
+            # ceiling names switching off and on as the way out, and it takes effect at once.
+            self._auto_triage_not_before = -math.inf
+            self._log.info("auto_triage_on", watermark=record.watermark.isoformat())
+        else:
+            self._log.info("auto_triage_off")
+
+    def _record_auto_triage(self, record: AutoTriageRecord) -> None:
+        """Keep ``record`` and publish it whole. The one place the record changes, so the latest
+        ``auto_triage_state`` the store holds is the one this worker acts on, and a restart
+        reads back exactly that (phase 4 ruling 1)."""
+        self._auto_triage_record = record
+        self._bus.publish(AutoTriageState(auto=record.auto, watermark=record.watermark))
+
+    async def _scan_for_auto_triage(self) -> int:
+        """Label each new maintainer issue ``triage-todo``, oldest first; the number labelled.
+
+        Every open issue opened after the watermark is decided once -- labelled, or passed over
+        for its ``skip_reason`` -- and the watermark moves past it, so an issue behind it is
+        never looked at again: a label a human or an escape takes off is not put back (spec
+        2026-10-25, section 2; phase 4 ruling 2). An issue opened within ``SETTLE`` of the scan
+        waits for the next one, the watermark behind it, because GitHub may not list it yet and
+        a newer issue it did list must not carry the watermark past both (ruling 6). A refused
+        label write ends the scan with the watermark strictly before the refused issue, which
+        the next scan decides again; an issue labelled before the refusal is remembered, so it
+        is not labelled twice whatever becomes of its label (ruling 15).
+
+        The scan fills no slot of its own, yet it is made only on a tick that could dispatch --
+        a slot free, not stopping, no hold -- and at most every ``SCAN_INTERVAL_S`` (ruling 5).
+        A label it adds would wait for the slot its triage run needs anyway, so labelling
+        sooner gains nothing, and the read spends the account's hourly GraphQL budget, which
+        every deployment shares (section 9). A failed read is logged and waits out the
+        interval -- an hour, ``CEILING_RETRY_S``, for one past its page ceiling, which would walk
+        every page again; like the triage read, it does not feed the GitHub hold, which is the
+        board's.
+        """
+        record = self._auto_triage_record
+        if record is None or not record.auto:
+            return 0
+        if self._cannot_dispatch():
+            return 0
+        if self._clock() < self._auto_triage_not_before:
+            return 0
+        self._auto_triage_not_before = self._clock() + SCAN_INTERVAL_S
+        try:
+            issues = await self._adapter.fetch_issues_opened_since(record.watermark)
+        except PageCeilingError as exc:
+            self._auto_triage_not_before = self._clock() + CEILING_RETRY_S
+            self._log.warning(
+                "auto_triage_scan_failed",
+                error=str(exc),
+                retry_in_s=CEILING_RETRY_S,
+                # At least one poll: the setting is read once a tick, so an off and on that no
+                # tick sees in between moves nothing.
+                remedy=(
+                    "set triage.auto off for at least one poll, then on again: that moves the "
+                    "watermark to the present, and leaves the issues opened before it to a person"
+                ),
+            )
+            return 0
+        except GitHubError as exc:
+            self._log.warning("auto_triage_scan_failed", error=str(exc))
+            return 0
+        labels = self._workflow.config.github.labels
+        settled = self._now() - SETTLE
+        # `watermark` is past every issue decided so far; `behind` is past every one opened
+        # strictly before the issue in hand, which is where a refused write leaves it.
+        watermark = behind = record.watermark
+        labelled = 0
+        for issue in issues:
+            if issue.created_at > settled:
+                # The read is oldest first, so every issue after this one is newer still.
+                break
+            if issue.created_at > watermark:
+                behind = watermark
+            if issue.number in self._auto_labelled:
+                reason: str | None = "already auto-labelled"
+            else:
+                reason = skip_reason(issue, labels)
+            if reason is not None:
+                self._log.info(
+                    "auto_triage_passed_over",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    reason=reason,
+                )
+            else:
+                try:
+                    await self._adapter.edit_labels(issue.number, add=[labels.triage_todo])
+                except GitHubError as exc:
+                    self._log.warning(
+                        "auto_triage_label_failed",
+                        issue_number=issue.number,
+                        issue_identifier=issue.identifier,
+                        error=str(exc),
+                    )
+                    # The next read is strictly after the watermark, so it is left strictly
+                    # before this issue's second, even past one decided in that same second:
+                    # one labelled there is in `_auto_labelled`, so the next scan passes it over
+                    # rather than labelling it twice, whatever has become of its label.
+                    watermark = behind
+                    break
+                self._auto_labelled[issue.number] = self._tick_count
+                # A move on the triage track (phase 4 ruling 13): kept as history, and Slack's
+                # `state_changed` says it in one line.
+                self._bus.publish(
+                    StateChanged(
+                        issue_number=issue.number,
+                        issue_identifier=issue.identifier,
+                        from_label=None,
+                        to_label=labels.triage_todo,
+                        actor="issuebot",
+                        note="auto-triage",
+                    )
+                )
+                self._log.info(
+                    "auto_triage_labelled",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                )
+                labelled += 1
+            watermark = issue.created_at
+        if watermark != record.watermark:
+            self._record_auto_triage(replace(record, watermark=watermark))
+        return labelled
+
     # --- triage (spec 2026-10-25-triage-design.md) ---------------------------------------
 
     async def _dispatch_triage(self) -> int:
@@ -1812,6 +2010,12 @@ class Orchestrator:
         dispatched = 0
         for issue in issues:
             if not is_triage_candidate(issue, labels):
+                continue
+            if self._auto_labelled.get(issue.number) == self._tick_count:
+                # This tick's scan labelled it moments ago. The approval reads the label's event
+                # back, and GitHub may not list it yet: refused for that, the issue would be
+                # handed back, and behind the watermark it is never auto-triaged again. So it
+                # waits for the next tick.
                 continue
             # A parent review's verdict owed is as busy as a triage one: a review a human's
             # `triage-todo` started leaves that label on until its filing lands.
@@ -2033,8 +2237,10 @@ class Orchestrator:
         labels = self._workflow.config.github.labels
         # Before the account (spec section 3, GHSA-jm8h-q3j6-p8xp): the latest `triage-todo` a
         # person applied approves the text as it stood, and an edit after it by anyone else
-        # hands the issue back without a session ever reading it.
-        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        # hands the issue back without a session ever reading it. One issuebot applied itself
+        # -- auto-triage's -- is approved by authorship instead: a maintainer opened the issue
+        # and nobody else has edited it. A refusal under either is handed back the same way.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo, authorship=True)
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):
@@ -2411,10 +2617,11 @@ class Orchestrator:
     ) -> bool:
         """Start one parent review on ``steps``. Like triage, it claims nothing (section 6)."""
         labels = self._workflow.config.github.labels
-        # Section 3's first rule, as for triage: the latest `triage-todo` a person applied
-        # approves the text as it stood, and an edit after it by anyone else hands the parent
-        # over before a session reads it.
-        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        # Section 3, as for triage: the latest `triage-todo` a person applied approves the text
+        # as it stood, and an edit after it by anyone else hands the parent over before a
+        # session reads it. A parent whose latest `triage-todo` was issuebot's own -- an
+        # auto-triaged one -- is re-checked by authorship, the rule that approved its triage.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo, authorship=True)
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):

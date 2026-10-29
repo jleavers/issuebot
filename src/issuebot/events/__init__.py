@@ -5,6 +5,7 @@ from issuebot.events.log_sink import LogSink
 from issuebot.events.types import (
     EVENT_KINDS,
     EVENT_TYPES,
+    AutoTriageState,
     Blocked,
     CompletionResolution,
     Event,
@@ -24,6 +25,7 @@ from issuebot.events.types import (
 __all__ = [
     "EVENT_KINDS",
     "EVENT_TYPES",
+    "AutoTriageState",
     "Blocked",
     "CompletionResolution",
     "Event",

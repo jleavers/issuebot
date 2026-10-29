@@ -46,7 +46,7 @@ which `issuebot labels ensure` creates, and nothing else.
 | `issuebot/rework` | you, if the pull request needs more work; or the worker, when a sibling merge leaves it conflicting |
 | `issuebot/no-fault` | the agent, beside `review`, when the reported defect does not happen (a marker, not a state) |
 | `issuebot/complete` | automatically, when the issue closes by a merged pull request or with `issuebot/no-fault` |
-| `issuebot/triage-todo` | you, to have a session read the issue and file a verdict (not a state; see below) |
+| `issuebot/triage-todo` | you, to have a session read the issue and file a verdict; or the worker, with `triage.auto` on (not a state; see below) |
 | `issuebot/triage-complete` | the worker, after it filed a triage verdict; it stays beside a later state label |
 | `issuebot/operator-step` | the worker, on a sub-issue triage filed for you to do outside issuebot |
 
@@ -60,7 +60,7 @@ comes back with the evidence and the `issuebot/no-fault` marker instead of a pul
 closing it counts as a completion too — on a backlog of aged issues that triage is most of the
 value.
 
-**Triage is by hand.** Label an issue `issuebot/triage-todo` and a read-only session reads it
+**Triage is by hand, or by the worker once `triage.auto` is on.** Label an issue `issuebot/triage-todo` and a read-only session reads it
 against the clone and files a verdict: `fits`, or `split` into ordered sub-issues. The worker
 files it, not the session: the sub-issues are created linked to the parent, a step for you
 rather than the agent carries `issuebot/operator-step`, `triage-todo` becomes
@@ -72,6 +72,10 @@ once per repository first; a verdict cannot be filed until the three triage labe
 the session is bounded is
 [A triage session](docs/security-model.md#a-triage-session) and what to do when it hands an
 issue back is [Triage](docs/operations.md#triage).
+
+With `triage.auto` on, the worker labels each new issue a maintainer opens `issuebot/triage-todo`
+itself, once; it never labels the backlog. See
+[Auto-triage](docs/operations.md#auto-triage).
 
 **A split is reviewed once its steps have closed.** The worker reviews the parent by itself
 when every step has closed, in the same read-only session, and files the next batch (`next`),
@@ -355,7 +359,7 @@ docker compose run --rm worker labels ensure
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 7
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 26632 characters, renders
-[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, at most 8 sub-issues
+[ OK ] triage: prompt shipped default, model claude's own default (neither triage.model nor claude.model is set), 1 turn(s) at $2.00, at most 8 sub-issues, parent review prompt shipped default, 2 gap round(s), at most 6 reviews, auto-triage off
 22 checks: 0 failed, 2 warnings
 ```
 
@@ -511,6 +515,7 @@ first issue running; it is what to consult once one has.
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it; `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
+| `triage.auto` | the worker labels each new issue a maintainer opens `issuebot/triage-todo` itself; when the key is absent it falls back to `ISSUEBOT_AUTO_TRIAGE`, and an explicit `false` wins over the variable. See [Auto-triage](docs/operations.md#auto-triage) | `false` |
 | `triage.model` | the model for a triage session; omit to use `claude.model` | none |
 | `triage.max_turns` | `claude -p` invocations per triage run | `1` |
 | `triage.max_budget_usd` | spend cap per triage turn (its cost counts toward `agent.max_issue_cost_usd`) | `2.0` |

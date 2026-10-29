@@ -145,6 +145,8 @@ from issuebot.orchestrator import (
     claimed_snapshot,
     probe_run_as,
 )
+from issuebot.orchestrator.actions import assess_triage_issue
+from issuebot.orchestrator.auto_triage import AutoTriageRecord
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import rate_limits_from_dict
@@ -1665,7 +1667,8 @@ def _triage_check(workflow: Workflow) -> Check:
         f"prompt {source}, model {model}, {triage.max_turns} turn(s) at "
         f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues, "
         f"parent review prompt {review_source}, {triage.max_gap_rounds} gap round(s), "
-        f"at most {triage.max_parent_reviews} reviews",
+        f"at most {triage.max_parent_reviews} reviews, "
+        f"auto-triage {'on' if triage.auto else 'off'}",
     )
 
 
@@ -2292,7 +2295,7 @@ async def _run_once_triage(
         )
         return 1
     if not show_prompt and not await _approved_for_run_once(
-        adapter, issue, labels, todo_label=labels.triage_todo
+        adapter, issue, labels, todo_label=labels.triage_todo, authorship=True
     ):
         return 1
     try:
@@ -2540,21 +2543,33 @@ async def held_reason(adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels
 
 
 async def _approved_for_run_once(
-    adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels, *, todo_label: str | None = None
+    adapter: GitHubAdapter,
+    issue: Issue,
+    labels: GitHubLabels,
+    *,
+    todo_label: str | None = None,
+    authorship: bool = False,
 ) -> bool:
     """The worker's approval check, answered in the foreground (GHSA-jm8h-q3j6-p8xp).
 
-    The same ``assess_issue`` the orchestrator calls, so `run-once` cannot run what the worker
-    would refuse. What differs is the answer to a refusal: no escape, because the operator who
+    The same ``assess_issue`` the orchestrator calls -- ``assess_triage_issue`` for a triage run,
+    as the worker's triage dispatch calls it -- so `run-once` cannot run what the worker would
+    refuse. What differs is the answer to a refusal: no escape, because the operator who
     typed the command is the human the escape would hand the issue to -- the line says why and
     the label stays where it is. An unreadable history, the ceiling included, is a failure
     too; here there is nobody to hand an issue back to, only a command to stop.
     ``--show-prompt`` skips it: a preview renders for the operator and runs nothing.
-    ``todo_label`` is the label whose approval is checked: ``triage_todo`` for a triage run.
+    ``todo_label`` is the label whose approval is checked: ``triage_todo`` for a triage run,
+    which also passes ``authorship``, so a ``triage-todo`` issuebot applied itself is judged by
+    the author's standing and edits exactly as the worker's triage dispatch judges it (spec
+    2026-10-25, section 3). A work run never asks for it.
     """
     todo_label = todo_label or labels.todo
     try:
-        verdict = await assess_issue(adapter, issue.number, todo_label=todo_label)
+        if authorship:
+            verdict = await assess_triage_issue(adapter, issue, triage_label=todo_label)
+        else:
+            verdict = await assess_issue(adapter, issue.number, todo_label=todo_label)
     except GitHubError as exc:
         print(f"[FAIL] approval: could not read the issue's history: {exc}")
         return False
@@ -2736,6 +2751,28 @@ async def _initial_parents(database: Database | None, repo: str) -> dict[int, Pa
     return parents
 
 
+async def _initial_auto_triage(database: Database | None, repo: str) -> AutoTriageRecord | None:
+    """Auto-triage's record, read back from the store.
+
+    The worker publishes every change to it as an event, so a restart with auto-triage on keeps
+    its watermark and an issue opened while the worker was stopped is still labelled. A read that
+    fails costs exactly that and no more, since without a record the watermark moves to the
+    present: never a reason to refuse to start.
+    """
+    if database is None:
+        return None
+    try:
+        async with database.queries() as queries:
+            row = await queries.scoped(repo).auto_triage_state()
+    except DatabaseError as exc:
+        get_logger(__name__).warning("auto_triage_seed_failed", error=exc.message)
+        return None
+    if row is None:
+        return None
+    get_logger(__name__).info("auto_triage_seeded", auto=row.auto, watermark=row.watermark)
+    return AutoTriageRecord(auto=row.auto, watermark=row.watermark)
+
+
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     scrubber = _deployment_scrubber(workflow.config, os.environ)
@@ -2757,6 +2794,7 @@ async def _run_worker(workflow: Workflow) -> int:
         initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         initial_ledger=await _initial_ledger(sinks.database, workflow.config.github.repo),
         initial_parents=await _initial_parents(sinks.database, workflow.config.github.repo),
+        initial_auto_triage=await _initial_auto_triage(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,

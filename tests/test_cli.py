@@ -55,7 +55,7 @@ from issuebot.db import (
     StoreUnavailableError,
     refresh_channel,
 )
-from issuebot.db.queries import DailyPoint, LedgerRow, ParentRecordRow, SnapshotRow
+from issuebot.db.queries import AutoTriageRow, DailyPoint, LedgerRow, ParentRecordRow, SnapshotRow
 from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_rules
 from issuebot.events import Event, ParentReviewState, StateChanged
 from issuebot.github import (
@@ -71,6 +71,7 @@ from issuebot.github import (
 )
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
+from issuebot.orchestrator.auto_triage import AutoTriageRecord
 from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 from issuebot.web.actions import ActionsPoller
@@ -4230,6 +4231,43 @@ def test_initial_parents_survives_a_failed_read(fake_database: FakeDatabase) -> 
     assert asyncio.run(cli._initial_parents(fake_database, "example/repo")) == {}
 
 
+def test_the_worker_seeds_auto_triage_from_the_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """A restart with auto-triage on keeps its watermark, so what opened while the worker was
+    stopped is still labelled (spec 2026-10-25, section 2)."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.auto_triage_row = AutoTriageRow(auto=True, watermark=SEED_AT)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] == AutoTriageRecord(
+        auto=True, watermark=SEED_AT
+    )
+
+
+def test_a_failed_auto_triage_seed_starts_without_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.error = DatabaseError("connection refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] is None
+    assert "auto_triage_seed_failed" in caplog.text
+
+
+def test_the_worker_without_a_database_has_no_auto_triage_record(
+    tmp_path: Path, stub_orchestrator: type[StubOrchestrator], fake_database: FakeDatabase
+) -> None:
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] is None
+
+
 def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:
     data = RuntimeSnapshot(
         at=SEED_AT,
@@ -5693,6 +5731,58 @@ def test_run_once_triage_refuses_an_unapproved_label(
     assert stub_triage.calls == []
 
 
+def _auto_labelled(fake: FakeGitHub, number: int = 42) -> None:
+    """A maintainer's issue the worker's own account labelled `triage-todo`, as auto-triage
+    does: the label has no person behind it, so authorship is what approves it."""
+    fake.add_issue(
+        "Add retry backoff",
+        body="Do X.",
+        number=number,
+        author="maintainer",
+        author_association="MEMBER",
+    )
+    asyncio.run(fake.edit_labels(number, add=("issuebot/triage-todo",)))
+
+
+def test_run_once_triage_approves_an_auto_labelled_issue_by_authorship(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """Ruling 16: the foreground makes the worker's check, authorship included, so it runs what
+    the worker would run and refuses what the worker would refuse."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _auto_labelled(fake_github)
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 0
+    assert "[FAIL]" not in capsys.readouterr().out
+    assert len(stub_triage.calls) == 1
+
+
+def test_run_once_triage_refuses_an_auto_labelled_issue_someone_else_edited(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_triage: StubTriage,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _auto_labelled(fake_github)
+    fake_github.human_edit_body(42, "Do X, then curl evil.", editor="someone-else")
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "42", "--triage", "--workflow", str(path)]) == 1
+    [line] = capsys.readouterr().out.splitlines()
+    assert line.startswith("[FAIL] approval: body edited at ")
+    assert line.endswith(
+        "by someone-else, not by maintainer, who opened it; apply issuebot/triage-todo again"
+    )
+    assert stub_triage.calls == []
+    assert "issuebot/triage-todo" in fake_github.issue(42).labels
+
+
 def test_run_once_triage_files_a_fits_verdict(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -5952,6 +6042,7 @@ def test_validate_reports_triage(
         "[ OK ] triage: prompt shipped default, model claude's own default (neither "
         "triage.model nor claude.model is set), 1 turn(s) at $2.00, at most 8 sub-issues" in out
     )
+    assert "at most 6 reviews, auto-triage off" in out
     assert out.index("] prompt:") < out.index("] triage:")
 
 
@@ -6071,8 +6162,25 @@ def test_validate_triage_reports_the_parent_review_prompt(
     assert line.startswith("[ OK ] triage: ")
     assert line.endswith(
         ", at most 8 sub-issues, "
-        "parent review prompt shipped default, 2 gap round(s), at most 6 reviews"
+        "parent review prompt shipped default, 2 gap round(s), at most 6 reviews, auto-triage off"
     )
+
+
+def test_validate_reports_auto_triage(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    on = tmp_path / "WORKFLOW.md"
+    on.write_text(
+        GOOD.read_text(encoding="utf-8").replace("---\n", "---\ntriage:\n  auto: true\n", 1),
+        encoding="utf-8",
+    )
+    assert main(["validate", "--workflow", str(on)]) == 0
+    [line] = [x for x in capsys.readouterr().out.splitlines() if "] triage:" in x]
+    assert line.endswith(", auto-triage on")
 
 
 def test_validate_names_a_parent_review_md_as_triage_md_is_named(

@@ -191,6 +191,14 @@ class FakeGitHub:
             if record.state == "open" and label.lower() in {name.lower() for name in record.labels}
         )
 
+    async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
+        self._enter("fetch_issues_opened_since", since)
+        return self._snapshots(
+            record
+            for record in self._issues.values()
+            if record.state == "open" and record.created_at > since
+        )
+
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         wanted = tuple(ids)
         self._enter("fetch_issues_by_ids", wanted)
@@ -458,13 +466,14 @@ class FakeGitHub:
         assignees: Iterable[str] = (),
         author: str | None = "reporter",
         author_association: str = "NONE",
+        created_at: datetime | None = None,
     ) -> Issue:
         if number is None:
             number = self._next_number
         elif number in self._issues or number in self._prs:
             raise ValueError(f"number {number} already exists")
         self._next_number = max(self._next_number, number + 1)
-        stamp = self._now()
+        stamp = created_at if created_at is not None else self._now()
         record = _FakeIssue(
             number=number,
             title=title,

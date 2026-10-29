@@ -17,11 +17,12 @@ class Event:
     at: datetime = field(default_factory=_utcnow)
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe mapping with ``kind``, ISO 8601 ``at`` and every field."""
+        """JSON-safe mapping with ``kind``, ``at`` and every field, a ``datetime`` as ISO 8601."""
         data: dict[str, Any] = {"kind": self.kind, "at": self.at.isoformat()}
         for f in fields(self):
             if f.name != "at":
-                data[f.name] = getattr(self, f.name)
+                value = getattr(self, f.name)
+                data[f.name] = value.isoformat() if isinstance(value, datetime) else value
         return data
 
 
@@ -131,6 +132,21 @@ class ParentReviewState(IssueEvent):
     finished: bool = False
 
 
+@dataclass(frozen=True, kw_only=True)
+class AutoTriageState(Event):
+    """The worker's record of auto-triage, published whole on every change (spec 2026-10-25,
+    section 2): whether it was on when last settled, and the watermark behind which no issue
+    is looked at again.
+
+    A repository-level event, not an issue's: the store writes no issue number for it and the
+    worker reads the latest one back at startup, so there is no table.
+    """
+
+    kind: ClassVar[str] = "auto_triage_state"
+    auto: bool
+    watermark: datetime
+
+
 EVENT_TYPES: tuple[type[Event], ...] = (
     StateChanged,
     RunStarted,
@@ -141,6 +157,7 @@ EVENT_TYPES: tuple[type[Event], ...] = (
     IssueCancelled,
     NotificationSent,
     ParentReviewState,
+    AutoTriageState,
 )
 
 EVENT_KINDS: frozenset[str] = frozenset(cls.kind for cls in EVENT_TYPES)

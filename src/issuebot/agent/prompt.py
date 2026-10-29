@@ -17,6 +17,7 @@ from issuebot.agent.instructions import RepositoryFile
 from issuebot.agent.visible import strip_invisible, visible_text
 from issuebot.config import GitHubLabels, Settings
 from issuebot.github.models import (
+    MAINTAINER_ASSOCIATIONS,
     WORKPAD_MARKER,
     ClosingPr,
     Comment,
@@ -347,7 +348,6 @@ def _visible_body(issue: Issue) -> str:
     return visible_text(issue.body_html)
 
 
-MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 _GH_SPAN = re.compile(r"`gh [^`\n]*`")
 _SEPARATOR_CHARS = frozenset(";&|")
 _QUOTE_PREFIX = re.compile(r"^(?:>\s*)+")

@@ -22,6 +22,8 @@ misses a file replaced by a save that preserved its timestamp (#46).
 Front matter → `$VAR`/`~`/relative-path
 resolution (`resolve.py`, designated fields only) → pydantic `Settings`
 (`settings.py`, `extra="forbid"`). Errors are `ConfigError` subclasses with a `code`.
+`triage.auto` is absent unless set, and then falls back to `ISSUEBOT_AUTO_TRIAGE`; an explicit
+`false` wins.
 The local overlay: `load_workflow(path, overlay=True)` also reads the sibling
 `overlay_path_for(path)` names (`WORKFLOW.md` → `WORKFLOW.local.md`, git-ignored, derived
 and never configured so it lives in the mounted directory and reloads like the base) and
@@ -160,9 +162,11 @@ session both questions.
 
 frozen dataclass events (`EVENT_KINDS`), `EventBus.publish()`
 (synchronous, sink failures isolated and counted), `LogSink`. `RunEnded.log_dir` (Phase 6)
-carries the run's log directory.
+carries the run's log directory. `AutoTriageState` is the first event with no issue.
 
 ## `issuebot.github`
+
+`fetch_issues_opened_since(since)` is auto-triage's one bounded read (33 a page).
 
 `StateLabel` roles, the transition table, `model_label_style` and
 `marker_label_styles` (`state.py`; `classify_closed(issue, labels)` returns `complete` for a
@@ -1448,6 +1452,10 @@ while an earlier one is open, ranked after the worker-wide checks and `inactive`
 comment and `apply_parent_review`. The records are `parent_review_state` events, seeded at
 startup (no table). `_dispatch_parent_reviews` is the watch; a `gap` past the limit and
 a step set that changed mid-run are discarded or handed over at filing, on a fresh read.
+
+`auto_triage.py` holds the record, `settle` and `skip_reason`. `assess_triage` in `approval.py`
+tries rule 1, then `assess_authorship` for issuebot's own `triage-todo`. The scan is
+`Orchestrator._scan_for_auto_triage`; its rulings are in the triage spec.
 
 ## `issuebot.notifications`
 

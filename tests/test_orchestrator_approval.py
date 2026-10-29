@@ -2,8 +2,19 @@
 
 from datetime import UTC, datetime, timedelta, timezone
 
+import pytest
+
 from issuebot.github import ApprovalEvidence, LabelApplied, TextEdit
-from issuebot.orchestrator.approval import Approved, Unapproved, assess
+from issuebot.orchestrator.approval import (
+    AUTHOR_DELETED,
+    DELETED_ACCOUNT,
+    NOT_A_MAINTAINER,
+    Approved,
+    Unapproved,
+    assess,
+    assess_triage,
+)
+from issuebot.orchestrator.stamps import utc_stamp
 
 T0 = datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
 TODO = "issuebot/todo"
@@ -207,3 +218,184 @@ def test_a_label_by_a_deleted_account_is_not_an_approval() -> None:
 def test_label_names_compare_case_insensitively() -> None:
     result = verdict(labelled("Issuebot/Todo", "maintainer", 0))
     assert isinstance(result, Approved)
+
+
+# --- authorship (spec 2026-10-25, section 3) ---------------------------------------------
+
+OWN = "issuebot-bot"
+TRIAGE = "issuebot/triage-todo"
+T1 = at(10)
+
+
+def triage_verdict(
+    *events: LabelApplied,
+    edits: tuple[TextEdit, ...] = (),
+    author: str | None = "maintainer",
+    association: str | None = "MEMBER",
+    admin: bool = False,
+) -> Approved | Unapproved:
+    """The triage verdict for a deployment acting as ``OWN`` on an issue ``author`` opened."""
+    return assess_triage(
+        ApprovalEvidence(label_events=events, edits=edits),
+        triage_label=TRIAGE,
+        own_login=OWN,
+        own_labels_approve=admin,
+        author=author,
+        author_association=association,
+    )
+
+
+def test_an_auto_label_is_approved_by_authorship() -> None:
+    """A `triage-todo` with no person behind it: a maintainer opened the issue and nobody else
+    has touched the text, so the author's own wording stands as the approved text."""
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor=OWN, at=T1),
+        edits=(TextEdit(what="body", editor="maintainer", at=T0),),
+    )
+    assert result == Approved(approver="maintainer", at=T1)
+
+
+@pytest.mark.parametrize(
+    ("editor", "editor_text"), [("someone-else", "someone-else"), (None, DELETED_ACCOUNT)]
+)
+def test_authorship_refuses_an_edit_by_anyone_but_the_author(
+    editor: str | None, editor_text: str
+) -> None:
+    """Since the issue was opened, not since the label: an auto label approves the text as the
+    author wrote it, so an edit before the label is as much someone else's text as one after."""
+    label = LabelApplied(label=TRIAGE, actor=OWN, at=T1)
+    edit = TextEdit(what="body", editor=editor, at=T0)
+    result = triage_verdict(label, edits=(edit,))
+    assert result == Unapproved(
+        reason=f"body edited at {utc_stamp(T0)} by {editor_text}, not by maintainer, who opened it",
+        approval=label,
+        edit=edit,
+    )
+
+
+@pytest.mark.parametrize("association", ["CONTRIBUTOR", "NONE", None])
+def test_authorship_refuses_an_author_who_is_not_a_maintainer(association: str | None) -> None:
+    label = LabelApplied(label=TRIAGE, actor=OWN, at=T1)
+    result = triage_verdict(label, association=association)
+    assert result == Unapproved(
+        reason=NOT_A_MAINTAINER.format(author="maintainer", association=association or "unknown"),
+        approval=label,
+        edit=None,
+    )
+
+
+def test_authorship_refuses_a_deleted_author() -> None:
+    label = LabelApplied(label=TRIAGE, actor=OWN, at=T1)
+    result = triage_verdict(label, author=None)
+    assert result == Unapproved(reason=AUTHOR_DELETED, approval=label, edit=None)
+
+
+def test_a_persons_label_is_judged_by_rule_one() -> None:
+    """The latest `triage-todo` decides which rule applies. A person's is judged as `todo` is,
+    and authorship never rescues it, although the author is a maintainer: whoever applied it
+    read the text, and an edit after their reading is what rule 1 exists to refuse."""
+    approval = LabelApplied(label=TRIAGE, actor="maintainer", at=T1)
+    edit = TextEdit(what="body", editor="other", at=at(20))
+    result = triage_verdict(LabelApplied(label=TRIAGE, actor=OWN, at=T0), approval, edits=(edit,))
+    assert result == Unapproved(
+        reason=(
+            f"body edited at {utc_stamp(at(20))} by other, after maintainer applied "
+            f"`issuebot/triage-todo` at {utc_stamp(T1)}"
+        ),
+        approval=approval,
+        edit=edit,
+    )
+
+
+def test_a_person_labelling_in_the_same_second_as_issuebot_keeps_rule_one() -> None:
+    """A tie for the latest `triage-todo` goes to the person's, whatever order GitHub lists the
+    two in: rule 1 has already refused, and authorship decides only a label nobody stands
+    behind."""
+    approval = LabelApplied(label=TRIAGE, actor="colleague", at=T1)
+    edit = TextEdit(what="body", editor="maintainer", at=at(20))
+    for events in (
+        (approval, LabelApplied(label=TRIAGE, actor=OWN, at=T1)),
+        (LabelApplied(label=TRIAGE, actor=OWN, at=T1), approval),
+    ):
+        result = triage_verdict(*events, edits=(edit,))
+        assert isinstance(result, Unapproved) and result.approval == approval
+
+
+def test_issuebots_label_newer_than_a_persons_is_judged_by_authorship() -> None:
+    """The latest `triage-todo` decides the rule, not the first. A person's earlier label is
+    refused under rule 1 for the author's edit after it, but issuebot's later one has no person
+    behind it, so authorship judges it: a maintainer's issue, every edit their own."""
+    edit = TextEdit(what="body", editor="maintainer", at=at(5))
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor="colleague", at=T0),
+        LabelApplied(label=TRIAGE, actor=OWN, at=T1),
+        edits=(edit,),
+    )
+    assert result == Approved(approver="maintainer", at=T1)
+
+
+def test_on_an_admin_token_a_strangers_edit_keeps_rule_ones_reason() -> None:
+    """On the operator's own token the operator hand-applies `triage-todo` to a stranger's
+    issue as issuebot's account, and the stranger then edits it. Rule 1 counted that label and
+    refused for the edit; authorship refuses too, because the stranger is no maintainer. The
+    hand-back gives rule 1's reason, which names who edited and when -- the one the operator
+    can act on -- rather than the author's standing, which was never what approved it."""
+    approval = LabelApplied(label=TRIAGE, actor=OWN, at=T0)
+    edit = TextEdit(what="body", editor="stranger", at=T1)
+    result = triage_verdict(
+        approval, edits=(edit,), author="stranger", association="NONE", admin=True
+    )
+    assert result == Unapproved(
+        reason=(
+            f"body edited at {utc_stamp(T1)} by stranger, after {OWN} applied "
+            f"`issuebot/triage-todo` at {utc_stamp(T0)}"
+        ),
+        approval=approval,
+        edit=edit,
+    )
+
+
+def test_on_an_admin_token_the_authors_own_edit_is_approved_by_authorship() -> None:
+    """Phase 4 ruling 22, beside the case above: rule 1 refuses the author's edit after the
+    operator's label, and authorship approving wins over that refusal."""
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor=OWN, at=T0),
+        edits=(TextEdit(what="body", editor="maintainer", at=T1),),
+        admin=True,
+    )
+    assert result == Approved(approver="maintainer", at=T0)
+
+
+def test_authorship_compares_logins_case_insensitively() -> None:
+    """GitHub logins are case-insensitive, and the adapter's comparisons are too: issuebot's
+    own label is its own however it is spelt, and so is the author's edit."""
+    result = triage_verdict(
+        LabelApplied(label="Issuebot/Triage-Todo", actor="IssueBot-Bot", at=T1),
+        edits=(TextEdit(what="title", editor="Maintainer", at=at(20)),),
+    )
+    assert result == Approved(approver="maintainer", at=T1)
+
+
+def test_an_issue_issuebot_opened_passes_authorship_on_a_write_account() -> None:
+    """Section 3's narrow exception: a follow-up issuebot filed is its own, and on an account
+    with write access it passes, because the session it reaches is read-only and holds no
+    credential. The work run's `todo` never gets this far."""
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor=OWN, at=T1),
+        edits=(TextEdit(what="body", editor=OWN, at=T0),),
+        author=OWN,
+        association="COLLABORATOR",
+    )
+    assert result == Approved(approver=OWN, at=T1)
+
+
+def test_on_an_admin_token_issuebot_label_approves_under_rule_one() -> None:
+    """On the operator's own token issuebot's label is the operator's, so rule 1 approves it as
+    it does `todo`, before authorship is asked -- the author need not be a maintainer."""
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor=OWN, at=T1),
+        author="stranger",
+        association="NONE",
+        admin=True,
+    )
+    assert result == Approved(approver=OWN, at=T1)

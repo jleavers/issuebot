@@ -476,6 +476,20 @@ async def test_fake_fetch_issues_with_label_is_open_oldest_first(fake: FakeGitHu
     assert [i.number for i in found] == [first.number, third.number]
 
 
+async def test_fake_fetch_issues_opened_since(fake: FakeGitHub) -> None:
+    base = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+    fake.add_issue("A", created_at=base - timedelta(hours=1))
+    closed = fake.add_issue("B", created_at=base + timedelta(minutes=30))
+    newest = fake.add_issue("C", created_at=base + timedelta(hours=1))
+    fake.close_issue(closed.number)
+
+    found = await fake.fetch_issues_opened_since(base)
+
+    assert [i.number for i in found] == [newest.number]
+    assert found[0].created_at == base + timedelta(hours=1)
+    assert fake.calls[-1] == ("fetch_issues_opened_since", (base,))
+
+
 async def test_fail_next_on_a_method_leaves_other_calls_alone(fake: FakeGitHub) -> None:
     issue = fake.add_issue("Task")
     fake.fail_next("server_error", on="comment")

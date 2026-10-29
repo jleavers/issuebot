@@ -11,6 +11,7 @@ from issuebot.db import DatabaseError, MigrationResult, Probe
 from issuebot.db.connection import NOT_A_URL, is_postgres_url
 from issuebot.db.queries import (
     ActionsMinutesRow,
+    AutoTriageRow,
     DailyPoint,
     EventRow,
     IssueRow,
@@ -78,6 +79,7 @@ class FakeQueries:
         self.issue_list: list[IssueRow] = []
         self.ledger_rows: list[LedgerRow] = []
         self.parent_rows: list[ParentRecordRow] = []
+        self.auto_triage_row: AutoTriageRow | None = None
         self.state_asked: str | None = None
         self.series: list[DailyPoint] = []
         self.issue_rows: dict[int, IssueRow] = {}
@@ -159,6 +161,10 @@ class FakeRepoQueries:
     async def parent_records(self) -> list[ParentRecordRow]:
         self._check("parent_records")
         return self._parent.parent_rows
+
+    async def auto_triage_state(self) -> AutoTriageRow | None:
+        self._check("auto_triage_state")
+        return self._parent.auto_triage_row
 
     async def issues_by_state(self) -> dict[str, list[IssueRow]]:
         self._check("issues_by_state")

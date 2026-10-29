@@ -1,7 +1,7 @@
 # Triage: issuebot sizes an issue before anyone starts it
 
 Date: 2026-10-25
-Status: approved 2026-10-25; phase 3 (the parent review) built; phase 1 planned in
+Status: approved 2026-10-25; phase 3 (the parent review) and phase 4 (auto-triage) built; phase 1 planned in
 [`../plans/2026-10-25-triage-phase-1.md`](../plans/2026-10-25-triage-phase-1.md), with the
 refinements found while planning folded in below (sections 1, 4 and 7, and "Phases")
 
@@ -442,6 +442,42 @@ Decided while planning phase 3:
 - A verdict whose steps changed while it ran, including a `gap` past the limit, is discarded and
   files nothing.
 
+Decided while planning phase 4:
+
+1. The record is an `auto_triage_state` event (`auto`, `watermark`), repository-level with no issue
+   number, seeded at startup; no table. Without a store, or a failed seed, a restart is a fresh start.
+2. The watermark moves as issues are decided, and that is the "at most once" record: a label
+   removed by a human or an escape is final.
+3. The setting is settled every tick, since `WORKFLOW.md` reloads live.
+4. One bounded read: `fetch_issues_opened_since`, 33 a page, failing at the page ceiling.
+5. The scan runs at most every 120 s and only on a tick that could dispatch: at most 30 points an hour.
+6. A 60 s settle window: an issue opened within it waits for the next scan.
+7. An issuebot label is any state label or marker, including `operator-step`.
+8. Rule 1 goes first; authorship decides when it refuses and the latest `triage-todo` is issuebot's.
+9. Authorship checks a named author, a maintainer association, and every edit being the author's.
+10. Authorship never reaches a work run.
+11. The approval cache key gains the author's association.
+12. A refused auto-labelled issue is handed back as `unapproved edit` and not labelled again.
+13. The auto label publishes `StateChanged(None -> triage-todo, actor="issuebot", note="auto-triage")`.
+14. A triage run in flight when `todo` is added is phase 1's reconcile, and works.
+15. A failed label write stops the scan without skipping the issue; the watermark stays strictly
+    before it.
+16. `run-once --triage` uses the same approval, authorship included.
+17. `validate` stays at 22 checks; the `triage` line ends `auto-triage on` or `off`.
+18. `Event.to_dict` writes every `datetime` field as ISO 8601.
+19. An auto-labelled issue is dispatched for triage from the next tick, not the one that labels
+    it, so the approval read does not follow the label write by moments.
+20. The scan never labels the same issue twice in one process (an in-memory record), which closes
+    ruling 15's same-second window; after a restart the label and the watermark are the only guards.
+21. After a page-ceiling failure the scan waits one hour (`CEILING_RETRY_S`), and the warning names
+    the remedy: switching `triage.auto` off for at least one poll, then on, moves the watermark to
+    the present. Switching it on ends a running wait at once.
+22. On an operator's own admin token rule 1 approves issuebot's label as before; if it refuses
+    because the author edited after an operator's own `triage-todo`, authorship then approves when
+    the author is a maintainer and every edit is theirs. Triage and the parent review only. If
+    authorship refuses too, the hand-back keeps rule 1's reason, which names the edit.
+23. An issue with sub-issues is passed over (`has sub-issues`): a maintainer split it by hand.
+
 ### 7. Where the operator sees it
 
 - **The issue.** One comment per triage verdict and per parent review, written by the worker:
@@ -532,10 +568,11 @@ byte budget (`tests/test_instruction_bounds.py`).
 
 - Label colours and descriptions; the sub-issue title format; the exact verdict schema.
 - ~~The store's schema for the triage track, the watermark and the run kind.~~ The parent review's
-  record is an event, not a table (phase 3 ruling 1).
+  record is an event, not a table (phase 3 ruling 1), and so is the watermark (phase 4 ruling 1).
 - ~~How triage and parent reviews are ordered against work runs for free slots.~~ Triage first,
   then parent reviews, then work (phase 3 ruling 6).
-- What happens to a triage run in flight when the operator adds `todo` (section 1).
+- ~~What happens to a triage run in flight when the operator adds `todo` (section 1).~~ Phase 1's
+  reconcile stops it, the verdict is discarded and the claim strips `triage-todo` (phase 4 ruling 14).
 - Whether to hand triage extra signal for the "lands fast" question -- recent churn on the
   default branch, or the files open pull requests touch -- since it has no shell to run
   `git log` itself.
