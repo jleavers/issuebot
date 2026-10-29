@@ -359,7 +359,7 @@ docker compose run --rm worker labels ensure
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 7
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 26632 characters, renders
-[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, at most 8 sub-issues, auto-triage off
+[ OK ] triage: prompt shipped default, model claude's own default (neither triage.model nor claude.model is set), 1 turn(s) at $2.00, at most 8 sub-issues, parent review prompt shipped default, 2 gap round(s), at most 6 reviews, auto-triage off
 22 checks: 0 failed, 2 warnings
 ```
 
@@ -515,12 +515,12 @@ first issue running; it is what to consult once one has.
 | `claude.disallowed_tools` | the tools it may not, passed as `--disallowedTools`; ships with the model's own network tools in it, and every session runs with `--strict-mcp-config`, so no MCP server from the clone or a settings file joins the set. This is where the session's authority is fixed, and the only place: neither the prompt nor an issue can widen it; `disallowed_tools: []` does | `[WebFetch, WebSearch]` |
 | `claude.mcp_config` | the MCP servers a session may use, as `claude --mcp-config` takes them (paths to JSON files, resolved against this file's directory and readable by the session's account -- by *every* account when `agent.run_as` names a pool, since the orchestrator binds whichever is free -- so under compose keep them in `./configs`: a `~` is the *worker's* home, which the session cannot read; or JSON strings, which go on the command line, so a server whose `env` holds a credential belongs in a file rather than inline); the whole set, since every session runs with `--strict-mcp-config`, so empty is none at all whatever the clone or a settings file says | `[]` |
 | `claude.append_system_prompt` | passed straight to `claude` | none |
+| `triage.auto` | the worker labels each new issue a maintainer opens `issuebot/triage-todo` itself; when the key is absent it falls back to `ISSUEBOT_AUTO_TRIAGE`, and an explicit `false` wins over the variable. See [Auto-triage](docs/operations.md#auto-triage) | `false` |
 | `triage.model` | the model for a triage session; omit to use `claude.model` | none |
 | `triage.max_turns` | `claude -p` invocations per triage run | `1` |
 | `triage.max_budget_usd` | spend cap per triage turn (its cost counts toward `agent.max_issue_cost_usd`) | `2.0` |
 | `triage.max_sub_issues` | the most sub-issues one verdict may ask for, at most 20; a longer one is refused as malformed | `8` |
 | `triage.max_gap_rounds` | the `gap` verdicts a parent review acts on before a further `gap` is handed over instead of filed | `2` |
-| `triage.auto` | the worker labels each new issue a maintainer opens `issuebot/triage-todo` itself; when the key is absent it falls back to `ISSUEBOT_AUTO_TRIAGE`, and an explicit `false` wins over the variable. See [Auto-triage](docs/operations.md#auto-triage) | `false` |
 | `triage.max_parent_reviews` | the parent reviews the worker starts on a parent by itself, at least 1; `issuebot/triage-todo` resets the count | `6` |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |

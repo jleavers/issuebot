@@ -185,7 +185,8 @@ warning for it and another only if the error changes, and the worker asks again 
 
 ### Triage
 
-Triage (`issuebot/triage-todo`, by hand) never leaves an issue silently. When it cannot file a
+Triage (`issuebot/triage-todo`, by hand or by [auto-triage](#auto-triage)) never leaves an
+issue silently. When it cannot file a
 verdict it removes `issuebot/triage-todo`, posts a `### Issuebot <title>` comment saying why
 and publishes `blocked`. Apart from the `operator step` refusal below, which takes off
 whichever state label the issue carried, it never touches a state label: a triage candidate
@@ -242,8 +243,9 @@ creates its container: run `docker compose up -d worker` after changing it. An e
 line ends `auto-triage on` or `auto-triage off`.
 
 What is labelled: an open issue opened after the watermark, by a maintainer (`OWNER`, `MEMBER` or
-`COLLABORATOR`), with no issuebot label of any kind and no parent issue. Anything else is passed
-over, and the log says why (`auto_triage_passed_over`).
+`COLLABORATOR`), with no issuebot label of any kind, no parent issue and no sub-issues: one you
+have split by hand is yours. Anything else is passed over, and the log says why
+(`auto_triage_passed_over`).
 
 The watermark is the time up to which every issue has been decided once, and an issue behind it is
 never looked at again:
@@ -259,13 +261,15 @@ watermark. The scan also never labels one issue twice within a process; after a 
 and the watermark are the only guards, so a label removed in the moments before a stop may be put
 back.
 
-The scan costs one GraphQL point, at most once every two minutes and only on a tick with a free
-slot: at most 30 points an hour, shared with every other deployment on the account. An issue
-opened less than a minute before a scan waits for the next. The label normally lands within about
-three minutes of opening, and triage starts on the following tick, not the one that labelled it.
-If the read hits its page ceiling the scan waits an hour and the log names the remedy: switch
-`triage.auto` off and on, which moves the watermark to the present and leaves what was opened
-before it to a person.
+A scan costs a GraphQL point per page of 33 issues opened since the watermark, and one page
+almost always holds them all. It runs at most once every two minutes and only on a tick with a
+free slot, so it costs at most 30 points an hour in all but a burst, shared with every other
+deployment on the account. An issue opened less than a minute before a scan waits for the next.
+The label normally lands within about three minutes of opening, and triage starts on the
+following tick, not the one that labelled it. If the read hits its page ceiling the scan waits an
+hour and the log names the remedy: set `triage.auto` off for at least one poll, then on again.
+That moves the watermark to the present and leaves the issues opened before it to a person. An
+off and on quicker than a poll is never seen by a tick, and moves nothing.
 
 A label with no person behind it is approved by authorship, not by who applied it
 ([A triage session](security-model.md#a-triage-session)). When that refuses an issue, say because

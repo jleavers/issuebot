@@ -466,15 +466,17 @@ Decided while planning phase 4:
 17. `validate` stays at 22 checks; the `triage` line ends `auto-triage on` or `off`.
 18. `Event.to_dict` writes every `datetime` field as ISO 8601.
 19. An auto-labelled issue is dispatched for triage from the next tick, not the one that labels
-    it, so the approval read never races the label write.
+    it, so the approval read does not follow the label write by moments.
 20. The scan never labels the same issue twice in one process (an in-memory record), which closes
     ruling 15's same-second window; after a restart the label and the watermark are the only guards.
 21. After a page-ceiling failure the scan waits one hour (`CEILING_RETRY_S`), and the warning names
-    the remedy: switching `triage.auto` off and on moves the watermark to the present. Switching it
-    on ends a running wait at once.
+    the remedy: switching `triage.auto` off for at least one poll, then on, moves the watermark to
+    the present. Switching it on ends a running wait at once.
 22. On an operator's own admin token rule 1 approves issuebot's label as before; if it refuses
     because the author edited after an operator's own `triage-todo`, authorship then approves when
-    the author is a maintainer and every edit is theirs. Triage and the parent review only.
+    the author is a maintainer and every edit is theirs. Triage and the parent review only. If
+    authorship refuses too, the hand-back keeps rule 1's reason, which names the edit.
+23. An issue with sub-issues is passed over (`has sub-issues`): a maintainer split it by hand.
 
 ### 7. Where the operator sees it
 
