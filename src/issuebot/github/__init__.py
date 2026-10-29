@@ -5,6 +5,7 @@ from issuebot.github.errors import ErrorCategory, GitHubError, PageCeilingError
 from issuebot.github.fake import FakeGitHub
 from issuebot.github.ghcli import GhCliAdapter
 from issuebot.github.models import (
+    MAINTAINER_ASSOCIATIONS,
     WORKPAD_MARKER,
     ApprovalEvidence,
     AuthStatus,
@@ -57,6 +58,7 @@ from issuebot.github.status import (
 __all__ = [
     "ACTIVE_STATES",
     "LABEL_STYLES",
+    "MAINTAINER_ASSOCIATIONS",
     "NO_FAULT_LABEL_STYLE",
     "SUMMARY_TIMEOUT_S",
     "SUMMARY_URL",

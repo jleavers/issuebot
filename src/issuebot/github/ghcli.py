@@ -125,6 +125,22 @@ def _issues_query(states: str) -> str:
     )
 
 
+# The open issues opened after a watermark (auto-triage, spec 2026-10-25, section 2), newest
+# first so that the read can stop at the first one that is not new. ``filterBy.since`` is
+# GitHub's *updated*-since, a superset of opened-since that keeps the long-quiet issues out of
+# the pages; ``created_at`` is checked on this side.
+OPENED_SINCE_QUERY = (
+    "query($owner: String!, $name: String!, $since: DateTime!, $cursor: String) {\n"
+    "  repository(owner: $owner, name: $name) {\n"
+    f"    issues(states: [OPEN], first: {ISSUE_PAGE_SIZE}, after: $cursor,\n"
+    "           orderBy: {field: CREATED_AT, direction: DESC},\n"
+    "           filterBy: {since: $since}) {\n"
+    "      nodes { ...IssueFields }\n"
+    "      pageInfo { hasNextPage endCursor }\n"
+    "    }\n"
+    "  }\n"
+    "}\n" + ISSUE_FIELDS
+)
 OPEN_ISSUES_QUERY = _issues_query("OPEN")
 CLOSED_ISSUES_QUERY = _issues_query("CLOSED")
 # The issue's label history, as GitHub recorded it: who added which label, oldest first.
@@ -345,6 +361,55 @@ class GhCliAdapter:
         """Open issues carrying ``label``, oldest first; the ceiling is the board poll's."""
         login = await self.own_login()
         return await self._issues_with_label(label, OPEN_ISSUES_QUERY, login, MAX_ISSUE_PAGES)
+
+    async def fetch_issues_opened_since(self, since: datetime) -> list[Issue]:
+        """Open issues opened strictly after ``since``, oldest first.
+
+        Pages are newest first, so the read stops at the first page that holds an issue opened
+        at or before ``since``. Past ``MAX_ISSUE_PAGES`` it fails rather than return the newest
+        ones only: the caller moves a watermark past what it was given, so a short answer would
+        skip the issues in between for good.
+        """
+        login = await self.own_login()
+        found: list[Issue] = []
+        cursor: str | None = None
+        for _page_number in range(MAX_ISSUE_PAGES):
+            variables = {"owner": self._owner, "name": self._name, "since": since.isoformat()}
+            if cursor:
+                variables["cursor"] = cursor
+            data = await self._graphql(OPENED_SINCE_QUERY, variables)
+            connection = _dig(data, "repository", "issues")
+            if not isinstance(connection, Mapping):
+                raise GitHubError("response", "GraphQL response has no repository.issues")
+            all_new = True
+            for node in connection.get("nodes") or []:
+                if not isinstance(node, Mapping):
+                    self._log.warning(
+                        "issue_record_skipped", issue_number=None, reason="record is not an object"
+                    )
+                    continue
+                try:
+                    issue = self._issue(node, login)
+                except GitHubError as exc:
+                    self._log.warning(
+                        "issue_record_skipped", issue_number=node.get("number"), reason=exc.message
+                    )
+                    continue
+                if issue.created_at > since:
+                    found.append(issue)
+                else:
+                    all_new = False
+            page = connection.get("pageInfo")
+            page = page if isinstance(page, Mapping) else {}
+            if not all_new or not page.get("hasNextPage"):
+                return sorted(found, key=lambda issue: (issue.created_at, issue.number))
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubError("response", "GraphQL page has hasNextPage without endCursor")
+        raise PageCeilingError(
+            f"more than {MAX_ISSUE_PAGES * ISSUE_PAGE_SIZE} issues were opened since "
+            f"{since.isoformat()}"
+        )
 
     async def fetch_issues_by_ids(self, ids: Iterable[str]) -> list[Issue]:
         numbers = sorted(

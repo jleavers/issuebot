@@ -7,6 +7,9 @@ from typing import Literal
 
 WORKPAD_MARKER = "## Issuebot Workpad"
 
+MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+"""The ``authorAssociation`` values GitHub gives someone with write access or better."""
+
 
 def is_workpad_body(body: object) -> bool:
     """True when a comment body's first non-blank line is the workpad marker."""
