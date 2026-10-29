@@ -742,6 +742,14 @@ def test_the_issues_page_offers_a_filter_per_column_and_an_all(h: Harness) -> No
     assert f'class="filter current" href="{BASE}/issues"' in text
 
 
+def test_the_list_page_draws_the_triage_pill_for_a_row_with_no_state(h: Harness) -> None:
+    h.queries.issue_list = [
+        issue_row(number=61, state=None, state_label=None, triage="triage_complete")
+    ]
+    text = html(h.client.get(f"{BASE}/issues?state=triage_complete"))
+    assert 'class="state triage_complete"' in text and "issuebot/triage-complete" in text
+
+
 def test_the_list_page_filters_by_a_triage_column(h: Harness) -> None:
     h.queries.counts["triage_todo"] = 3
     h.queries.issue_list = [

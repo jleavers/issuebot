@@ -548,6 +548,12 @@ def issue_pill(issue: IssueRow, labels: GitHubLabels) -> dict[str, str]:
     return {"role": "unlabelled", "text": "unlabelled"}
 
 
+def list_pill(issue: IssueRow, labels: GitHubLabels) -> dict[str, str] | None:
+    """The list page's state cell: the issue page's pill, or nothing for an unlabelled row."""
+    pill = issue_pill(issue, labels)
+    return None if pill["role"] == "unlabelled" else pill
+
+
 def issue_filters(
     state: str | None, counts: dict[str, int], labels: GitHubLabels, base: str
 ) -> list[dict[str, Any]]:

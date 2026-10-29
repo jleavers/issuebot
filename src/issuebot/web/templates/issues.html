@@ -16,11 +16,11 @@
 {% if rows %}
 <table class="issues">
   <tr><th class="num">issue</th><th>title</th><th>state</th><th>PR</th><th>last moved</th></tr>
-  {% for row in rows %}
+  {% for row, pill in rows_and_pills %}
   <tr>
     <td class="num">#{{ row.number }}</td>
     <td><a href="{{ repo.base }}/issues/{{ row.number }}">{{ row.title }}</a></td>
-    <td>{% if row.state %}<span class="state {{ row.state }}">{{ row.state_label }}</span>{% endif %}</td>
+    <td>{% if pill %}<span class="state {{ pill.role }}">{{ pill.text }}</span>{% endif %}</td>
     <td>{% if row.pr_number %}{% set pr = row.pr_url|href %}{% if pr %}<a href="{{ pr }}">PR#{{ row.pr_number }}</a>{% else %}PR#{{ row.pr_number }}{% endif %}{% if row.pr_state %} <span class="muted">{{ row.pr_state }}</span>{% endif %}{% endif %}</td>
     <td>{{ (row.closed_at or row.updated_at)|age(now) }}</td>
   </tr>

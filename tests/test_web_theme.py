@@ -18,7 +18,13 @@ from typing import Any
 import pytest
 
 from fakes.web import BASE, RUN_ID, Harness
-from issuebot.github.state import LABEL_STYLES, StateLabel
+from issuebot.db.queries import BOARD_COLUMNS
+from issuebot.github.state import (
+    LABEL_STYLES,
+    TRIAGE_COMPLETE_LABEL_STYLE,
+    TRIAGE_TODO_LABEL_STYLE,
+    StateLabel,
+)
 
 CSS = (files("issuebot.web") / "static" / "app.css").read_text(encoding="utf-8")
 THEME_JS = (files("issuebot.web") / "static" / "theme.js").read_text(encoding="utf-8")
@@ -244,7 +250,16 @@ def test_the_kanban_card_marks_clear_the_mark_floor(theme: dict[str, str]) -> No
     dark); --in_progress is the closest.
     """
     background = theme["--bg"]
-    for name in ("--todo", "--in_progress", "--review", "--rework", "--complete", "--accent"):
+    for name in (
+        "--triage_todo",
+        "--triage_complete",
+        "--todo",
+        "--in_progress",
+        "--review",
+        "--rework",
+        "--complete",
+        "--accent",
+    ):
         ratio = contrast(theme[name], background)
         assert ratio >= MARK_FLOOR, f"{name} {theme[name]} on {background} is {ratio:.2f}:1"
 
@@ -314,7 +329,15 @@ def test_the_column_role_is_a_dot_and_keeps_its_state_token(theme: dict[str, str
     have fixed the ratio by drifting the board off the colours GitHub renders. The dot is a
     mark on --panel (the column's own surface, unlike the card stripe, which sits on --bg).
     """
-    roles = ("todo", "in_progress", "review", "rework", "complete")
+    roles = (
+        "triage_todo",
+        "triage_complete",
+        "todo",
+        "in_progress",
+        "review",
+        "rework",
+        "complete",
+    )
     dots = {}
     for selector, declarations in rules(KANBAN):
         match = re.fullmatch(r"\.column\.(\w+) h3 \.name::before", selector)
@@ -429,6 +452,8 @@ def test_a_pill_label_is_legible_on_every_solid_colour(theme: dict[str, str]) ->
         "--review",
         "--rework",
         "--complete",
+        "--triage_todo",
+        "--triage_complete",
     ):
         ratio = contrast(theme["--on-solid"], theme[name])
         assert ratio >= MARK_FLOOR, f"--on-solid on {name} {theme[name]} is {ratio:.2f}:1"
@@ -500,3 +525,22 @@ def test_the_theme_introduces_no_inline_code(h: Harness) -> None:
         assert ' style="' not in text, response.url
         assert "<style" not in text, response.url
         assert "onclick=" not in text, response.url
+
+
+def test_the_triage_tokens_are_not_the_triage_labels_which_cannot_be_marks() -> None:
+    """Ruling 9: GitHub's triage hexes are too pale to be a mark, and their darkened siblings
+    are In progress's amber and Complete's purple, so the two columns take hues of their own."""
+    for style, token in (
+        (TRIAGE_TODO_LABEL_STYLE, "--triage_todo"),
+        (TRIAGE_COMPLETE_LABEL_STYLE, "--triage_complete"),
+    ):
+        assert contrast(f"#{style.color}", LIGHT["--panel"]) < MARK_FLOOR
+        assert LIGHT[token] != f"#{style.color.lower()}"
+    for token in ("--triage_todo", "--triage_complete"):
+        for theme in (LIGHT, OS_DARK):
+            assert contrast(theme[token], theme["--bg"]) >= MARK_FLOOR
+
+
+def test_the_kanban_has_a_column_per_board_column() -> None:
+    assert f"repeat({len(BOARD_COLUMNS)}, minmax(150px, 1fr))" in KANBAN
+    assert "overflow-x: auto" in KANBAN
