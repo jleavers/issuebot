@@ -2,7 +2,7 @@
 {% block title %}#{{ issue.number }} {{ issue.title }}{% endblock %}
 {% block content %}
 <section class="panel issue-head">
-  <h1><span class="muted">#{{ issue.number }}</span> {{ issue.title }} <span class="state {{ issue.state or 'unlabelled' }}">{{ issue.state_label or "unlabelled" }}</span></h1>
+  <h1><span class="muted">#{{ issue.number }}</span> {{ issue.title }} <span class="state {{ pill.role }}">{{ pill.text }}</span></h1>
   <dl>
     <dt>identifier</dt><dd>{{ issue.identifier }}</dd>
     <dt>GitHub</dt><dd>{% set url = issue.url|href %}{% if url %}<a href="{{ url }}">{{ url }}</a>{% else %}{{ issue.github_state }}{% endif %} ({{ issue.github_state }})</dd>

@@ -167,7 +167,15 @@ async def test_stats_match_the_query_module(client: TestClient, seeded: Database
         series = await q.daily_series(7)
     assert (body["closed"], body["runs"]) == (closed, runs) == (1, 1)
     assert body["by_state"] == counts
-    assert counts == {"todo": 1, "in_progress": 0, "review": 1, "rework": 0, "complete": 1}
+    assert counts == {
+        "triage_todo": 0,
+        "triage_complete": 0,
+        "todo": 1,
+        "in_progress": 0,
+        "review": 1,
+        "rework": 0,
+        "complete": 1,
+    }
     assert len(body["series"]) == len(series) == 7
     assert body["series"][-1]["runs"] == series[-1].runs
 

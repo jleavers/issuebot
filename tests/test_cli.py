@@ -3596,7 +3596,10 @@ def test_stats_prints_the_windows_and_the_series(
     out = capsys.readouterr().out
     assert "1d      1       3" in out
     assert "7d      2       4" in out
-    assert "issues: todo 0, in_progress 0, review 1, rework 0, complete 73" in out
+    assert (
+        "issues: triage_todo 0, triage_complete 0, todo 0, in_progress 0, review 1, rework 0, "
+        "complete 73" in out
+    )
     assert out.endswith("DAY         CLOSED  RUNS\n2026-09-04  1       3\n")
     assert queries.days_asked == 3
     assert "issues_by_state" not in queries.calls

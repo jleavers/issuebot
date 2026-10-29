@@ -20,6 +20,9 @@ LEDGER_SEED_LIMIT = 500
 LEDGER_WINDOW_DAYS = 90
 # The values of issues.triage: GitHubLabels field names, in the order the board draws them.
 TRIAGE_COLUMNS = ("triage_todo", "triage_complete")
+# The board's column keys in drawing order: the triage track left of the state labels. An
+# issue's column is its state label if it has one, otherwise its triage track.
+BOARD_COLUMNS = (*TRIAGE_COLUMNS, *(role.value for role in StateLabel))
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -317,7 +320,7 @@ FROM days ORDER BY day
 
 OPEN_ISSUES = f"""
 SELECT {ISSUE_COLUMNS} FROM issues
-WHERE repo = %(repo)s AND github_state = 'open' AND state IS NOT NULL
+WHERE repo = %(repo)s AND github_state = 'open' AND coalesce(state, triage) IS NOT NULL
 ORDER BY updated_at DESC, number DESC
 """
 
@@ -329,11 +332,14 @@ ORDER BY closed_at DESC NULLS LAST, number DESC LIMIT %(limit)s
 
 # The list page's query. `roles` carries both jobs: it filters to the column asked for, and
 # it is what keeps a role this issuebot does not know off the page, the way the board does.
+# A closed issue gets in only through `complete`, so one that closed on the triage track
+# (its `triage` can outlive it) is on no column, here or on the board.
 # One ordering for every column, because the page mixes them: a closed issue sorts on when
 # it closed, an open one on when it last moved.
 ISSUE_LIST = f"""
 SELECT {ISSUE_COLUMNS} FROM issues
-WHERE repo = %(repo)s AND state = ANY(%(roles)s) AND (github_state = 'open' OR state = 'complete')
+WHERE repo = %(repo)s AND coalesce(state, triage) = ANY(%(roles)s)
+  AND (github_state = 'open' OR state = 'complete')
 ORDER BY coalesce(closed_at, updated_at) DESC, number DESC LIMIT %(limit)s
 """
 
@@ -381,9 +387,10 @@ WHERE t.repo = %(repo)s AND t.run_id = %(run_id)s AND t.turn_number = %(turn_num
 """
 
 STATE_COUNTS = """
-SELECT state, count(*) AS n FROM issues
-WHERE repo = %(repo)s AND state IS NOT NULL AND (github_state = 'open' OR state = 'complete')
-GROUP BY state
+SELECT coalesce(state, triage) AS state, count(*) AS n FROM issues
+WHERE repo = %(repo)s AND coalesce(state, triage) IS NOT NULL
+  AND (github_state = 'open' OR state = 'complete')
+GROUP BY coalesce(state, triage)
 """
 
 
@@ -524,9 +531,10 @@ class RepoQueries(_Reader):
         whole board, and an open column falls behind the same way a closed one piles up.
         What the column headers count is ``state_counts``, which is not capped.
         """
-        groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
+        groups: dict[str, list[IssueRow]] = {key: [] for key in BOARD_COLUMNS}
         for row in await self._rows(OPEN_ISSUES, self._params()):
-            rows = groups.get(row["state"])  # a role this issuebot does not know is on no column
+            # a role this issuebot does not know is on no column
+            rows = groups.get(row["state"] or row["triage"])
             if rows is not None and len(rows) < BOARD_LIMIT:
                 rows.append(IssueRow(**row))
         for row in await self._rows(COMPLETE_ISSUES, self._params(limit=BOARD_LIMIT)):
@@ -535,7 +543,7 @@ class RepoQueries(_Reader):
 
     async def issues_for_state(self, state: str | None) -> list[IssueRow]:
         """One column in full up to ``ISSUE_LIST_LIMIT``, or every column when ``state`` is None."""
-        known = [role.value for role in StateLabel]
+        known = list(BOARD_COLUMNS)
         if state is None:
             roles = known
         elif state in known:
@@ -546,8 +554,8 @@ class RepoQueries(_Reader):
         return [IssueRow(**row) for row in rows]
 
     async def state_counts(self) -> dict[str, int]:
-        """Issues per StateLabel value over the Kanban's predicate; every role key present."""
-        counts = {role.value: 0 for role in StateLabel}
+        """Issues per board column over the Kanban's predicate; every column key present."""
+        counts = {key: 0 for key in BOARD_COLUMNS}
         for row in await self._rows(STATE_COUNTS, self._params()):
             if row["state"] in counts:
                 counts[row["state"]] = int(row["n"])

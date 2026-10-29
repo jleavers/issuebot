@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from issuebot.config import GitHubLabels
 from issuebot.db.queries import (
+    BOARD_COLUMNS,
     MAX_WINDOW_DAYS,
     ActionsMinutesRow,
     DailyPoint,
@@ -21,7 +22,6 @@ from issuebot.db.queries import (
     SnapshotRow,
     TurnSummaryRow,
 )
-from issuebot.github import StateLabel
 from issuebot.github.billing import next_period
 
 LIVE_POLL_S = 10
@@ -489,13 +489,13 @@ def dashboard_context(
     # difference is what the overflow link offers. `max` because the two reads are separate
     # queries: a column that grew between them must not count backwards.
     columns = []
-    for role in StateLabel:
-        rows = groups.get(role.value, [])
-        total = counts.get(role.value, len(rows))
+    for key in BOARD_COLUMNS:
+        rows = groups.get(key, [])
+        total = counts.get(key, len(rows))
         columns.append(
             {
-                "role": role.value,
-                "label": names[role.value],
+                "role": key,
+                "label": names[key],
                 "rows": rows,
                 "total": total,
                 "overflow": max(total - len(rows), 0),
@@ -532,7 +532,20 @@ def dashboard_context(
 
 def is_board_state(state: str) -> bool:
     """Whether ``state`` names one of the board's columns (so the list page will show it)."""
-    return state in {role.value for role in StateLabel}
+    return state in BOARD_COLUMNS
+
+
+def issue_pill(issue: IssueRow, labels: GitHubLabels) -> dict[str, str]:
+    """The issue page's header pill: its state label, else its triage label, else "unlabelled".
+
+    An issue on the triage track has no state label until the operator moves it to todo, and
+    saying "unlabelled" about a card the board draws in Triaged would contradict the board.
+    """
+    if issue.state is not None:
+        return {"role": issue.state, "text": issue.state_label or issue.state}
+    if issue.triage is not None:
+        return {"role": issue.triage, "text": labels.model_dump()[issue.triage]}
+    return {"role": "unlabelled", "text": "unlabelled"}
 
 
 def issue_filters(
@@ -541,7 +554,7 @@ def issue_filters(
     """The list page's filter row: "all" first, then one per column, each with its count.
 
     ``counts`` is ``state_counts``, the same uncapped read the board's headers use, so a
-    filter and the column header it came from never disagree. "all" sums the five rather
+    filter and the column header it came from never disagree. "all" sums every column rather
     than counting rows, because the page itself stops at ``ISSUE_LIST_LIMIT``.
     """
     names = labels.model_dump()
@@ -551,17 +564,17 @@ def issue_filters(
             "label": "all",
             "href": f"{base}/issues",
             "current": state is None,
-            "total": sum(counts.get(role.value, 0) for role in StateLabel),
+            "total": sum(counts.get(key, 0) for key in BOARD_COLUMNS),
         }
     ]
-    for role in StateLabel:
+    for key in BOARD_COLUMNS:
         filters.append(
             {
-                "role": role.value,
-                "label": names[role.value],
-                "href": f"{base}/issues?state={role.value}",
-                "current": state == role.value,
-                "total": counts.get(role.value, 0),
+                "role": key,
+                "label": names[key],
+                "href": f"{base}/issues?state={key}",
+                "current": state == key,
+                "total": counts.get(key, 0),
             }
         )
     return filters
@@ -585,6 +598,8 @@ def running_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "attempt": entry.get("attempt"),
         "rework": entry.get("rework"),
         "resumed": entry.get("resumed"),
+        # "work", "triage" or "parent_review"; a snapshot from before phase 1 has none.
+        "kind": entry.get("kind") or "work",
         "turn_count": entry.get("turns"),
         "last_event": entry.get("last_event"),
         "started_at": entry.get("started_at"),
