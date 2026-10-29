@@ -41,6 +41,7 @@ from issuebot.config.workflow import (
     triage_prompt_path_for,
 )
 from issuebot.events import (
+    AutoTriageState,
     Blocked,
     Event,
     EventBus,
@@ -71,6 +72,7 @@ from issuebot.orchestrator.approval import (
     Approved,
     Unapproved,
 )
+from issuebot.orchestrator.auto_triage import SCAN_INTERVAL_S, AutoTriageRecord
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     MAX_FETCH_FAILURES,
@@ -113,7 +115,7 @@ claude:
   stall_timeout_ms: {stall_timeout_ms}
 {claude_extra}hooks:
   timeout_ms: 5000
-{hooks}---
+{hooks}{triage}---
 {prompt}
 """
 
@@ -254,9 +256,11 @@ class Harness:
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
         initial_parents: Mapping[int, ParentRecord] | None = None,
+        initial_auto_triage: AutoTriageRecord | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
         admin: bool = False,
+        auto_triage: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.path = tmp_path / "WORKFLOW.md"
@@ -283,6 +287,7 @@ class Harness:
             max_issue_cost_usd=max_issue_cost_usd,
             hooks=hooks,
             prompt=prompt,
+            auto_triage=auto_triage,
         )
         self.workflow = load_workflow(self.path, environ=self.environ)
         self.clock = FakeClock()
@@ -325,6 +330,7 @@ class Harness:
             initial_rate_limits=initial_rate_limits,
             initial_ledger=initial_ledger,
             initial_parents=initial_parents,
+            initial_auto_triage=initial_auto_triage,
             scrubber=scrubber,
         )
 
@@ -380,6 +386,7 @@ class Harness:
         hooks: dict[str, str] | None = None,
         prompt: str = "Task {{ issue.identifier }}",
         text: str | None = None,
+        auto_triage: bool = False,
     ) -> None:
         hook_lines = "".join(f"  {name}: {script}\n" for name, script in (hooks or {}).items())
         content = text or WORKFLOW_TEMPLATE.format(
@@ -395,6 +402,7 @@ class Harness:
             claude_extra=self.claude_extra(),
             stall_timeout_ms=stall_timeout_ms,
             hooks=hook_lines,
+            triage="triage:\n  auto: true\n" if auto_triage else "",
             prompt=prompt,
         )
         self.path.write_text(content, encoding="utf-8")
@@ -4290,6 +4298,7 @@ def _pool_workflow(h: Harness, accounts: str) -> None:
             claude_extra=h.claude_extra(),
             stall_timeout_ms=300_000,
             hooks="",
+            triage="",
             prompt="Task {{ issue.identifier }}",
         ).replace("agent:\n", f"agent:\n  run_as: [{accounts}]\n", 1)
     )
@@ -5534,6 +5543,346 @@ async def test_the_approval_check_runs_again_when_the_association_changes(
     assert isinstance(third, Unapproved)
     assert third.reason == NO_OTHER_APPROVER.format(own_login=h.github.login, todo_label=label)
     assert len(h.calls("approval_evidence")) == 3
+
+
+# --- auto-triage's scan (spec 2026-10-25, sections 2 and 9) ---------------------------------
+
+
+def opened(
+    h: Harness,
+    number: int,
+    *,
+    at: datetime,
+    author: str = "maintainer",
+    association: str = "MEMBER",
+    labels: tuple[str, ...] = (),
+) -> Issue:
+    """An issue opened at ``at``, by a maintainer unless the test says otherwise."""
+    return h.github.add_issue(
+        f"Issue {number}",
+        body="Do X.",
+        number=number,
+        labels=labels,
+        author=author,
+        author_association=association,
+        created_at=at,
+    )
+
+
+async def scan(h: Harness) -> None:
+    """The next tick the scan is due on: one interval after the last."""
+    h.clock.advance(SCAN_INTERVAL_S)
+    await h.tick()
+
+
+def auto_states(h: Harness) -> list[tuple[bool, datetime]]:
+    return [(event.auto, event.watermark) for event in h.recorder.of(AutoTriageState)]
+
+
+def auto_label_writes(h: Harness, number: int) -> list[tuple[Any, ...]]:
+    return [args for args in h.calls("edit_labels") if args[0] == number]
+
+
+def scans(h: Harness) -> int:
+    return len(h.calls("fetch_issues_opened_since"))
+
+
+async def test_switching_auto_triage_on_labels_nothing_already_open(tmp_path: Path) -> None:
+    """Review focus 1: switching auto-triage on puts the watermark at the present, so the
+    backlog is never auto-triaged; the operator labels it by hand (section 2)."""
+    h = Harness(tmp_path, auto_triage=True)
+    opened(h, 1, at=START - timedelta(hours=1))
+    with capture_logs() as logs:
+        await h.tick()
+    assert auto_states(h) == [(True, START)]
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_on"]
+    assert (line["log_level"], line["watermark"]) == ("info", START.isoformat())
+    await scan(h)
+    assert scans(h) == 2
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.calls("edit_labels") == []
+    assert auto_states(h) == [(True, START)]
+
+
+async def test_a_new_maintainer_issue_is_labelled_triage_todo(tmp_path: Path) -> None:
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    at = START + timedelta(seconds=10)
+    opened(h, 1, at=at)
+    with capture_logs() as logs:
+        await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    [moved] = h.recorder.of(StateChanged)
+    assert (moved.issue_number, moved.from_label, moved.to_label, moved.actor, moved.note) == (
+        1,
+        None,
+        "issuebot/triage-todo",
+        "issuebot",
+        "auto-triage",
+    )
+    assert auto_states(h) == [(True, START), (True, at)]
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_labelled"]
+    assert (line["log_level"], line["issue_number"]) == ("info", 1)
+    assert h.orchestrator._auto_triage_record == AutoTriageRecord(auto=True, watermark=at)
+
+
+async def test_issues_opened_while_the_worker_was_stopped_are_labelled_after_restart(
+    tmp_path: Path,
+) -> None:
+    """Review focus 1: a restart with the setting on keeps the watermark the store gave back,
+    so an issue opened while the worker was stopped is caught on the first tick."""
+    record = AutoTriageRecord(auto=True, watermark=START - timedelta(hours=1))
+    h = Harness(tmp_path, auto_triage=True, initial_auto_triage=record)
+    at = START - timedelta(minutes=30)
+    opened(h, 1, at=at)
+    await h.tick()
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert (True, START) not in auto_states(h)
+    assert auto_states(h) == [(True, at)]
+
+
+async def test_turning_auto_triage_off_and_on_skips_issues_opened_while_off(
+    tmp_path: Path,
+) -> None:
+    """Review focus 1: the setting is settled on every tick, so a reload switching it off is
+    recorded and one switching it back on moves the watermark past the spell off (phase 4
+    ruling 3)."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    h.write_workflow()
+    with capture_logs() as logs:
+        await h.tick()
+    assert auto_states(h) == [(True, START), (False, START)]
+    assert [entry["log_level"] for entry in logs if entry["event"] == "auto_triage_off"] == ["info"]
+    h.clock.advance(10)
+    opened(h, 1, at=h.now())
+    h.clock.advance(20)
+    h.write_workflow(auto_triage=True)
+    await h.tick()
+    back_on = h.now()
+    assert auto_states(h)[-1] == (True, back_on)
+    await scan(h)
+    await scan(h)
+    assert h.calls("fetch_issues_opened_since")[-1] == (back_on,)
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.calls("edit_labels") == []
+
+
+async def test_auto_triage_off_reads_nothing(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    opened(h, 1, at=START + timedelta(seconds=10))
+    await h.tick()
+    await scan(h)
+    await scan(h)
+    assert h.calls("fetch_issues_opened_since") == []
+    assert h.recorder.of(AutoTriageState) == []
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+
+
+async def test_a_strangers_issue_is_never_auto_triaged(tmp_path: Path) -> None:
+    """Review focus 2: only an account with write access has its issue auto-triaged, and a
+    stranger's is passed over for good rather than labelled and handed back (section 2)."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    at = START + timedelta(seconds=10)
+    opened(h, 1, at=at, author="stranger", association="NONE")
+    with capture_logs() as logs:
+        await scan(h)
+    assert h.github.issue(1).labels == ()
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_passed_over"]
+    assert (line["log_level"], line["issue_number"], line["reason"]) == (
+        "info",
+        1,
+        NOT_A_MAINTAINER.format(author="stranger", association="NONE"),
+    )
+    assert auto_states(h)[-1] == (True, at)
+    with capture_logs() as logs:
+        await scan(h)
+    assert h.calls("fetch_issues_opened_since")[-1] == (at,)
+    assert [entry for entry in logs if entry["event"] == "auto_triage_passed_over"] == []
+
+
+async def test_sub_issues_and_labelled_issues_are_not_auto_triaged(tmp_path: Path) -> None:
+    """Section 2: triage's own steps are never triaged again, and an issue that already carries
+    an issuebot label is on a track a person put it on."""
+    h = Harness(tmp_path, auto_triage=True)
+    opened(h, 10, at=START - timedelta(hours=1))
+    await h.tick()
+    opened(h, 11, at=START + timedelta(seconds=10))
+    h.github.link_sub_issue(10, 11)
+    opened(h, 12, at=START + timedelta(seconds=20), labels=(h.labels.todo,))
+    with capture_logs() as logs:
+        await scan(h)
+    for number in (11, 12):
+        assert h.labels.triage_todo not in h.github.issue(number).labels
+    assert [event for event in h.recorder.of(StateChanged) if event.note == "auto-triage"] == []
+    reasons = {
+        entry["issue_number"]: entry["reason"]
+        for entry in logs
+        if entry["event"] == "auto_triage_passed_over"
+    }
+    assert reasons == {11: "has a parent issue", 12: "carries an issuebot label"}
+
+
+async def test_a_removed_auto_label_is_not_put_back(tmp_path: Path) -> None:
+    """Review focus 3: the watermark is the "at most once" record, so a human taking the auto
+    label off is final for auto-triage, as an escape taking it off is (phase 4 ruling 2)."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    opened(h, 1, at=START + timedelta(seconds=10))
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    await h.tick()  # the reconcile stops the triage run the label started
+    await h.drain()
+    before = scans(h)
+    await scan(h)
+    await scan(h)
+    assert scans(h) == before + 2
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert auto_label_writes(h, 1) == [(1, (h.labels.triage_todo,), ())]
+
+
+async def test_a_failed_label_write_leaves_the_issue_for_the_next_scan(tmp_path: Path) -> None:
+    """Review focus 5 (phase 4 ruling 15): a refused write ends the scan, and the watermark
+    stops at the last issue decided before it, so the refused one is decided again and nothing
+    twice."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    a_at, b_at = START + timedelta(seconds=10), START + timedelta(seconds=20)
+    opened(h, 1, at=a_at)
+    opened(h, 2, at=b_at)
+    h.github.fail_next("response", on="edit_labels", after=1)
+    with capture_logs() as logs:
+        await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.labels.triage_todo not in h.github.issue(2).labels
+    assert auto_states(h)[-1] == (True, a_at)
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_label_failed"]
+    assert (line["log_level"], line["issue_number"]) == ("warning", 2)
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(2).labels
+    assert len(auto_label_writes(h, 1)) == 1
+    assert auto_states(h)[-1] == (True, b_at)
+
+
+async def test_a_failed_label_write_keeps_the_watermark_behind_an_issue_sharing_its_second(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 ruling 15's tie: the read is strictly after the watermark, so it may not reach
+    the second of an issue still undecided. The one labelled beside it is passed over on the
+    retry, because it carries `triage-todo` now."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    at = START + timedelta(seconds=10)
+    opened(h, 1, at=at)
+    opened(h, 2, at=at)
+    h.github.fail_next("response", on="edit_labels", after=1)
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.labels.triage_todo not in h.github.issue(2).labels
+    assert auto_states(h) == [(True, START)]
+    with capture_logs() as logs:
+        await scan(h)
+    assert h.labels.triage_todo in h.github.issue(2).labels
+    assert len(auto_label_writes(h, 1)) == 1
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_passed_over"]
+    assert (line["issue_number"], line["reason"]) == (1, "carries an issuebot label")
+    assert auto_states(h)[-1] == (True, at)
+
+
+async def test_an_issue_opened_in_the_last_minute_waits_for_the_next_scan(
+    tmp_path: Path,
+) -> None:
+    """Review focus 5 (phase 4 ruling 6): GitHub may not list an issue the moment it is
+    opened, so one opened inside the settle window is left, and the watermark with it, for the
+    next scan."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    h.clock.advance(SCAN_INTERVAL_S)
+    opened(h, 1, at=h.now() - timedelta(seconds=30))
+    await h.tick()
+    assert scans(h) == 2
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert auto_states(h) == [(True, START)]
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+
+
+async def test_the_scan_runs_at_most_every_two_minutes_and_only_with_a_slot_free(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 ruling 5: every deployment shares the account's GraphQL budget (section 9)."""
+    h = Harness(tmp_path, auto_triage=True, max_concurrent=1)
+    for _ in range(3):
+        await h.tick()
+        h.clock.advance(30)
+    assert scans(h) == 1
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert list(h.orchestrator.running) == ["1"]
+    opened(h, 2, at=START + timedelta(seconds=100))
+    await scan(h)
+    assert scans(h) == 1
+    assert h.labels.triage_todo not in h.github.issue(2).labels
+
+
+async def test_the_scan_reads_nothing_while_dispatch_is_held_or_the_worker_is_stopping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 4 ruling 5: the scan runs only on a tick that could dispatch what it labels."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    outage = FetchOutage(h, monkeypatch)
+    for _ in range(MAX_FETCH_FAILURES):
+        await h.tick()
+    assert held(h).kind == "github"
+    await scan(h)
+    assert scans(h) == 1
+    outage.down = False
+    await h.tick()  # the hold is lifted by this tick's poll, after the scan
+    assert held(h) is None
+    h.orchestrator.request_stop()
+    await scan(h)
+    assert scans(h) == 1
+
+
+async def test_a_failed_scan_is_logged_and_retried_next_interval(tmp_path: Path) -> None:
+    """A failed read waits out the interval as a successful one does, and does not feed the
+    GitHub hold, which is the board's (as the triage read does not)."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    opened(h, 1, at=START + timedelta(seconds=10))
+    h.github.fail_next("response", times=MAX_FETCH_FAILURES, on="fetch_issues_opened_since")
+    with capture_logs() as logs:
+        for _ in range(MAX_FETCH_FAILURES):
+            await scan(h)
+            h.clock.advance(30)
+            await h.tick()
+    lines = [entry for entry in logs if entry["event"] == "auto_triage_scan_failed"]
+    assert [line["log_level"] for line in lines] == ["warning"] * MAX_FETCH_FAILURES
+    assert scans(h) == 1 + MAX_FETCH_FAILURES
+    assert held(h) is None
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert auto_states(h) == [(True, START)]
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+
+
+async def test_an_auto_labelled_issue_is_triaged(tmp_path: Path) -> None:
+    """The scan comes before the triage pass, so the tick that labels a maintainer's issue
+    starts its triage run, approved by authorship (phase 4 ruling 8); a later tick starts no
+    second."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    opened(h, 1, at=START + timedelta(seconds=10))
+    await scan(h)
+    [run] = h.triage_sessions.runs
+    assert run.issue.number == 1
+    await h.tick()
+    assert len(h.triage_sessions.runs) == 1
+    assert h.recorder.of(Blocked) == []
+    assert h.github.comments_for(1) == []
 
 
 async def test_triage_todo_on_a_split_parent_with_open_steps_waits(tmp_path: Path) -> None:

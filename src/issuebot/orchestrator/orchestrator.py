@@ -53,7 +53,7 @@ from issuebot.config import (
     overlay_path_for,
 )
 from issuebot.config.workflow import parent_review_prompt_path_for, triage_prompt_path_for
-from issuebot.events import EventBus, RunKind
+from issuebot.events import AutoTriageState, EventBus, RunKind, StateChanged
 from issuebot.github import (
     GhCliAdapter,
     GitHubAdapter,
@@ -82,7 +82,13 @@ from issuebot.orchestrator.admission import (
     seeded_chain,
 )
 from issuebot.orchestrator.approval import Approved, Unapproved
-from issuebot.orchestrator.auto_triage import AutoTriageRecord
+from issuebot.orchestrator.auto_triage import (
+    SCAN_INTERVAL_S,
+    SETTLE,
+    AutoTriageRecord,
+    settle,
+    skip_reason,
+)
 from issuebot.orchestrator.parent_review import (
     ParentHandOver,
     ParentRecord,
@@ -535,6 +541,8 @@ class Orchestrator:
         # no issue is looked at again. Seeded from the store like the parents; without one a
         # restart counts as never having run, so the watermark moves to the present.
         self._auto_triage_record: AutoTriageRecord | None = initial_auto_triage
+        # The monotonic moment of the last scan, read or failed: one every `SCAN_INTERVAL_S`.
+        self._auto_triage_scanned: float = -math.inf
         # Parent review verdicts GitHub would not let the worker file, retried from memory as
         # triage's are, by issue id.
         self._parent_pending: dict[str, PendingParentReview] = {}
@@ -999,6 +1007,8 @@ class Orchestrator:
         """Symphony §8.1: reconcile, reload, preflight, fetch, dispatch, snapshot."""
         await self.reconcile()
         self._reload_workflow()
+        # Every tick, holds or not: a reload can switch auto-triage on or off (phase 4 ruling 3).
+        self._settle_auto_triage()
         await self._settle_run_as()
         # Before any hold is decided, and not inside `_dispatch_candidates`, which a preflight
         # or auth hold skips: a reason `fire_due_retries` quotes has to be about this tick.
@@ -1035,7 +1045,9 @@ class Orchestrator:
                 # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
                 # short and what it unblocks is a human, so it takes a free slot before work.
                 # A parent review next (section 6): it is short too, and what it unblocks is the
-                # parent's next batch.
+                # parent's next batch. Auto-triage's scan before both, so an issue it labels is
+                # a triage candidate on this same tick.
+                await self._scan_for_auto_triage()
                 dispatched = await self._dispatch_triage()
                 dispatched += await self._dispatch_parent_reviews()
                 dispatched += await self._dispatch_candidates()
@@ -1816,6 +1828,125 @@ class Orchestrator:
             ),
             run_id=entry.run_id,
         )
+
+    # --- auto-triage (spec 2026-10-25-triage-design.md, section 2) -------------------------
+
+    def _settle_auto_triage(self) -> None:
+        """Read ``triage.auto`` against the record, on every tick rather than only at start.
+
+        ``WORKFLOW.md`` reloads live, so a reload switching it on moves the watermark to the
+        present as a start with it on does, and one switching it off is recorded: the issues
+        opened during the spell off are then behind the watermark the next switch on sets, and
+        never auto-triaged (spec 2026-10-25, section 2; phase 4 ruling 3).
+        """
+        record = settle(
+            self._auto_triage_record, auto=self._workflow.config.triage.auto, now=self._now()
+        )
+        if record is None:
+            return
+        self._record_auto_triage(record)
+        if record.auto:
+            self._log.info("auto_triage_on", watermark=record.watermark.isoformat())
+        else:
+            self._log.info("auto_triage_off")
+
+    def _record_auto_triage(self, record: AutoTriageRecord) -> None:
+        """Keep ``record`` and publish it whole. The one place the record changes, so the latest
+        ``auto_triage_state`` the store holds is the one this worker acts on, and a restart
+        reads back exactly that (phase 4 ruling 1)."""
+        self._auto_triage_record = record
+        self._bus.publish(AutoTriageState(auto=record.auto, watermark=record.watermark))
+
+    async def _scan_for_auto_triage(self) -> int:
+        """Label each new maintainer issue ``triage-todo``, oldest first; the number labelled.
+
+        Every open issue opened after the watermark is decided once -- labelled, or passed over
+        for its ``skip_reason`` -- and the watermark moves past it, so an issue behind it is
+        never looked at again: a label a human or an escape takes off is not put back (spec
+        2026-10-25, section 2; phase 4 ruling 2). An issue opened within ``SETTLE`` of the scan
+        waits for the next one, the watermark behind it, because GitHub may not list it yet and
+        a newer issue it did list must not carry the watermark past both (ruling 6). A refused
+        label write ends the scan with the watermark strictly before the refused issue, which
+        the next scan decides again (ruling 15).
+
+        The scan fills no slot of its own, yet it is made only on a tick that could dispatch --
+        a slot free, not stopping, no hold -- and at most every ``SCAN_INTERVAL_S`` (ruling 5).
+        A label it adds would wait for the slot its triage run needs anyway, so labelling
+        sooner gains nothing, and the read spends the account's hourly GraphQL budget, which
+        every deployment shares (section 9). A failed read is logged and waits out the
+        interval; like the triage read, it does not feed the GitHub hold, which is the board's.
+        """
+        record = self._auto_triage_record
+        if record is None or not record.auto:
+            return 0
+        if self._slots() == 0 or self._stopping or self._current_hold() is not None:
+            return 0
+        if self._clock() - self._auto_triage_scanned < SCAN_INTERVAL_S:
+            return 0
+        self._auto_triage_scanned = self._clock()
+        try:
+            issues = await self._adapter.fetch_issues_opened_since(record.watermark)
+        except GitHubError as exc:
+            self._log.warning("auto_triage_scan_failed", error=str(exc))
+            return 0
+        labels = self._workflow.config.github.labels
+        settled = self._now() - SETTLE
+        # `watermark` is past every issue decided so far; `behind` is past every one opened
+        # strictly before the issue in hand, which is where a refused write leaves it.
+        watermark = behind = record.watermark
+        labelled = 0
+        for issue in issues:
+            if issue.created_at > settled:
+                # The read is oldest first, so every issue after this one is newer still.
+                break
+            if issue.created_at > watermark:
+                behind = watermark
+            reason = skip_reason(issue, labels)
+            if reason is not None:
+                self._log.info(
+                    "auto_triage_passed_over",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                    reason=reason,
+                )
+            else:
+                try:
+                    await self._adapter.edit_labels(issue.number, add=[labels.triage_todo])
+                except GitHubError as exc:
+                    self._log.warning(
+                        "auto_triage_label_failed",
+                        issue_number=issue.number,
+                        issue_identifier=issue.identifier,
+                        error=str(exc),
+                    )
+                    # The next read is strictly after the watermark, so it is left strictly
+                    # before this issue's second, even past one decided in that same second:
+                    # one labelled there carries `triage-todo` now, so the next scan passes it
+                    # over rather than labelling it twice.
+                    watermark = behind
+                    break
+                # A move on the triage track (phase 4 ruling 13): kept as history, and Slack's
+                # `state_changed` says it in one line.
+                self._bus.publish(
+                    StateChanged(
+                        issue_number=issue.number,
+                        issue_identifier=issue.identifier,
+                        from_label=None,
+                        to_label=labels.triage_todo,
+                        actor="issuebot",
+                        note="auto-triage",
+                    )
+                )
+                self._log.info(
+                    "auto_triage_labelled",
+                    issue_number=issue.number,
+                    issue_identifier=issue.identifier,
+                )
+                labelled += 1
+            watermark = issue.created_at
+        if watermark != record.watermark:
+            self._record_auto_triage(replace(record, watermark=watermark))
+        return labelled
 
     # --- triage (spec 2026-10-25-triage-design.md) ---------------------------------------
 
