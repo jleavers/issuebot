@@ -1910,9 +1910,11 @@ class Orchestrator:
                 "auto_triage_scan_failed",
                 error=str(exc),
                 retry_in_s=CEILING_RETRY_S,
+                # At least one poll: the setting is read once a tick, so an off and on that no
+                # tick sees in between moves nothing.
                 remedy=(
-                    "set triage.auto off for one poll, then on again: that moves the watermark "
-                    "to the present, and leaves the issues opened before it to a person"
+                    "set triage.auto off for at least one poll, then on again: that moves the "
+                    "watermark to the present, and leaves the issues opened before it to a person"
                 ),
             )
             return 0

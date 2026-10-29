@@ -2552,8 +2552,9 @@ async def _approved_for_run_once(
 ) -> bool:
     """The worker's approval check, answered in the foreground (GHSA-jm8h-q3j6-p8xp).
 
-    The same ``assess_issue`` the orchestrator calls, so `run-once` cannot run what the worker
-    would refuse. What differs is the answer to a refusal: no escape, because the operator who
+    The same ``assess_issue`` the orchestrator calls -- ``assess_triage_issue`` for a triage run,
+    as the worker's triage dispatch calls it -- so `run-once` cannot run what the worker would
+    refuse. What differs is the answer to a refusal: no escape, because the operator who
     typed the command is the human the escape would hand the issue to -- the line says why and
     the label stays where it is. An unreadable history, the ceiling included, is a failure
     too; here there is nobody to hand an issue back to, only a command to stop.

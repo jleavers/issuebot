@@ -321,6 +321,51 @@ def test_a_person_labelling_in_the_same_second_as_issuebot_keeps_rule_one() -> N
         assert isinstance(result, Unapproved) and result.approval == approval
 
 
+def test_issuebots_label_newer_than_a_persons_is_judged_by_authorship() -> None:
+    """The latest `triage-todo` decides the rule, not the first. A person's earlier label is
+    refused under rule 1 for the author's edit after it, but issuebot's later one has no person
+    behind it, so authorship judges it: a maintainer's issue, every edit their own."""
+    edit = TextEdit(what="body", editor="maintainer", at=at(5))
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor="colleague", at=T0),
+        LabelApplied(label=TRIAGE, actor=OWN, at=T1),
+        edits=(edit,),
+    )
+    assert result == Approved(approver="maintainer", at=T1)
+
+
+def test_on_an_admin_token_a_strangers_edit_keeps_rule_ones_reason() -> None:
+    """On the operator's own token the operator hand-applies `triage-todo` to a stranger's
+    issue as issuebot's account, and the stranger then edits it. Rule 1 counted that label and
+    refused for the edit; authorship refuses too, because the stranger is no maintainer. The
+    hand-back gives rule 1's reason, which names who edited and when -- the one the operator
+    can act on -- rather than the author's standing, which was never what approved it."""
+    approval = LabelApplied(label=TRIAGE, actor=OWN, at=T0)
+    edit = TextEdit(what="body", editor="stranger", at=T1)
+    result = triage_verdict(
+        approval, edits=(edit,), author="stranger", association="NONE", admin=True
+    )
+    assert result == Unapproved(
+        reason=(
+            f"body edited at {utc_stamp(T1)} by stranger, after {OWN} applied "
+            f"`issuebot/triage-todo` at {utc_stamp(T0)}"
+        ),
+        approval=approval,
+        edit=edit,
+    )
+
+
+def test_on_an_admin_token_the_authors_own_edit_is_approved_by_authorship() -> None:
+    """Phase 4 ruling 22, beside the case above: rule 1 refuses the author's edit after the
+    operator's label, and authorship approving wins over that refusal."""
+    result = triage_verdict(
+        LabelApplied(label=TRIAGE, actor=OWN, at=T0),
+        edits=(TextEdit(what="body", editor="maintainer", at=T1),),
+        admin=True,
+    )
+    assert result == Approved(approver="maintainer", at=T0)
+
+
 def test_authorship_compares_logins_case_insensitively() -> None:
     """GitHub logins are case-insensitive, and the adapter's comparisons are too: issuebot's
     own label is its own however it is spelt, and so is the author's edit."""

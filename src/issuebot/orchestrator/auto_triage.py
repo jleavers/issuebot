@@ -55,8 +55,12 @@ def skip_reason(issue: Issue, labels: GitHubLabels) -> str | None:
     """Why ``issue`` is not auto-triaged, or ``None`` when it is.
 
     "Carries an issuebot label" is any state label or marker (``operator-step`` included), not
-    only the states and triage labels section 2 names. The author checks are the ones approval
-    makes later, so a stranger's issue is passed over here rather than labelled and handed back.
+    only the states and triage labels section 2 names. An issue with sub-issues has been split
+    already, by a maintainer linking them before the scan reached it: ``triage-todo`` on it is a
+    parent review a person asks for (section 1), which would put on ``triage-complete`` and start
+    a record the worker then reviews by itself, so it is passed over as a step is (phase 4
+    ruling 23). The author checks are the ones approval makes later, so a stranger's issue is
+    passed over here rather than labelled and handed back.
     """
     if issue.github_state != "open":
         return "closed"
@@ -65,6 +69,8 @@ def skip_reason(issue: Issue, labels: GitHubLabels) -> str | None:
         return "carries an issuebot label"
     if issue.parent is not None:
         return "has a parent issue"
+    if issue.sub_issue_count > 0:
+        return "has sub-issues"
     if issue.author is None:
         return AUTHOR_DELETED
     if issue.author_association not in MAINTAINER_ASSOCIATIONS:

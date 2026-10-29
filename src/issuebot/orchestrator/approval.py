@@ -38,7 +38,9 @@ refuse the operator. Only when rule 1 refuses does the latest ``triage-todo`` sa
 authorship is asked, because the label is the record of who vouched for the text. A person's
 means a person read it, so an edit after their reading stays refused however the author
 stands; authorship decides only a label issuebot's own account applied, and a tie in one
-second goes to the person's, which is the reading that never admits more. ``assess_triage`` is
+second goes to the person's, which is the reading that never admits more. When authorship
+refuses as well, and rule 1 had counted a label and refused for an edit after it, the
+hand-back keeps rule 1's reason, which names the edit. ``assess_triage`` is
 never called for ``todo``: authorship passes an issue issuebot's own account opened, which
 holds only because the triage and parent-review sessions are read-only and hold no
 credential, so a work run's approval is rule 1 alone.
@@ -177,8 +179,12 @@ def assess_triage(
     """The verdict for a triage or parent-review run: rule 1, then authorship when the latest
     ``triage_label`` is issuebot's own (spec 2026-10-25, section 3).
 
-    Rule 1's refusal is the answer whenever authorship is not asked, so the reason a person's
-    label was refused is the one the hand-back gives.
+    Authorship approving wins over rule 1's refusal (phase 4 ruling 22). Otherwise rule 1's
+    refusal is the answer whenever authorship is not asked, and whenever authorship refuses too
+    after rule 1 counted a label and refused for an edit after it -- a person's, or on an admin
+    token the operator's hand-applied one, a stranger's issue included. So the reason a label
+    someone applied was refused is the one the hand-back gives, naming who edited and when;
+    authorship's own reason is given only where rule 1 counted no label at all.
     """
     verdict = assess(
         evidence,
@@ -202,6 +208,12 @@ def assess_triage(
     actor, latest = max(named, key=lambda item: (item[1].at, item[0].lower() != own))
     if actor.lower() != own:
         return verdict
-    return assess_authorship(
+    authored = assess_authorship(
         evidence, author=author, author_association=author_association, labelled=latest
     )
+    if isinstance(authored, Approved) or verdict.approval is None:
+        return authored
+    # Rule 1 counted a label and refused for an edit after it: on an admin token, the operator
+    # hand-applying `triage-todo` to a stranger's issue, which the stranger then edited. That
+    # edit is what un-approved it, so the hand-back names it, not the author's standing.
+    return verdict

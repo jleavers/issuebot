@@ -5679,10 +5679,13 @@ async def test_auto_triage_off_reads_nothing(tmp_path: Path) -> None:
     assert h.labels.triage_todo not in h.github.issue(1).labels
 
 
-async def test_a_strangers_issue_is_never_auto_triaged(tmp_path: Path) -> None:
+@pytest.mark.parametrize("admin", [False, True])
+async def test_a_strangers_issue_is_never_auto_triaged(tmp_path: Path, admin: bool) -> None:
     """Review focus 2: only an account with write access has its issue auto-triaged, and a
-    stranger's is passed over for good rather than labelled and handed back (section 2)."""
-    h = Harness(tmp_path, auto_triage=True)
+    stranger's is passed over for good rather than labelled and handed back (section 2). On
+    the operator's own admin token this filter is the only guard: rule 1 approves issuebot's
+    own label there, so a stranger's issue the scan labelled would be triaged."""
+    h = Harness(tmp_path, auto_triage=True, admin=admin)
     await h.tick()
     at = START + timedelta(seconds=10)
     opened(h, 1, at=at, author="stranger", association="NONE")
@@ -5700,6 +5703,8 @@ async def test_a_strangers_issue_is_never_auto_triaged(tmp_path: Path) -> None:
         await scan(h)
     assert h.calls("fetch_issues_opened_since")[-1] == (at,)
     assert [entry for entry in logs if entry["event"] == "auto_triage_passed_over"] == []
+    assert h.github.issue(1).labels == ()
+    assert h.triage_sessions.runs == []
 
 
 async def test_sub_issues_and_labelled_issues_are_not_auto_triaged(tmp_path: Path) -> None:
@@ -5722,6 +5727,33 @@ async def test_sub_issues_and_labelled_issues_are_not_auto_triaged(tmp_path: Pat
         if entry["event"] == "auto_triage_passed_over"
     }
     assert reasons == {11: "has a parent issue", 12: "carries an issuebot label"}
+
+
+async def test_an_issue_already_split_by_hand_is_not_auto_triaged(tmp_path: Path) -> None:
+    """A maintainer who linked sub-issues under a new issue before the scan reached it has split
+    it already. Labelled, it would be taken for a parent review a person asked for -- a note,
+    `triage-complete`, which holds the steps' order, and a record the worker then reviews on
+    its own -- so it is passed over, as triage's own steps are (phase 4 ruling 23)."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    opened(h, 1, at=START + timedelta(seconds=10))
+    opened(h, 2, at=START + timedelta(seconds=20))
+    h.github.link_sub_issue(1, 2)
+    with capture_logs() as logs:
+        await scan(h)
+    await h.tick()
+    for number in (1, 2):
+        assert h.github.issue(number).labels == ()
+        assert h.github.comments_for(number) == []
+    assert [event for event in h.recorder.of(StateChanged) if event.note == "auto-triage"] == []
+    assert h.orchestrator._parents == {}
+    assert h.triage_sessions.runs == []
+    reasons = {
+        entry["issue_number"]: entry["reason"]
+        for entry in logs
+        if entry["event"] == "auto_triage_passed_over"
+    }
+    assert reasons == {1: "has sub-issues", 2: "has a parent issue"}
 
 
 async def test_a_removed_auto_label_is_not_put_back(tmp_path: Path) -> None:
