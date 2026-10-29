@@ -18,6 +18,8 @@ MAX_WINDOW_DAYS = 365
 # an issue nobody has run for three months is not one whose chain of failures is still live.
 LEDGER_SEED_LIMIT = 500
 LEDGER_WINDOW_DAYS = 90
+# The values of issues.triage: GitHubLabels field names, in the order the board draws them.
+TRIAGE_COLUMNS = ("triage_todo", "triage_complete")
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -27,6 +29,7 @@ class IssueRow:
     title: str
     state: str | None
     state_label: str | None
+    triage: str | None
     github_state: str
     url: str
     labels: list[str]

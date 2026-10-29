@@ -40,6 +40,7 @@ class FakeStore:
         self.turns: list[list[TurnCapture]] = []
         self.issues: list[list[IssueSnapshot]] = []
         self.snapshots: list[dict[str, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
         self.closed = False
 
     async def connect(self) -> None:
@@ -54,9 +55,13 @@ class FakeStore:
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
         self.issues.append(list(issues))
+        self.calls.append(("issues", list(issues)))
 
     async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
         self.snapshots.append(dict(data))
+
+    async def reconcile_triage_track(self, numbers: Sequence[int], at: datetime) -> None:
+        self.calls.append(("reconcile", tuple(numbers), at))
 
 
 class FakeQueries:

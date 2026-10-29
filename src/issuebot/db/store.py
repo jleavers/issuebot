@@ -1,7 +1,7 @@
 """The SQL writes behind the sink: one connection, three methods, errors mapped and redacted."""
 
 import contextlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
@@ -47,6 +47,8 @@ class Store(Protocol):
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None: ...
 
     async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None: ...
+
+    async def reconcile_triage_track(self, numbers: Sequence[int], at: datetime) -> None: ...
 
 
 INSERT_EVENT = """
@@ -129,6 +131,19 @@ UPDATE issues SET state = %(state)s, state_label = %(state_label)s, seen_at = %(
 WHERE repo = %(repo)s AND number = %(number)s AND seen_at <= %(at)s
 """
 
+TRIAGE_CHANGED = """
+UPDATE issues SET triage = %(triage)s, seen_at = %(at)s
+WHERE repo = %(repo)s AND number = %(number)s AND seen_at <= %(at)s
+"""
+
+# The complete set of open triage-track issues, read at %(at)s: an open row missing from it has
+# left the track (closed, or stripped of its label). Closed rows are on no column either way.
+RECONCILE_TRIAGE = """
+UPDATE issues SET triage = NULL
+WHERE repo = %(repo)s AND triage IS NOT NULL AND github_state = 'open'
+  AND NOT (number = ANY(%(numbers)s)) AND seen_at <= %(at)s
+"""
+
 ISSUE_CLOSED = """
 UPDATE issues
 SET github_state = 'closed', closed_at = coalesce(closed_at, %(at)s), seen_at = %(at)s
@@ -136,17 +151,18 @@ WHERE repo = %(repo)s AND number = %(number)s AND seen_at <= %(at)s
 """
 
 UPSERT_ISSUE = """
-INSERT INTO issues (repo, number, identifier, title, state, state_label, github_state, url,
-                    labels, pr_number, pr_url, pr_state, pr_merged_at, created_at, updated_at,
+INSERT INTO issues (repo, number, identifier, title, state, state_label, triage, github_state,
+                    url, labels, pr_number, pr_url, pr_state, pr_merged_at, created_at, updated_at,
                     closed_at, seen_at)
 VALUES (%(repo)s, %(number)s, %(identifier)s, %(title)s, %(state)s, %(state_label)s,
-        %(github_state)s, %(url)s, %(labels)s, %(pr_number)s, %(pr_url)s, %(pr_state)s,
+        %(triage)s, %(github_state)s, %(url)s, %(labels)s, %(pr_number)s, %(pr_url)s, %(pr_state)s,
         %(pr_merged_at)s, %(created_at)s, %(updated_at)s, %(closed_at)s, %(seen_at)s)
 ON CONFLICT (repo, number) DO UPDATE SET
     identifier = EXCLUDED.identifier,
     title = EXCLUDED.title,
     state = EXCLUDED.state,
     state_label = EXCLUDED.state_label,
+    triage = EXCLUDED.triage,
     github_state = EXCLUDED.github_state,
     url = EXCLUDED.url,
     labels = EXCLUDED.labels,
@@ -177,7 +193,21 @@ ON CONFLICT (repo) DO UPDATE SET
 """
 
 
-def issue_row(snapshot: IssueSnapshot) -> dict[str, Any]:
+def triage_track(names: Iterable[str], labels: GitHubLabels) -> str | None:
+    """The ``issues.triage`` value for a set of label names, against the configured names.
+
+    ``triage_todo`` wins over ``triage_complete``: a human re-triaging a parent adds the
+    former and may leave the latter on, and the issue is waiting again.
+    """
+    lowered = {name.lower() for name in names}
+    if labels.triage_todo.lower() in lowered:
+        return "triage_todo"
+    if labels.triage_complete.lower() in lowered:
+        return "triage_complete"
+    return None
+
+
+def issue_row(snapshot: IssueSnapshot, labels: GitHubLabels) -> dict[str, Any]:
     """The bound parameters of UPSERT_ISSUE for one polled issue."""
     issue = snapshot.issue
     pr = issue.linked_pr
@@ -187,6 +217,7 @@ def issue_row(snapshot: IssueSnapshot) -> dict[str, Any]:
         "title": issue.title,
         "state": issue.state.value if issue.state is not None else None,
         "state_label": issue.state_labels[0] if len(issue.state_labels) == 1 else None,
+        "triage": triage_track(issue.labels, labels),
         "github_state": issue.github_state,
         "url": issue.url,
         "labels": list(issue.labels),
@@ -249,8 +280,24 @@ class PostgresStore:
                             INSERT_TURN,
                             [self._stamp(turn_row(event.run_id, turn)) for turn in turns],
                         )
-            elif isinstance(event, StateChanged) and not _on_the_triage_track(event, self._labels):
-                await conn.execute(STATE_CHANGED, self._stamp(self._state_changed_row(event)))
+            elif isinstance(event, StateChanged):
+                if not _on_the_triage_track(event, self._labels):
+                    await conn.execute(STATE_CHANGED, self._stamp(self._state_changed_row(event)))
+                else:
+                    # Only a move that lands on a triage label says what the track now is; one
+                    # that leaves it does not say which labels remain, so the poll settles it.
+                    track = (
+                        triage_track([event.to_label], self._labels)
+                        if event.to_label is not None
+                        else None
+                    )
+                    if track is not None:
+                        await conn.execute(
+                            TRIAGE_CHANGED,
+                            self._stamp(
+                                {"number": event.issue_number, "triage": track, "at": event.at}
+                            ),
+                        )
             elif isinstance(event, IssueCompleted | IssueCancelled):
                 await conn.execute(
                     ISSUE_CLOSED, self._stamp({"number": event.issue_number, "at": event.at})
@@ -262,13 +309,25 @@ class PostgresStore:
         conn = self._require()
         async with self._guard(), conn.transaction(), conn.cursor() as cursor:
             await cursor.executemany(
-                UPSERT_ISSUE, [self._stamp(issue_row(snapshot)) for snapshot in issues]
+                UPSERT_ISSUE,
+                [self._stamp(issue_row(snapshot, self._labels)) for snapshot in issues],
             )
 
     async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
         conn = self._require()
         async with self._guard():
             await conn.execute(WRITE_SNAPSHOT, self._stamp({"at": at, "data": Jsonb(dict(data))}))
+
+    async def reconcile_triage_track(self, numbers: Sequence[int], at: datetime) -> None:
+        """Clear ``triage`` on every open row the complete triage-track read did not list.
+
+        ``at`` guards the write but is not stamped into ``seen_at``: the sink drains in order,
+        so every snapshot of the same read has already been written, and bumping ``seen_at``
+        would only make a poll that began earlier lose a race it has already won.
+        """
+        conn = self._require()
+        async with self._guard():
+            await conn.execute(RECONCILE_TRIAGE, self._stamp({"numbers": list(numbers), "at": at}))
 
     def _stamp(self, row: dict[str, Any]) -> dict[str, Any]:
         """The bound parameters of one write, with this store's repository forced in.
@@ -321,7 +380,8 @@ def _on_the_triage_track(event: StateChanged, labels: GitHubLabels) -> bool:
 
     The triage labels sit beside the issue's state rather than in it: an issue waiting to be
     triaged is still ``todo``, and the verdict's label is not a column. The event is still
-    written, so the history has the move; only the recorded state is left alone.
+    written, so the history has the move; the recorded state is left alone, and the track
+    (``issues.triage``) is what records it instead.
     """
     track = {labels.triage_todo.lower(), labels.triage_complete.lower()}
     return any(

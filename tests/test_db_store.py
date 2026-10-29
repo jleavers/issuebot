@@ -11,7 +11,14 @@ import pytest
 from issuebot.agent.turnlog import TurnCapture
 from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, StoreUnavailableError, connect, migrate
-from issuebot.db.store import INSERT_TURN, IssueSnapshot, PostgresStore
+from issuebot.db.store import (
+    INSERT_TURN,
+    UPSERT_ISSUE,
+    IssueSnapshot,
+    PostgresStore,
+    issue_row,
+    triage_track,
+)
 from issuebot.events import (
     Blocked,
     Event,
@@ -545,4 +552,96 @@ async def test_two_repositories_share_an_issue_number_without_colliding(
     assert [(r["repo"], r["title"], r["state"]) for r in found] == [
         ("example/other", "Theirs", "review"),
         (REPO, "Ours", "todo"),
+    ]
+
+
+# --- the triage track (spec 2026-10-25, section 7) ---------------------------------------------
+
+
+def only_triage(number: int, label: str, **overrides: Any) -> Issue:
+    """An issue the board poll cannot see: a triage label and no state label."""
+    return overrides.pop("make")(
+        number=number,
+        id=str(number),
+        identifier=f"repo-{number}",
+        labels=(label,),
+        state=None,
+        state_labels=(),
+        **overrides,
+    )
+
+
+def test_triage_track_reads_the_configured_names_case_insensitively() -> None:
+    labels = GitHubLabels(triage_todo="Needs/Sizing", triage_complete="sized")
+    assert triage_track(["needs/sizing"], labels) == "triage_todo"
+    assert triage_track(["SIZED", "issuebot/todo"], labels) == "triage_complete"
+    assert triage_track(["issuebot/triage-todo"], labels) is None
+
+
+def test_triage_todo_wins_when_an_issue_carries_both() -> None:
+    labels = GitHubLabels()
+    assert triage_track([labels.triage_complete, labels.triage_todo], labels) == "triage_todo"
+
+
+def test_upsert_issue_placeholders_match_issue_row(make_issue: Callable[..., Issue]) -> None:
+    """Hermetic: a column added to the row but not to the statement fails here, not in prod."""
+    row = issue_row(snapshot(make_issue(), 0), GitHubLabels())
+    assert set(re.findall(r"%\((\w+)\)s", UPSERT_ISSUE)) == set(row) | {"repo"}
+
+
+async def test_a_polled_issue_records_its_triage_track(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await store.upsert_issues(
+        [snapshot(only_triage(42, "issuebot/triage-complete", make=make_issue), 0)]
+    )
+    (row,) = await rows(db_url, "SELECT state, triage FROM issues")
+    assert row == {"state": None, "triage": "triage_complete"}
+
+
+async def test_a_triage_label_move_records_the_track(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await store.upsert_issues(
+        [snapshot(only_triage(42, "issuebot/triage-todo", make=make_issue), 0)]
+    )
+    await store.apply_event(
+        moved(from_label="issuebot/triage-todo", to_label="issuebot/triage-complete")
+    )
+    (row,) = await rows(db_url, "SELECT triage FROM issues")
+    assert row["triage"] == "triage_complete"
+
+
+async def test_a_move_off_the_triage_track_leaves_it_for_the_poll(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await store.upsert_issues(
+        [snapshot(only_triage(42, "issuebot/triage-todo", make=make_issue), 0)]
+    )
+    await store.apply_event(moved(from_label="issuebot/triage-todo", to_label=None))
+    (row,) = await rows(db_url, "SELECT triage FROM issues")
+    assert row["triage"] == "triage_todo"
+
+
+async def test_reconcile_clears_open_rows_missing_from_the_track(
+    store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await store.upsert_issues(
+        [
+            snapshot(only_triage(60, "issuebot/triage-todo", make=make_issue), 0),
+            snapshot(only_triage(61, "issuebot/triage-complete", make=make_issue), 0),
+            snapshot(
+                only_triage(62, "issuebot/triage-complete", make=make_issue, github_state="closed"),
+                0,
+            ),
+            snapshot(only_triage(63, "issuebot/triage-complete", make=make_issue), 20),
+        ]
+    )
+    await store.reconcile_triage_track([60], at(10))
+    found = await rows(db_url, "SELECT number, triage FROM issues ORDER BY number")
+    assert [(r["number"], r["triage"]) for r in found] == [
+        (60, "triage_todo"),  # in the set
+        (61, None),  # open, missing: closed or unlabelled on GitHub
+        (62, "triage_complete"),  # already closed in the store: on no column either way
+        (63, "triage_complete"),  # seen after the read began: newer than its answer
     ]
