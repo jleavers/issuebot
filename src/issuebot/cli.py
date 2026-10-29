@@ -1665,7 +1665,8 @@ def _triage_check(workflow: Workflow) -> Check:
         f"prompt {source}, model {model}, {triage.max_turns} turn(s) at "
         f"${triage.max_budget_usd:.2f}, at most {triage.max_sub_issues} sub-issues, "
         f"parent review prompt {review_source}, {triage.max_gap_rounds} gap round(s), "
-        f"at most {triage.max_parent_reviews} reviews",
+        f"at most {triage.max_parent_reviews} reviews, "
+        f"auto-triage {'on' if triage.auto else 'off'}",
     )
 
 

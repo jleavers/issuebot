@@ -245,3 +245,31 @@ def test_an_accounts_file_that_is_not_utf8_fails_closed(
     # `UnicodeDecodeError` describes the bytes, not the file they came from, so the message
     # has to name it: an operator reading this line needs to know which file to open.
     assert str(listing) in exc.value.message
+
+
+def test_auto_triage_falls_back_to_the_environment_variable() -> None:
+    out = resolve_config(
+        {"github": {"repo": "o/r"}}, environ={"ISSUEBOT_AUTO_TRIAGE": "true"}, base_dir=BASE
+    )
+    assert out["triage"]["auto"] == "true"
+
+
+def test_an_explicit_auto_triage_wins_over_the_environment() -> None:
+    out = resolve_config(
+        {"github": {"repo": "o/r"}, "triage": {"auto": False}},
+        environ={"ISSUEBOT_AUTO_TRIAGE": "true"},
+        base_dir=BASE,
+    )
+    assert out["triage"]["auto"] is False
+
+
+def test_auto_triage_is_off_by_default() -> None:
+    out = resolve_config({"github": {"repo": "o/r"}}, environ={}, base_dir=BASE)
+    assert "auto" not in out.get("triage", {})
+
+
+def test_an_empty_auto_triage_variable_counts_as_unset() -> None:
+    out = resolve_config(
+        {"github": {"repo": "o/r"}}, environ={"ISSUEBOT_AUTO_TRIAGE": ""}, base_dir=BASE
+    )
+    assert "auto" not in out.get("triage", {})

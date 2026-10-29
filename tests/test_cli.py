@@ -5952,6 +5952,7 @@ def test_validate_reports_triage(
         "[ OK ] triage: prompt shipped default, model claude's own default (neither "
         "triage.model nor claude.model is set), 1 turn(s) at $2.00, at most 8 sub-issues" in out
     )
+    assert "at most 6 reviews, auto-triage off" in out
     assert out.index("] prompt:") < out.index("] triage:")
 
 
@@ -6071,8 +6072,25 @@ def test_validate_triage_reports_the_parent_review_prompt(
     assert line.startswith("[ OK ] triage: ")
     assert line.endswith(
         ", at most 8 sub-issues, "
-        "parent review prompt shipped default, 2 gap round(s), at most 6 reviews"
+        "parent review prompt shipped default, 2 gap round(s), at most 6 reviews, auto-triage off"
     )
+
+
+def test_validate_reports_auto_triage(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    executables: object,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "t")
+    on = tmp_path / "WORKFLOW.md"
+    on.write_text(
+        GOOD.read_text(encoding="utf-8").replace("---\n", "---\ntriage:\n  auto: true\n", 1),
+        encoding="utf-8",
+    )
+    assert main(["validate", "--workflow", str(on)]) == 0
+    [line] = [x for x in capsys.readouterr().out.splitlines() if "] triage:" in x]
+    assert line.endswith(", auto-triage on")
 
 
 def test_validate_names_a_parent_review_md_as_triage_md_is_named(

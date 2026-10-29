@@ -283,6 +283,9 @@ class TriageSettings(_Model):
     # reviews acted on automatically, before the worker hands it to a human.
     max_gap_rounds: int = Field(default=2, ge=0)
     max_parent_reviews: int = Field(default=6, ge=1)
+    # Auto-triage (triage design, section 2): label each new maintainer-opened issue
+    # `triage-todo` without a person. Off unless set here or in ISSUEBOT_AUTO_TRIAGE.
+    auto: bool = False
 
 
 class Settings(_Model):
