@@ -2795,9 +2795,11 @@ async def _run_worker(workflow: Workflow) -> int:
         initial_ledger=await _initial_ledger(sinks.database, workflow.config.github.repo),
         initial_parents=await _initial_parents(sinks.database, workflow.config.github.repo),
         initial_auto_triage=await _initial_auto_triage(sinks.database, workflow.config.github.repo),
-        # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
+        # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set,
+        # and reads the triage track only when on_triage_track is.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,
+        on_triage_track=postgres.record_triage_track if postgres is not None else None,
         scrubber=scrubber,
     )
     listener: RefreshListener | None = None

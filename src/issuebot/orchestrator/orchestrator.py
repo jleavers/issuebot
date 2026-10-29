@@ -383,6 +383,7 @@ class Orchestrator:
         initial_auto_triage: AutoTriageRecord | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
+        on_triage_track: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
     ) -> None:
         self._workflow = workflow
@@ -408,6 +409,7 @@ class Orchestrator:
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
         self._on_snapshot = on_snapshot
         self._on_issues = on_issues
+        self._on_triage_track = on_triage_track
         self._adapter = adapter_factory(workflow.config.github)
         # The manager the orchestrator itself reads workspaces through: `path_for` and
         # `read_session` ask nothing about the session's account, and everything that does --
@@ -1220,8 +1222,34 @@ class Orchestrator:
             return None
         self._note_fetch_success()
         self._report_issues(issues)
+        await self._observe_triage_track()
         await self._bounce_conflicts(issues)
         return issues
+
+    async def _observe_triage_track(self) -> None:
+        """Hand the store every open issue on the triage track; a failed read is a warning.
+
+        The board poll reads by state label, so it never sees an issue waiting in Triaged; this
+        is the one extra read that does (triage spec section 7, rulings 4 and 5), and its answer
+        is the complete set, so the store reconciles against it. Only a worker with a store makes
+        it. A failure is deliberately outside the GitHub hold (#88): it neither counts towards
+        the hold nor resets the count, as the triage candidates' read does not, because the
+        board is not what dispatch depends on and a failed read reconciles nothing.
+        """
+        if self._on_triage_track is None:
+            return
+        labels = self._workflow.config.github.labels
+        try:
+            issues = await self._adapter.fetch_issues_with_any_label(
+                (labels.triage_todo, labels.triage_complete)
+            )
+        except GitHubError as exc:
+            self._log.warning("triage_track_fetch_failed", error=str(exc))
+            return
+        try:
+            self._on_triage_track(issues)
+        except Exception:
+            self._log.exception("triage_track_consumer_failed", count=len(issues))
 
     async def _bounce_conflicts(self, issues: Sequence[Issue]) -> None:
         """Move each review issue whose pull request conflicts to rework (spec §3, §4).
@@ -1279,9 +1307,14 @@ class Orchestrator:
         ``claude.command``; either way the fetch still works and the board can stay current. A
         hold that ``fetch_preflight`` reports on skips this, since the request would only fail.
         The request is worth making at all only when an observer is watching or the conflict
-        bounce is on: a conflict is about the board, not about dispatch.
+        bounce is on, or the triage track is read for the store: a conflict is about the board,
+        not about dispatch.
         """
-        if self._on_issues is None and self._conflict_limit() <= 0:
+        if (
+            self._on_issues is None
+            and self._on_triage_track is None
+            and self._conflict_limit() <= 0
+        ):
             self._note_fetch_skipped()
             return
         await self._fetch_issues()
