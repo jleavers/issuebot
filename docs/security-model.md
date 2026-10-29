@@ -181,6 +181,19 @@ by the prompt or by anything in `WORKFLOW.md` the operator has widened for work 
 - **The text it acts on.** The same approval rule as work: an edit to the title or body after
   `triage-todo` by someone other than who applied it hands the issue back before any session
   reads it ([Triage](operations.md#triage)).
+- **A label with no person behind it.** Under auto-triage ([Auto-triage](operations.md#auto-triage))
+  the latest `triage-todo` is issuebot's own, which never approves under the first rule on a
+  dedicated account. Authorship decides instead: the author is named and a maintainer
+  (`OWNER`, `MEMBER` or `COLLABORATOR`), read from the issue as the dispatching tick fetched it,
+  and every title and body edit since the issue was opened is the author's own. That includes
+  an edit before the label, since nobody read the text when it went on. This also covers an issue
+  issuebot's own account opened, if that account has write access: a deliberate, narrow
+  exception to "issuebot's own label never approves", safe only because this session is read-only
+  and credential-free. The first rule still goes first: on an operator's own admin token it
+  approves issuebot's label as it always has, and if it refuses because the author edited after an
+  operator's own `triage-todo`, authorship then approves when the author is a maintainer and every
+  edit is theirs. Only triage and the parent review ask for authorship; the work run's approval
+  of `todo` is unchanged.
 
 A parent review ([The parent review](operations.md#the-parent-review)) is this same session:
 the same flags, clone, absent credential and worker-side writes. What it adds is text to read.

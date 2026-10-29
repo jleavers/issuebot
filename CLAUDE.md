@@ -353,7 +353,7 @@ anything reading or writing issue state goes through these:
 | `issuebot/review` | agent, when PR opened or no fault found |
 | `issuebot/rework` | human, if the PR needs more work; or issuebot, when the PR conflicts with the default branch (bounded by `agent.max_conflict_reworks`) |
 | `issuebot/no-fault` | agent, beside `review`, when it found no fault (a marker, not a state) |
-| `issuebot/triage-todo` | human (phase 1); a later phase adds opt-in auto-triage |
+| `issuebot/triage-todo` | human, or issuebot under opt-in auto-triage (`triage.auto`) |
 | `issuebot/triage-complete` | issuebot, after a triage verdict; beside a state label, not instead of one |
 | `issuebot/complete` | automatically, when the issue closes via linked-PR merge or with `issuebot/no-fault`, or when a parent review finds a split issue's ask met |
 

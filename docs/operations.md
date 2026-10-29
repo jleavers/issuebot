@@ -232,6 +232,47 @@ every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <
 held step too, naming the step it waits for, so close that first or reorder the parent;
 `--show-prompt` skips the check.
 
+#### Auto-triage
+
+With `triage.auto` on, the worker labels each new issue `issuebot/triage-todo` itself, so a
+maintainer need not. Switch it on with `triage.auto: true` in `WORKFLOW.md`, which reloads live,
+or with `ISSUEBOT_AUTO_TRIAGE=true` in the env file, which the worker reads only when compose
+creates its container: run `docker compose up -d worker` after changing it. An explicit
+`triage.auto` in `WORKFLOW.md` wins over the variable, `false` included. `validate`'s `triage`
+line ends `auto-triage on` or `auto-triage off`.
+
+What is labelled: an open issue opened after the watermark, by a maintainer (`OWNER`, `MEMBER` or
+`COLLABORATOR`), with no issuebot label of any kind and no parent issue. Anything else is passed
+over, and the log says why (`auto_triage_passed_over`).
+
+The watermark is the time up to which every issue has been decided once, and an issue behind it is
+never looked at again:
+
+- Switching auto-triage on puts it at the present, so nothing already open is labelled, however
+  old the backlog.
+- A restart with it on keeps it, so an issue opened while the worker was stopped is labelled.
+- A spell with it off is skipped: switching it on again moves the watermark to the present.
+- Without a store, a restart is a fresh start, and the watermark goes to the present.
+
+So a person or an escape removing `issuebot/triage-todo` is final: the issue is behind the
+watermark. The scan also never labels one issue twice within a process; after a restart the label
+and the watermark are the only guards, so a label removed in the moments before a stop may be put
+back.
+
+The scan costs one GraphQL point, at most once every two minutes and only on a tick with a free
+slot: at most 30 points an hour, shared with every other deployment on the account. An issue
+opened less than a minute before a scan waits for the next. The label normally lands within about
+three minutes of opening, and triage starts on the following tick, not the one that labelled it.
+If the read hits its page ceiling the scan waits an hour and the log names the remedy: switch
+`triage.auto` off and on, which moves the watermark to the present and leaves what was opened
+before it to a person.
+
+A label with no person behind it is approved by authorship, not by who applied it
+([A triage session](security-model.md#a-triage-session)). When that refuses an issue, say because
+someone other than its author edited it, it is handed back as `unapproved edit` like any other:
+`issuebot/triage-todo` comes off and a comment says why. Auto-triage will not label it again, so
+read the text as it stands and apply `issuebot/triage-todo` yourself to approve it.
+
 ### The parent review
 
 A split parent is watched by the worker. Once every one of its steps has closed (any close

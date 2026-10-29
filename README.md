@@ -46,7 +46,7 @@ which `issuebot labels ensure` creates, and nothing else.
 | `issuebot/rework` | you, if the pull request needs more work; or the worker, when a sibling merge leaves it conflicting |
 | `issuebot/no-fault` | the agent, beside `review`, when the reported defect does not happen (a marker, not a state) |
 | `issuebot/complete` | automatically, when the issue closes by a merged pull request or with `issuebot/no-fault` |
-| `issuebot/triage-todo` | you, to have a session read the issue and file a verdict (not a state; see below) |
+| `issuebot/triage-todo` | you, to have a session read the issue and file a verdict; or the worker, with `triage.auto` on (not a state; see below) |
 | `issuebot/triage-complete` | the worker, after it filed a triage verdict; it stays beside a later state label |
 | `issuebot/operator-step` | the worker, on a sub-issue triage filed for you to do outside issuebot |
 
@@ -60,7 +60,7 @@ comes back with the evidence and the `issuebot/no-fault` marker instead of a pul
 closing it counts as a completion too — on a backlog of aged issues that triage is most of the
 value.
 
-**Triage is by hand.** Label an issue `issuebot/triage-todo` and a read-only session reads it
+**Triage is by hand, or by the worker once `triage.auto` is on.** Label an issue `issuebot/triage-todo` and a read-only session reads it
 against the clone and files a verdict: `fits`, or `split` into ordered sub-issues. The worker
 files it, not the session: the sub-issues are created linked to the parent, a step for you
 rather than the agent carries `issuebot/operator-step`, `triage-todo` becomes
@@ -72,6 +72,10 @@ once per repository first; a verdict cannot be filed until the three triage labe
 the session is bounded is
 [A triage session](docs/security-model.md#a-triage-session) and what to do when it hands an
 issue back is [Triage](docs/operations.md#triage).
+
+With `triage.auto` on, the worker labels each new issue a maintainer opens `issuebot/triage-todo`
+itself, once; it never labels the backlog. See
+[Auto-triage](docs/operations.md#auto-triage).
 
 **A split is reviewed once its steps have closed.** The worker reviews the parent by itself
 when every step has closed, in the same read-only session, and files the next batch (`next`),
@@ -355,7 +359,7 @@ docker compose run --rm worker labels ensure
 [ OK ] database.url: connected (PostgreSQL 18.1); schema version 7
 [WARN] notifications.slack: not configured; export SLACK_WEBHOOK_URL to notify on blocked, state_changed, or set notifications.slack.events: [] to silence this
 [ OK ] prompt: 26632 characters, renders
-[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, at most 8 sub-issues
+[ OK ] triage: prompt shipped default, model default, 1 turn(s) at $2.00, at most 8 sub-issues, auto-triage off
 22 checks: 0 failed, 2 warnings
 ```
 
@@ -516,6 +520,7 @@ first issue running; it is what to consult once one has.
 | `triage.max_budget_usd` | spend cap per triage turn (its cost counts toward `agent.max_issue_cost_usd`) | `2.0` |
 | `triage.max_sub_issues` | the most sub-issues one verdict may ask for, at most 20; a longer one is refused as malformed | `8` |
 | `triage.max_gap_rounds` | the `gap` verdicts a parent review acts on before a further `gap` is handed over instead of filed | `2` |
+| `triage.auto` | the worker labels each new issue a maintainer opens `issuebot/triage-todo` itself; when the key is absent it falls back to `ISSUEBOT_AUTO_TRIAGE`, and an explicit `false` wins over the variable. See [Auto-triage](docs/operations.md#auto-triage) | `false` |
 | `triage.max_parent_reviews` | the parent reviews the worker starts on a parent by itself, at least 1; `issuebot/triage-todo` resets the count | `6` |
 | `database.url` | `$VAR` naming the PostgreSQL URL, `postgresql://user@host:port/db` with the password in the userinfo or as `?password=` (libpq's keyword/value form is refused, since only the URL can be logged without its password); unset disables history and the dashboard | `DATABASE_URL` |
 | `notifications.slack.events` | event kinds posted to Slack; `[]` silences it | `[state_changed, blocked]` |
