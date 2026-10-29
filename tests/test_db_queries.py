@@ -14,6 +14,7 @@ from issuebot.db.database import Database
 from issuebot.db.queries import (
     BOARD_LIMIT,
     ISSUE_LIST_LIMIT,
+    AutoTriageRow,
     DailyPoint,
     EventRow,
     IssueRow,
@@ -26,6 +27,7 @@ from issuebot.db.queries import (
 )
 from issuebot.db.store import IssueSnapshot, PostgresStore
 from issuebot.events import (
+    AutoTriageState,
     Blocked,
     IssueCompleted,
     ParentReviewState,
@@ -943,3 +945,30 @@ async def test_parent_records_are_each_parents_latest_state(db_url: str) -> None
                 handed_over="gap limit",
             )
         ]
+
+
+async def test_auto_triage_state_is_the_latest_record(db_url: str) -> None:
+    """The worker's auto-triage record comes back at startup: this repository's latest
+    ``auto_triage_state`` by ``(at, id)``, however old, and nothing for one with none."""
+    await migrate(db_url)
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    other = PostgresStore(db_url, repo="other/repo", labels=GitHubLabels())
+    await store.connect()
+    await other.connect()
+    try:
+        await store.apply_event(
+            AutoTriageState(auto=True, watermark=NOW - 200 * DAY, at=NOW - 200 * DAY)
+        )
+        await store.apply_event(
+            AutoTriageState(auto=False, watermark=NOW - 100 * DAY, at=NOW - 100 * DAY)
+        )
+        await other.apply_event(AutoTriageState(auto=True, watermark=NOW, at=NOW))
+    finally:
+        await store.close()
+        await other.close()
+    async with scoped(Database(db_url)) as queries:
+        assert await queries.auto_triage_state() == AutoTriageRow(
+            auto=False, watermark=NOW - 100 * DAY
+        )
+    async with scoped(Database(db_url), "third/repo") as queries:
+        assert await queries.auto_triage_state() is None

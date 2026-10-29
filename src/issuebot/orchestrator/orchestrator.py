@@ -82,6 +82,7 @@ from issuebot.orchestrator.admission import (
     seeded_chain,
 )
 from issuebot.orchestrator.approval import Approved, Unapproved
+from issuebot.orchestrator.auto_triage import AutoTriageRecord
 from issuebot.orchestrator.parent_review import (
     ParentHandOver,
     ParentRecord,
@@ -372,6 +373,7 @@ class Orchestrator:
         initial_rate_limits: RateLimits | None = None,
         initial_ledger: Mapping[str, IssueLedger] | None = None,
         initial_parents: Mapping[int, ParentRecord] | None = None,
+        initial_auto_triage: AutoTriageRecord | None = None,
         on_snapshot: Callable[[RuntimeSnapshot], None] | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
@@ -529,6 +531,10 @@ class Orchestrator:
         # are reviewed on its first tick; without a store a restart forgets them, and such a
         # parent waits for a human's `triage-todo`.
         self._parents: dict[int, ParentRecord] = dict(initial_parents or {})
+        # Auto-triage's record (spec section 2): whether it was on and the watermark behind which
+        # no issue is looked at again. Seeded from the store like the parents; without one a
+        # restart counts as never having run, so the watermark moves to the present.
+        self._auto_triage_record: AutoTriageRecord | None = initial_auto_triage
         # Parent review verdicts GitHub would not let the worker file, retried from memory as
         # triage's are, by issue id.
         self._parent_pending: dict[str, PendingParentReview] = {}

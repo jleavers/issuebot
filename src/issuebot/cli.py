@@ -146,6 +146,7 @@ from issuebot.orchestrator import (
     probe_run_as,
 )
 from issuebot.orchestrator.actions import assess_triage_issue
+from issuebot.orchestrator.auto_triage import AutoTriageRecord
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import rate_limits_from_dict
@@ -2749,6 +2750,28 @@ async def _initial_parents(database: Database | None, repo: str) -> dict[int, Pa
     return parents
 
 
+async def _initial_auto_triage(database: Database | None, repo: str) -> AutoTriageRecord | None:
+    """Auto-triage's record, read back from the store.
+
+    The worker publishes every change to it as an event, so a restart with auto-triage on keeps
+    its watermark and an issue opened while the worker was stopped is still labelled. A read that
+    fails costs exactly that and no more, since without a record the watermark moves to the
+    present: never a reason to refuse to start.
+    """
+    if database is None:
+        return None
+    try:
+        async with database.queries() as queries:
+            row = await queries.scoped(repo).auto_triage_state()
+    except DatabaseError as exc:
+        get_logger(__name__).warning("auto_triage_seed_failed", error=exc.message)
+        return None
+    if row is None:
+        return None
+    get_logger(__name__).info("auto_triage_seeded", auto=row.auto, watermark=row.watermark)
+    return AutoTriageRecord(auto=row.auto, watermark=row.watermark)
+
+
 async def _run_worker(workflow: Workflow) -> int:
     """Run the orchestrator until a stop signal; 1 when startup validation fails."""
     scrubber = _deployment_scrubber(workflow.config, os.environ)
@@ -2770,6 +2793,7 @@ async def _run_worker(workflow: Workflow) -> int:
         initial_rate_limits=await _last_rate_limits(sinks.database, workflow.config.github.repo),
         initial_ledger=await _initial_ledger(sinks.database, workflow.config.github.repo),
         initial_parents=await _initial_parents(sinks.database, workflow.config.github.repo),
+        initial_auto_triage=await _initial_auto_triage(sinks.database, workflow.config.github.repo),
         # None, not sinks.record_issues: the orchestrator polls review only when on_issues is set.
         on_snapshot=postgres.record_snapshot if postgres is not None else None,
         on_issues=postgres.record_issues if postgres is not None else None,

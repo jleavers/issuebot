@@ -77,6 +77,14 @@ class ParentRecordRow:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class AutoTriageRow:
+    """The repository's latest ``auto_triage_state``, as the worker's record of it reads it."""
+
+    auto: bool
+    watermark: datetime
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LedgerRow:
     """One issue's durable run history, as the orchestrator's admission ledger reads it.
 
@@ -275,6 +283,15 @@ FROM (
 ) latest
 WHERE NOT finished
 ORDER BY number
+"""
+
+AUTO_TRIAGE_STATE = """
+SELECT (payload ->> 'auto')::boolean AS auto,
+       (payload ->> 'watermark')::timestamptz AS watermark
+FROM events
+WHERE repo = %(repo)s AND kind = 'auto_triage_state'
+ORDER BY at DESC, id DESC
+LIMIT 1
 """
 
 DAILY_SERIES = """
@@ -480,6 +497,17 @@ class RepoQueries(_Reader):
             )
             for row in rows
         ]
+
+    async def auto_triage_state(self) -> AutoTriageRow | None:
+        """The latest auto-triage record, or ``None`` when the repository has none.
+
+        No time window, as for ``parent_records``: auto-triage can stay on for months with
+        nothing to publish, and a record dropped for being old moves the watermark to now.
+        """
+        rows = await self._rows(AUTO_TRIAGE_STATE, self._params())
+        if not rows:
+            return None
+        return AutoTriageRow(auto=bool(rows[0]["auto"]), watermark=rows[0]["watermark"])
 
     async def daily_series(self, days: int) -> list[DailyPoint]:
         """One point per UTC day for the last ``days`` days, today last, zero-filled."""

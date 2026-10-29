@@ -55,7 +55,7 @@ from issuebot.db import (
     StoreUnavailableError,
     refresh_channel,
 )
-from issuebot.db.queries import DailyPoint, LedgerRow, ParentRecordRow, SnapshotRow
+from issuebot.db.queries import AutoTriageRow, DailyPoint, LedgerRow, ParentRecordRow, SnapshotRow
 from issuebot.egress import ALLOW_ENV, DEFAULT_ALLOW, REQUEST_TIMEOUT_S, allow_rules
 from issuebot.events import Event, ParentReviewState, StateChanged
 from issuebot.github import (
@@ -71,6 +71,7 @@ from issuebot.github import (
 )
 from issuebot.notifications import PostResult
 from issuebot.orchestrator import IssueLedger, OrchestratorStartupError
+from issuebot.orchestrator.auto_triage import AutoTriageRecord
 from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import ClaudeTotals, Counters, RuntimeSnapshot
 from issuebot.web.actions import ActionsPoller
@@ -4228,6 +4229,43 @@ def test_initial_parents_survives_a_failed_read(fake_database: FakeDatabase) -> 
     """A parent left unwatched until a human's `triage-todo` is better than no worker."""
     fake_database.queries_obj.error = DatabaseError("connection refused")
     assert asyncio.run(cli._initial_parents(fake_database, "example/repo")) == {}
+
+
+def test_the_worker_seeds_auto_triage_from_the_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+) -> None:
+    """A restart with auto-triage on keeps its watermark, so what opened while the worker was
+    stopped is still labelled (spec 2026-10-25, section 2)."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.auto_triage_row = AutoTriageRow(auto=True, watermark=SEED_AT)
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] == AutoTriageRecord(
+        auto=True, watermark=SEED_AT
+    )
+
+
+def test_a_failed_auto_triage_seed_starts_without_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_orchestrator: type[StubOrchestrator],
+    fake_database: FakeDatabase,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    fake_database.queries_obj.error = DatabaseError("connection refused")
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] is None
+    assert "auto_triage_seed_failed" in caplog.text
+
+
+def test_the_worker_without_a_database_has_no_auto_triage_record(
+    tmp_path: Path, stub_orchestrator: type[StubOrchestrator], fake_database: FakeDatabase
+) -> None:
+    assert main(["worker", "--workflow", str(_workflow_with_root(tmp_path))]) == 0
+    assert stub_orchestrator.instances[0].kwargs["initial_auto_triage"] is None
 
 
 def _snapshot_row(limits: RateLimits | None) -> SnapshotRow:
