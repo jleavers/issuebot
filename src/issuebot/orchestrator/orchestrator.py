@@ -83,6 +83,7 @@ from issuebot.orchestrator.admission import (
 )
 from issuebot.orchestrator.approval import Approved, Unapproved
 from issuebot.orchestrator.auto_triage import (
+    CEILING_RETRY_S,
     SCAN_INTERVAL_S,
     SETTLE,
     AutoTriageRecord,
@@ -541,8 +542,15 @@ class Orchestrator:
         # no issue is looked at again. Seeded from the store like the parents; without one a
         # restart counts as never having run, so the watermark moves to the present.
         self._auto_triage_record: AutoTriageRecord | None = initial_auto_triage
-        # The monotonic moment of the last scan, read or failed: one every `SCAN_INTERVAL_S`.
-        self._auto_triage_scanned: float = -math.inf
+        # The monotonic moment before which the scan does not read again: `SCAN_INTERVAL_S` after
+        # the last read, failed or not, and `CEILING_RETRY_S` after one past its page ceiling.
+        self._auto_triage_not_before: float = -math.inf
+        # Every issue this process has auto-labelled, by number, and the tick whose scan did it.
+        # The watermark is the record that outlives a restart, but a refused write leaves it
+        # behind an issue labelled in the same second, and an escape may take that label off
+        # before the retry reads the issue again: this is what keeps it to once (phase 4
+        # ruling 2). The tick is what this tick's triage pass leaves for the next one.
+        self._auto_labelled: dict[int, int] = {}
         # Parent review verdicts GitHub would not let the worker file, retried from memory as
         # triage's are, by issue id.
         self._parent_pending: dict[str, PendingParentReview] = {}
@@ -1045,8 +1053,8 @@ class Orchestrator:
                 # Triage first (spec 2026-10-25-triage-design.md, section 4): a triage run is
                 # short and what it unblocks is a human, so it takes a free slot before work.
                 # A parent review next (section 6): it is short too, and what it unblocks is the
-                # parent's next batch. Auto-triage's scan before both, so an issue it labels is
-                # a triage candidate on this same tick.
+                # parent's next batch. Auto-triage's scan before both, though an issue it labels
+                # is left by this tick's triage pass and started on the next.
                 await self._scan_for_auto_triage()
                 dispatched = await self._dispatch_triage()
                 dispatched += await self._dispatch_parent_reviews()
@@ -1083,6 +1091,10 @@ class Orchestrator:
 
     def _slots(self) -> int:
         return max(self._workflow.config.agent.max_concurrent_agents - len(self._running), 0)
+
+    def _cannot_dispatch(self) -> bool:
+        """Whether this tick can admit nothing: no slot free, the worker stopping, or a hold."""
+        return self._slots() == 0 or self._stopping or self._current_hold() is not None
 
     def _publish_snapshot(self) -> None:
         if self._on_snapshot is None:
@@ -1434,7 +1446,7 @@ class Orchestrator:
         the failure the hold exists to stop, and waiting one poll costs one interval. It is
         logged, and does not feed the GitHub hold (spec 2026-10-25, section 5).
         """
-        if self._slots() == 0 or self._stopping or self._current_hold() is not None:
+        if self._cannot_dispatch():
             # The account's GraphQL budget is shared, and `admit` ranks stopping, hold and slots
             # above `order`: the sweep stops at the first such refusal, so nothing is admitted
             # this tick and an empty mapping cannot let a held step through (spec 2026-10-25,
@@ -1846,6 +1858,9 @@ class Orchestrator:
             return
         self._record_auto_triage(record)
         if record.auto:
+            # A new watermark, so any wait the old one earned is over: a scan past its page
+            # ceiling names switching off and on as the way out, and it takes effect at once.
+            self._auto_triage_not_before = -math.inf
             self._log.info("auto_triage_on", watermark=record.watermark.isoformat())
         else:
             self._log.info("auto_triage_off")
@@ -1867,25 +1882,40 @@ class Orchestrator:
         waits for the next one, the watermark behind it, because GitHub may not list it yet and
         a newer issue it did list must not carry the watermark past both (ruling 6). A refused
         label write ends the scan with the watermark strictly before the refused issue, which
-        the next scan decides again (ruling 15).
+        the next scan decides again; an issue labelled before the refusal is remembered, so it
+        is not labelled twice whatever becomes of its label (ruling 15).
 
         The scan fills no slot of its own, yet it is made only on a tick that could dispatch --
         a slot free, not stopping, no hold -- and at most every ``SCAN_INTERVAL_S`` (ruling 5).
         A label it adds would wait for the slot its triage run needs anyway, so labelling
         sooner gains nothing, and the read spends the account's hourly GraphQL budget, which
         every deployment shares (section 9). A failed read is logged and waits out the
-        interval; like the triage read, it does not feed the GitHub hold, which is the board's.
+        interval -- an hour, ``CEILING_RETRY_S``, for one past its page ceiling, which would walk
+        every page again; like the triage read, it does not feed the GitHub hold, which is the
+        board's.
         """
         record = self._auto_triage_record
         if record is None or not record.auto:
             return 0
-        if self._slots() == 0 or self._stopping or self._current_hold() is not None:
+        if self._cannot_dispatch():
             return 0
-        if self._clock() - self._auto_triage_scanned < SCAN_INTERVAL_S:
+        if self._clock() < self._auto_triage_not_before:
             return 0
-        self._auto_triage_scanned = self._clock()
+        self._auto_triage_not_before = self._clock() + SCAN_INTERVAL_S
         try:
             issues = await self._adapter.fetch_issues_opened_since(record.watermark)
+        except PageCeilingError as exc:
+            self._auto_triage_not_before = self._clock() + CEILING_RETRY_S
+            self._log.warning(
+                "auto_triage_scan_failed",
+                error=str(exc),
+                retry_in_s=CEILING_RETRY_S,
+                remedy=(
+                    "set triage.auto off for one poll, then on again: that moves the watermark "
+                    "to the present, and leaves the issues opened before it to a person"
+                ),
+            )
+            return 0
         except GitHubError as exc:
             self._log.warning("auto_triage_scan_failed", error=str(exc))
             return 0
@@ -1901,7 +1931,10 @@ class Orchestrator:
                 break
             if issue.created_at > watermark:
                 behind = watermark
-            reason = skip_reason(issue, labels)
+            if issue.number in self._auto_labelled:
+                reason: str | None = "already auto-labelled"
+            else:
+                reason = skip_reason(issue, labels)
             if reason is not None:
                 self._log.info(
                     "auto_triage_passed_over",
@@ -1921,10 +1954,11 @@ class Orchestrator:
                     )
                     # The next read is strictly after the watermark, so it is left strictly
                     # before this issue's second, even past one decided in that same second:
-                    # one labelled there carries `triage-todo` now, so the next scan passes it
-                    # over rather than labelling it twice.
+                    # one labelled there is in `_auto_labelled`, so the next scan passes it over
+                    # rather than labelling it twice, whatever has become of its label.
                     watermark = behind
                     break
+                self._auto_labelled[issue.number] = self._tick_count
                 # A move on the triage track (phase 4 ruling 13): kept as history, and Slack's
                 # `state_changed` says it in one line.
                 self._bus.publish(
@@ -1974,6 +2008,12 @@ class Orchestrator:
         dispatched = 0
         for issue in issues:
             if not is_triage_candidate(issue, labels):
+                continue
+            if self._auto_labelled.get(issue.number) == self._tick_count:
+                # This tick's scan labelled it moments ago. The approval reads the label's event
+                # back, and GitHub may not list it yet: refused for that, the issue would be
+                # handed back, and behind the watermark it is never auto-triaged again. So it
+                # waits for the next tick.
                 continue
             # A parent review's verdict owed is as busy as a triage one: a review a human's
             # `triage-todo` started leaves that label on until its filing lands.

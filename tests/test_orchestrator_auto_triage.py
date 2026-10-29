@@ -9,6 +9,7 @@ from issuebot.config import GitHubLabels
 from issuebot.github import Issue
 from issuebot.orchestrator.approval import AUTHOR_DELETED, NOT_A_MAINTAINER
 from issuebot.orchestrator.auto_triage import (
+    CEILING_RETRY_S,
     SCAN_INTERVAL_S,
     SETTLE,
     AutoTriageRecord,
@@ -22,6 +23,7 @@ T = datetime(2026, 10, 29, 9, 0, tzinfo=UTC)
 
 def test_the_constants() -> None:
     assert SCAN_INTERVAL_S == 120.0
+    assert CEILING_RETRY_S == 3600.0
     assert timedelta(seconds=60) == SETTLE
 
 

@@ -16,6 +16,11 @@ from issuebot.orchestrator.approval import AUTHOR_DELETED, NOT_A_MAINTAINER
 # about three minutes of being opened.
 SCAN_INTERVAL_S = 120.0
 
+# How long the next scan waits after one stopped at its page ceiling. That read walked every page
+# it may, some thirty points, and the next from the same watermark would walk them all again:
+# every two minutes, that is close to a fifth of the account's hourly GraphQL budget.
+CEILING_RETRY_S = 3600.0
+
 # An issue opened less than this before a scan waits for the next: otherwise one GitHub has not
 # yet listed could be overtaken by a newer one, with the watermark moving past both.
 SETTLE = timedelta(seconds=60)

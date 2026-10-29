@@ -72,7 +72,7 @@ from issuebot.orchestrator.approval import (
     Approved,
     Unapproved,
 )
-from issuebot.orchestrator.auto_triage import SCAN_INTERVAL_S, AutoTriageRecord
+from issuebot.orchestrator.auto_triage import CEILING_RETRY_S, SCAN_INTERVAL_S, AutoTriageRecord
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     MAX_FETCH_FAILURES,
@@ -5733,8 +5733,6 @@ async def test_a_removed_auto_label_is_not_put_back(tmp_path: Path) -> None:
     await scan(h)
     assert h.labels.triage_todo in h.github.issue(1).labels
     h.github.human_remove_label(1, h.labels.triage_todo)
-    await h.tick()  # the reconcile stops the triage run the label started
-    await h.drain()
     before = scans(h)
     await scan(h)
     await scan(h)
@@ -5771,7 +5769,7 @@ async def test_a_failed_label_write_keeps_the_watermark_behind_an_issue_sharing_
 ) -> None:
     """Phase 4 ruling 15's tie: the read is strictly after the watermark, so it may not reach
     the second of an issue still undecided. The one labelled beside it is passed over on the
-    retry, because it carries `triage-todo` now."""
+    retry, because the scan remembers labelling it."""
     h = Harness(tmp_path, auto_triage=True)
     await h.tick()
     at = START + timedelta(seconds=10)
@@ -5787,8 +5785,32 @@ async def test_a_failed_label_write_keeps_the_watermark_behind_an_issue_sharing_
     assert h.labels.triage_todo in h.github.issue(2).labels
     assert len(auto_label_writes(h, 1)) == 1
     [line] = [entry for entry in logs if entry["event"] == "auto_triage_passed_over"]
-    assert (line["issue_number"], line["reason"]) == (1, "carries an issuebot label")
+    assert (line["issue_number"], line["reason"]) == (1, "already auto-labelled")
     assert auto_states(h)[-1] == (True, at)
+
+
+async def test_a_same_second_issue_escaped_before_the_retry_is_not_labelled_again(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 ruling 2's "at most once" in the tie: the watermark stays behind the issue
+    labelled beside a refused write, so its label is no guard if an escape takes it off before
+    the retry. The scan's own memory of what it labelled is."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    at = START + timedelta(seconds=10)
+    opened(h, 1, at=at)
+    opened(h, 2, at=at)
+    h.github.fail_next("response", on="edit_labels", after=1)
+    await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    with capture_logs() as logs:
+        await scan(h)
+    assert auto_label_writes(h, 1) == [(1, (h.labels.triage_todo,), ())]
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    assert h.labels.triage_todo in h.github.issue(2).labels
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_passed_over"]
+    assert (line["issue_number"], line["reason"]) == (1, "already auto-labelled")
 
 
 async def test_an_issue_opened_in_the_last_minute_waits_for_the_next_scan(
@@ -5853,30 +5875,105 @@ async def test_a_failed_scan_is_logged_and_retried_next_interval(tmp_path: Path)
     h = Harness(tmp_path, auto_triage=True)
     await h.tick()
     opened(h, 1, at=START + timedelta(seconds=10))
-    h.github.fail_next("response", times=MAX_FETCH_FAILURES, on="fetch_issues_opened_since")
+    h.github.fail_next("response", on="fetch_issues_opened_since")
+    h.clock.advance(SCAN_INTERVAL_S)
     with capture_logs() as logs:
-        for _ in range(MAX_FETCH_FAILURES):
-            await scan(h)
-            h.clock.advance(30)
-            await h.tick()
-    lines = [entry for entry in logs if entry["event"] == "auto_triage_scan_failed"]
-    assert [line["log_level"] for line in lines] == ["warning"] * MAX_FETCH_FAILURES
-    assert scans(h) == 1 + MAX_FETCH_FAILURES
-    assert held(h) is None
+        # Alone, not in a tick: the tick's own board poll would zero any count the scan fed.
+        assert await h.orchestrator._scan_for_auto_triage() == 0
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_scan_failed"]
+    assert line["log_level"] == "warning"
+    assert "remedy" not in line
+    assert h.orchestrator._fetch_failures == 0
+    h.clock.advance(30)
+    await h.tick()
+    assert scans(h) == 2
     assert h.labels.triage_todo not in h.github.issue(1).labels
     assert auto_states(h) == [(True, START)]
     await scan(h)
+    assert scans(h) == 3
     assert h.labels.triage_todo in h.github.issue(1).labels
 
 
+def past_the_ceiling(h: Harness, monkeypatch: pytest.MonkeyPatch) -> list[datetime]:
+    """The scan's next read fails at its page ceiling, and those after it answer as usual. The
+    list is every read's ``since``, the failed one included."""
+    original = h.github.fetch_issues_opened_since
+    reads: list[datetime] = []
+
+    async def read(since: datetime) -> list[Issue]:
+        reads.append(since)
+        if len(reads) == 1:
+            raise PageCeilingError("more than 330 issues were opened since the watermark")
+        return await original(since)
+
+    monkeypatch.setattr(h.github, "fetch_issues_opened_since", read)
+    return reads
+
+
+async def test_a_page_ceiling_failure_waits_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that stopped at its ceiling walked every page it may, and the next one from the
+    same watermark would walk them again: a fifth of the account's hourly GraphQL budget at
+    the usual cadence (section 9). The warning names the way out."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    reads = past_the_ceiling(h, monkeypatch)
+    with capture_logs() as logs:
+        await scan(h)
+    assert len(reads) == 1
+    [line] = [entry for entry in logs if entry["event"] == "auto_triage_scan_failed"]
+    assert line["log_level"] == "warning"
+    assert "triage.auto off" in line["remedy"] and "watermark to the present" in line["remedy"]
+    await scan(h)
+    h.clock.advance(CEILING_RETRY_S - SCAN_INTERVAL_S - 1)
+    await h.tick()
+    assert len(reads) == 1
+    h.clock.advance(1)
+    await h.tick()
+    assert reads == [START, START]
+
+
+async def test_switching_auto_triage_off_and_on_ends_a_ceiling_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The way out the warning names takes effect at once: the hour waited out was about the
+    old watermark, and a switch on puts a new one at the present."""
+    h = Harness(tmp_path, auto_triage=True)
+    await h.tick()
+    reads = past_the_ceiling(h, monkeypatch)
+    await scan(h)
+    h.write_workflow()
+    await h.tick()
+    h.write_workflow(auto_triage=True)
+    await h.tick()
+    assert reads == [START, h.now()]
+
+
+async def test_a_record_seeded_on_with_the_setting_now_off_is_recorded_off(
+    tmp_path: Path,
+) -> None:
+    """A worker restarted with the setting off records it off at once, so the next switch on
+    moves the watermark to the present rather than reaching back to the old one."""
+    record = AutoTriageRecord(auto=True, watermark=START - timedelta(hours=1))
+    h = Harness(tmp_path, initial_auto_triage=record)
+    await h.tick()
+    assert auto_states(h) == [(False, START - timedelta(hours=1))]
+    assert h.calls("fetch_issues_opened_since") == []
+
+
 async def test_an_auto_labelled_issue_is_triaged(tmp_path: Path) -> None:
-    """The scan comes before the triage pass, so the tick that labels a maintainer's issue
-    starts its triage run, approved by authorship (phase 4 ruling 8); a later tick starts no
-    second."""
+    """The tick after the label starts its triage run, approved by authorship (phase 4 ruling
+    8). Not the labelling tick: the approval reads the label's event back, and GitHub may not
+    list it moments after the write."""
     h = Harness(tmp_path, auto_triage=True)
     await h.tick()
     opened(h, 1, at=START + timedelta(seconds=10))
     await scan(h)
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert h.triage_sessions.runs == []
+    assert h.calls("approval_evidence") == []
+    await h.tick()
     [run] = h.triage_sessions.runs
     assert run.issue.number == 1
     await h.tick()
