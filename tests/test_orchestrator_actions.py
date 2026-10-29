@@ -35,6 +35,7 @@ from issuebot.orchestrator.actions import (
     CONFLICT_LIMIT_HEADING,
     UNAPPROVED_HEADING,
     _has_budget_block,
+    assess_triage_issue,
     blocked_block,
     blocked_escape,
     budget_block,
@@ -51,7 +52,7 @@ from issuebot.orchestrator.actions import (
     unapproved_block,
     unapproved_escape,
 )
-from issuebot.orchestrator.approval import Unapproved
+from issuebot.orchestrator.approval import Approved, Unapproved
 from issuebot.orchestrator.state import BlockedContext
 
 NOW = datetime(2026, 9, 3, 14, 2, 11, tzinfo=UTC)
@@ -721,6 +722,26 @@ async def test_escape_retries_a_retryable_workpad_write_failure(
     assert len(h.github.comments_for(42)) == 1
     assert h.github.comments_for(42)[0].body.count("### Issuebot blocked") == 1
     assert h.github.issue(42).state is StateLabel.REVIEW
+
+
+# --- the triage approval (spec 2026-10-25, section 3) -------------------------------------
+
+
+async def test_assess_triage_issue_reads_the_evidence_and_the_issues_author(
+    tmp_path: Path,
+) -> None:
+    """The author and the association come from the issue as the caller fetched it; the label
+    history, the account and its standing are read as ``assess_issue`` reads them."""
+    h = Harness(tmp_path)
+    h.github.add_issue("Task", number=42, author="maintainer", author_association="MEMBER")
+    await h.github.edit_labels(42, add=("issuebot/triage-todo",))
+    h.github.calls.clear()
+    verdict = await assess_triage_issue(
+        h.github, h.github.issue(42), triage_label="issuebot/triage-todo"
+    )
+    assert isinstance(verdict, Approved) and verdict.approver == "maintainer"
+    assert h.calls("approval_evidence") == [(42,)]
+    assert h.calls("own_login") == [()] and h.calls("repo_info") == [()]
 
 
 # --- unapproved escape ----------------------------------------------------------------

@@ -145,6 +145,7 @@ from issuebot.orchestrator import (
     claimed_snapshot,
     probe_run_as,
 )
+from issuebot.orchestrator.actions import assess_triage_issue
 from issuebot.orchestrator.orchestrator import GITHUB_STATUS_DEADLINE_S
 from issuebot.orchestrator.parent_review import ParentRecord
 from issuebot.orchestrator.state import rate_limits_from_dict
@@ -2293,7 +2294,7 @@ async def _run_once_triage(
         )
         return 1
     if not show_prompt and not await _approved_for_run_once(
-        adapter, issue, labels, todo_label=labels.triage_todo
+        adapter, issue, labels, todo_label=labels.triage_todo, authorship=True
     ):
         return 1
     try:
@@ -2541,7 +2542,12 @@ async def held_reason(adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels
 
 
 async def _approved_for_run_once(
-    adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels, *, todo_label: str | None = None
+    adapter: GitHubAdapter,
+    issue: Issue,
+    labels: GitHubLabels,
+    *,
+    todo_label: str | None = None,
+    authorship: bool = False,
 ) -> bool:
     """The worker's approval check, answered in the foreground (GHSA-jm8h-q3j6-p8xp).
 
@@ -2551,11 +2557,17 @@ async def _approved_for_run_once(
     the label stays where it is. An unreadable history, the ceiling included, is a failure
     too; here there is nobody to hand an issue back to, only a command to stop.
     ``--show-prompt`` skips it: a preview renders for the operator and runs nothing.
-    ``todo_label`` is the label whose approval is checked: ``triage_todo`` for a triage run.
+    ``todo_label`` is the label whose approval is checked: ``triage_todo`` for a triage run,
+    which also passes ``authorship``, so a ``triage-todo`` issuebot applied itself is judged by
+    the author's standing and edits exactly as the worker's triage dispatch judges it (spec
+    2026-10-25, section 3). A work run never asks for it.
     """
     todo_label = todo_label or labels.todo
     try:
-        verdict = await assess_issue(adapter, issue.number, todo_label=todo_label)
+        if authorship:
+            verdict = await assess_triage_issue(adapter, issue, triage_label=todo_label)
+        else:
+            verdict = await assess_issue(adapter, issue.number, todo_label=todo_label)
     except GitHubError as exc:
         print(f"[FAIL] approval: could not read the issue's history: {exc}")
         return False

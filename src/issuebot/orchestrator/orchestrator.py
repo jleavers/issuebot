@@ -493,9 +493,16 @@ class Orchestrator:
         # the text before it -- the same-second race the tie rule in `approval.py` closes.
         # The approving label is in the key too: `todo` and `triage-todo` approve the same
         # text independently (spec 2026-10-25, section 3), so a verdict about one is not one
-        # about the other.
+        # about the other -- and so is whether authorship was asked, since a verdict under
+        # rule 1 alone is not one under both. The author's association is there because
+        # authorship rests on it and losing write access does not move `updatedAt`: without
+        # it a remembered `Approved` would outlive the standing it was given for.
         self._approval_verdicts: dict[
-            str, tuple[tuple[str, datetime, str, str | None], Approved | Unapproved]
+            str,
+            tuple[
+                tuple[str, bool, datetime, str, str | None, str | None],
+                Approved | Unapproved,
+            ],
         ] = {}
         self._github_note: str | None = None
         self._reported_github_block: str | None = None
@@ -1595,12 +1602,15 @@ class Orchestrator:
         return account, True
 
     async def _assess_approval(
-        self, issue: Issue, *, label: str | None = None
+        self, issue: Issue, *, label: str | None = None, authorship: bool = False
     ) -> Approved | Unapproved | None:
         """Is the issue's text the text a human approved? ``None`` when GitHub would not say.
 
         ``label`` is the one that approves: ``todo`` unless the caller names another, which
         the triage dispatch does with ``triage-todo`` (spec 2026-10-25, section 3).
+        ``authorship`` adds that section's second rule, for a ``triage-todo`` issuebot applied
+        itself: the triage and parent-review dispatch ask for it, and the work dispatch never
+        does, so it cannot approve a session that holds a shell or a GitHub credential.
 
         Read at dispatch rather than at poll: one issue is dispatched at a time, where every
         poll reads the whole board. A verdict is remembered for as long as the issue is
@@ -1612,19 +1622,34 @@ class Orchestrator:
         It is a verdict, so the escape takes the label off and the spin stops.
         """
         label = label or self._adapter.labels.todo
-        key = (label, issue.updated_at, issue.title, issue.body)
+        key = (
+            label,
+            authorship,
+            issue.updated_at,
+            issue.title,
+            issue.body,
+            issue.author_association,
+        )
         remembered = self._approval_verdicts.get(issue.id)
         if remembered is not None and remembered[0] == key:
             return remembered[1]
         try:
             if self._own_labels_approve is None:
                 self._own_labels_approve = (await self._adapter.repo_info()).admin
-            verdict = await actions.assess_issue(
-                self._adapter,
-                issue.number,
-                todo_label=label,
-                own_labels_approve=self._own_labels_approve,
-            )
+            if authorship:
+                verdict = await actions.assess_triage_issue(
+                    self._adapter,
+                    issue,
+                    triage_label=label,
+                    own_labels_approve=self._own_labels_approve,
+                )
+            else:
+                verdict = await actions.assess_issue(
+                    self._adapter,
+                    issue.number,
+                    todo_label=label,
+                    own_labels_approve=self._own_labels_approve,
+                )
         except PageCeilingError as exc:
             # The message names the ceiling; the orchestrator does not import the adapter's
             # constants to say it again.
@@ -2033,8 +2058,10 @@ class Orchestrator:
         labels = self._workflow.config.github.labels
         # Before the account (spec section 3, GHSA-jm8h-q3j6-p8xp): the latest `triage-todo` a
         # person applied approves the text as it stood, and an edit after it by anyone else
-        # hands the issue back without a session ever reading it.
-        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        # hands the issue back without a session ever reading it. One issuebot applied itself
+        # -- auto-triage's -- is approved by authorship instead: a maintainer opened the issue
+        # and nobody else has edited it. A refusal under either is handed back the same way.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo, authorship=True)
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):
@@ -2411,10 +2438,11 @@ class Orchestrator:
     ) -> bool:
         """Start one parent review on ``steps``. Like triage, it claims nothing (section 6)."""
         labels = self._workflow.config.github.labels
-        # Section 3's first rule, as for triage: the latest `triage-todo` a person applied
-        # approves the text as it stood, and an edit after it by anyone else hands the parent
-        # over before a session reads it.
-        verdict = await self._assess_approval(issue, label=labels.triage_todo)
+        # Section 3, as for triage: the latest `triage-todo` a person applied approves the text
+        # as it stood, and an edit after it by anyone else hands the parent over before a
+        # session reads it. A parent whose latest `triage-todo` was issuebot's own -- an
+        # auto-triaged one -- is re-checked by authorship, the rule that approved its triage.
+        verdict = await self._assess_approval(issue, label=labels.triage_todo, authorship=True)
         if verdict is None:
             return False
         if isinstance(verdict, Unapproved):

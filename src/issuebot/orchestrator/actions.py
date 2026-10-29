@@ -22,7 +22,7 @@ from issuebot.github import (
     classify_closed,
 )
 from issuebot.log import get_logger
-from issuebot.orchestrator.approval import Approved, Unapproved, assess
+from issuebot.orchestrator.approval import Approved, Unapproved, assess, assess_triage
 from issuebot.orchestrator.stamps import utc_stamp
 from issuebot.orchestrator.state import (
     BlockedContext,
@@ -323,6 +323,36 @@ async def assess_issue(
         todo_label=todo_label,
         own_login=own_login,
         own_labels_approve=own_labels_approve,
+    )
+
+
+async def assess_triage_issue(
+    adapter: GitHubAdapter,
+    issue: Issue,
+    *,
+    triage_label: str,
+    own_labels_approve: bool | None = None,
+) -> Approved | Unapproved:
+    """``assess_issue`` for a triage or parent-review run: rule 1, then authorship for a
+    ``triage-todo`` issuebot applied itself (spec 2026-10-25, section 3).
+
+    The same reads, and the author and association from ``issue``: the record the caller has
+    just fetched, which is the spec's "re-read at dispatch". The worker's triage and
+    parent-review dispatch and ``run-once --triage`` call it, and nothing else does -- a work
+    run's approval is ``assess_issue`` alone, so authorship never reaches a session with a
+    shell or a credential. Raises as ``assess_issue`` does.
+    """
+    evidence = await adapter.approval_evidence(issue.number)
+    own_login = await adapter.own_login()
+    if own_labels_approve is None:
+        own_labels_approve = (await adapter.repo_info()).admin
+    return assess_triage(
+        evidence,
+        triage_label=triage_label,
+        own_login=own_login,
+        own_labels_approve=own_labels_approve,
+        author=issue.author,
+        author_association=issue.author_association,
     )
 
 

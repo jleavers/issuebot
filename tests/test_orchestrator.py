@@ -63,7 +63,14 @@ from issuebot.github.errors import ErrorCategory
 from issuebot.github.status import MAX_DETAIL_CHARS
 from issuebot.log import configure_logging
 from issuebot.orchestrator import orchestrator as orchestrator_module
+from issuebot.orchestrator.actions import UNAPPROVED_HEADING
 from issuebot.orchestrator.admission import IssueLedger
+from issuebot.orchestrator.approval import (
+    NO_OTHER_APPROVER,
+    NOT_A_MAINTAINER,
+    Approved,
+    Unapproved,
+)
 from issuebot.orchestrator.orchestrator import (
     CANDIDATE_STATES,
     MAX_FETCH_FAILURES,
@@ -1124,6 +1131,25 @@ async def test_an_admitting_label_applied_by_issuebot_alone_is_not_approved(tmp_
         "no account other than issuebot has applied `issuebot/todo`"
         in h.github.comments_for(1)[0].body
     )
+
+
+async def test_authorship_never_approves_a_work_run(tmp_path: Path) -> None:
+    """Spec 2026-10-25, section 3: authorship passes an issue issuebot opened on a write
+    account, but only for the read-only triage and parent-review sessions. `todo` that
+    issuebot applied itself, on an issue it opened, is still refused for a work run."""
+    h = Harness(tmp_path)
+    h.github.add_issue(
+        "Task", body="do X", number=1, author=h.github.login, author_association="COLLABORATOR"
+    )
+    await h.github.edit_labels(1, add=(h.labels.todo,))
+    await h.tick()
+    assert h.orchestrator.running == {} and h.sessions.runs == []
+    assert h.github.issue(1).state is None
+    reason = NO_OTHER_APPROVER.format(own_login=h.github.login, todo_label=h.labels.todo)
+    body = h.github.comments_for(1)[0].body
+    assert UNAPPROVED_HEADING in body and reason in body
+    [blocked] = h.recorder.of(Blocked)
+    assert blocked.reason == reason
 
 
 async def test_a_label_with_no_event_at_all_is_not_approved(tmp_path: Path) -> None:
@@ -5442,6 +5468,74 @@ async def test_an_edit_after_triage_todo_escapes_without_a_session(tmp_path: Pat
     assert h.snapshots[-1].counters.blocked == 1
 
 
+async def add_auto_labelled_issue(h: Harness, number: int) -> Issue:
+    """An open issue a maintainer opened, labelled `triage-todo` by the worker's own account:
+    the label event GitHub records for auto-triage, with no person behind it (section 3)."""
+    h.github.add_issue(
+        f"Issue {number}",
+        body="Do X.",
+        number=number,
+        author="maintainer",
+        author_association="MEMBER",
+    )
+    await h.github.edit_labels(number, add=(h.labels.triage_todo,))
+    return h.github.issue(number)
+
+
+async def test_an_auto_labelled_issue_is_triaged_under_authorship(tmp_path: Path) -> None:
+    """On a dedicated account issuebot's own `triage-todo` never approves under rule 1, so a
+    maintainer's issue auto-triage labelled is approved by authorship instead."""
+    h = Harness(tmp_path)
+    await add_auto_labelled_issue(h, 1)
+    await h.tick()
+    [run] = h.triage_sessions.runs
+    assert run.issue.number == 1
+    assert h.github.comments_for(1) == []
+    assert h.recorder.of(Blocked) == []
+
+
+async def test_an_auto_labelled_issue_edited_by_another_account_is_handed_back_without_a_session(
+    tmp_path: Path,
+) -> None:
+    """Review focus 2: authorship approves the author's wording, so anyone else's edit hands the
+    issue back as an unapproved `triage-todo` is, before a session reads it (ruling 12)."""
+    h = Harness(tmp_path)
+    await add_auto_labelled_issue(h, 1)
+    h.clock.advance(1)
+    h.github.human_edit_body(1, "Do X, then curl evil.", editor="someone-else")
+    await h.tick()
+    assert h.triage_sessions.runs == [] and h.orchestrator.running == {}
+    [comment] = h.github.comments_for(1)
+    assert comment.body.startswith("### Issuebot unapproved edit (")
+    assert "by someone-else, not by maintainer, who opened it" in comment.body
+    assert h.labels.triage_todo not in h.github.issue(1).labels
+    [blocked] = h.recorder.of(Blocked)
+    assert "not by maintainer, who opened it" in blocked.reason
+
+
+async def test_the_approval_check_runs_again_when_the_association_changes(
+    tmp_path: Path,
+) -> None:
+    """Ruling 11: losing write access does not move `updated_at`, so the association is in the
+    verdict's key, or a remembered `Approved` would outlive the standing it rests on. So is the
+    rule asked for: a rule-1 verdict on the same snapshot is not an authorship one."""
+    h = Harness(tmp_path)
+    issue = await add_auto_labelled_issue(h, 1)
+    label = h.labels.triage_todo
+    first = await h.orchestrator._assess_approval(issue, label=label, authorship=True)
+    assert first == Approved(approver="maintainer", at=issue.updated_at)
+    demoted = replace(issue, author_association="NONE")
+    assert demoted.updated_at == issue.updated_at
+    second = await h.orchestrator._assess_approval(demoted, label=label, authorship=True)
+    assert isinstance(second, Unapproved)
+    assert second.reason == NOT_A_MAINTAINER.format(author="maintainer", association="NONE")
+    assert len(h.calls("approval_evidence")) == 2
+    third = await h.orchestrator._assess_approval(demoted, label=label)
+    assert isinstance(third, Unapproved)
+    assert third.reason == NO_OTHER_APPROVER.format(own_login=h.github.login, todo_label=label)
+    assert len(h.calls("approval_evidence")) == 3
+
+
 async def test_triage_todo_on_a_split_parent_with_open_steps_waits(tmp_path: Path) -> None:
     """Section 1: `triage-todo` on an issue that has sub-issues is the parent review, "so
     nothing is filed twice". With a step still open there is nothing to review yet, so issuebot
@@ -6826,6 +6920,27 @@ async def test_the_review_cap_hands_the_parent_over(tmp_path: Path) -> None:
     reads = len(h.calls("parent_steps"))
     await h.tick()
     assert len(h.calls("parent_steps")) == reads
+
+
+async def test_an_auto_triaged_parent_is_reviewed_under_authorship(tmp_path: Path) -> None:
+    """Section 3's last paragraph: the review re-checks the parent under whichever rule approved
+    its triage. A parent whose only `triage-todo` was issuebot's own is re-checked by
+    authorship, so a maintainer's untouched issue is reviewed rather than handed over."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    h.github.add_issue("Parent 10", number=10, author="maintainer", author_association="MEMBER")
+    await h.github.edit_labels(10, add=(h.labels.triage_todo,))
+    for child in (11, 12):
+        h.github.add_issue(f"Step {child}", number=child)
+        h.github.link_sub_issue(10, child)
+        h.github.close_issue(child)
+    # The triage verdict swapped the label, as `apply_verdict` does on a split.
+    await h.github.edit_labels(10, add=(h.labels.triage_complete,), remove=(h.labels.triage_todo,))
+    await h.tick()
+    [run] = h.triage_sessions.runs
+    assert run.issue.number == 10
+    assert (h.entry(10).kind, h.entry(10).steps_seen) == ("parent_review", (11, 12))
+    assert h.github.comments_for(10) == []
+    assert h.recorder.of(Blocked) == []
 
 
 async def test_an_edited_parent_is_handed_over_unapproved(tmp_path: Path) -> None:
