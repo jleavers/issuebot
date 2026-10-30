@@ -70,8 +70,12 @@ class Issue:
     # ...); ``None`` when the record carries none. What the prompt's envelope reports, so a
     # session can tell a maintainer's text from anyone else's (GHSA-jm8h-q3j6-p8xp).
     author_association: str | None = None
-    # The parent issue's number when this one is a sub-issue; ``None`` for a top-level issue.
+    # The parent issue's number when this one is a sub-issue; ``None`` for a top-level issue,
+    # and for one whose parent is in another repository (#359), which ``parent_elsewhere`` says.
     parent: int | None = None
+    # A sub-issue of an issue in another repository: no parent here, but still a step of
+    # someone's split, so auto-triage passes it over as it does any sub-issue (#359).
+    parent_elsewhere: bool = False
     # GitHub's sanitised render of `body` (`bodyHTML`): what the prompt shows a session
     # (GHSA-f3fm-r55f-2vgm). `None` exactly when `body` is.
     body_html: str | None = None

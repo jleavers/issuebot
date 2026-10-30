@@ -86,7 +86,8 @@ def issue_from_node(
     )
     state = role_for(labels, state_labels[0]) if len(state_labels) == 1 else None
     github_state = "open" if raw_state == "OPEN" else "closed"
-    parent = _parent_number(node.get("parent"), number, repo=repo)
+    raw_parent = node.get("parent")
+    parent = _parent_number(raw_parent, number, repo=repo)
 
     return Issue(
         id=str(number),
@@ -109,6 +110,7 @@ def issue_from_node(
         dispatchable=github_state == "open" and state is not None,
         author_association=_association(node.get("authorAssociation")),
         parent=parent,
+        parent_elsewhere=raw_parent is not None and parent is None,
         sub_issue_count=_sub_issue_total(node.get("subIssuesSummary"), number),
     )
 

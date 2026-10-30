@@ -256,6 +256,8 @@ in another repository, which GitHub allows (#359): the fragment reads the parent
 `repository { nameWithOwner }` beside its number, so a parent elsewhere is never read as the
 same-numbered issue here. Triage only files sub-issues in their parent's own repository, so a
 parent elsewhere is outside it, and the field costs no rate-limit points (a poll is still 1).
+Such an issue carries `Issue.parent_elsewhere` instead, so auto-triage still passes it over as
+a sub-issue rather than labelling and splitting a step of someone else's split.
 `parent_steps` reads each parent's labels and its sub-issues, with state, in GitHub's order
 (`ParentSteps`), for many parents in one aliased query per tick, at most one page each. It
 normalises per parent (`normalise.parent_record_from_node`, which the fake shares): a malformed

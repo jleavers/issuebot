@@ -381,11 +381,15 @@ def test_parent_is_the_parent_issue_number() -> None:
     assert normalised(node(parent=here(7))).parent == 7
     assert normalised(node(parent=None)).parent is None
     assert normalised(node()).parent is None  # an older fixture without the field
+    assert not normalised(node(parent=here(7))).parent_elsewhere
+    assert not normalised(node(parent=None)).parent_elsewhere
 
 
 def test_a_parent_in_another_repository_is_no_parent() -> None:
     elsewhere = {"number": 7, "repository": {"nameWithOwner": "other/repo"}}
-    assert normalised(node(parent=elsewhere)).parent is None
+    issue = normalised(node(parent=elsewhere))
+    assert issue.parent is None
+    assert issue.parent_elsewhere  # still a sub-issue, so auto-triage passes it over
 
 
 def test_the_parents_repository_is_compared_without_case() -> None:
