@@ -6287,7 +6287,7 @@ async def test_a_part_filed_split_github_keeps_refusing_is_handed_over_as_a_pare
     assert "issuebot could not file the triage verdict on GitHub: " in note.body
     assert (
         "Unlink the sub-issues it filed from this issue first, then add "
-        "`issuebot/triage-todo` again to triage it afresh. Until then "
+        "`issuebot/triage-todo` again to triage it afresh. Meanwhile "
         "`issuebot/triage-complete` stays on, so the steps it filed stay held."
     ) in note.body
     assert h.recorder.kinds[-3:] == ["state_changed", "blocked", "parent_review_state"]
@@ -6322,6 +6322,29 @@ async def test_a_failed_read_before_the_hand_back_keeps_the_verdict(tmp_path: Pa
     assert note.body.startswith("### Issuebot triage not filed (")
     assert h.labels.triage_complete in h.github.issue(1).labels
     assert h.orchestrator._triage_pending == {}
+
+
+async def test_a_refused_parent_hand_over_leaves_no_note_owed_beside_the_verdict(
+    tmp_path: Path,
+) -> None:
+    """The kept verdict owns the retry: a refused hand-over's note is not also owed on its own,
+    where a verdict discarded meanwhile would leave it to be written over a later triage."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="create_sub_issue", times=3, after=1)
+    await h.exit(h.triage_sessions.runs[0], **THREE_STEP_SPLIT)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    assert "1" in h.orchestrator._triage_pending
+    assert h.orchestrator._parent_handovers == {}
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    await h.tick()
+    assert h.orchestrator._triage_pending == {}
+    assert h.orchestrator._parent_handovers == {}
+    assert h.github.comments_for(1) == []
 
 
 async def test_a_split_that_filed_nothing_is_handed_back_as_before(tmp_path: Path) -> None:
