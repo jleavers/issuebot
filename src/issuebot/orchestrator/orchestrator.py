@@ -464,8 +464,6 @@ class Orchestrator:
         # Issue id -> the order-hold reason last logged for it, so a step held behind an earlier
         # one says so once per change rather than on every poll (spec 2026-10-25, section 5).
         self._held: dict[str, str] = {}
-        # (tick, parents) whose malformed record this tick has logged already: the hold and the
-        # watch may both read one parent, and it is said once a tick (#358).
         self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
@@ -1535,7 +1533,9 @@ class Orchestrator:
         self._record_escape(issue.identifier, outcome)
 
     async def _dispatch_candidates(
-        self, issues: Sequence[Issue] | None, steps: Mapping[int, ParentSteps] | None
+        self,
+        issues: Sequence[Issue] | None,
+        steps: Mapping[int, ParentSteps | UnreadableParent] | None,
     ) -> int:
         """Dispatch this poll's ``issues``, ``None`` when the poll failed; ``steps`` is the
         order hold's view of this tick's parent read (``_read_parents``)."""
@@ -2818,10 +2818,9 @@ class Orchestrator:
         shares with the order hold (``_read_parents``, #357). A failed read was logged there and
         skips the watch for this tick; like the triage read, it does not feed the GitHub hold,
         which is the board's. A parent GitHub no longer returns, or that has closed, is
-        finished, whoever closed it. One
-        whose record came back malformed is neither: it was logged with the read and is left
-        watched, untouched, until a tick reads it whole, and a hand-over note owed on it waits
-        for that tick too (#358).
+        finished, whoever closed it. One whose record came back malformed is neither: it was
+        logged with the read and is left watched, untouched, until a tick reads it whole, and a
+        hand-over note owed on it waits for that tick too (#358).
 
         The parents' issues are read only for what the watch can act on this tick: an owed
         note, written while the parent is open whether or not it is still due, so no note that
