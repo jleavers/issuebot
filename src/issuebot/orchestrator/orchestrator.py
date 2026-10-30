@@ -55,6 +55,8 @@ from issuebot.config import (
 from issuebot.config.workflow import parent_review_prompt_path_for, triage_prompt_path_for
 from issuebot.events import AutoTriageState, EventBus, RunKind, StateChanged
 from issuebot.github import (
+    ISSUE_PAGE_SIZE,
+    MAX_ISSUE_PAGES,
     GhCliAdapter,
     GitHubAdapter,
     GitHubError,
@@ -154,6 +156,13 @@ GITHUB_STATUS_DEADLINE_S = 10.0
 # `since` is keyed on this rather than on the reason (the same trick the auth hold plays with
 # the probe's verdict).
 GITHUB_HOLD_KEY = "github"
+# The two triage label reads a page-ceiling failure backs off (#367), one back-off each: the
+# board's triage track, every open issue carrying either triage label, and dispatch's triage
+# candidates, those carrying `triage-todo`. The most issues either may return is
+# `CEILING_ISSUES`, and the warning names it as the count to come under.
+TRACK_READ = "triage_track"
+CANDIDATES_READ = "triage_candidates"
+CEILING_ISSUES = MAX_ISSUE_PAGES * ISSUE_PAGE_SIZE
 # And the same for the account registry (#121): one unreadable record, however the
 # complaint is worded from tick to tick.
 ACCOUNTS_HOLD_KEY = "accounts"
@@ -356,9 +365,9 @@ class _TrackRead:
     """One dispatching tick's read of the triage track, shared by triage dispatch and the store.
 
     ``issues`` is None when the read failed, and ``ceiling`` says whether it failed on
-    ``PageCeilingError``: the union pages on more issues than ``triage-todo`` alone, so triage
-    dispatch falls back to its own read of that one label then, rather than losing dispatch
-    sooner than it did before the read was shared (#366).
+    ``PageCeilingError`` or was not made, waiting one out (#367): the union pages on more issues
+    than ``triage-todo`` alone, so triage dispatch falls back to its own read of that one label
+    then, rather than losing dispatch sooner than it did before the read was shared (#366).
     """
 
     issues: Sequence[Issue] | None
@@ -542,6 +551,10 @@ class Orchestrator:
         # The monotonic moment before which an issue is not triaged again: a failure's backoff,
         # or one poll interval after a hold.
         self._triage_not_before: dict[str, float] = {}
+        # The monotonic moment before which a triage label read is not made again, by read
+        # (`TRACK_READ`, `CANDIDATES_READ`): `CEILING_RETRY_S` after one past its page ceiling,
+        # which walked every page first and cannot succeed until the count comes down (#367).
+        self._ceiling_not_before: dict[str, float] = {}
         # The reason of a triage hand-back GitHub refused to write. The chain it ends is over
         # for this process, so the issue's next pass writes the note again rather than starting
         # another session for an issue that has spent its attempts.
@@ -1259,18 +1272,37 @@ class Orchestrator:
         dispatch both (#366): its answer holds every open `triage-todo` issue, which is what the
         candidates' own read would fetch. A failure is deliberately outside the GitHub hold
         (#88): it neither counts towards the hold nor resets the count, because the board is
-        not what dispatch depends on and a failed read reconciles nothing.
+        not what dispatch depends on and a failed read reconciles nothing. Past its page ceiling
+        it waits ``CEILING_RETRY_S`` (#367), and the columns keep the last good read meanwhile;
+        the warning, once per back-off, is what reports it. Both that failure and the wait
+        answer with ``ceiling`` set, so triage dispatch makes its own read instead.
         """
         if self._on_triage_track is None:
             return None
+        if self._ceiling_backed_off(TRACK_READ):
+            return _TrackRead(None, ceiling=True)
         labels = self._workflow.config.github.labels
         try:
             issues = await self._adapter.fetch_issues_with_any_label(
                 (labels.triage_todo, labels.triage_complete)
             )
+        except PageCeilingError as exc:
+            self._back_off_ceiling(
+                TRACK_READ,
+                "triage_track_fetch_failed",
+                exc,
+                remedy=(
+                    f"bring the open issues carrying {labels.triage_todo} or "
+                    f"{labels.triage_complete} to {CEILING_ISSUES} or fewer -- close what is "
+                    f"finished, or take {labels.triage_complete} off issues long past triage "
+                    "(not a split parent with steps still open); "
+                    "the Triage and Triaged columns show the last good read until then"
+                ),
+            )
+            return _TrackRead(None, ceiling=True)
         except GitHubError as exc:
             self._log.warning("triage_track_fetch_failed", error=str(exc))
-            return _TrackRead(None, ceiling=isinstance(exc, PageCeilingError))
+            return _TrackRead(None)
         return _TrackRead(issues)
 
     async def _observe_triage_track(self, track: _TrackRead | None = None) -> None:
@@ -1288,6 +1320,31 @@ class Orchestrator:
             self._on_triage_track(issues)
         except Exception:
             self._log.exception("triage_track_consumer_failed", count=len(issues))
+
+    def _ceiling_backed_off(self, read: str) -> bool:
+        """Whether ``read`` is still waiting out a page-ceiling failure's ``CEILING_RETRY_S``."""
+        return self._clock() < self._ceiling_not_before.get(read, -math.inf)
+
+    def _back_off_ceiling(
+        self, read: str, event: str, exc: PageCeilingError, *, remedy: str
+    ) -> None:
+        """Hold ``read`` off for ``CEILING_RETRY_S`` after it stopped at its page ceiling (#367).
+
+        Every page up to the ceiling was fetched before the error, some thirty GraphQL points of
+        the hourly budget every deployment on the account shares, and the next attempt would
+        fetch them all again until the count comes down: once a poll, that is most of the
+        budget. The warning is logged here and so once per back-off, since nothing reads in
+        between. Only the ceiling waits: any other failure is usually a moment's, and the next
+        poll tries again.
+        """
+        self._ceiling_not_before[read] = self._clock() + CEILING_RETRY_S
+        self._log.warning(
+            event,
+            error=str(exc),
+            retry_in_s=CEILING_RETRY_S,
+            retry_at=(self._now() + timedelta(seconds=CEILING_RETRY_S)).isoformat(),
+            remedy=remedy,
+        )
 
     async def _bounce_conflicts(self, issues: Sequence[Issue]) -> None:
         """Move each review issue whose pull request conflicts to rework (spec §3, §4).
@@ -2064,9 +2121,11 @@ class Orchestrator:
         The candidates are not a field of the board's poll, which fetches by state label and so
         never sees an issue on the triage track. In a worker with a store they are filtered out
         of ``track``, this tick's read of the whole track (#366); without one, or when that read
-        stopped at its page ceiling, they are a read of their own -- one label, open issues only.
-        A failure of either read is not counted towards the GitHub hold (#88): the hold is the
-        board's, and the board's own poll follows in this tick to answer it.
+        stopped at its page ceiling or is waiting one out, they are a read of their own -- one
+        label, open issues only. A failure of either read is not counted towards the GitHub hold
+        (#88): the hold is the board's, and the board's own poll follows in this tick to answer
+        it. The candidates' own read past its page ceiling waits ``CEILING_RETRY_S`` before the
+        next (#367).
         """
         labels = self._workflow.config.github.labels
         if track is not None and track.issues is not None:
@@ -2078,9 +2137,23 @@ class Orchestrator:
             # no slot to fill the gate would refuse the first candidate on `slots` anyway. An
             # escape or hand-over note still owed needs no slot, so it keeps the read.
             return 0
+        elif self._ceiling_backed_off(CANDIDATES_READ):
+            return 0
         else:
             try:
                 issues = await self._adapter.fetch_issues_with_label(labels.triage_todo)
+            except PageCeilingError as exc:
+                self._back_off_ceiling(
+                    CANDIDATES_READ,
+                    "triage_fetch_failed",
+                    exc,
+                    remedy=(
+                        f"bring the open issues carrying {labels.triage_todo} to "
+                        f"{CEILING_ISSUES} or fewer by taking {labels.triage_todo} off those "
+                        "that need not be triaged; no triage run starts until then"
+                    ),
+                )
+                return 0
             except GitHubError as exc:
                 self._log.warning("triage_fetch_failed", error=str(exc))
                 return 0
