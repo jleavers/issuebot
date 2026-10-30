@@ -85,7 +85,7 @@ def issue_from_node(
     )
     state = role_for(labels, state_labels[0]) if len(state_labels) == 1 else None
     github_state = "open" if raw_state == "OPEN" else "closed"
-    parent = _parent_number(node.get("parent"), number)
+    parent = _parent_number(node.get("parent"), number, repo=repo)
 
     return Issue(
         id=str(number),
@@ -112,13 +112,22 @@ def issue_from_node(
     )
 
 
-def _parent_number(value: Any, number: int) -> int | None:
+def _parent_number(value: Any, number: int, *, repo: str) -> int | None:
+    """The parent's number when it is an issue of ``repo``; ``None`` for no parent at all and
+    for one in another repository (#359). GitHub lets a sub-issue's parent live elsewhere, and
+    the number alone would then name the same-numbered issue here. Triage only ever files
+    sub-issues in their parent's own repository, so a parent elsewhere is outside it."""
     if value is None:
         return None
     parent = value.get("number") if isinstance(value, Mapping) else None
     if not isinstance(parent, int) or isinstance(parent, bool):
         raise GitHubError("response", f"malformed issue record #{number}: parent")
-    return parent
+    home = value.get("repository")
+    owner_name = home.get("nameWithOwner") if isinstance(home, Mapping) else None
+    if not isinstance(owner_name, str) or not owner_name:
+        raise GitHubError("response", f"malformed issue record #{number}: parent repository")
+    # GitHub's owner and repository names are case-insensitive.
+    return parent if owner_name.lower() == repo.lower() else None
 
 
 def _sub_issue_total(value: Any, number: int) -> int:

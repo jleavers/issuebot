@@ -547,6 +547,16 @@ async def test_link_sub_issue_links_both_ways(fake: FakeGitHub) -> None:
         fake.link_sub_issue(parent.number, child.number)  # already has a parent
 
 
+async def test_a_parent_in_another_repository_is_no_parent_here(fake: FakeGitHub) -> None:
+    same_number = fake.add_issue("Unrelated")  # the issue a bare number would name
+    child = fake.add_issue("Step")
+    fake.link_foreign_parent(child.number, repo="other/repo", parent=same_number.number)
+    assert fake.issue(child.number).parent is None
+    assert await fake.sub_issues(same_number.number) == []
+    with pytest.raises(ValueError):
+        fake.link_sub_issue(same_number.number, child.number)  # already has a parent
+
+
 async def test_fake_parent_steps(fake: FakeGitHub) -> None:
     parent = fake.add_issue("Big thing", labels=("issuebot/triage-complete",))
     first = await fake.create_sub_issue(parent.number, title="A", body="a")

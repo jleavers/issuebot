@@ -373,13 +373,40 @@ def normalised(raw: dict[str, Any]) -> Issue:
     return issue_from_node(raw, repo=REPO, labels=LABELS, login=LOGIN)
 
 
+def here(number: int) -> dict[str, Any]:
+    return {"number": number, "repository": {"nameWithOwner": REPO}}
+
+
 def test_parent_is_the_parent_issue_number() -> None:
-    assert normalised(node(parent={"number": 7})).parent == 7
+    assert normalised(node(parent=here(7))).parent == 7
     assert normalised(node(parent=None)).parent is None
     assert normalised(node()).parent is None  # an older fixture without the field
 
 
-@pytest.mark.parametrize("parent", [{"number": "7"}, {"number": True}, {}, 7])
+def test_a_parent_in_another_repository_is_no_parent() -> None:
+    elsewhere = {"number": 7, "repository": {"nameWithOwner": "other/repo"}}
+    assert normalised(node(parent=elsewhere)).parent is None
+
+
+def test_the_parents_repository_is_compared_without_case() -> None:
+    upper = {"number": 7, "repository": {"nameWithOwner": REPO.upper()}}
+    assert normalised(node(parent=upper)).parent == 7
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        {"number": "7", "repository": {"nameWithOwner": REPO}},
+        {"number": True, "repository": {"nameWithOwner": REPO}},
+        {"repository": {"nameWithOwner": REPO}},
+        {"number": 7},
+        {"number": 7, "repository": None},
+        {"number": 7, "repository": {"nameWithOwner": 7}},
+        {"number": 7, "repository": {"nameWithOwner": ""}},
+        {},
+        7,
+    ],
+)
 def test_a_malformed_parent_is_a_response_error(parent: Any) -> None:
     with pytest.raises(GitHubError) as info:
         normalised(node(parent=parent))

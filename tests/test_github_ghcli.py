@@ -2054,8 +2054,20 @@ async def test_create_sub_issue_links_the_parent_at_creation() -> None:
 # --- reads: a parent's steps ---------------------------------------------------------
 
 
-def test_the_issue_fragment_asks_for_the_parent_number() -> None:
-    assert "parent { number }" in ISSUE_FIELDS
+def test_the_issue_fragment_asks_for_the_parent_number_and_repository() -> None:
+    assert "parent { number repository { nameWithOwner } }" in ISSUE_FIELDS
+
+
+async def test_a_parent_in_another_repository_is_read_as_no_parent() -> None:
+    def child(number: int, parent: int, repo: str) -> dict[str, object]:
+        node = _opened_node(number, datetime(2026, 10, 1, tzinfo=UTC))
+        return {**node, "parent": {"number": parent, "repository": {"nameWithOwner": repo}}}
+
+    runner = StubRunner()
+    nodes = [child(11, 7, "example/repo"), child(12, 7, "other/repo")]
+    runner.on(has("label=issuebot/todo"), stdout=_opened_page(nodes, end_cursor=None))
+    issues = await make_adapter(runner).fetch_issues_with_label("issuebot/todo")
+    assert [(issue.number, issue.parent) for issue in issues] == [(11, 7), (12, None)]
 
 
 async def test_parent_steps_reads_every_parent_in_one_query() -> None:

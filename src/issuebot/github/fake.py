@@ -101,8 +101,10 @@ class _FakeIssue:
     label_events: list[tuple[str, str, datetime]] = field(default_factory=list)
     # Body edits and title renames, oldest first, as ``approval_evidence`` reports them.
     edits: list[TextEdit] = field(default_factory=list)
-    # The sub-issue link, both ways, as GitHub keeps it.
+    # The sub-issue link, both ways, as GitHub keeps it. ``parent_repo`` is the parent's
+    # repository when it is not this one (#359); ``None`` means this repository.
     parent: int | None = None
+    parent_repo: str | None = None
     children: list[int] = field(default_factory=list)
     # What ``Comment`` cannot carry, by comment id: (author or None once deleted, association).
     tracker_authors: dict[int, tuple[str | None, str]] = field(default_factory=dict)
@@ -507,6 +509,15 @@ class FakeGitHub:
         child_record.parent = parent
         parent_record.children.append(child)
 
+    def link_foreign_parent(self, child: int, *, repo: str, parent: int) -> None:
+        """Link an existing issue under issue ``parent`` of another repository, which GitHub
+        allows (#359). The fake holds only this repository, so the parent has no record."""
+        child_record = self._require_issue(child)
+        if child_record.parent is not None:
+            raise ValueError(f"#{child} already has a parent: #{child_record.parent}")
+        child_record.parent = parent
+        child_record.parent_repo = repo
+
     def human_set_state(self, number: int, state: StateLabel, *, actor: str = "reporter") -> None:
         """A state label set by someone else; ``actor`` is who the timeline credits."""
         record = self._require_issue(number)
@@ -801,7 +812,14 @@ class FakeGitHub:
             "updatedAt": record.updated_at.isoformat(),
             "closedAt": record.closed_at.isoformat() if record.closed_at else None,
             "authorAssociation": record.author_association,
-            "parent": {"number": record.parent} if record.parent is not None else None,
+            "parent": (
+                {
+                    "number": record.parent,
+                    "repository": {"nameWithOwner": record.parent_repo or self.repo},
+                }
+                if record.parent is not None
+                else None
+            ),
             "subIssuesSummary": {"total": len(record.children)},
             "labels": {"nodes": [{"name": name} for name in record.labels]},
             "assignees": {"nodes": [{"login": login} for login in record.assignees]},
