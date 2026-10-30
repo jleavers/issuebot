@@ -26,6 +26,7 @@ from issuebot.github.models import (
     SubIssue,
     TextEdit,
     TrackerComment,
+    UnreadableParent,
     is_workpad_body,
 )
 from issuebot.github.normalise import issue_from_node, label_name, repo_short_name, role_for
@@ -99,6 +100,7 @@ __all__ = [
     "SubIssue",
     "TextEdit",
     "TrackerComment",
+    "UnreadableParent",
     "carries_no_fault",
     "classify_closed",
     "fetch_status_summary",

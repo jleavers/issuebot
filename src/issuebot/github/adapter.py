@@ -19,6 +19,7 @@ from issuebot.github.models import (
     StateLabel,
     SubIssue,
     TrackerComment,
+    UnreadableParent,
 )
 from issuebot.github.state import LabelStyle
 
@@ -90,10 +91,13 @@ class GitHubAdapter(Protocol):
         """The issue's sub-issues, in GitHub's order."""
         ...
 
-    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+    async def parent_steps(
+        self, numbers: Iterable[int]
+    ) -> dict[int, ParentSteps | UnreadableParent]:
         """Each parent's labels and sub-issues (in GitHub's order), one read per
         ``ID_BATCH_SIZE`` parents. Numbers are deduplicated; one GitHub returns no issue for is
-        absent from the result."""
+        absent from the result, and one whose record is malformed is an ``UnreadableParent``
+        rather than a failure of the whole read (#358)."""
         ...
 
     async def parent_review_steps(self, number: int) -> list[ReviewStep]:

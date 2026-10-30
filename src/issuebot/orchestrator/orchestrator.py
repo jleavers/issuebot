@@ -65,6 +65,7 @@ from issuebot.github import (
     ParentSteps,
     StateLabel,
     SubIssue,
+    UnreadableParent,
     fetch_status_summary,
     parse_status_summary,
 )
@@ -384,10 +385,10 @@ class _ParentRead:
 
     watched: tuple[int, ...]
     ordered: tuple[int, ...]
-    steps: Mapping[int, ParentSteps] | None
+    steps: Mapping[int, ParentSteps | UnreadableParent] | None
 
     @property
-    def for_hold(self) -> Mapping[int, ParentSteps] | None:
+    def for_hold(self) -> Mapping[int, ParentSteps | UnreadableParent] | None:
         """The hold's view: nothing read while its gate was shut, so nothing to hold on."""
         return self.steps if self.ordered else {}
 
@@ -463,6 +464,8 @@ class Orchestrator:
         # Issue id -> the order-hold reason last logged for it, so a step held behind an earlier
         # one says so once per change rather than on every poll (spec 2026-10-25, section 5).
         self._held: dict[str, str] = {}
+        # (tick, parents) whose malformed record this tick has logged already: the hold and the
+        # watch may both read one parent, and it is said once a tick (#358).
         self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
@@ -1601,7 +1604,9 @@ class Orchestrator:
         asks for under its own gate -- ``_watched_parents`` and ``_ordered_parents`` -- and is made
         when either is open. A failed read is logged as each reader logged its own: the watch
         skips this tick, and the hold holds the poll's sub-issues for this poll only (they are
-        given an unreadable ``OrderHold``). Neither feeds the GitHub hold, which is the board's.
+        given an unreadable ``OrderHold``). Neither feeds the GitHub hold, which is the board's. A
+        parent whose record alone is malformed holds its own steps and stays watched, untouched,
+        and no other split's (#358); it is logged here, once for both readers.
         """
         watched = self._watched_parents()
         ordered = self._ordered_parents(issues)
@@ -1616,6 +1621,7 @@ class Orchestrator:
             if ordered:
                 self._log.warning("parent_steps_failed", error=str(exc), parents=list(ordered))
             return _ParentRead(watched, ordered, None)
+        self._log_malformed_parents(steps)
         return _ParentRead(watched, ordered, steps)
 
     def _ordered_parents(self, issues: Sequence[Issue] | None) -> tuple[int, ...]:
@@ -1645,8 +1651,17 @@ class Orchestrator:
             )
         )
 
+    def _log_malformed_parents(self, found: Mapping[int, ParentSteps | UnreadableParent]) -> None:
+        """``parent_record_malformed`` for each unreadable parent in ``found``: the tick's one
+        parent read is the one caller, so each is said once a tick."""
+        for steps in found.values():
+            if isinstance(steps, UnreadableParent):
+                self._log.warning(
+                    "parent_record_malformed", issue_number=steps.number, reason=steps.reason
+                )
+
     def _order_hold(
-        self, issue: Issue, steps: Mapping[int, ParentSteps] | None
+        self, issue: Issue, steps: Mapping[int, ParentSteps | UnreadableParent] | None
     ) -> OrderHold | None:
         """The hold ``issue`` is under, if any. ``steps`` is ``None`` when the read failed."""
         parent = issue.parent
@@ -1657,6 +1672,9 @@ class Orchestrator:
         found = steps.get(parent)
         if found is None:
             return None
+        if isinstance(found, UnreadableParent):
+            # Not "not returned", which holds nothing: the parent is there, its order is not.
+            return OrderHold(parent, None)
         earlier = earlier_open_step(issue, found, self._workflow.config.github.labels)
         return None if earlier is None else OrderHold(parent, earlier)
 
@@ -2207,6 +2225,9 @@ class Orchestrator:
             except GitHubError as exc:
                 self._log.warning("triage_fetch_failed", error=str(exc))
                 return 0
+        self._drop_owed_notes_taken_back(
+            {issue.id for issue in issues if is_triage_candidate(issue, labels)}
+        )
         dispatched = 0
         for issue in issues:
             if not is_triage_candidate(issue, labels):
@@ -2263,6 +2284,34 @@ class Orchestrator:
                 dispatched += 1
         return dispatched
 
+    def _drop_owed_notes_taken_back(self, candidates: set[str]) -> None:
+        """Forget each owed note whose issue is neither among ``candidates`` nor a watched parent.
+
+        Only those two passes write an owed note, and either keeps the candidate read going with
+        no slot free, so a note neither will reach would hold that read on every tick (#355). A
+        note is owed because its label write failed, so an issue that is no candidate now was,
+        as a rule, taken back -- the label removed, a state label added, the issue closed -- and
+        the note has nothing left to explain; one whose write landed under an error is no
+        candidate either, and no pass would have written its note again. A verdict still owed
+        writes its own hand-back (``_retry_pending_verdicts``), so its issue is kept too. Called
+        after a read that succeeded only: a failed one says nothing about who holds the issue.
+        """
+        keep = (
+            candidates
+            | self._triage_pending.keys()
+            | self._parent_pending.keys()
+            | {str(n) for n, record in self._parents.items() if record.watched}
+        )
+        dropped = [
+            *(("triage_escape", i) for i in self._triage_escapes if i not in keep),
+            *(("parent_hand_over", i) for i in self._parent_handovers if i not in keep),
+        ]
+        for note, issue_id in dropped:
+            self._triage_escapes.pop(issue_id, None)
+            self._parent_handovers.pop(issue_id, None)
+            # Issue ids are the number (`Issue.id`).
+            self._log.info("owed_note_dropped", issue_number=int(issue_id), note=note)
+
     async def _retry_pending_verdicts(self) -> None:
         """Try once more to file each verdict GitHub refused, once per entry per tick.
 
@@ -2271,7 +2320,9 @@ class Orchestrator:
         drops a verdict that is owed no longer without a write (``_verdict_owed``).
         ``agent.max_attempts`` failed retries hand the issue back; an entry is dropped only once
         that note has landed, so a GitHub that refuses the note as well as the filing leaves the
-        verdict to be tried again rather than forgotten. A parent review's verdict is retried the
+        verdict to be tried again rather than forgotten. The issue is read again for the
+        hand-back, so a split that filed some of its steps first is handed over as the parent it
+        now is, and a failed read keeps the entry too. A parent review's verdict is retried the
         same way, through ``apply_parent_review`` and ``_parent_review_owed``, and its hand-back
         is a parent hand-over.
         """
@@ -2287,20 +2338,54 @@ class Orchestrator:
             self._triage_pending[issue_id] = pending
             if pending.tries < agent.max_attempts:
                 continue
+            # `pending.issue` is the issue as it was read before the split, with no sub-issues:
+            # a split that filed some steps before GitHub refused the rest is a parent now, and
+            # is handed over as one, so `triage-complete` goes on and its steps stay held
+            # (#356). A `fits` files no sub-issue, so it is handed back without the read.
+            issue = pending.issue
+            if pending.verdict.verdict == "split":
+                try:
+                    found = await self._adapter.fetch_issues_by_ids([issue_id])
+                except GitHubError as exc:
+                    # Kept, as an owed note is: the next tick tries the filing and this read
+                    # again.
+                    self._log.warning(
+                        "triage_hand_back_read_failed",
+                        issue_number=pending.issue.number,
+                        issue_identifier=pending.issue.identifier,
+                        error=str(exc),
+                        category=exc.category,
+                    )
+                    continue
+                # An issue the read no longer returns was dropped by `_file_verdict` already,
+                # which reads it first, so the fallback is never taken in practice.
+                issue = next((i for i in found if i.id == issue_id), issue)
+            way_back = (
+                "Unlink any sub-issues it filed from this issue first, then add "
+                f"`{labels.triage_todo}` again to triage it afresh."
+            )
+            if issue.sub_issue_count > 0:
+                way_back = (
+                    "Unlink the sub-issues it filed from this issue first, then add "
+                    f"`{labels.triage_todo}` again to triage it afresh. Meanwhile "
+                    f"`{labels.triage_complete}` stays on, so the steps it filed stay held."
+                )
             error = _clipped(str(failure), MAX_HOLD_ERROR_CHARS)
             outcome = await self._triage_hand_back(
-                pending.issue,
+                issue,
                 title="triage not filed",
                 reason=f"issuebot could not file the triage verdict on GitHub: {error}",
-                way_back=(
-                    "Unlink any sub-issues it filed from this issue first, then add "
-                    f"`{labels.triage_todo}` again to triage it afresh."
-                ),
+                way_back=way_back,
             )
             if outcome != "failed":
                 # The note ends the chain (`_triage_hand_back`), and the verdict with it.
                 del self._triage_pending[issue_id]
                 self._schedule_triage_discard(pending.issue.identifier)
+            else:
+                # The kept verdict owns the retry. A parent hand-over GitHub refused also keeps
+                # its note as owed (`_hand_over_parent`); left there, a verdict discarded
+                # before the retry would leave that note to be written over a later triage.
+                self._parent_handovers.pop(issue_id, None)
         for issue_id in list(self._parent_pending):
             failure = await self._file_parent_review(self._parent_pending[issue_id])
             if failure is None:
@@ -2733,7 +2818,10 @@ class Orchestrator:
         shares with the order hold (``_read_parents``, #357). A failed read was logged there and
         skips the watch for this tick; like the triage read, it does not feed the GitHub hold,
         which is the board's. A parent GitHub no longer returns, or that has closed, is
-        finished, whoever closed it.
+        finished, whoever closed it. One
+        whose record came back malformed is neither: it was logged with the read and is left
+        watched, untouched, until a tick reads it whole, and a hand-over note owed on it waits
+        for that tick too (#358).
 
         The parents' issues are read only for what the watch can act on this tick: an owed
         note, written while the parent is open whether or not it is still due, so no note that
@@ -2753,6 +2841,8 @@ class Orchestrator:
         due: dict[int, tuple[int, ...]] = {}
         for number in watched:
             steps, issue_id = found.get(number), str(number)
+            if isinstance(steps, UnreadableParent):
+                continue
             if steps is None or steps.state == "closed":
                 self._record_parent(number, replace(self._parents[number], finished=True))
                 # As for a reconcile's stop: a closed or vanished parent has no chain left, and
@@ -3127,6 +3217,10 @@ class Orchestrator:
             reason = "triage labels removed"
         else:
             steps = (await self._adapter.parent_steps([current.number])).get(current.number)
+            if isinstance(steps, UnreadableParent):
+                # A read that failed, as it was before #358, not steps that changed: the
+                # verdict is still owed, and the retry asks again.
+                raise GitHubError("response", steps.reason)
             # A gap past the gap limit is handed over and files no step, so it owns none.
             filing = () if pending.past_gap_limit else pending.verdict.sub_issues
             if steps is not None and steps_as_seen(steps, pending.seen, filing):
