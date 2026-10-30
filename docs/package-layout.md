@@ -1446,9 +1446,9 @@ startup refuses to start over a missing label except those `GitHubLabels.warn_on
 triage's three, which a deployment that upgraded has not got until `labels ensure` -- and only
 warns over those (`triage_labels_missing`). Runs carry
 a kind (`work` or `triage`, migration 0007); a triage failure does not extend a work chain.
-`earlier_open_step` is the pure order rule. `admission.py`'s `order` refusal holds a `todo` step
-while an earlier one is open, ranked after the worker-wide checks and `inactive`, before
-`attempts` and `spend`. The tick reads parents once; a failed read holds that poll only.
+`earlier_open_step` is the pure order rule, holding under either triage label (#354).
+`admission.py`'s `order` refusal holds a `todo` step while an earlier one is open, ranked after
+the worker-wide checks and `inactive`, before `attempts` and `spend`. The tick reads parents once; a failed read holds that poll only.
 
 `parent_review.py` holds `ParentRecord` (reviews, gap rounds, hand-over, finished), the verdict's
 comment and `apply_parent_review`. The records are `parent_review_state` events, seeded at

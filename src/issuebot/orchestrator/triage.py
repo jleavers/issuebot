@@ -32,10 +32,14 @@ def is_triage_candidate(issue: Issue, labels: GitHubLabels) -> bool:
 def earlier_open_step(issue: Issue, steps: ParentSteps, labels: GitHubLabels) -> int | None:
     """The first open step before ``issue`` in its parent's order, or ``None`` to run now.
 
-    The order is GitHub's own (``steps.sub_issues``). Nothing is held under a parent that was
-    not triaged, nor when the issue is no longer among the parent's steps.
+    The order is GitHub's own (``steps.sub_issues``). Nothing is held under a parent carrying
+    neither triage label, nor when the issue is no longer among the parent's steps. Either label
+    holds (#354): ``triage_todo`` on a parent with steps is a review request, which the worker
+    answers by restoring ``triage_complete`` or running the review, but a failed read or a
+    part-done filing can leave it wearing ``triage_todo`` alone while work dispatch runs.
     """
-    if issue.parent != steps.number or labels.triage_complete.lower() not in steps.labels:
+    triage = {labels.triage_todo.lower(), labels.triage_complete.lower()}
+    if issue.parent != steps.number or triage.isdisjoint(steps.labels):
         return None
     numbers = [step.number for step in steps.sub_issues]
     if issue.number not in numbers:
