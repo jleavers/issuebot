@@ -406,10 +406,13 @@ round is counted. A `met` restarted between its label write and its close leaves
 open with `issuebot/complete`: close it yourself, or take that label off and add
 `issuebot/triage-todo` to review it again.
 
-The watch costs one GraphQL point a tick (a `parent_steps` read) while any parent is watched,
-and only when a slot is free or a hand-over note is owed. A review's own read of the steps
-measured 3 points on a parent with 11 merged steps. `validate`'s triage check reports both
-limits.
+The watch costs one GraphQL point a tick per 50 parents (a `parent_steps` read) while any
+parent is watched, and only when a slot is free or a hand-over note is owed. The read is
+shared: the step-order hold's read of the parents of the poll's `todo` steps, made only when
+the tick can dispatch, is the same `parent_steps` call, so a tick with both open pays once for
+the union. A failed read skips the watch (`parent_watch_failed`) and holds the steps for that
+poll (`parent_steps_failed`). A review's own read of the steps measured 3 points on a parent
+with 11 merged steps. `validate`'s triage check reports both limits.
 
 ### GitHub itself
 

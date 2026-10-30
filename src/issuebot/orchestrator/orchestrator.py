@@ -375,6 +375,24 @@ class _TrackRead:
     ceiling: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _ParentRead:
+    """A tick's one ``parent_steps`` read, shared by the parent watch and the order hold (#357).
+
+    ``watched`` is what the watch asked for and ``ordered`` what the hold asked for, each empty
+    while its own gate is shut; ``steps`` answers both, and is ``None`` when the read failed.
+    """
+
+    watched: tuple[int, ...]
+    ordered: tuple[int, ...]
+    steps: Mapping[int, ParentSteps | UnreadableParent] | None
+
+    @property
+    def for_hold(self) -> Mapping[int, ParentSteps | UnreadableParent] | None:
+        """The hold's view: nothing read while its gate was shut, so nothing to hold on."""
+        return self.steps if self.ordered else {}
+
+
 _REFRESH = object()
 _STOP = object()
 
@@ -446,9 +464,6 @@ class Orchestrator:
         # Issue id -> the order-hold reason last logged for it, so a step held behind an earlier
         # one says so once per change rather than on every poll (spec 2026-10-25, section 5).
         self._held: dict[str, str] = {}
-        # (tick, parents) whose malformed record this tick has logged already: the hold and the
-        # watch may both read one parent, and it is said once a tick (#358).
-        self._malformed_logged: tuple[int, set[int]] = (-1, set())
         self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
@@ -1092,13 +1107,18 @@ class Orchestrator:
                 # this tick; and the track is read once, after the scan, for both triage
                 # dispatch and the store (#366). Any label this tick changes after the read -- a
                 # triage hand-back, or a verdict that lands while dispatch waits on GitHub --
-                # therefore reaches the board on the next poll, which is accepted.
+                # therefore reaches the board on the next poll, which is accepted. The board is
+                # polled before the review, so the parents the watch and the order hold read
+                # are one `parent_steps` read between them (#357); a review therefore sees this
+                # poll's effect on the GitHub hold, as the candidates always have.
                 await self._scan_for_auto_triage()
                 await self._retry_pending_verdicts()
                 track = await self._read_triage_track()
                 dispatched = await self._dispatch_triage(track)
-                dispatched += await self._dispatch_parent_reviews()
-                dispatched += await self._dispatch_candidates(track)
+                issues = await self._fetch_issues(track)
+                parents = await self._read_parents(issues)
+                dispatched += await self._dispatch_parent_reviews(parents)
+                dispatched += await self._dispatch_candidates(issues, parents.for_hold)
         # Whatever the holds: removing a clone asks nothing of GitHub or of claude.
         await self._discard_triage_workspaces()
         self._settle_dispatch_hold()
@@ -1512,15 +1532,19 @@ class Orchestrator:
         # one leaves it, so the next tick tries again -- the issue is still a candidate.
         self._record_escape(issue.identifier, outcome)
 
-    async def _dispatch_candidates(self, track: _TrackRead | None = None) -> int:
-        issues = await self._fetch_issues(track)
+    async def _dispatch_candidates(
+        self,
+        issues: Sequence[Issue] | None,
+        steps: Mapping[int, ParentSteps | UnreadableParent] | None,
+    ) -> int:
+        """Dispatch this poll's ``issues``, ``None`` when the poll failed; ``steps`` is the
+        order hold's view of this tick's parent read (``_read_parents``)."""
         if issues is None:
             return 0
         dispatched = 0
         # A hold is remembered only while its issue is still a `todo` one this poll.
         todo_ids = {issue.id for issue in issues if issue.state is StateLabel.TODO}
         self._held = {id_: reason for id_, reason in self._held.items() if id_ in todo_ids}
-        steps = await self._read_parent_steps(issues)
         for issue in sort_candidates(issues):
             verdict = self._admit(
                 issue.identifier, issue.id, issue, order=self._order_hold(issue, steps)
@@ -1571,49 +1595,67 @@ class Orchestrator:
             and self._workflow.config.github.labels.operator_step.lower() not in issue.labels
         )
 
-    async def _read_parent_steps(
-        self, issues: Sequence[Issue]
-    ) -> dict[int, ParentSteps | UnreadableParent] | None:
-        """One read of every parent the poll's `todo` sub-issues point at, or ``None`` if it failed.
+    async def _read_parents(self, issues: Sequence[Issue] | None) -> _ParentRead:
+        """This tick's one ``parent_steps`` read, for the parent watch and the order hold (#357).
 
-        Nothing is read when no candidate is a sub-issue. A failed read holds those candidates
-        for this poll only (they are given an unreadable ``OrderHold``): running a step early is
-        the failure the hold exists to stop, and waiting one poll costs one interval. It is
-        logged, and does not feed the GitHub hold (spec 2026-10-25, section 5). A parent whose
-        record alone is malformed holds its own steps the same way, and no other split's (#358).
+        A watched parent is one whose steps are still open, which is when they are `todo`
+        candidates, so the two sets overlap heavily, and every deployment shares the account's
+        hourly GraphQL budget (spec 2026-10-25, section 9). The read is the union of what each
+        asks for under its own gate -- ``_watched_parents`` and ``_ordered_parents`` -- and is made
+        when either is open. A failed read is logged as each reader logged its own: the watch
+        skips this tick, and the hold holds the poll's sub-issues for this poll only (they are
+        given an unreadable ``OrderHold``). Neither feeds the GitHub hold, which is the board's. A
+        parent whose record alone is malformed holds its own steps and stays watched, untouched,
+        and no other split's (#358); it is logged here, once for both readers.
         """
-        if self._cannot_dispatch():
-            # The account's GraphQL budget is shared, and `admit` ranks stopping, hold and slots
-            # above `order`: the sweep stops at the first such refusal, so nothing is admitted
-            # this tick and an empty mapping cannot let a held step through (spec 2026-10-25,
-            # section 9). The hold is read here, after the fetch that may have lifted it.
-            return {}
-        parents = sorted(
-            {
-                issue.parent
-                for issue in issues
-                if issue.parent is not None and self._order_applies(issue)
-            }
-        )
-        if not parents:
-            return {}
+        watched = self._watched_parents()
+        ordered = self._ordered_parents(issues)
+        wanted = sorted({*watched, *ordered})
+        if not wanted:
+            return _ParentRead(watched, ordered, {})
         try:
-            found = await self._adapter.parent_steps(parents)
+            steps = await self._adapter.parent_steps(wanted)
         except GitHubError as exc:
-            self._log.warning("parent_steps_failed", error=str(exc), parents=parents)
-            return None
-        self._log_malformed_parents(found)
-        return found
+            if watched:
+                self._log.warning("parent_watch_failed", error=str(exc), parents=list(watched))
+            if ordered:
+                self._log.warning("parent_steps_failed", error=str(exc), parents=list(ordered))
+            return _ParentRead(watched, ordered, None)
+        self._log_malformed_parents(steps)
+        return _ParentRead(watched, ordered, steps)
+
+    def _ordered_parents(self, issues: Sequence[Issue] | None) -> tuple[int, ...]:
+        """The order hold's half of the read: every parent the poll's `todo` sub-issues point at.
+
+        Nothing when the poll failed, when no candidate is a sub-issue, or when the tick cannot
+        dispatch. For the last, the account's GraphQL budget is shared, and `admit` ranks
+        stopping, hold and slots above `order`: the sweep stops at the first such refusal, so
+        nothing is admitted this tick and an empty mapping cannot let a held step through (spec
+        2026-10-25, section 9). The gate is read after the fetch that may have lifted the hold,
+        and before the parent reviews this tick may start: a review that takes the last slot
+        leaves the hold's parents in a read that was being made anyway, which is the price of
+        one read rather than two.
+
+        Running a step early is the failure the hold exists to stop, and waiting one poll costs
+        one interval, which is why a failed read holds the steps rather than passing them.
+        """
+        if issues is None or self._cannot_dispatch():
+            return ()
+        return tuple(
+            sorted(
+                {
+                    issue.parent
+                    for issue in issues
+                    if issue.parent is not None and self._order_applies(issue)
+                }
+            )
+        )
 
     def _log_malformed_parents(self, found: Mapping[int, ParentSteps | UnreadableParent]) -> None:
-        """``parent_record_malformed`` for each unreadable parent in ``found``, once a tick."""
-        tick, logged = self._malformed_logged
-        if tick != self._tick_count:
-            logged = set()
-            self._malformed_logged = (self._tick_count, logged)
+        """``parent_record_malformed`` for each unreadable parent in ``found``: the tick's one
+        parent read is the one caller, so each is said once a tick."""
         for steps in found.values():
-            if isinstance(steps, UnreadableParent) and steps.number not in logged:
-                logged.add(steps.number)
+            if isinstance(steps, UnreadableParent):
                 self._log.warning(
                     "parent_record_malformed", issue_number=steps.number, reason=steps.reason
                 )
@@ -2758,16 +2800,27 @@ class Orchestrator:
         self._parents[number] = record
         self._bus.publish(record.state_event(number))
 
-    async def _dispatch_parent_reviews(self) -> int:
+    def _watched_parents(self) -> tuple[int, ...]:
+        """The watch's half of the tick's parent read: every watched parent, or nothing unless a
+        review could start or a hand-over note is owed, since every deployment shares the
+        account's hourly GraphQL budget (section 9)."""
+        busy = self._running.keys() | self._parent_pending.keys()
+        watched = sorted(number for number, record in self._parents.items() if record.watched)
+        owed = any(str(n) in self._parent_handovers and str(n) not in busy for n in watched)
+        if not watched or (self._slots() == 0 and not owed):
+            return ()
+        return tuple(watched)
+
+    async def _dispatch_parent_reviews(self, parents: _ParentRead) -> int:
         """Review each watched parent whose every step has closed, with no label from anyone.
 
-        The watch is one ``parent_steps`` read of every watched parent, made only when a review
-        could start or a hand-over note is owed: every deployment shares the account's hourly
-        GraphQL budget (section 9). A failed read is logged and skips the watch for this tick;
-        like the triage read, it does not feed the GitHub hold, which is the board's. A parent
-        GitHub no longer returns, or that has closed, is finished, whoever closed it. One whose
-        record came back malformed is neither: it is logged and left watched, untouched, until a
-        tick reads it whole, and a hand-over note owed on it waits for that tick too (#358).
+        The watch reads ``parents.watched`` out of the tick's one ``parent_steps`` read, which it
+        shares with the order hold (``_read_parents``, #357). A failed read was logged there and
+        skips the watch for this tick; like the triage read, it does not feed the GitHub hold,
+        which is the board's. A parent GitHub no longer returns, or that has closed, is
+        finished, whoever closed it. One whose record came back malformed is neither: it was
+        logged with the read and is left watched, untouched, until a tick reads it whole, and a
+        hand-over note owed on it waits for that tick too (#358).
 
         The parents' issues are read only for what the watch can act on this tick: an owed
         note, written while the parent is open whether or not it is still due, so no note that
@@ -2779,17 +2832,10 @@ class Orchestrator:
         # `_retry_pending_verdicts` writes the note a verdict owes. Issue ids are the number
         # (`Issue.id`); the steps' `id` is GraphQL's node id, which none of this takes.
         busy = self._running.keys() | self._parent_pending.keys()
-        watched = sorted(number for number, record in self._parents.items() if record.watched)
-        owed = any(str(n) in self._parent_handovers and str(n) not in busy for n in watched)
-        if not watched or (self._slots() == 0 and not owed):
+        watched, found = parents.watched, parents.steps
+        if not watched or found is None:
             return 0
         labels = self._workflow.config.github.labels
-        try:
-            found = await self._adapter.parent_steps(watched)
-        except GitHubError as exc:
-            self._log.warning("parent_watch_failed", error=str(exc), parents=watched)
-            return 0
-        self._log_malformed_parents(found)
         notes: list[int] = []
         due: dict[int, tuple[int, ...]] = {}
         for number in watched:

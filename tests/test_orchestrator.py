@@ -7609,6 +7609,78 @@ async def test_a_failed_watch_read_skips_the_tick_and_feeds_no_hold(tmp_path: Pa
     assert [run.issue.number for run in h.triage_sessions.runs] == [10]
 
 
+def watched_and_held(h: Harness) -> None:
+    """Two watched parents: 10, whose step 12 is a `todo` candidate behind its open step 11,
+    and 30, whose every step has closed, so it is due a review."""
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.human_record_label(10, h.labels.triage_todo, actor="maintainer")
+    watched_split(h, 30, 31, 32)
+
+
+TWO_WATCHED = {**WATCHED, 30: ParentRecord(identifier="repo-30")}
+
+
+async def test_the_watch_and_the_order_hold_share_one_parent_read(tmp_path: Path) -> None:
+    """#357: a watched parent is one whose steps are still open, so its `todo` steps are the
+    hold's to read too. One `parent_steps` read of the union serves both."""
+    h = Harness(tmp_path, max_concurrent=3, initial_parents=TWO_WATCHED)
+    watched_and_held(h)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.calls("parent_steps") == [([10, 30],)]
+    # The watch acted on it: 30 is reviewed, and 10, with a step open, is not.
+    assert [run.issue.number for run in h.triage_sessions.runs] == [30]
+    # And the hold did: 12 waits for 11.
+    assert "12" not in h.orchestrator.running
+    [held] = [entry for entry in logs if entry["event"] == "dispatch_held"]
+    assert (held["issue_number"], held["reason"]) == (12, "waits for #11, an earlier step of #10")
+
+
+async def test_a_failed_shared_parent_read_holds_the_steps_and_skips_the_watch(
+    tmp_path: Path,
+) -> None:
+    """#357: one failed read does what two did -- the poll's sub-issues are held for this poll
+    and the watch is skipped, each logged as before -- and the next tick reads again."""
+    h = Harness(tmp_path, max_concurrent=3, initial_parents=TWO_WATCHED)
+    watched_and_held(h)
+    h.github.close_issue(11)
+    h.github.fail_next("transport", on="parent_steps")
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.calls("parent_steps") == [([10, 30],)]
+    assert h.triage_sessions.runs == [] and "12" not in h.orchestrator.running
+    events = [entry["event"] for entry in logs]
+    assert events.count("parent_watch_failed") == 1 and events.count("parent_steps_failed") == 1
+    assert h.snapshots[-1].dispatch_hold is None
+    await h.tick()
+    assert len(h.calls("parent_steps")) == 2
+    assert "12" in h.orchestrator.running
+    assert [run.issue.number for run in h.triage_sessions.runs] == [30]
+
+
+async def test_the_shared_read_takes_only_the_parents_whose_gate_is_open(tmp_path: Path) -> None:
+    """#357: each reader keeps its own gate. With no slot free the hold reads nothing, and a
+    note owed on a watched parent still has the watch read that parent alone."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=1,
+        initial_parents={10: ParentRecord(identifier="repo-10", reviews=6)},
+    )
+    watched_split(h, 10, 11, 12)
+    add_split(h, 40, 41, 42, todo=(42,))
+    h.add_issue(20, "todo")
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()  # the cap's note on 10 is refused; the work run takes the one slot
+    assert "10" in h.orchestrator._parent_handovers
+    assert [run.issue.number for run in h.sessions.runs] == [20]
+    assert h.calls("parent_steps") == [([10, 40],)]
+    await h.tick()  # no slot, a note owed: the watch's gate alone is open
+    assert h.orchestrator._parent_handovers == {}
+    assert h.calls("parent_steps") == [([10, 40],), ([10],)]
+    await h.tick()  # no slot and nothing owed: neither is
+    assert len(h.calls("parent_steps")) == 2
+
+
 async def test_the_watch_does_not_finish_a_parent_whose_record_is_malformed(
     tmp_path: Path,
 ) -> None:
@@ -7629,15 +7701,15 @@ async def test_the_watch_does_not_finish_a_parent_whose_record_is_malformed(
 
 
 async def test_a_malformed_parent_is_logged_once_a_tick(tmp_path: Path) -> None:
-    """#358: the watch and the hold both read a watched parent with a `todo` step; its
-    malformed record is said once a tick, and again on the next."""
+    """#358: the watch and the hold both want a watched parent with a `todo` step, and share
+    one read of it (#357); its malformed record is said once a tick, and again on the next."""
     h = Harness(tmp_path, max_concurrent=3, initial_parents=WATCHED)
     add_split(h, 10, 11, 12, todo=(12,))
     h.github.close_issue(11)
     h.github.malform_parent(10, "subIssues")
     with capture_logs() as logs:
         await h.tick()
-        assert len(h.calls("parent_steps")) == 2
+        assert h.calls("parent_steps") == [([10],)]
         await h.tick()
     assert [entry["event"] for entry in logs].count("parent_record_malformed") == 2
     assert h.orchestrator.running == {}
