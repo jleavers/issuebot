@@ -122,6 +122,7 @@ from issuebot.github import (
     ReviewStep,
     StateLabel,
     TrackerComment,
+    UnreadableParent,
     fetch_status_summary,
     model_label_style,
     parse_status_summary,
@@ -2533,6 +2534,8 @@ async def held_reason(adapter: GitHubAdapter, issue: Issue, labels: GitHubLabels
         return f"could not read the order of #{parent}'s sub-issues: {exc}"
     if steps is None:
         return None
+    if isinstance(steps, UnreadableParent):
+        return f"could not read the order of #{parent}'s sub-issues: {steps.reason}"
     waiting_for = earlier_open_step(issue, steps, labels)
     if waiting_for is None:
         return None

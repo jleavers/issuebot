@@ -65,6 +65,7 @@ from issuebot.github import (
     ParentSteps,
     StateLabel,
     SubIssue,
+    UnreadableParent,
     fetch_status_summary,
     parse_status_summary,
 )
@@ -445,6 +446,9 @@ class Orchestrator:
         # Issue id -> the order-hold reason last logged for it, so a step held behind an earlier
         # one says so once per change rather than on every poll (spec 2026-10-25, section 5).
         self._held: dict[str, str] = {}
+        # (tick, parents) whose malformed record this tick has logged already: the hold and the
+        # watch may both read one parent, and it is said once a tick (#358).
+        self._malformed_logged: tuple[int, set[int]] = (-1, set())
         self._log = get_logger(__name__)
         self._totals = ClaudeTotals()
         # The admission gate's durable half (#112): what each issue has cost this worker,
@@ -1567,13 +1571,16 @@ class Orchestrator:
             and self._workflow.config.github.labels.operator_step.lower() not in issue.labels
         )
 
-    async def _read_parent_steps(self, issues: Sequence[Issue]) -> dict[int, ParentSteps] | None:
+    async def _read_parent_steps(
+        self, issues: Sequence[Issue]
+    ) -> dict[int, ParentSteps | UnreadableParent] | None:
         """One read of every parent the poll's `todo` sub-issues point at, or ``None`` if it failed.
 
         Nothing is read when no candidate is a sub-issue. A failed read holds those candidates
         for this poll only (they are given an unreadable ``OrderHold``): running a step early is
         the failure the hold exists to stop, and waiting one poll costs one interval. It is
-        logged, and does not feed the GitHub hold (spec 2026-10-25, section 5).
+        logged, and does not feed the GitHub hold (spec 2026-10-25, section 5). A parent whose
+        record alone is malformed holds its own steps the same way, and no other split's (#358).
         """
         if self._cannot_dispatch():
             # The account's GraphQL budget is shared, and `admit` ranks stopping, hold and slots
@@ -1591,13 +1598,28 @@ class Orchestrator:
         if not parents:
             return {}
         try:
-            return await self._adapter.parent_steps(parents)
+            found = await self._adapter.parent_steps(parents)
         except GitHubError as exc:
             self._log.warning("parent_steps_failed", error=str(exc), parents=parents)
             return None
+        self._log_malformed_parents(found)
+        return found
+
+    def _log_malformed_parents(self, found: Mapping[int, ParentSteps | UnreadableParent]) -> None:
+        """``parent_record_malformed`` for each unreadable parent in ``found``, once a tick."""
+        tick, logged = self._malformed_logged
+        if tick != self._tick_count:
+            logged = set()
+            self._malformed_logged = (self._tick_count, logged)
+        for steps in found.values():
+            if isinstance(steps, UnreadableParent) and steps.number not in logged:
+                logged.add(steps.number)
+                self._log.warning(
+                    "parent_record_malformed", issue_number=steps.number, reason=steps.reason
+                )
 
     def _order_hold(
-        self, issue: Issue, steps: Mapping[int, ParentSteps] | None
+        self, issue: Issue, steps: Mapping[int, ParentSteps | UnreadableParent] | None
     ) -> OrderHold | None:
         """The hold ``issue`` is under, if any. ``steps`` is ``None`` when the read failed."""
         parent = issue.parent
@@ -1608,6 +1630,9 @@ class Orchestrator:
         found = steps.get(parent)
         if found is None:
             return None
+        if isinstance(found, UnreadableParent):
+            # Not "not returned", which holds nothing: the parent is there, its order is not.
+            return OrderHold(parent, None)
         earlier = earlier_open_step(issue, found, self._workflow.config.github.labels)
         return None if earlier is None else OrderHold(parent, earlier)
 
@@ -2740,7 +2765,9 @@ class Orchestrator:
         could start or a hand-over note is owed: every deployment shares the account's hourly
         GraphQL budget (section 9). A failed read is logged and skips the watch for this tick;
         like the triage read, it does not feed the GitHub hold, which is the board's. A parent
-        GitHub no longer returns, or that has closed, is finished, whoever closed it.
+        GitHub no longer returns, or that has closed, is finished, whoever closed it. One whose
+        record came back malformed is neither: it is logged and left watched, untouched, until a
+        tick reads it whole, and a hand-over note owed on it waits for that tick too (#358).
 
         The parents' issues are read only for what the watch can act on this tick: an owed
         note, written while the parent is open whether or not it is still due, so no note that
@@ -2762,10 +2789,13 @@ class Orchestrator:
         except GitHubError as exc:
             self._log.warning("parent_watch_failed", error=str(exc), parents=watched)
             return 0
+        self._log_malformed_parents(found)
         notes: list[int] = []
         due: dict[int, tuple[int, ...]] = {}
         for number in watched:
             steps, issue_id = found.get(number), str(number)
+            if isinstance(steps, UnreadableParent):
+                continue
             if steps is None or steps.state == "closed":
                 self._record_parent(number, replace(self._parents[number], finished=True))
                 # As for a reconcile's stop: a closed or vanished parent has no chain left, and
@@ -3140,6 +3170,10 @@ class Orchestrator:
             reason = "triage labels removed"
         else:
             steps = (await self._adapter.parent_steps([current.number])).get(current.number)
+            if isinstance(steps, UnreadableParent):
+                # A read that failed, as it was before #358, not steps that changed: the
+                # verdict is still owed, and the retry asks again.
+                raise GitHubError("response", steps.reason)
             # A gap past the gap limit is handed over and files no step, so it owns none.
             filing = () if pending.past_gap_limit else pending.verdict.sub_issues
             if steps is not None and steps_as_seen(steps, pending.seen, filing):
