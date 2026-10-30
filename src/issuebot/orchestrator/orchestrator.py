@@ -55,6 +55,8 @@ from issuebot.config import (
 from issuebot.config.workflow import parent_review_prompt_path_for, triage_prompt_path_for
 from issuebot.events import AutoTriageState, EventBus, RunKind, StateChanged
 from issuebot.github import (
+    ISSUE_PAGE_SIZE,
+    MAX_ISSUE_PAGES,
     GhCliAdapter,
     GitHubAdapter,
     GitHubError,
@@ -66,7 +68,6 @@ from issuebot.github import (
     fetch_status_summary,
     parse_status_summary,
 )
-from issuebot.github.ghcli import ISSUE_PAGE_SIZE, MAX_ISSUE_PAGES
 from issuebot.invocation import run_hint
 from issuebot.log import get_logger
 from issuebot.orchestrator import actions

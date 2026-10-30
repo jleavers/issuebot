@@ -262,13 +262,15 @@ once per hour, not once per poll:
 
 `retry_at` is when the next attempt is due, and `retry_in_s` the wait. Neither read feeds the
 [GitHub hold](#github-itself), and a failure of any other kind -- usually a moment's -- is tried
-again on the next poll, with no `remedy`. To clear it, count what the read pages on:
+again on the next poll, with no `remedy`. To clear it, count what the read pages on -- a comma
+in a search's `label:` means either label, which is the union the track read takes, and the
+count costs one point:
 
 ```bash
-gh issue list -R <owner>/<repo> --state open --label issuebot/triage-complete --limit 2000 --json number --jq length
+gh api graphql -f query='query { search(type: ISSUE, query: "repo:<owner>/<repo> is:issue is:open label:issuebot/triage-todo,issuebot/triage-complete") { issueCount } }' --jq .data.search.issueCount
 ```
 
-and bring it to 990 or fewer: close what is finished, or take `issuebot/triage-complete` off open
+(`label:issuebot/triage-todo` alone for `triage_fetch_failed`), and bring it to 990 or fewer: close what is finished, or take `issuebot/triage-complete` off open
 issues long past triage -- but not off a split parent whose steps are still open, since that
 label is what holds its steps in order. For `triage_fetch_failed`, take `issuebot/triage-todo`
 off issues that need not be triaged. The wait is the worker's memory, so the read resumes at

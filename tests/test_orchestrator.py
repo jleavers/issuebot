@@ -6484,6 +6484,7 @@ async def test_a_page_ceiling_failure_backs_the_triage_read_off_for_an_hour(
     assert h.triage_sessions.runs == []
     [line] = [entry for entry in logs if entry["event"] == "triage_fetch_failed"]
     assert line["retry_in_s"] == CEILING_RETRY_S
+    assert line["retry_at"] == (START + timedelta(seconds=CEILING_RETRY_S)).isoformat()
     assert "issuebot/triage-todo" in line["remedy"] and "990" in line["remedy"]
     assert h.orchestrator.snapshot().dispatch_hold is None
     failures.append(GitHubError("transport", "injected transport failure"))
