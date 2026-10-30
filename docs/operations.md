@@ -402,8 +402,7 @@ shared: the step-order hold's read of the parents of the poll's `todo` steps, ma
 the tick can dispatch, is the same `parent_steps` call, so a tick with both open pays once for
 the union. A failed read skips the watch (`parent_watch_failed`) and holds the steps for that
 poll (`parent_steps_failed`). A review's own read of the steps measured 3 points on a parent
-with 11 merged steps. `validate`'s triage check reports both
-limits.
+with 11 merged steps. `validate`'s triage check reports both limits.
 
 ### GitHub itself
 

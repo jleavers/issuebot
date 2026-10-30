@@ -1108,7 +1108,8 @@ class Orchestrator:
                 # triage hand-back, or a verdict that lands while dispatch waits on GitHub --
                 # therefore reaches the board on the next poll, which is accepted. The board is
                 # polled before the review, so the parents the watch and the order hold read
-                # are one `parent_steps` read between them (#357).
+                # are one `parent_steps` read between them (#357); a review therefore sees this
+                # poll's effect on the GitHub hold, as the candidates always have.
                 await self._scan_for_auto_triage()
                 await self._retry_pending_verdicts()
                 track = await self._read_triage_track()
@@ -1628,6 +1629,7 @@ class Orchestrator:
         and before the parent reviews this tick may start: a review that takes the last slot
         leaves the hold's parents in a read that was being made anyway, which is the price of
         one read rather than two.
+
         Running a step early is the failure the hold exists to stop, and waiting one poll costs
         one interval, which is why a failed read holds the steps rather than passing them.
         """
