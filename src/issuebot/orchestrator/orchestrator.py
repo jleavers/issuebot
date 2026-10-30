@@ -2158,6 +2158,9 @@ class Orchestrator:
             except GitHubError as exc:
                 self._log.warning("triage_fetch_failed", error=str(exc))
                 return 0
+        self._drop_owed_notes_taken_back(
+            {issue.id for issue in issues if is_triage_candidate(issue, labels)}
+        )
         dispatched = 0
         for issue in issues:
             if not is_triage_candidate(issue, labels):
@@ -2213,6 +2216,34 @@ class Orchestrator:
             if await self._dispatch_triage_one(issue, attempt=attempt):
                 dispatched += 1
         return dispatched
+
+    def _drop_owed_notes_taken_back(self, candidates: set[str]) -> None:
+        """Forget each owed note whose issue is neither among ``candidates`` nor a watched parent.
+
+        Only those two passes write an owed note, and either keeps the candidate read going with
+        no slot free, so a note neither will reach would hold that read on every tick (#355). A
+        note is owed because its label write failed, so an issue that is no candidate now was,
+        as a rule, taken back -- the label removed, a state label added, the issue closed -- and
+        the note has nothing left to explain; one whose write landed under an error is no
+        candidate either, and no pass would have written its note again. A verdict still owed
+        writes its own hand-back (``_retry_pending_verdicts``), so its issue is kept too. Called
+        after a read that succeeded only: a failed one says nothing about who holds the issue.
+        """
+        keep = (
+            candidates
+            | self._triage_pending.keys()
+            | self._parent_pending.keys()
+            | {str(n) for n, record in self._parents.items() if record.watched}
+        )
+        dropped = [
+            *(("triage_escape", i) for i in self._triage_escapes if i not in keep),
+            *(("parent_hand_over", i) for i in self._parent_handovers if i not in keep),
+        ]
+        for note, issue_id in dropped:
+            self._triage_escapes.pop(issue_id, None)
+            self._parent_handovers.pop(issue_id, None)
+            # Issue ids are the number (`Issue.id`).
+            self._log.info("owed_note_dropped", issue_number=int(issue_id), note=note)
 
     async def _retry_pending_verdicts(self) -> None:
         """Try once more to file each verdict GitHub refused, once per entry per tick.
