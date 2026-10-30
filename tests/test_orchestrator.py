@@ -6244,11 +6244,131 @@ async def test_a_verdict_github_keeps_refusing_is_handed_back(tmp_path: Path) ->
     [note] = h.github.comments_for(1)
     assert note.body.startswith("### Issuebot triage not filed (")
     assert "issuebot could not file the triage verdict on GitHub: " in note.body
-    assert "`issuebot/triage-todo` again to triage it afresh." in note.body
+    assert note.body.endswith("`issuebot/triage-todo` again to triage it afresh.")
     assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
     assert len(h.triage_sessions.runs) == 1
     await h.tick()
     assert len(h.github.comments_for(1)) == 1, "dropped once handed back"
+
+
+THREE_STEP_SPLIT = {
+    "stop_reason": "verdict",
+    "structured_output": {
+        **FITS,
+        "verdict": "split",
+        "sub_issues": [
+            {"title": f"{ordinal} step", "body": "Do it.", "kind": "issuebot"}
+            for ordinal in ("First", "Second", "Third")
+        ],
+    },
+}
+
+
+async def test_a_part_filed_split_github_keeps_refusing_is_handed_over_as_a_parent(
+    tmp_path: Path,
+) -> None:
+    """#356: the hand-back reads the issue again, so a split that filed some steps before
+    GitHub refused the rest is a parent hand-over: `triage-complete` goes on, and the steps it
+    filed stay held in order, rather than sitting under a parent with neither triage label."""
+    h = Harness(tmp_path, max_attempts=2, max_concurrent=3)
+    h.add_triage_issue(1)
+    await h.tick()
+    # Steps #2 and #3 land; #4 is refused on the filing and on both retries.
+    h.github.fail_next("transport", on="create_sub_issue", times=3, after=2)
+    await h.exit(h.triage_sessions.runs[0], **THREE_STEP_SPLIT)
+    await h.tick()
+    await h.tick()
+    parent = h.github.issue(1)
+    assert parent.sub_issue_count == 2
+    assert h.labels.triage_complete in parent.labels
+    assert h.labels.triage_todo not in parent.labels
+    [note] = h.github.comments_for(1)
+    assert note.body.startswith("### Issuebot triage not filed (")
+    assert "issuebot could not file the triage verdict on GitHub: " in note.body
+    assert (
+        "Unlink the sub-issues it filed from this issue first, then add "
+        "`issuebot/triage-todo` again to triage it afresh. Meanwhile "
+        "`issuebot/triage-complete` stays on, so the steps it filed stay held."
+    ) in note.body
+    assert h.recorder.kinds[-3:] == ["state_changed", "blocked", "parent_review_state"]
+    assert h.orchestrator._triage_pending == {}
+    assert h.orchestrator._parents[1].handed_over is not None
+    # A human labels the second step: it waits for the first, as any split's step does.
+    h.github.human_set_state(3, StateLabel.TODO, actor="maintainer")
+    await h.tick()
+    assert "3" not in h.orchestrator.running
+    assert h.labels.todo in h.github.issue(3).labels
+    assert len(h.triage_sessions.runs) == 1
+    assert len(h.github.comments_for(1)) == 1
+
+
+async def test_a_failed_read_before_the_hand_back_keeps_the_verdict(tmp_path: Path) -> None:
+    """The re-read is the hand-back's first write's precondition: one GitHub refuses keeps the
+    entry for the next tick, as an owed note is, and writes nothing."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="create_sub_issue", times=4, after=1)
+    await h.exit(h.triage_sessions.runs[0], **THREE_STEP_SPLIT)
+    await h.tick()
+    # The filing's own read passes; the hand-back's read after it is refused.
+    h.github.fail_next("transport", on="fetch_issues_by_ids", after=1)
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    assert h.labels.triage_todo in h.github.issue(1).labels
+    assert "1" in h.orchestrator._triage_pending
+    await h.tick()
+    [note] = h.github.comments_for(1)
+    assert note.body.startswith("### Issuebot triage not filed (")
+    assert h.labels.triage_complete in h.github.issue(1).labels
+    assert h.orchestrator._triage_pending == {}
+
+
+async def test_a_refused_parent_hand_over_leaves_no_note_owed_beside_the_verdict(
+    tmp_path: Path,
+) -> None:
+    """The kept verdict owns the retry: a refused hand-over's note is not also owed on its own,
+    where a verdict discarded meanwhile would leave it to be written over a later triage."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="create_sub_issue", times=3, after=1)
+    await h.exit(h.triage_sessions.runs[0], **THREE_STEP_SPLIT)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()
+    assert h.github.comments_for(1) == []
+    assert "1" in h.orchestrator._triage_pending
+    assert h.orchestrator._parent_handovers == {}
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    await h.tick()
+    assert h.orchestrator._triage_pending == {}
+    assert h.orchestrator._parent_handovers == {}
+    assert h.github.comments_for(1) == []
+
+
+async def test_a_split_that_filed_nothing_is_handed_back_as_before(tmp_path: Path) -> None:
+    """With no step filed the issue is still no parent: `triage-todo` comes off and nothing
+    puts `triage-complete` on, as for a `fits`."""
+    h = Harness(tmp_path, max_attempts=2)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="create_sub_issue", times=3)
+    await h.exit(h.triage_sessions.runs[0], **THREE_STEP_SPLIT)
+    await h.tick()
+    await h.tick()
+    issue = h.github.issue(1)
+    assert issue.sub_issue_count == 0
+    assert h.labels.triage_todo not in issue.labels
+    assert h.labels.triage_complete not in issue.labels
+    [note] = h.github.comments_for(1)
+    assert note.body.startswith("### Issuebot triage not filed (")
+    assert note.body.endswith(
+        "Unlink any sub-issues it filed from this issue first, then add "
+        "`issuebot/triage-todo` again to triage it afresh."
+    )
+    assert h.recorder.kinds[-2:] == ["state_changed", "blocked"]
+    assert 1 not in h.orchestrator._parents
 
 
 async def test_a_retry_owed_only_the_comment_publishes_no_second_state_change(

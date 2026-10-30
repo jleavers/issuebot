@@ -2222,7 +2222,9 @@ class Orchestrator:
         drops a verdict that is owed no longer without a write (``_verdict_owed``).
         ``agent.max_attempts`` failed retries hand the issue back; an entry is dropped only once
         that note has landed, so a GitHub that refuses the note as well as the filing leaves the
-        verdict to be tried again rather than forgotten. A parent review's verdict is retried the
+        verdict to be tried again rather than forgotten. The issue is read again for the
+        hand-back, so a split that filed some of its steps first is handed over as the parent it
+        now is, and a failed read keeps the entry too. A parent review's verdict is retried the
         same way, through ``apply_parent_review`` and ``_parent_review_owed``, and its hand-back
         is a parent hand-over.
         """
@@ -2238,20 +2240,54 @@ class Orchestrator:
             self._triage_pending[issue_id] = pending
             if pending.tries < agent.max_attempts:
                 continue
+            # `pending.issue` is the issue as it was read before the split, with no sub-issues:
+            # a split that filed some steps before GitHub refused the rest is a parent now, and
+            # is handed over as one, so `triage-complete` goes on and its steps stay held
+            # (#356). A `fits` files no sub-issue, so it is handed back without the read.
+            issue = pending.issue
+            if pending.verdict.verdict == "split":
+                try:
+                    found = await self._adapter.fetch_issues_by_ids([issue_id])
+                except GitHubError as exc:
+                    # Kept, as an owed note is: the next tick tries the filing and this read
+                    # again.
+                    self._log.warning(
+                        "triage_hand_back_read_failed",
+                        issue_number=pending.issue.number,
+                        issue_identifier=pending.issue.identifier,
+                        error=str(exc),
+                        category=exc.category,
+                    )
+                    continue
+                # An issue the read no longer returns was dropped by `_file_verdict` already,
+                # which reads it first, so the fallback is never taken in practice.
+                issue = next((i for i in found if i.id == issue_id), issue)
+            way_back = (
+                "Unlink any sub-issues it filed from this issue first, then add "
+                f"`{labels.triage_todo}` again to triage it afresh."
+            )
+            if issue.sub_issue_count > 0:
+                way_back = (
+                    "Unlink the sub-issues it filed from this issue first, then add "
+                    f"`{labels.triage_todo}` again to triage it afresh. Meanwhile "
+                    f"`{labels.triage_complete}` stays on, so the steps it filed stay held."
+                )
             error = _clipped(str(failure), MAX_HOLD_ERROR_CHARS)
             outcome = await self._triage_hand_back(
-                pending.issue,
+                issue,
                 title="triage not filed",
                 reason=f"issuebot could not file the triage verdict on GitHub: {error}",
-                way_back=(
-                    "Unlink any sub-issues it filed from this issue first, then add "
-                    f"`{labels.triage_todo}` again to triage it afresh."
-                ),
+                way_back=way_back,
             )
             if outcome != "failed":
                 # The note ends the chain (`_triage_hand_back`), and the verdict with it.
                 del self._triage_pending[issue_id]
                 self._schedule_triage_discard(pending.issue.identifier)
+            else:
+                # The kept verdict owns the retry. A parent hand-over GitHub refused also keeps
+                # its note as owed (`_hand_over_parent`); left there, a verdict discarded
+                # before the retry would leave that note to be written over a later triage.
+                self._parent_handovers.pop(issue_id, None)
         for issue_id in list(self._parent_pending):
             failure = await self._file_parent_review(self._parent_pending[issue_id])
             if failure is None:

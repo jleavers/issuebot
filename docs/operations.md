@@ -209,7 +209,9 @@ has none. The one action that resumes it is in the comment:
   included. Fix the cause the comment names, then add `issuebot/triage-todo` again.
 - **`triage not filed`**: the session finished but GitHub refused the filing
   `agent.max_attempts` times. Unlink any sub-issues it filed from this issue first, then add
-  `issuebot/triage-todo` again to triage it afresh.
+  `issuebot/triage-todo` again to triage it afresh. A split that filed some of its steps
+  before GitHub refused the rest is a parent by then, and is handed over as one ([The parent
+  review](#the-parent-review)).
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
 - **`operator step`**: an `issuebot/operator-step` issue came up for a work run under any
@@ -370,6 +372,9 @@ review. The title says which:
   note names first.
 - **`parent review not filed`**: GitHub refused the filing `agent.max_attempts` times. Unlink
   any sub-issues the review filed from the parent first.
+- **`triage not filed`**: the parent's first split, which GitHub refused part-way
+  `agent.max_attempts` times. The steps it filed stay held until you unlink them from the
+  parent; do that first, so `issuebot/triage-todo` triages it afresh rather than reviewing it.
 - **`parent review budget limit`**: the issue's cost reached `agent.max_issue_cost_usd`. Raise
   the ceiling first.
 - **`unapproved edit`**: the parent was edited after `issuebot/triage-todo` by someone other
