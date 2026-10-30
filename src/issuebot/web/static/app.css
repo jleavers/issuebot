@@ -179,6 +179,9 @@ html:not(.js) .theme-toggle { display: none; }
 :root[data-theme="dark"] .theme-toggle .moon { display: none; }
 
 main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
+/* The dashboard: seven columns want every pixel a full-screen window has, where a transcript
+ * wants a measure. Under the 1500px cap a 1920px window drew the board 210px in from each edge. */
+main.wide { max-width: none; }
 section { margin-bottom: 20px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 
