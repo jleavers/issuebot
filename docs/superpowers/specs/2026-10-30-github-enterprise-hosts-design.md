@@ -292,9 +292,11 @@ says so.
 
 ### Step 1: enterprise accounts
 
-**EMU usernames.** `billing._LOGIN` refuses an underscore, and every EMU username has one
-(`handle_SHORTCODE`). The pattern accepts that shape. The builder also checks any other place that
-validates a login against GitHub's alphabet.
+**EMU usernames.** `billing._LOGIN` refuses an underscore. A managed user on github.com always
+has one (`handle_SHORTCODE`, the enterprise's short code appended). A GHE.com tenant appends no
+short code, and the spike's login had no underscore, but a handle the identity provider derives
+can still carry one. The pattern accepts the underscore either way, since that is harmless. The
+builder also checks any other place that validates a login against GitHub's alphabet.
 
 **The account arrangement.**
 
