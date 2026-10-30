@@ -2475,6 +2475,28 @@ def test_run_once_fails_when_the_order_cannot_be_read(
     assert stub_session.calls == []
 
 
+def test_run_once_fails_when_the_parent_record_is_malformed(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_github: FakeGitHub,
+    stub_session: StubSession,
+    recording_sink: type[RecordingSink],
+) -> None:
+    """#358: an unreadable parent refuses, as a failed read does, though its earlier step closed."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _split_with_held_step(fake_github)
+    fake_github.close_issue(11)
+    fake_github.malform_parent(10, "subIssues")
+    path = _workflow_with_root(tmp_path)
+    assert main(["run-once", "12", "--workflow", str(path)]) == 1
+    assert (
+        "[FAIL] issue: #12 could not read the order of #10's sub-issues: "
+        "malformed parent record #10: subIssues" in capsys.readouterr().out
+    )
+    assert stub_session.calls == []
+
+
 def test_run_once_show_prompt_skips_the_order_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

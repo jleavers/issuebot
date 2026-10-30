@@ -6749,6 +6749,31 @@ async def test_a_failed_parent_read_holds_sub_issues_for_that_poll_only(tmp_path
     assert "12" in h.orchestrator.running
 
 
+async def test_a_malformed_parent_record_holds_only_its_own_steps(tmp_path: Path) -> None:
+    """#358: one malformed record is that parent's unreadable order, not the whole read's. Its
+    step is held though the step before it has closed; another split runs in order as ever."""
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.close_issue(11)
+    add_split(h, 30, 31, 32, todo=(32,))
+    h.github.malform_parent(10, "subIssues")
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.orchestrator.running == {}
+    malformed = [entry for entry in logs if entry["event"] == "parent_record_malformed"]
+    assert [(entry["issue_number"], entry["reason"]) for entry in malformed] == [
+        (10, "malformed parent record #10: subIssues")
+    ]
+    assert not any(entry["event"] == "parent_steps_failed" for entry in logs)
+    assert h.calls("parent_steps") == [([10, 30],)]
+    h.github.close_issue(31)
+    await h.tick()
+    assert "32" in h.orchestrator.running and "12" not in h.orchestrator.running
+    h.github.malform_parent(10)
+    await h.tick()
+    assert "12" in h.orchestrator.running
+
+
 async def test_a_sub_issue_of_an_untriaged_parent_is_not_held(tmp_path: Path) -> None:
     h = Harness(tmp_path, max_concurrent=3)
     h.github.add_issue("Parent", number=10)
@@ -7139,6 +7164,29 @@ async def test_a_met_parent_reaches_the_store_before_it_closes(tmp_path: Path) -
     assert len(h.recorder.of(IssueCompleted)) == 1
 
 
+async def test_a_verdict_owed_on_a_malformed_parent_record_is_kept_for_the_retry(
+    tmp_path: Path,
+) -> None:
+    """#358: the check before filing reads the parent's steps again. A malformed record there is
+    a failed read, as it was when the whole read raised: the verdict is kept, not discarded as
+    stale, and the next tick files it."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.malform_parent(10, "subIssues")
+    with capture_logs() as logs:
+        await h.exit(h.triage_sessions.runs[0], **NEXT_REVIEW)
+    assert h.calls("create_sub_issue") == []
+    assert not any(entry["event"] == "parent_review_discarded" for entry in logs)
+    [line] = [entry for entry in logs if entry["event"] == "parent_review_file_failed"]
+    assert "malformed parent record #10: subIssues" in line["error"]
+    assert list(h.orchestrator._parent_pending) == ["10"]
+    h.github.malform_parent(10)
+    await h.tick()
+    assert h.orchestrator._parent_pending == {}
+    assert len(h.calls("create_sub_issue")) > 0
+
+
 async def test_a_review_whose_steps_changed_is_discarded(tmp_path: Path) -> None:
     """Review focus 2: a step reopened while the review ran. Nothing stale is filed, and the
     next tick waits for the steps to close again."""
@@ -7321,6 +7369,41 @@ async def test_a_failed_watch_read_skips_the_tick_and_feeds_no_hold(tmp_path: Pa
     assert h.snapshots[-1].dispatch_hold is None
     await h.tick()
     assert [run.issue.number for run in h.triage_sessions.runs] == [10]
+
+
+async def test_the_watch_does_not_finish_a_parent_whose_record_is_malformed(
+    tmp_path: Path,
+) -> None:
+    """#358: a malformed record is not a parent GitHub stopped returning. The record stays
+    watched and untouched, and the review starts on the first tick that reads it whole."""
+    h = Harness(tmp_path, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    h.github.malform_parent(10, "id")
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.triage_sessions.runs == []
+    assert parent_states(h, 10) == []
+    assert h.orchestrator._parents[10] == WATCHED[10]
+    assert [entry["event"] for entry in logs].count("parent_record_malformed") == 1
+    h.github.malform_parent(10)
+    await h.tick()
+    assert [run.issue.number for run in h.triage_sessions.runs] == [10]
+
+
+async def test_a_malformed_parent_is_logged_once_a_tick(tmp_path: Path) -> None:
+    """#358: the watch and the hold both read a watched parent with a `todo` step; its
+    malformed record is said once a tick, and again on the next."""
+    h = Harness(tmp_path, max_concurrent=3, initial_parents=WATCHED)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.close_issue(11)
+    h.github.malform_parent(10, "subIssues")
+    with capture_logs() as logs:
+        await h.tick()
+        assert len(h.calls("parent_steps")) == 2
+        await h.tick()
+    assert [entry["event"] for entry in logs].count("parent_record_malformed") == 2
+    assert h.orchestrator.running == {}
+    assert h.orchestrator._parents[10] == WATCHED[10]
 
 
 @pytest.mark.parametrize("why", ["running", "backing off"])

@@ -131,6 +131,18 @@ class ParentSteps:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class UnreadableParent:
+    """A parent ``parent_steps`` asked for whose record came back malformed (#358).
+
+    It stands in that parent's place in the result, so one bad record costs that parent and
+    not the batch, and a reader can tell it from a parent GitHub did not return at all: that
+    one is absent. ``reason`` is the normaliser's message."""
+
+    number: int
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PrReview:
     """One review of a pull request. ``association`` is GitHub's ``CommentAuthorAssociation``,
     upper-case; ``state`` is GitHub's ``PullRequestReviewState`` (``APPROVED``, ...)."""

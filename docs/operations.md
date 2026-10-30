@@ -236,7 +236,10 @@ releases every held step at once, so keep it there until the split's steps have 
 `docker compose logs worker` shows `dispatch_held` with the step it waits for, once per change.
 To change the order, drag the sub-issues on the parent; to run a step early, remove it from the
 parent. `rework` and resumed steps are never held. A poll that cannot read the order holds
-every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>` refuses a
+every sub-issue for that poll only (`parent_steps_failed`). One parent whose record comes back
+malformed holds that parent's steps alone, and the watch leaves its record as it is rather than
+finishing it; `parent_record_malformed` names the parent and the reason once a tick until
+GitHub answers whole. `issuebot run-once <n>` refuses a
 held step too, naming the step it waits for, so close that first or reorder the parent;
 `--show-prompt` skips the check.
 

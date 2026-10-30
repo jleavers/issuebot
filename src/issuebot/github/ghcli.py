@@ -29,13 +29,14 @@ from issuebot.github.models import (
     SubIssue,
     TextEdit,
     TrackerComment,
+    UnreadableParent,
     is_workpad_body,
 )
 from issuebot.github.normalise import (
     issue_from_node,
     label_name,
     optional_timestamp,
-    parent_steps_from_node,
+    parent_record_from_node,
     review_step_from_node,
     sub_issue_from_node,
 )
@@ -586,10 +587,12 @@ class GhCliAdapter:
             raise GitHubError("response", "GraphQL response has no issue.subIssues")
         return [sub_issue_from_node(node) for node in connection.get("nodes") or []]
 
-    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+    async def parent_steps(
+        self, numbers: Iterable[int]
+    ) -> dict[int, ParentSteps | UnreadableParent]:
         wanted = sorted(set(numbers))
         self._log.debug("parent_steps", parents=wanted)
-        found: dict[int, ParentSteps] = {}
+        found: dict[int, ParentSteps | UnreadableParent] = {}
         for start in range(0, len(wanted), ID_BATCH_SIZE):
             batch = wanted[start : start + ID_BATCH_SIZE]
             data = await self._graphql(
@@ -604,9 +607,7 @@ class GhCliAdapter:
                 node = repository.get(f"p{number}")
                 if node is None:
                     continue
-                if not isinstance(node, Mapping):
-                    raise GitHubError("response", f"malformed parent record for alias p{number}")
-                found[number] = parent_steps_from_node(node)
+                found[number] = parent_record_from_node(number, node)
         return found
 
     async def parent_review_steps(self, number: int) -> list[ReviewStep]:
