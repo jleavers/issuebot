@@ -257,7 +257,10 @@ in another repository, which GitHub allows (#359): the fragment reads the parent
 same-numbered issue here. Triage only files sub-issues in their parent's own repository, so a
 parent elsewhere is outside it, and the field costs no rate-limit points (a poll is still 1).
 `parent_steps` reads each parent's labels and its sub-issues, with state, in GitHub's order
-(`ParentSteps`), for many parents in one aliased query per tick, at most one page each.
+(`ParentSteps`), for many parents in one aliased query per tick, at most one page each. It
+normalises per parent (`normalise.parent_record_from_node`, which the fake shares): a malformed
+record is that parent's `UnreadableParent`, not a failure of the read, so the hold and the watch
+can tell it from a parent GitHub did not return at all (#358).
 
 `billing.py`: the dashboard's Actions minutes reads, made with the billing token through any
 `GhRunnerLike` -- `fetch_login`, `fetch_actions_usage`, `parse_summary` (period from
@@ -1450,9 +1453,9 @@ startup refuses to start over a missing label except those `GitHubLabels.warn_on
 triage's three, which a deployment that upgraded has not got until `labels ensure` -- and only
 warns over those (`triage_labels_missing`). Runs carry
 a kind (`work` or `triage`, migration 0007); a triage failure does not extend a work chain.
-`earlier_open_step` is the pure order rule. `admission.py`'s `order` refusal holds a `todo` step
-while an earlier one is open, ranked after the worker-wide checks and `inactive`, before
-`attempts` and `spend`. The tick reads parents once; a failed read holds that poll only.
+`earlier_open_step` is the pure order rule, holding under either triage label (#354).
+`admission.py`'s `order` refusal holds a `todo` step while an earlier one is open, ranked after
+the worker-wide checks and `inactive`, before `attempts` and `spend`. The tick reads parents once; a failed read holds that poll only.
 
 `parent_review.py` holds `ParentRecord` (reviews, gap rounds, hand-over, finished), the verdict's
 comment and `apply_parent_review`. The records are `parent_review_state` events, seeded at

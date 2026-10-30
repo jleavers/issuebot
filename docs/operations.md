@@ -209,7 +209,9 @@ has none. The one action that resumes it is in the comment:
   included. Fix the cause the comment names, then add `issuebot/triage-todo` again.
 - **`triage not filed`**: the session finished but GitHub refused the filing
   `agent.max_attempts` times. Unlink any sub-issues it filed from this issue first, then add
-  `issuebot/triage-todo` again to triage it afresh.
+  `issuebot/triage-todo` again to triage it afresh. A split that filed some of its steps
+  before GitHub refused the rest is a parent by then, and is handed over as one ([The parent
+  review](#the-parent-review)).
 - **`triage budget limit`**: the issue's cumulative cost reached `agent.max_issue_cost_usd`,
   and a triage run counts. Raise the ceiling first, then add `issuebot/triage-todo` again.
 - **`operator step`**: an `issuebot/operator-step` issue came up for a work run under any
@@ -231,15 +233,20 @@ share one triage clone, and both file.
 A `split` files the steps up to and including the implementation plan. Once the plan step
 merges, the parent review files the next batch ([The parent review](#the-parent-review)).
 
-A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, with no comment or
-label change, while any sub-issue before it in the parent's order is open. Operator steps
-count, and "closed" means closed by any route, so a step whose pull request is still open holds
-the next one until it merges. The hold depends on that label: removing it from the parent
-releases every held step at once, so keep it there until the split's steps have closed.
+A `todo` sub-issue of a parent carrying `issuebot/triage-complete` or `issuebot/triage-todo`
+waits, with no comment or label change, while any sub-issue before it in the parent's order is
+open. Operator steps count, and "closed" means closed by any route, so a step whose pull request
+is still open holds the next one until it merges. The hold depends on those two labels: swapping
+one for the other to ask for a [parent review](#the-parent-review) keeps it, while removing
+both from the parent releases every held step at once, so keep one there until the split's
+steps have closed.
 `docker compose logs worker` shows `dispatch_held` with the step it waits for, once per change.
 To change the order, drag the sub-issues on the parent; to run a step early, remove it from the
 parent. `rework` and resumed steps are never held. A poll that cannot read the order holds
-every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>` refuses a
+every sub-issue for that poll only (`parent_steps_failed`). One parent whose record comes back
+malformed holds that parent's steps alone, and the watch leaves its record as it is rather than
+finishing it; `parent_record_malformed` names the parent and the reason once a tick until
+GitHub answers whole. `issuebot run-once <n>` refuses a
 held step too, naming the step it waits for, so close that first or reorder the parent;
 `--show-prompt` skips the check.
 
@@ -368,6 +375,9 @@ review. The title says which:
   note names first.
 - **`parent review not filed`**: GitHub refused the filing `agent.max_attempts` times. Unlink
   any sub-issues the review filed from the parent first.
+- **`triage not filed`**: the parent's first split, which GitHub refused part-way
+  `agent.max_attempts` times. The steps it filed stay held until you unlink them from the
+  parent; do that first, so `issuebot/triage-todo` triages it afresh rather than reviewing it.
 - **`parent review budget limit`**: the issue's cost reached `agent.max_issue_cost_usd`. Raise
   the ceiling first.
 - **`unapproved edit`**: the parent was edited after `issuebot/triage-todo` by someone other

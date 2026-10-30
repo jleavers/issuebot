@@ -332,11 +332,21 @@ def test_the_first_step_and_a_step_after_closed_ones_wait_for_nothing(
     assert earlier_open_step(make_issue(number=11, parent=10), order, LABELS) is None
 
 
-def test_a_parent_without_triage_complete_holds_nothing(
+def test_a_parent_without_either_triage_label_holds_nothing(
     make_issue: Callable[..., Issue],
 ) -> None:
     order = parent_order((11, "open"), (12, "open"), labels=())
     assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) is None
+
+
+def test_a_parent_carrying_only_triage_todo_holds_as_triage_complete_does(
+    make_issue: Callable[..., Issue],
+) -> None:
+    """#354: the swap that asks for a parent review leaves `triage-todo` alone on the parent
+    until the worker restores `triage-complete`, and a tick can reach work dispatch first."""
+    for labels in (("issuebot/triage-todo",), ("issuebot/triage-complete",)):
+        order = parent_order((11, "open"), (12, "open"), labels=labels)
+        assert earlier_open_step(make_issue(number=12, parent=10), order, LABELS) == 11
 
 
 def test_a_step_missing_from_its_parent_holds_nothing(

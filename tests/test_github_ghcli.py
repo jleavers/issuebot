@@ -26,7 +26,7 @@ from issuebot.github.ghcli import (
     _issues_query,
     by_ids_query,
 )
-from issuebot.github.models import WORKPAD_MARKER, StateLabel
+from issuebot.github.models import WORKPAD_MARKER, StateLabel, UnreadableParent
 from issuebot.github.runner import GhResult
 from issuebot.github.state import TERMINAL_SWEEP_ROLES, LabelStyle
 from issuebot.log import configure_logging
@@ -2101,15 +2101,48 @@ async def test_parent_steps_of_nothing_makes_no_call() -> None:
     assert runner.calls == []
 
 
-async def test_a_malformed_parent_steps_record_is_a_response_error() -> None:
+async def test_one_malformed_parent_record_leaves_the_others_readable() -> None:
+    """#358: a malformed alias is reported unreadable, and the rest of the batch still reads."""
+    runner = StubRunner()
+    good = {
+        "number": 6,
+        "id": "I_6",
+        "state": "OPEN",
+        "labels": {"nodes": []},
+        "subIssues": {"nodes": [{"number": 8, "title": "c", "url": "u8", "state": "OPEN"}]},
+    }
+    runner.on(
+        has("p5: issue(number: 5)"),
+        stdout=json.dumps(
+            {"data": {"repository": {"p5": {"number": 5, "subIssues": 3}, "p6": good}}}
+        ),
+    )
+    steps = await make_adapter(runner).parent_steps([5, 6])
+    assert [s.number for s in steps[6].sub_issues] == [8]
+    assert steps[5] == UnreadableParent(number=5, reason="malformed parent record #5: subIssues")
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("node", "reason"),
+    [
+        ([], "malformed parent record for alias p5"),
+        ({"id": "I_5"}, "malformed parent record: missing number"),
+        ({"number": 7, "id": "I_7", "state": "OPEN", "subIssues": {"nodes": []}}, "number 7"),
+    ],
+)
+async def test_a_parent_alias_that_is_not_a_parent_record_is_unreadable(
+    node: object, reason: str
+) -> None:
+    """Not an object, no number, or another issue's number under this alias: all unreadable."""
     runner = StubRunner()
     runner.on(
         has("p5: issue(number: 5)"),
-        stdout=json.dumps({"data": {"repository": {"p5": {"number": 5, "subIssues": 3}}}}),
+        stdout=json.dumps({"data": {"repository": {"p5": node}}}),
     )
-    with pytest.raises(GitHubError) as info:
-        await make_adapter(runner).parent_steps([5])
-    assert info.value.category == "response"
+    [(number, steps)] = (await make_adapter(runner).parent_steps([5])).items()
+    assert number == 5 and isinstance(steps, UnreadableParent)
+    assert reason in steps.reason
 
 
 def _review_step(number: int) -> dict[str, object]:

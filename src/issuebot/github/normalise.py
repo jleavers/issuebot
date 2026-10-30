@@ -17,6 +17,7 @@ from issuebot.github.models import (
     ReviewStep,
     StateLabel,
     SubIssue,
+    UnreadableParent,
 )
 
 _PR_STATES: dict[str, PrState] = {"OPEN": "open", "CLOSED": "closed", "MERGED": "merged"}
@@ -175,6 +176,29 @@ def parent_steps_from_node(node: Mapping[str, Any]) -> ParentSteps:
         labels=_label_names(node.get("labels")),
         sub_issues=tuple(sub_issue_from_node(item) for item in nodes),
     )
+
+
+def parent_record_from_node(number: int, node: Any) -> ParentSteps | UnreadableParent:
+    """Normalise the record under parent ``number``'s alias, or say why it is unreadable (#358).
+
+    Never raises for one record: a malformed one is that parent's ``UnreadableParent``, so the
+    rest of the batch still reads. A record for another number than the alias asked for is
+    malformed too.
+    """
+    if not isinstance(node, Mapping):
+        return UnreadableParent(
+            number=number, reason=f"malformed parent record for alias p{number}"
+        )
+    try:
+        steps = parent_steps_from_node(node)
+    except GitHubError as exc:
+        return UnreadableParent(number=number, reason=exc.message)
+    if steps.number != number:
+        return UnreadableParent(
+            number=number,
+            reason=f"malformed parent record for alias p{number}: number {steps.number}",
+        )
+    return steps
 
 
 def review_step_from_node(node: Mapping[str, Any]) -> ReviewStep:

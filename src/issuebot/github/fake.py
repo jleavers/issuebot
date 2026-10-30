@@ -30,12 +30,13 @@ from issuebot.github.models import (
     SubIssue,
     TextEdit,
     TrackerComment,
+    UnreadableParent,
     is_workpad_body,
 )
 from issuebot.github.normalise import (
     issue_from_node,
     label_name,
-    parent_steps_from_node,
+    parent_record_from_node,
     review_step_from_node,
 )
 from issuebot.github.state import (
@@ -156,6 +157,8 @@ class FakeGitHub:
         self._next_comment_id = 1000
         # [category, method or None, matching calls still to let through], one per failure.
         self._failures: list[list[Any]] = []
+        # Parent number -> the fields ``parent_steps`` leaves out of its record (#358).
+        self._malformed_parents: dict[int, tuple[str, ...]] = {}
         if preseed_labels:
             for role in StateLabel:
                 self.repo_labels[label_name(settings.labels, role)] = LABEL_STYLES[role]
@@ -297,10 +300,12 @@ class FakeGitHub:
         record = self._require_issue(number)
         return [self._sub_issue(self._issues[child]) for child in record.children]
 
-    async def parent_steps(self, numbers: Iterable[int]) -> dict[int, ParentSteps]:
+    async def parent_steps(
+        self, numbers: Iterable[int]
+    ) -> dict[int, ParentSteps | UnreadableParent]:
         wanted = sorted(set(numbers))
         self._enter("parent_steps", wanted)
-        found: dict[int, ParentSteps] = {}
+        found: dict[int, ParentSteps | UnreadableParent] = {}
         for number in wanted:
             record = self._issues.get(number)
             if record is None:
@@ -322,7 +327,9 @@ class FakeGitHub:
                     ]
                 },
             }
-            found[number] = parent_steps_from_node(node)
+            for name in self._malformed_parents.get(number, ()):
+                node.pop(name, None)
+            found[number] = parent_record_from_node(number, node)
         return found
 
     async def parent_review_steps(self, number: int) -> list[ReviewStep]:
@@ -673,6 +680,14 @@ class FakeGitHub:
 
     def issue(self, number: int) -> Issue:
         return self._snapshot(self._require_issue(number))
+
+    def malform_parent(self, number: int, *fields: str) -> None:
+        """Make ``parent_steps`` serve parent ``number``'s record without ``fields`` (``"id"``,
+        ``"subIssues"``, ...), through the same normaliser as ever; no fields puts it right."""
+        if fields:
+            self._malformed_parents[number] = fields
+        else:
+            self._malformed_parents.pop(number, None)
 
     def fail_next(
         self, category: ErrorCategory, *, times: int = 1, on: str | None = None, after: int = 0

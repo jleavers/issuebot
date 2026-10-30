@@ -7,7 +7,13 @@ import pytest
 from issuebot.config import GitHubSettings
 from issuebot.github.errors import GitHubError
 from issuebot.github.fake import FakeGitHub
-from issuebot.github.models import WORKPAD_MARKER, BranchRules, StateLabel
+from issuebot.github.models import (
+    WORKPAD_MARKER,
+    BranchRules,
+    ParentSteps,
+    StateLabel,
+    UnreadableParent,
+)
 from issuebot.github.state import LABEL_STYLES, LabelStyle
 
 SETTINGS = GitHubSettings(repo="example/repo")
@@ -572,6 +578,19 @@ async def test_fake_parent_steps(fake: FakeGitHub) -> None:
         (second.number, "open"),
     ]
     assert fake.issue(first.number).parent == parent.number
+
+
+async def test_fake_malformed_parent_goes_through_the_shared_normaliser(fake: FakeGitHub) -> None:
+    for number in (10, 20):
+        fake.add_issue(f"Parent {number}", number=number)
+    fake.malform_parent(10, "id")
+    steps = await fake.parent_steps([10, 20])
+    assert steps[10] == UnreadableParent(
+        number=10, reason="malformed parent record #10: id or state"
+    )
+    assert isinstance(steps[20], ParentSteps)
+    fake.malform_parent(10)
+    assert isinstance((await fake.parent_steps([10]))[10], ParentSteps)
 
 
 async def test_fake_parent_review_steps(fake: FakeGitHub) -> None:
