@@ -262,8 +262,8 @@ the billing page shows), `next_period`, and `describe_failure`, issuebot's own w
 failure, since `gh`'s stderr never reaches a page. `errors.categorise` is the stderr
 classification it shares with `ghcli`.
 
-`parent_steps` is the watch's one batched read (1 point a tick), and `parent_review_steps` a
-review's own, carrying each step's close reason and the merged pull request that closed it.
+`parent_steps` is the tick's one batched parent read (1 point a tick per 50 parents), shared
+by the watch and the step-order hold (#357), and `parent_review_steps` a review's own, carrying each step's close reason and the merged pull request that closed it.
 
 ## `issuebot.agent`
 
@@ -1452,7 +1452,8 @@ while an earlier one is open, ranked after the worker-wide checks and `inactive`
 
 `parent_review.py` holds `ParentRecord` (reviews, gap rounds, hand-over, finished), the verdict's
 comment and `apply_parent_review`. The records are `parent_review_state` events, seeded at
-startup (no table). `_dispatch_parent_reviews` is the watch; a `gap` past the limit and
+startup (no table). `_dispatch_parent_reviews` is the watch, reading its parents out of `_read_parents`, the
+read it shares with the order hold; a `gap` past the limit and
 a step set that changed mid-run are discarded or handed over at filing, on a fresh read.
 
 `auto_triage.py` holds the record, `settle` and `skip_reason`. `assess_triage` in `approval.py`
