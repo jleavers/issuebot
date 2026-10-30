@@ -6765,6 +6765,9 @@ async def test_a_malformed_parent_record_holds_only_its_own_steps(tmp_path: Path
         (10, "malformed parent record #10: subIssues")
     ]
     assert not any(entry["event"] == "parent_steps_failed" for entry in logs)
+    held = {e["issue_number"]: e["reason"] for e in logs if e["event"] == "dispatch_held"}
+    assert held[32] == "waits for #31, an earlier step of #30"
+    assert held[12] != held[32] and "#10" in held[12]
     assert h.calls("parent_steps") == [([10, 30],)]
     h.github.close_issue(31)
     await h.tick()

@@ -2653,7 +2653,7 @@ class Orchestrator:
         like the triage read, it does not feed the GitHub hold, which is the board's. A parent
         GitHub no longer returns, or that has closed, is finished, whoever closed it. One whose
         record came back malformed is neither: it is logged and left watched, untouched, until a
-        tick reads it whole (#358).
+        tick reads it whole, and a hand-over note owed on it waits for that tick too (#358).
 
         The parents' issues are read only for what the watch can act on this tick: an owed
         note, written while the parent is open whether or not it is still due, so no note that
