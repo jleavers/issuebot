@@ -129,7 +129,7 @@ Non-goals:
 - Building GHES (decision 1).
 - GitHub App installation tokens. #280 already sets them aside as a separate issue.
 - Removing a repository from the dashboard's picker. Nothing can do that today, for github.com
-  either. It is a follow-up of its own (see "Follow-ups"); until then it is a hand-written
+  either. It is #382; until that lands it is a hand-written
   `DELETE`.
 
 Anti-goals, which would be failures even if everything else worked:
@@ -424,7 +424,7 @@ Most of it is step 0's derivation turned on for `ghe_com`:
 4. Run `validate`, and add the storage line it prints.
 5. Start the worker.
 6. Leave the old checkout running until its open work drains, then stop it.
-7. Remove the old repository from the picker. This is a hand-written `DELETE` until the follow-up
+7. Remove the old repository from the picker. This is a hand-written `DELETE` until #382
    lands.
 
 This also states decision 2: the new repository starts fresh.
@@ -540,8 +540,7 @@ greps the diff for the real subdomain.
 ## Follow-ups
 
 - **Removing a repository from the dashboard's picker**, and its rows if wanted. It is needed for
-  a move, and for a github.com deployment that is retired. It is filed only with the
-  maintainer's approval.
+  a move, and for a github.com deployment that is retired. Filed as #382.
 - **GHES is deliberately not filed.** `triage.auto` is on for this repository, so a new issue
   would be triaged and worked. The maintainer files one by hand, labelled
   `issuebot/operator-step`, if an appliance ever becomes available.
