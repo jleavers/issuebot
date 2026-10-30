@@ -6706,6 +6706,25 @@ async def test_re_triaging_a_split_parent_keeps_its_steps_in_order(tmp_path: Pat
     assert len(h.github.comments_for(10)) == 1
 
 
+async def test_a_swapped_parent_whose_approval_read_fails_still_holds_its_steps(
+    tmp_path: Path,
+) -> None:
+    """#354: a failed approval read skips the "parent review waiting" restore for the tick, so
+    work dispatch meets the parent wearing `triage-todo` alone. Step 12 still waits for 11."""
+    h = Harness(tmp_path, max_concurrent=3)
+    add_split(h, 10, 11, 12, todo=(12,))
+    h.github.human_remove_label(10, h.labels.triage_complete)
+    h.github.human_add_label(10, h.labels.triage_todo, actor="maintainer")
+    h.github.fail_next("transport", on="approval_evidence")
+    await h.tick()
+    labels = h.github.issue(10).labels
+    assert h.labels.triage_todo in labels and h.labels.triage_complete not in labels
+    assert h.github.comments_for(10) == []
+    assert h.calls("parent_steps") == [([10],)]
+    assert "12" not in h.orchestrator.running
+    assert h.calls("set_state") == []
+
+
 async def test_an_earlier_operator_step_holds_the_next_step(tmp_path: Path) -> None:
     h = Harness(tmp_path, max_concurrent=3)
     add_split(h, 10, 11, 12, todo=(12,))

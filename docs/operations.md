@@ -228,11 +228,13 @@ share one triage clone, and both file.
 A `split` files the steps up to and including the implementation plan. Once the plan step
 merges, the parent review files the next batch ([The parent review](#the-parent-review)).
 
-A `todo` sub-issue of a parent carrying `issuebot/triage-complete` waits, with no comment or
-label change, while any sub-issue before it in the parent's order is open. Operator steps
-count, and "closed" means closed by any route, so a step whose pull request is still open holds
-the next one until it merges. The hold depends on that label: removing it from the parent
-releases every held step at once, so keep it there until the split's steps have closed.
+A `todo` sub-issue of a parent carrying `issuebot/triage-complete` or `issuebot/triage-todo`
+waits, with no comment or label change, while any sub-issue before it in the parent's order is
+open. Operator steps count, and "closed" means closed by any route, so a step whose pull request
+is still open holds the next one until it merges. The hold depends on those two labels: swapping
+one for the other to ask for a [parent review](#the-parent-review) keeps it, while removing
+both from the parent releases every held step at once, so keep one there until the split's
+steps have closed.
 `docker compose logs worker` shows `dispatch_held` with the step it waits for, once per change.
 To change the order, drag the sub-issues on the parent; to run a step early, remove it from the
 parent. `rework` and resumed steps are never held. A poll that cannot read the order holds
