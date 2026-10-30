@@ -65,8 +65,8 @@ ARCHIVE_TITLES = (
 
 JOURNEY_TITLE = "Focus ring is invisible on the dark theme's primary button"
 
-# The stage the hero image is taken at: #42 in progress, so two agents are running. The
-# capture.py's HERO_STAGE must match it.
+# The stage the hero image is taken at: #42 in progress, so three runs show (#51, #42 and
+# the triage run on #60). capture.py's HERO_STAGE must match it.
 HERO_STAGE = 4
 
 

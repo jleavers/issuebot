@@ -544,7 +544,7 @@ def issue_pill(issue: IssueRow, labels: GitHubLabels) -> dict[str, str]:
     if issue.state is not None:
         return {"role": issue.state, "text": issue.state_label or issue.state}
     if issue.triage is not None:
-        return {"role": issue.triage, "text": labels.model_dump()[issue.triage]}
+        return {"role": issue.triage, "text": labels.model_dump().get(issue.triage, issue.triage)}
     return {"role": "unlabelled", "text": "unlabelled"}
 
 

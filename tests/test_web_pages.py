@@ -692,6 +692,14 @@ def test_the_issue_page_names_the_triage_label_when_there_is_no_state(h: Harness
     assert "unlabelled" not in text
 
 
+def test_the_issue_page_renders_a_triage_value_it_does_not_know(h: Harness) -> None:
+    """The board tolerates an unknown role, so the page must not 500 on one either."""
+    h.queries.issue_rows[9] = issue_row(number=9, state=None, state_label=None, triage="mystery")
+    response = h.client.get(f"{BASE}/issues/9")
+    assert response.status_code == 200
+    assert 'class="state mystery"' in html(response)
+
+
 def test_the_issue_page_escapes_the_title(h: Harness) -> None:
     h.queries.issue_rows[7] = issue_row(title=HOSTILE)
     text = html(h.client.get(f"{BASE}/issues/7"))
@@ -748,6 +756,13 @@ def test_the_list_page_draws_the_triage_pill_for_a_row_with_no_state(h: Harness)
     ]
     text = html(h.client.get(f"{BASE}/issues?state=triage_complete"))
     assert 'class="state triage_complete"' in text and "issuebot/triage-complete" in text
+
+
+def test_the_list_page_keeps_an_empty_state_cell_for_an_unlabelled_row(h: Harness) -> None:
+    h.queries.issue_list = [issue_row(number=70, state=None, state_label=None, triage=None)]
+    text = html(h.client.get(f"{BASE}/issues"))
+    assert "#70" in text
+    assert 'class="state unlabelled"' not in text and "unlabelled" not in text
 
 
 def test_the_list_page_filters_by_a_triage_column(h: Harness) -> None:

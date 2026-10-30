@@ -623,6 +623,37 @@ async def test_a_move_off_the_triage_track_leaves_it_for_the_poll(
     assert row["triage"] == "triage_todo"
 
 
+async def test_reconcile_acts_on_its_own_repository_only_and_an_empty_set_clears_it(
+    db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    """The one write that acts on rows by their absence, on a table every deployment shares."""
+    await migrate(db_url)
+    ours = PostgresStore(db_url, repo="example/ours", labels=GitHubLabels())
+    theirs = PostgresStore(db_url, repo="example/theirs", labels=GitHubLabels())
+    await ours.connect()
+    await theirs.connect()
+    try:
+        for each in (ours, theirs):
+            await each.upsert_issues(
+                [
+                    snapshot(only_triage(60, "issuebot/triage-todo", make=make_issue), 0),
+                    snapshot(only_triage(61, "issuebot/triage-complete", make=make_issue), 0),
+                ]
+            )
+        await ours.reconcile_triage_track([61], at(10))  # a set: ours loses 60, theirs nothing
+        await ours.reconcile_triage_track([], at(10))  # no triage labels: the steady state
+        found = await rows(db_url, "SELECT repo, number, triage FROM issues ORDER BY repo, number")
+        assert [(r["repo"], r["number"], r["triage"]) for r in found] == [
+            ("example/ours", 60, None),
+            ("example/ours", 61, None),
+            ("example/theirs", 60, "triage_todo"),
+            ("example/theirs", 61, "triage_complete"),
+        ]
+    finally:
+        await ours.close()
+        await theirs.close()
+
+
 async def test_reconcile_clears_open_rows_missing_from_the_track(
     store: PostgresStore, db_url: str, make_issue: Callable[..., Issue]
 ) -> None:
@@ -643,5 +674,5 @@ async def test_reconcile_clears_open_rows_missing_from_the_track(
         (60, "triage_todo"),  # in the set
         (61, None),  # open, missing: closed or unlabelled on GitHub
         (62, "triage_complete"),  # already closed in the store: on no column either way
-        (63, "triage_complete"),  # seen after the read began: newer than its answer
+        (63, "triage_complete"),  # seen after the read returned: newer than its answer
     ]

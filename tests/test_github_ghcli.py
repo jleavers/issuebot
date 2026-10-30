@@ -23,6 +23,7 @@ from issuebot.github.ghcli import (
     MAX_TIMELINE_PAGES,
     OPEN_ISSUES_QUERY,
     GhCliAdapter,
+    _issues_query,
     by_ids_query,
 )
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
@@ -317,7 +318,11 @@ async def test_fetch_issues_with_any_label_gives_up_past_the_page_cap() -> None:
     assert len(runner.calls) == MAX_ISSUE_PAGES
 
 
-@pytest.mark.parametrize("query", [OPEN_ISSUES_QUERY, CLOSED_ISSUES_QUERY], ids=["open", "closed"])
+@pytest.mark.parametrize(
+    "query",
+    [OPEN_ISSUES_QUERY, CLOSED_ISSUES_QUERY, _issues_query("OPEN", 2)],
+    ids=["open", "closed", "any-of-two-labels"],
+)
 def test_a_page_of_issues_costs_one_graphql_point(query: str) -> None:
     """GitHub charges a query a point per hundred connections it could have to return.
 
@@ -328,7 +333,9 @@ def test_a_page_of_issues_costs_one_graphql_point(query: str) -> None:
     whether GitHub rounds to the nearest or up, and a connection added to ``IssueFields``
     fails here rather than tripling the poll again.
     """
-    match = re.search(r"issues\(labels: \[\$label\], states: \[\w+\], first: (\d+),", query)
+    match = re.search(
+        r"issues\(labels: \[\$label(?:0, \$label1)?\], states: \[\w+\], first: (\d+),", query
+    )
     assert match is not None
     per_page = int(match.group(1))
     nested = ISSUE_FIELDS.count("(first:")

@@ -1,4 +1,4 @@
-"""The SQL writes behind the sink: one connection, three methods, errors mapped and redacted."""
+"""The SQL writes behind the sink: one connection, four writes, errors mapped and redacted."""
 
 import contextlib
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
