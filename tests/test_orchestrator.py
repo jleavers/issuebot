@@ -6457,6 +6457,45 @@ async def test_a_tick_with_no_free_slot_makes_no_triage_read(tmp_path: Path) -> 
     assert len(h.triage_sessions.runs) == 1
 
 
+async def test_a_page_ceiling_failure_backs_the_triage_read_off_for_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The candidates read walks every page before its ceiling too (#367): it waits
+    `CEILING_RETRY_S` and warns once, while a failure of any other kind is tried next tick."""
+    h = Harness(tmp_path)
+    original = h.github.fetch_issues_with_label
+    failures: list[Exception] = [
+        PageCeilingError("more than 990 issues carry ['issuebot/triage-todo']"),
+    ]
+
+    async def read(label: str) -> list[Issue]:
+        if failures:
+            h.github.calls.append(("fetch_issues_with_label", (label,)))
+            raise failures.pop(0)
+        return await original(label)
+
+    monkeypatch.setattr(h.github, "fetch_issues_with_label", read)
+    h.add_triage_issue(1)
+    with capture_logs() as logs:
+        await h.tick()
+        h.clock.advance(CEILING_RETRY_S - 1)
+        await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == 1
+    assert h.triage_sessions.runs == []
+    [line] = [entry for entry in logs if entry["event"] == "triage_fetch_failed"]
+    assert line["retry_in_s"] == CEILING_RETRY_S
+    assert "issuebot/triage-todo" in line["remedy"] and "990" in line["remedy"]
+    assert h.orchestrator.snapshot().dispatch_hold is None
+    failures.append(GitHubError("transport", "injected transport failure"))
+    h.clock.advance(1)
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == 2
+    h.clock.advance(30)
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == 3
+    assert [run.issue.number for run in h.triage_sessions.runs] == [1]
+
+
 async def test_an_owed_triage_escape_keeps_the_read_with_no_free_slot(tmp_path: Path) -> None:
     h = Harness(tmp_path, max_concurrent=1, max_attempts=1)
     h.add_triage_issue(1)
@@ -7962,3 +8001,70 @@ async def test_a_failed_triage_track_read_is_a_warning_not_a_hold(tmp_path: Path
     assert seen == []
     failed = [entry for entry in logs if entry["event"] == "triage_track_fetch_failed"]
     assert len(failed) == MAX_FETCH_FAILURES + 1
+
+
+def track_past_the_ceiling(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The track's next read fails at its page ceiling, and those after it answer as usual."""
+    original = h.github.fetch_issues_with_any_label
+    failed: list[bool] = []
+
+    async def read(labels: Sequence[str]) -> list[Issue]:
+        if not failed:
+            failed.append(True)
+            h.github.calls.append(("fetch_issues_with_any_label", (tuple(labels),)))
+            raise PageCeilingError(f"more than 990 issues carry {list(labels)}")
+        return await original(labels)
+
+    monkeypatch.setattr(h.github, "fetch_issues_with_any_label", read)
+
+
+async def test_a_page_ceiling_failure_backs_the_triage_track_read_off_for_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read past its ceiling walked every page first, some thirty points of the account's
+    hourly GraphQL budget, and cannot succeed until the count comes down (#367): it waits
+    `CEILING_RETRY_S`, as the auto-triage scan does, and warns once for the hour, not per poll."""
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    h.github.add_issue("sixty", number=60, labels=["issuebot/triage-complete"])
+    track_past_the_ceiling(h, monkeypatch)
+    with capture_logs() as logs:
+        await h.tick()
+        for _ in range(3):
+            h.clock.advance(30)
+            await h.tick()
+    assert len(track_reads(h)) == 1
+    assert seen == []
+    [line] = [entry for entry in logs if entry["event"] == "triage_track_fetch_failed"]
+    assert line["log_level"] == "warning"
+    assert "more than 990 issues" in line["error"]
+    assert line["retry_in_s"] == CEILING_RETRY_S
+    assert line["retry_at"] == (START + timedelta(seconds=CEILING_RETRY_S)).isoformat()
+    assert "issuebot/triage-complete" in line["remedy"] and "990" in line["remedy"]
+    assert h.orchestrator.snapshot().dispatch_hold is None
+    h.clock.advance(CEILING_RETRY_S - 90 - 1)
+    await h.tick()
+    assert len(track_reads(h)) == 1
+    h.clock.advance(1)
+    await h.tick()
+    assert len(track_reads(h)) == 2
+    assert seen == [[60]]
+    h.clock.advance(30)
+    await h.tick()
+    assert len(track_reads(h)) == 3, "a good read resumes the per-poll cadence"
+
+
+async def test_a_failed_triage_track_read_that_is_not_the_ceiling_is_retried_next_poll(
+    tmp_path: Path,
+) -> None:
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    h.github.fail_next("response", on="fetch_issues_with_any_label")
+    with capture_logs() as logs:
+        await h.tick()
+    [line] = [entry for entry in logs if entry["event"] == "triage_track_fetch_failed"]
+    assert "retry_in_s" not in line and "remedy" not in line
+    h.clock.advance(30)
+    await h.tick()
+    assert len(track_reads(h)) == 2
+    assert seen == [[]]

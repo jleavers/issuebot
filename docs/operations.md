@@ -50,7 +50,8 @@ that dispatch makes of `triage-todo`, and one for the triage-track read that fee
 dashboard's columns), plus about 50 for the terminal sweep, while no label holds more than 33
 open issues. The track read pages on the *union* of the two triage labels, and that union
 includes every open issue still wearing `triage-complete` beside a state label, so it is that
-count, not `triage-todo`'s alone, that has to stay under 33. `triage.auto` adds up to about 30
+count, not `triage-todo`'s alone, that has to stay under 33 (and under 990, [the
+ceiling](#past-the-page-ceiling)). `triage.auto` adds up to about 30
 an hour, since its scan runs at most every 120 s, and a worker with sessions running up to 120
 more, so about 890 an hour at most: 5,000 / 890 is 5.6 and 5,000 / 770 is 6.5, so one account
 carries five to six workers before the polls alone use it up. Past that, lengthen
@@ -238,6 +239,40 @@ parent. `rework` and resumed steps are never held. A poll that cannot read the o
 every sub-issue for that poll only (`parent_steps_failed`). `issuebot run-once <n>` refuses a
 held step too, naming the step it waits for, so close that first or reorder the parent;
 `--show-prompt` skips the check.
+
+#### Past the page ceiling
+
+Two reads find the triage labels: the triage-track read, which feeds the dashboard's Triage and
+Triaged columns, and dispatch's read of `issuebot/triage-todo`, which finds what to triage. Each
+returns at most 990 open issues (30 pages of 33), and fetches every one of those pages before it
+fails, about 30 points of the account's [hourly GraphQL budget](#more-than-one-repository). Past
+the ceiling it cannot succeed until the count comes down, so rather than spend that on every
+poll -- about 3,600 points an hour, most of what every deployment on the account shares -- the
+read waits an hour (`CEILING_RETRY_S`) before it tries again. `docker compose logs worker` says so
+once per hour, not once per poll:
+
+- **`triage_track_fetch_failed` with a `remedy`**: more than 990 open issues carry
+  `issuebot/triage-todo` or `issuebot/triage-complete`. The track pages on the two together, and
+  `triage-complete` stays on an issue beside its state label after triage, so this is the larger
+  count. Meanwhile the Triage and Triaged columns show the last read that succeeded; nothing on
+  the board marks them stale, since dispatch does not depend on them and this line is where the
+  failure is reported.
+- **`triage_fetch_failed` with a `remedy`**: more than 990 open issues carry
+  `issuebot/triage-todo`. No triage run starts until the read succeeds.
+
+`retry_at` is when the next attempt is due, and `retry_in_s` the wait. Neither read feeds the
+[GitHub hold](#github-itself), and a failure of any other kind -- usually a moment's -- is tried
+again on the next poll, with no `remedy`. To clear it, count what the read pages on:
+
+```bash
+gh issue list -R <owner>/<repo> --state open --label issuebot/triage-complete --limit 2000 --json number --jq length
+```
+
+and bring it to 990 or fewer: close what is finished, or take `issuebot/triage-complete` off open
+issues long past triage -- but not off a split parent whose steps are still open, since that
+label is what holds its steps in order. For `triage_fetch_failed`, take `issuebot/triage-todo`
+off issues that need not be triaged. The wait is the worker's memory, so the read resumes at
+`retry_at` on its own, or at once after a restart.
 
 #### Auto-triage
 

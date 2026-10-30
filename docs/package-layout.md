@@ -1065,7 +1065,7 @@ widening.
 
 ## `issuebot.orchestrator`
 
-`_observe_triage_track` is the once-a-poll read of the two triage labels for the store, made in `_fetch_issues` and kept out of the GitHub dispatch hold (#88), which is the board poll's.
+`_observe_triage_track` is the once-a-poll read of the two triage labels for the store, made in `_fetch_issues` and kept out of the GitHub dispatch hold (#88), which is the board poll's. Past its page ceiling it, and dispatch's `triage-todo` read in `_dispatch_triage`, wait `CEILING_RETRY_S` before reading again (`_back_off_ceiling`, #367): each failed attempt fetched every page first, and the count only comes down by hand.
 
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
 the one gate every claim goes through: `admit(AdmissionRequest)` answers, in the order the
