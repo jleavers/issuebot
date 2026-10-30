@@ -42,7 +42,9 @@
     <svg class="sun" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11.2a3.2 3.2 0 1 1 0-6.4 3.2 3.2 0 0 1 0 6.4zm0-8.3a.8.8 0 0 1-.8-.8V.8a.8.8 0 0 1 1.6 0v1.3a.8.8 0 0 1-.8.8zm0 12.2a.8.8 0 0 1-.8-.8v-1.3a.8.8 0 0 1 1.6 0v1.3a.8.8 0 0 1-.8.8zM15.2 8.8h-1.3a.8.8 0 0 1 0-1.6h1.3a.8.8 0 0 1 0 1.6zm-13.1 0H.8a.8.8 0 0 1 0-1.6h1.3a.8.8 0 0 1 0 1.6zm10.6 4.9a.8.8 0 0 1-.6-.2l-.9-.9a.8.8 0 0 1 1.1-1.1l.9.9a.8.8 0 0 1-.5 1.3zM3.7 4.5a.8.8 0 0 1-.6-.2l-.9-.9a.8.8 0 1 1 1.1-1.1l.9.9a.8.8 0 0 1-.5 1.3zm-1.4 9.2a.8.8 0 0 1-.6-1.3l.9-.9a.8.8 0 0 1 1.1 1.1l-.9.9a.8.8 0 0 1-.5.2zm10-9.2a.8.8 0 0 1-.6-1.3l.9-.9a.8.8 0 1 1 1.1 1.1l-.9.9a.8.8 0 0 1-.5.2z"/></svg>
   </button>
 </header>
-<main>
+{# `main` is capped at a reading width; a page whose content is a board rather than text
+   lifts the cap by filling this block (index.html does). #}
+<main{% block main_class %}{% endblock %}>
 {% block content %}{% endblock %}
 </main>
 <script src="/static/vendor/htmx.min.js"></script>
