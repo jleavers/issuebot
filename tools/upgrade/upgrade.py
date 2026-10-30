@@ -653,7 +653,12 @@ def passphrase_note(
     over_ssh = [
         path
         for path in paths
-        if path.is_dir() and (origin := origin_of(path, run)) is not None and is_ssh_url(origin)
+        # The checks `inspect_checkout` makes before it fetches: a directory it refuses asks
+        # for no passphrase, and one without its own `.git` would answer for its parent's.
+        if (path / COMPOSE_FILE).is_file()
+        and (path / ".git").exists()
+        and (origin := origin_of(path, run)) is not None
+        and is_ssh_url(origin)
     ]
     if not over_ssh:
         return []

@@ -589,6 +589,43 @@ def test_no_note_when_every_origin_is_https(tmp_path: Path) -> None:
     upgrade.inspect_all(_deployments(tmp_path, "issuebot", "issuebot-two"), run, printed.append)
 
     assert not any("[note]" in line for line in printed)
+    assert "ssh-add" not in [FakeRun._verb(argv) for _name, argv in run.calls]
+
+
+def test_the_note_still_appears_without_ssh_add(tmp_path: Path) -> None:
+    """No `ssh-add` on the host means no agent to hold the key either."""
+
+    class NoSshAdd(FakeRun):
+        def __call__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            if tuple(argv)[:1] == ("ssh-add",):
+                raise FileNotFoundError("ssh-add")
+            return super().__call__(argv, **kwargs)
+
+    printed: list[str] = []
+    run = NoSshAdd(origins={"issuebot": "git@github.com:jleavers/issuebot.git"})
+
+    upgrade.inspect_all(_deployments(tmp_path, "issuebot"), run, printed.append)
+
+    notes = [line for line in printed if "[note]" in line]
+    assert len(notes) == 1
+    assert "no ssh-add found" in notes[0]
+
+
+def test_a_directory_inspection_refuses_is_not_counted(tmp_path: Path) -> None:
+    """It is refused before its fetch, so it never asks for a passphrase."""
+    printed: list[str] = []
+    stray = _mkdir(tmp_path / "not-a-deployment")
+    run = FakeRun(
+        origins={
+            "issuebot": "git@github.com:jleavers/issuebot.git",
+            "not-a-deployment": "git@github.com:jleavers/issuebot.git",
+        },
+        ssh_add=1,
+    )
+
+    upgrade.inspect_all([*_deployments(tmp_path, "issuebot"), stray], run, printed.append)
+
+    assert "once per checkout (1)" in "\n".join(printed)
 
 
 def test_no_note_when_the_agent_holds_a_key(tmp_path: Path) -> None:
