@@ -67,7 +67,7 @@ def skip_reason(issue: Issue, labels: GitHubLabels) -> str | None:
     issuebot = {label.lower() for label in (*labels.as_tuple(), *labels.markers())}
     if issuebot.intersection(label.lower() for label in issue.labels):
         return "carries an issuebot label"
-    if issue.parent is not None:
+    if issue.parent is not None or issue.parent_elsewhere:
         return "has a parent issue"
     if issue.sub_issue_count > 0:
         return "has sub-issues"

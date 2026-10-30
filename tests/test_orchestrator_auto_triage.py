@@ -63,6 +63,7 @@ def test_settle_with_it_off_after_off_changes_nothing() -> None:
         ({"labels": ("issuebot/triage-complete",)}, "carries an issuebot label"),
         ({"labels": ("issuebot/operator-step",)}, "carries an issuebot label"),
         ({"parent": 7}, "has a parent issue"),
+        ({"parent_elsewhere": True}, "has a parent issue"),
         ({"sub_issue_count": 2}, "has sub-issues"),
         ({"parent": 7, "sub_issue_count": 2}, "has a parent issue"),
         ({"author": None}, AUTHOR_DELETED),

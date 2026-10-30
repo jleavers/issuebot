@@ -100,7 +100,7 @@ MAX_TERMINAL_PAGES = 150
 
 ISSUE_FIELDS = """fragment IssueFields on Issue {
   number title body bodyHTML state url createdAt updatedAt closedAt authorAssociation
-  parent { number }
+  parent { number repository { nameWithOwner } }
   subIssuesSummary { total }
   author { login }
   labels(first: 50) { nodes { name } }

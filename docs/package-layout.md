@@ -251,12 +251,18 @@ is total in both directions -- `http`/`https` only, a 5 s timeout, a bounded rea
 anything unreadable or unexpected is no reading at all. Shared by the orchestrator's
 `github` dispatch hold and `validate`'s `github.status` check.
 
-`Issue.parent` is the parent's number from each poll's fragment. `parent_steps` reads each
-parent's labels and its sub-issues, with state, in GitHub's order (`ParentSteps`), for many
-parents in one aliased query per tick, at most one page each. It normalises per parent
-(`normalise.parent_record_from_node`, which the fake shares): a malformed record is that
-parent's `UnreadableParent`, not a failure of the read, so the hold and the watch can tell it
-from a parent GitHub did not return at all (#358).
+`Issue.parent` is the parent's number from each poll's fragment, and `None` when the parent is
+in another repository, which GitHub allows (#359): the fragment reads the parent's
+`repository { nameWithOwner }` beside its number, so a parent elsewhere is never read as the
+same-numbered issue here. Triage only files sub-issues in their parent's own repository, so a
+parent elsewhere is outside it, and the field costs no rate-limit points (a poll is still 1).
+Such an issue carries `Issue.parent_elsewhere` instead, so auto-triage still passes it over as
+a sub-issue rather than labelling and splitting a step of someone else's split.
+`parent_steps` reads each parent's labels and its sub-issues, with state, in GitHub's order
+(`ParentSteps`), for many parents in one aliased query per tick, at most one page each. It
+normalises per parent (`normalise.parent_record_from_node`, which the fake shares): a malformed
+record is that parent's `UnreadableParent`, not a failure of the read, so the hold and the watch
+can tell it from a parent GitHub did not return at all (#358).
 
 `billing.py`: the dashboard's Actions minutes reads, made with the billing token through any
 `GhRunnerLike` -- `fetch_login`, `fetch_actions_usage`, `parse_summary` (period from
