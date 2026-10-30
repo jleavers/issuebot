@@ -2067,7 +2067,10 @@ async def test_a_parent_in_another_repository_is_read_as_no_parent() -> None:
     nodes = [child(11, 7, "example/repo"), child(12, 7, "other/repo")]
     runner.on(has("label=issuebot/todo"), stdout=_opened_page(nodes, end_cursor=None))
     issues = await make_adapter(runner).fetch_issues_with_label("issuebot/todo")
-    assert [(issue.number, issue.parent) for issue in issues] == [(11, 7), (12, None)]
+    assert [(issue.number, issue.parent, issue.parent_elsewhere) for issue in issues] == [
+        (11, 7, False),
+        (12, None, True),
+    ]
 
 
 async def test_parent_steps_reads_every_parent_in_one_query() -> None:
