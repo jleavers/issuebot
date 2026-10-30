@@ -6513,6 +6513,80 @@ async def test_an_owed_triage_escape_keeps_the_read_with_no_free_slot(tmp_path: 
     assert h.github.comments_for(1)[-1].body.startswith("### Issuebot triage failed (")
 
 
+async def test_an_owed_triage_escape_is_dropped_once_the_issue_is_taken_back(
+    tmp_path: Path,
+) -> None:
+    """#355: a human who takes `triage-todo` off has taken the issue back, so the note owed on it
+    has nothing left to explain; kept, it would hold the candidate read on every tick."""
+    h = Harness(tmp_path, max_concurrent=1, max_attempts=1)
+    h.add_triage_issue(1)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    failed = {"outcome": "failed", "stop_reason": "failure", "error_category": "turn_failed"}
+    await h.exit(h.triage_sessions.runs[0], **failed, error="boom")
+    assert "1" in h.orchestrator._triage_escapes
+    h.github.human_remove_label(1, h.labels.triage_todo)
+    h.add_issue(2, "todo")
+    reads = len(h.calls("fetch_issues_with_label"))
+    await h.tick()  # the read that finds it gone; the work run takes the one slot
+    assert len(h.calls("fetch_issues_with_label")) == reads + 1
+    assert h.orchestrator._triage_escapes == {}
+    assert [r.issue.number for r in h.sessions.runs] == [2]
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == reads + 1, "no slot and nothing owed"
+    assert h.github.comments_for(1) == []
+
+
+async def test_an_owed_parent_hand_over_is_dropped_once_the_issue_is_taken_back(
+    tmp_path: Path,
+) -> None:
+    """#355: the same for a hand-over refused on a parent with no record, which the watch does
+    not cover, so only the candidate read could ever write it."""
+    h = Harness(
+        tmp_path,
+        max_concurrent=1,
+        max_issue_cost_usd=0.75,
+        initial_ledger={"repo-10": IssueLedger(runs=2, cost_usd=1.0)},
+    )
+    h.add_triage_issue(10)
+    h.github.add_issue("Step 11", number=11)
+    h.github.link_sub_issue(10, 11)
+    h.github.fail_next("transport", on="edit_labels")
+    await h.tick()
+    assert "10" in h.orchestrator._parent_handovers
+    assert 10 not in h.orchestrator._parents
+    h.github.human_remove_label(10, h.labels.triage_todo)
+    h.add_issue(20, "todo")
+    reads = len(h.calls("fetch_issues_with_label"))
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == reads + 1
+    assert h.orchestrator._parent_handovers == {}
+    assert [r.issue.number for r in h.sessions.runs] == [20]
+    await h.tick()
+    assert len(h.calls("fetch_issues_with_label")) == reads + 1, "no slot and nothing owed"
+    assert h.github.comments_for(10) == []
+
+
+async def test_an_owed_hand_over_on_a_watched_parent_survives_the_candidate_read(
+    tmp_path: Path,
+) -> None:
+    """A watched parent wears `triage-complete`, not `triage-todo`, so it is no candidate: its
+    note is the watch's to write, and the candidate read before the watch leaves it owed. The
+    candidate takes the one slot, so a parent whose note was dropped would only be refused."""
+    h = Harness(tmp_path, max_concurrent=1, max_attempts=1, initial_parents=WATCHED)
+    watched_split(h, 10, 11, 12)
+    await h.tick()
+    h.github.fail_next("transport", on="edit_labels")
+    await h.exit(h.triage_sessions.runs[0], stop_reason="max_turns", turns=2)
+    assert "10" in h.orchestrator._parent_handovers
+    h.add_triage_issue(1)
+    await h.tick()
+    assert [r.issue.number for r in h.triage_sessions.runs] == [10, 1]
+    [comment] = h.github.comments_for(10)
+    assert comment.body.startswith("### Issuebot parent review failed (")
+    assert h.orchestrator._parent_handovers == {}
+
+
 async def test_a_triage_candidate_over_the_spend_ceiling_is_handed_back_once(
     tmp_path: Path,
 ) -> None:
