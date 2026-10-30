@@ -555,6 +555,8 @@ async def test_a_parent_in_another_repository_is_no_parent_here(fake: FakeGitHub
     assert await fake.sub_issues(same_number.number) == []
     with pytest.raises(ValueError):
         fake.link_sub_issue(same_number.number, child.number)  # already has a parent
+    with pytest.raises(ValueError):
+        fake.link_foreign_parent(same_number.number, repo=fake.repo.upper(), parent=child.number)
 
 
 async def test_fake_parent_steps(fake: FakeGitHub) -> None:

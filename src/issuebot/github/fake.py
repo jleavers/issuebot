@@ -512,6 +512,8 @@ class FakeGitHub:
     def link_foreign_parent(self, child: int, *, repo: str, parent: int) -> None:
         """Link an existing issue under issue ``parent`` of another repository, which GitHub
         allows (#359). The fake holds only this repository, so the parent has no record."""
+        if repo.lower() == self.repo.lower():
+            raise ValueError(f"{repo} is this repository: use link_sub_issue")
         child_record = self._require_issue(child)
         if child_record.parent is not None:
             raise ValueError(f"#{child} already has a parent: #{child_record.parent}")
