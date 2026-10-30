@@ -6717,6 +6717,7 @@ async def test_a_swapped_parent_whose_approval_read_fails_still_holds_its_steps(
     h.github.human_add_label(10, h.labels.triage_todo, actor="maintainer")
     h.github.fail_next("transport", on="approval_evidence")
     await h.tick()
+    assert (10,) in h.calls("approval_evidence")
     labels = h.github.issue(10).labels
     assert h.labels.triage_todo in labels and h.labels.triage_complete not in labels
     assert h.github.comments_for(10) == []
