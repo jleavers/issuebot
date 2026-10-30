@@ -2175,12 +2175,19 @@ class Orchestrator:
 
         Only those two passes write an owed note, and either keeps the candidate read going with
         no slot free, so a note neither will reach would hold that read on every tick (#355). A
-        refused note never took ``triage-todo`` off (the label write is what failed), so an
-        issue that is no candidate now was taken back -- the label removed, a state label added,
-        the issue closed -- and the note has nothing left to explain. Called after a read that
-        succeeded only: a failed one says nothing about who holds the issue.
+        note is owed because its label write failed, so an issue that is no candidate now was,
+        as a rule, taken back -- the label removed, a state label added, the issue closed -- and
+        the note has nothing left to explain; one whose write landed under an error is no
+        candidate either, and no pass would have written its note again. A verdict still owed
+        writes its own hand-back (``_retry_pending_verdicts``), so its issue is kept too. Called
+        after a read that succeeded only: a failed one says nothing about who holds the issue.
         """
-        keep = candidates | {str(n) for n, record in self._parents.items() if record.watched}
+        keep = (
+            candidates
+            | self._triage_pending.keys()
+            | self._parent_pending.keys()
+            | {str(n) for n, record in self._parents.items() if record.watched}
+        )
         dropped = [
             *(("triage_escape", i) for i in self._triage_escapes if i not in keep),
             *(("parent_hand_over", i) for i in self._parent_handovers if i not in keep),
