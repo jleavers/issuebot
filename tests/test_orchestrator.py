@@ -8032,6 +8032,7 @@ async def test_the_triage_track_is_read_while_dispatch_is_held(tmp_path: Path) -
     await h.tick()
     assert h.orchestrator.snapshot().dispatch_hold is not None
     assert seen == [[60]]
+    assert h.calls("fetch_issues_with_label") == []
 
 
 async def test_a_failed_triage_track_read_is_a_warning_not_a_hold(tmp_path: Path) -> None:

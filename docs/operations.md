@@ -46,12 +46,12 @@ Tokens that belong to one GitHub account share one budget. GitHub allows 5,000 G
 points an hour *per account*, not per token, and the sessions' own `gh` calls and yours spend
 from it too. An idle worker at the default `polling.interval_ms` spends about 650 of them an
 hour -- 120 polls of five points each (one per state label, and one for the triage-track read,
-which feeds the dashboard's columns and, in a worker with a store, is also where dispatch finds
-its triage candidates), plus about 50 for the terminal sweep, while no label holds more than 33
-open issues. A worker without a store makes no track read, and reads `triage-todo` alone for its
-candidates instead, for the same point. The track read pages on the *union* of the two triage
-labels, and that union includes every open issue still wearing `triage-complete` beside a state
-label, so it is that count, not `triage-todo`'s alone, that has to stay under 33. It is also
+which feeds the dashboard's columns and is also where dispatch finds its triage candidates),
+plus about 50 for the terminal sweep, while no label holds more than 33 open issues. A worker
+without a store makes no track read and reads `triage-todo` alone for its candidates instead,
+for the same point, skipping even that on a tick with every slot full. The track read pages on
+the *union* of the two triage labels, and that union includes every open issue still wearing
+`triage-complete` beside a state label, so it is that count, not `triage-todo`'s alone, that has to stay under 33. It is also
 that count that meets the read's ceiling of 30 pages first; when it does, the dashboard's two
 columns stop updating and `triage_track_fetch_failed` is logged on every poll, but triage
 dispatch falls back to its own read of `triage-todo`, so it carries on until *that* label alone
