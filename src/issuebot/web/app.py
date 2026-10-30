@@ -224,6 +224,24 @@ class _Liveness:
             return ok
 
 
+class _RevalidatedStaticFiles(StaticFiles):
+    """The static files, each sent with ``Cache-Control: no-cache``.
+
+    Starlette sends a Last-Modified and an ETag and no Cache-Control, and on that a browser may
+    reuse its copy without asking for a tenth of the copy's age -- days, for a stylesheet a few
+    weeks old. So a deploy's new app.css did not reach a browser that held the old one: the
+    seven-column board drew through the five-column stylesheet, two columns on a second row.
+    ``no-cache`` keeps the copy and has it revalidated on every load, which costs a 304 when the
+    file is unchanged. The header goes on after the 304 is chosen because ``NotModifiedResponse``
+    carries Cache-Control over from the response it replaces, so both shapes leave with it.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class _SecureExit:
     """ASGI middleware: the security headers on every response, the raised ones included (#106).
 
@@ -348,7 +366,7 @@ def create_app(
     log = get_logger(__name__)
     refreshes: dict[str, _Refresh] = {}
     env = template_environment()
-    app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
+    app.mount("/static", _RevalidatedStaticFiles(directory=str(STATIC_ROOT)), name="static")
 
     def render(
         name: str,

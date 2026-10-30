@@ -961,6 +961,39 @@ def test_static_files_are_served(h: Harness) -> None:
     assert h.client.get("/static/nope.css").status_code == 404
 
 
+def test_a_browser_asks_before_it_reuses_a_static_file(h: Harness) -> None:
+    """A deploy that changes the stylesheet reaches a browser that already holds the old one.
+
+    The static files used to leave with a Last-Modified and an ETag and no Cache-Control, which
+    lets a browser reuse its copy without asking for a tenth of that copy's age. The first
+    deploy after the seven-column board was found that way: a cached five-column app.css under
+    the new markup, and rework and complete wrapped onto a second row. `no-cache` keeps the
+    copy but has it revalidated, so an unchanged file costs a 304 and a changed one arrives.
+    """
+    css = h.client.get("/static/app.css")
+    assert css.headers["cache-control"] == "no-cache"
+    again = h.client.get("/static/app.css", headers={"If-None-Match": css.headers["etag"]})
+    assert again.status_code == 304 and again.headers["cache-control"] == "no-cache"
+    for path in ("/static/app.js", "/static/theme.js", "/static/vendor/htmx.min.js"):
+        assert h.client.get(path).headers["cache-control"] == "no-cache", path
+
+
+def test_the_board_takes_the_whole_window_and_the_other_pages_keep_their_measure(
+    h: Harness,
+) -> None:
+    """Seven columns want every pixel a full-screen window has; a transcript does not.
+
+    `main` is capped at 1500px for the pages that are read, and the dashboard alone lifts the
+    cap: under it, a 1920px window left the board 1460px wide with 210px blank either side.
+    """
+    h.seed_issue()
+    assert '<main class="wide">' in html(h.client.get(f"{BASE}/"))
+    for url in (f"{BASE}/issues", f"{BASE}/issues/7", f"{BASE}/issues/7/runs/{RUN_ID}/turns/1"):
+        assert "<main>" in html(h.client.get(url)), url
+    assert css_declarations("main {")["max-width"] == "1500px"
+    assert css_declarations("main.wide {")["max-width"] == "none"
+
+
 def test_an_unknown_page_is_a_404_page(h: Harness) -> None:
     response = h.client.get("/nothing")
     assert response.status_code == 404
