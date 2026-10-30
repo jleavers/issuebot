@@ -79,13 +79,26 @@ class FakeRun:
     """Records every subprocess the tool would run, and answers each one.
 
     `fail` maps a verb -- the word the tool's own phase uses, `stop`, `build`, `validate`,
-    `up` -- to the checkout name it should fail for.
+    `up`, `fetch` -- to the checkout name it should fail for, and `output` is what that failure
+    printed. `origins` maps a checkout name to its `origin` URL, and `ssh_add` is the exit code of
+    `ssh-add -l`.
     """
 
-    def __init__(self, fail: dict[str, str] | None = None, example: str = "") -> None:
+    def __init__(
+        self,
+        fail: dict[str, str] | None = None,
+        example: str = "",
+        *,
+        output: str = "",
+        origins: dict[str, str] | None = None,
+        ssh_add: int = 0,
+    ) -> None:
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.fail = fail or {}
         self.example = example
+        self.output = output
+        self.origins = origins or {}
+        self.ssh_add = ssh_add
 
     def __call__(
         self,
@@ -99,7 +112,12 @@ class FakeRun:
         self.calls.append((name, tuple(argv)))
         verb = self._verb(tuple(argv))
         if self.fail.get(verb) == name:
-            return upgrade.RunResult(returncode=1, stdout="")
+            return upgrade.RunResult(returncode=1, stdout=self.output)
+        if verb == "origin":
+            origin = self.origins.get(name)
+            return upgrade.RunResult(returncode=0 if origin else 2, stdout=origin or "")
+        if verb == "ssh-add":
+            return upgrade.RunResult(returncode=self.ssh_add, stdout="")
         if verb == "example":
             return upgrade.RunResult(returncode=0, stdout=self.example)
         if verb == "ps":
@@ -112,6 +130,12 @@ class FakeRun:
             return "example"
         if argv[:2] == ("git", "merge"):
             return "merge"
+        if argv[:2] == ("git", "fetch"):
+            return "fetch"
+        if argv[:3] == ("git", "remote", "get-url"):
+            return "origin"
+        if argv[:1] == ("ssh-add",):
+            return "ssh-add"
         if "stop" in argv:
             return "stop"
         if "build" in argv:
@@ -456,3 +480,154 @@ def test_mixed_branches_are_reported_but_do_not_stop_the_run() -> None:
 
     assert code == 0
     assert any("branch" in line for line in printed)
+
+
+# ---------------------------------------------------------------------------
+# Inspection: why a fetch failed, and the passphrase asked once per checkout (#353)
+# ---------------------------------------------------------------------------
+TOKEN = "ghp_a-token-nobody-should-see"
+
+
+def _deployments(root: Path, *names: str) -> list[Path]:
+    """Directories `inspect_checkout` gets past its own checks on, for `FakeRun` to answer."""
+    return [_fake_checkout(_mkdir(root / name), git_is_a_directory=True) for name in names]
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+def test_a_failed_fetch_says_why_under_its_fail_line(tmp_path: Path) -> None:
+    """`Permission denied (publickey)` and `Repository not found` call for different fixes."""
+    printed: list[str] = []
+    run = FakeRun(
+        fail={"fetch": "issuebot-two"},
+        output=(
+            "remote: Repository not found.\n"
+            f"fatal: repository 'https://jleavers:{TOKEN}@github.com/jleavers/gone.git/'"
+            " not found\n"
+        ),
+    )
+
+    checkouts, refused = upgrade.inspect_all(
+        _deployments(tmp_path, "issuebot", "issuebot-two"), run, printed.append
+    )
+
+    assert refused
+    assert [c.name for c in checkouts] == ["issuebot"]
+    report = "\n".join(printed)
+    fail = report.index("[fail] issuebot-two: git fetch origin failed")
+    assert report.index("    remote: Repository not found.") > fail
+    assert "https://***@github.com/jleavers/gone.git/" in report
+    assert TOKEN not in report
+    assert "jleavers:" not in report
+
+
+def test_a_failed_fetch_shows_only_the_last_lines(tmp_path: Path) -> None:
+    printed: list[str] = []
+    output = "".join(f"line {n}\n" for n in range(20))
+    run = FakeRun(fail={"fetch": "issuebot"}, output=output)
+
+    upgrade.inspect_all(_deployments(tmp_path, "issuebot"), run, printed.append)
+
+    shown = [line for line in "\n".join(printed).splitlines() if line.startswith("    line ")]
+    assert shown == [f"    line {n}" for n in range(20 - upgrade.FAILURE_TAIL, 20)]
+
+
+def test_a_successful_fetch_prints_nothing_new(tmp_path: Path) -> None:
+    printed: list[str] = []
+    run = FakeRun(output="From github.com:jleavers/issuebot\n")
+
+    checkouts, refused = upgrade.inspect_all(
+        _deployments(tmp_path, "issuebot"), run, printed.append
+    )
+
+    assert not refused
+    assert [c.name for c in checkouts] == ["issuebot"]
+    assert printed == ["==> Inspecting 1 checkout(s)"]
+
+
+@pytest.mark.parametrize("exit_code", [1, 2])
+def test_ssh_origins_without_an_agent_get_one_note(tmp_path: Path, exit_code: int) -> None:
+    """Without it, a correct passphrase and a rejected one look the same: the next prompt."""
+    printed: list[str] = []
+    run = FakeRun(
+        origins={
+            "issuebot": "git@github.com:jleavers/issuebot.git",
+            "issuebot-two": "ssh://git@github.com/jleavers/issuebot.git",
+            "issuebot-three": "https://github.com/jleavers/issuebot.git",
+        },
+        ssh_add=exit_code,
+    )
+
+    upgrade.inspect_all(
+        _deployments(tmp_path, "issuebot", "issuebot-two", "issuebot-three"), run, printed.append
+    )
+
+    notes = [line for line in printed if "[note]" in line]
+    assert len(notes) == 1
+    report = "\n".join(printed)
+    assert "once per checkout (2)" in report
+    assert "ssh-add" in report
+    # Before the first fetch, which is where the first prompt appears.
+    verbs = [FakeRun._verb(argv) for _name, argv in run.calls]
+    assert verbs.index("ssh-add") < verbs.index("fetch")
+    assert verbs.count("ssh-add") == 1
+
+
+def test_no_note_when_every_origin_is_https(tmp_path: Path) -> None:
+    printed: list[str] = []
+    run = FakeRun(
+        origins={
+            "issuebot": "https://github.com/jleavers/issuebot.git",
+            "issuebot-two": "https://github.com/jleavers/issuebot",
+        },
+        ssh_add=2,
+    )
+
+    upgrade.inspect_all(_deployments(tmp_path, "issuebot", "issuebot-two"), run, printed.append)
+
+    assert not any("[note]" in line for line in printed)
+
+
+def test_no_note_when_the_agent_holds_a_key(tmp_path: Path) -> None:
+    printed: list[str] = []
+    run = FakeRun(origins={"issuebot": "git@github.com:jleavers/issuebot.git"}, ssh_add=0)
+
+    upgrade.inspect_all(_deployments(tmp_path, "issuebot"), run, printed.append)
+
+    assert not any("[note]" in line for line in printed)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("git@github.com:jleavers/issuebot.git", True),
+        ("github.com:jleavers/issuebot", True),
+        ("ssh://git@github.com:22/jleavers/issuebot.git", True),
+        ("git+ssh://git@github.com/jleavers/issuebot.git", True),
+        ("https://github.com/jleavers/issuebot.git", False),
+        ("https://user:token@github.com/jleavers/issuebot.git", False),
+        ("file:///srv/git/issuebot.git", False),
+        ("/srv/git/issuebot.git", False),
+    ],
+)
+def test_is_ssh_url(url: str, expected: bool) -> None:
+    assert upgrade.is_ssh_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"fatal: unable to access 'https://jleavers:{TOKEN}@github.com/x/y.git/'",
+            "fatal: unable to access 'https://***@github.com/x/y.git/'",
+        ),
+        ("https://x-access-token@github.com/x/y", "https://***@github.com/x/y"),
+        ("https://github.com/x/y", "https://github.com/x/y"),
+        ("Permission denied (publickey).", "Permission denied (publickey)."),
+    ],
+)
+def test_mask_credentials(text: str, expected: str) -> None:
+    assert upgrade.mask_credentials(text) == expected

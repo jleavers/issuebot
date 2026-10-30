@@ -101,7 +101,11 @@ works. If the checkouts are not all on the same branch it says so and carries on
 serves them all, so a schema applied by the newest code will stop an older worker starting, but a
 deployment may be pinning one deliberately and that is not this tool's call.
 
-## Two things worth knowing
+## Three things worth knowing
+
+With a passphrase-protected SSH key, load it into an agent (`ssh-add`) before running the script:
+otherwise git asks for the passphrase once per checkout, and a correct entry prints nothing before
+the next checkout's identical prompt.
 
 `validate` also fails on a lapsed `CLAUDE_CODE_OAUTH_TOKEN`, which is a real problem but not this
 upgrade's. That worker is left stopped; `--skip-validate` restarts it anyway, into the dispatch

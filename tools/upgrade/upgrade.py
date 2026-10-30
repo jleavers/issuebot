@@ -456,6 +456,26 @@ def _summarise(checkouts: Sequence[Checkout], ctx: Context, state: _State) -> in
 # ---------------------------------------------------------------------------
 # The edges: subprocesses, discovery, inspection
 # ---------------------------------------------------------------------------
+_URL_CREDENTIALS = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@")
+
+# How much of a failed command's output to show under its `[fail]` line: git puts the reason last.
+FAILURE_TAIL = 5
+
+
+def mask_credentials(text: str) -> str:
+    """`https://user:token@host/...` -> `https://***@host/...`, for any URL in the text.
+
+    The tool never prints a secret, and a remote URL is where one sits in a command's output.
+    """
+    return _URL_CREDENTIALS.sub(r"\1***@", text)
+
+
+def failure_detail(output: str, limit: int = FAILURE_TAIL) -> list[str]:
+    """The last lines of a failed command's output, masked and indented as `run_command` echoes."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    return [f"    {mask_credentials(line)}" for line in lines[-limit:]]
+
+
 def run_command(
     argv: Sequence[str], *, cwd: Path, log: Path | None = None, quiet: bool = False
 ) -> RunResult:
@@ -501,9 +521,20 @@ def looks_like_a_checkout(path: Path) -> bool:
     return (path / COMPOSE_FILE).is_file() and (path / ".git").is_dir()
 
 
-def origin_of(path: Path) -> str | None:
-    result = run_command(["git", "remote", "get-url", "origin"], cwd=path, quiet=True)
+def origin_of(path: Path, run: Callable[..., RunResult] = run_command) -> str | None:
+    result = run(["git", "remote", "get-url", "origin"], cwd=path, quiet=True)
     return result.stdout.strip() if result.ok else None
+
+
+def is_ssh_url(url: str) -> bool:
+    """Whether git reaches this remote over SSH: `ssh://...`, or scp-like `[user@]host:path`.
+
+    The same two spellings `repository_of` tells apart; a local path is neither.
+    """
+    text = url.strip()
+    if "://" in text:
+        return urllib.parse.urlsplit(text).scheme.lower() in {"ssh", "git+ssh", "ssh+git"}
+    return ":" in text.split("/", 1)[0]
 
 
 def repository_of(url: str) -> str:
@@ -548,8 +579,14 @@ def discover(start: Path) -> list[Path]:
     return found
 
 
-def inspect_checkout(path: Path) -> tuple[Checkout | None, str | None]:
-    """Fetch, then read everything the phases need. `(checkout, None)` or `(None, why not)`."""
+def inspect_checkout(
+    path: Path, run: Callable[..., RunResult] = run_command
+) -> tuple[Checkout | None, str | None]:
+    """Fetch, then read everything the phases need. `(checkout, None)` or `(None, why not)`.
+
+    A failed fetch's reason carries the last lines git printed, masked, on lines of their own:
+    `Permission denied (publickey)` and `Repository not found` call for different fixes.
+    """
     if not path.is_dir():
         return None, f"no such directory: {path}"
     if not (path / COMPOSE_FILE).is_file():
@@ -557,25 +594,24 @@ def inspect_checkout(path: Path) -> tuple[Checkout | None, str | None]:
     if not (path / ".git").exists():
         return None, "not a git checkout"
 
-    if not run_command(["git", "fetch", "--quiet", "origin"], cwd=path, quiet=True).ok:
-        return None, "git fetch origin failed"
+    fetched = run(["git", "fetch", "--quiet", "origin"], cwd=path, quiet=True)
+    if not fetched.ok:
+        return None, "\n".join(["git fetch origin failed", *failure_detail(fetched.stdout)])
 
-    branch = run_command(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path, quiet=True
-    ).stdout.strip()
+    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path, quiet=True).stdout.strip()
 
-    tracked = run_command(
+    tracked = run(
         ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         cwd=path,
         quiet=True,
     )
     upstream = tracked.stdout.strip() if tracked.ok else None
 
-    dirty = bool(run_command(["git", "status", "--porcelain"], cwd=path, quiet=True).stdout.strip())
+    dirty = bool(run(["git", "status", "--porcelain"], cwd=path, quiet=True).stdout.strip())
 
     ahead = behind = 0
     if upstream:
-        counts = run_command(
+        counts = run(
             ["git", "rev-list", "--left-right", "--count", f"{upstream}...HEAD"],
             cwd=path,
             quiet=True,
@@ -584,7 +620,7 @@ def inspect_checkout(path: Path) -> tuple[Checkout | None, str | None]:
         if counts.ok and len(parts) == 2:
             behind, ahead = int(parts[0]), int(parts[1])
 
-    services = run_command(["docker", "compose", "config", "--services"], cwd=path, quiet=True)
+    services = run(["docker", "compose", "config", "--services"], cwd=path, quiet=True)
     if not services.ok:
         return None, "docker compose config --services failed"
 
@@ -600,6 +636,63 @@ def inspect_checkout(path: Path) -> tuple[Checkout | None, str | None]:
         ),
         None,
     )
+
+
+def passphrase_note(
+    paths: Sequence[Path], run: Callable[..., RunResult] = run_command
+) -> list[str]:
+    """One note when git may ask for an SSH key's passphrase once per checkout, else nothing.
+
+    Each checkout fetches in turn, and with a passphrase-protected key and no agent holding it
+    ssh asks on the terminal every time, in identical words. A correct entry prints nothing (the
+    fetch is quiet and captured) before the next checkout's prompt appears, so it reads exactly
+    like a rejected one. `ssh-add -l` exits 1 when the agent holds no identities and 2 when no
+    agent is reachable. A note rather than a refusal: a key without a passphrase needs no agent,
+    and nothing here can tell which kind it is.
+    """
+    over_ssh = [
+        path
+        for path in paths
+        if path.is_dir() and (origin := origin_of(path, run)) is not None and is_ssh_url(origin)
+    ]
+    if not over_ssh:
+        return []
+    try:
+        agent = run(["ssh-add", "-l"], cwd=over_ssh[0], quiet=True)
+    except OSError:
+        # No `ssh-add` at all: no agent to hold the key either.
+        why = "no ssh-add found"
+    else:
+        if agent.ok:
+            return []
+        why = f"ssh-add -l exited {agent.returncode}"
+    count = len(over_ssh)
+    return [
+        f"  [note] {count} checkout(s) fetch over SSH, and no SSH agent holds a key ({why}).",
+        f"         If the key has a passphrase, git will ask for it once per checkout ({count}),",
+        "         with no confirmation in between: run `ssh-add` first to be asked only once.",
+    ]
+
+
+def inspect_all(
+    paths: Sequence[Path],
+    run: Callable[..., RunResult] = run_command,
+    out: Callable[[str], None] = print,
+) -> tuple[list[Checkout], bool]:
+    """Inspect every checkout, saying why each refusal happened. `(checkouts, any refused)`."""
+    out(f"==> Inspecting {len(paths)} checkout(s)")
+    for line in passphrase_note(paths, run):
+        out(line)
+    checkouts: list[Checkout] = []
+    refused = False
+    for path in paths:
+        checkout, problem = inspect_checkout(path, run)
+        if checkout is None:
+            out(f"  [fail] {path.name}: {problem}")
+            refused = True
+            continue
+        checkouts.append(checkout)
+    return checkouts, refused
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -647,16 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     paths = [Path(p).expanduser().resolve() for p in args.checkout] or discover(HERE)
 
-    print(f"==> Inspecting {len(paths)} checkout(s)")
-    checkouts: list[Checkout] = []
-    refused = False
-    for path in paths:
-        checkout, problem = inspect_checkout(path)
-        if checkout is None:
-            print(f"  [fail] {path.name}: {problem}")
-            refused = True
-            continue
-        checkouts.append(checkout)
+    checkouts, refused = inspect_all(paths)
 
     if not checkouts:
         print("  no checkouts to upgrade")
