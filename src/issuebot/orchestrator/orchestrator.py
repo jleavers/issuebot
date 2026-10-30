@@ -351,6 +351,20 @@ class _WorkerExited:
     issue_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _TrackRead:
+    """One dispatching tick's read of the triage track, shared by triage dispatch and the store.
+
+    ``issues`` is None when the read failed, and ``ceiling`` says whether it failed on
+    ``PageCeilingError``: the union pages on more issues than ``triage-todo`` alone, so triage
+    dispatch falls back to its own read of that one label then, rather than losing dispatch
+    sooner than it did before the read was shared (#366).
+    """
+
+    issues: Sequence[Issue] | None
+    ceiling: bool = False
+
+
 _REFRESH = object()
 _STOP = object()
 
@@ -1057,10 +1071,15 @@ class Orchestrator:
                 # A parent review next (section 6): it is short too, and what it unblocks is the
                 # parent's next batch. Auto-triage's scan before both, though an issue it labels
                 # is left by this tick's triage pass and started on the next.
+                # The verdicts owed are filed before the track is read, so the store sees them
+                # this tick; and the track is read once, after the scan, for both triage
+                # dispatch and the store (#366).
                 await self._scan_for_auto_triage()
-                dispatched = await self._dispatch_triage()
+                await self._retry_pending_verdicts()
+                track = await self._read_triage_track()
+                dispatched = await self._dispatch_triage(track)
                 dispatched += await self._dispatch_parent_reviews()
-                dispatched += await self._dispatch_candidates()
+                dispatched += await self._dispatch_candidates(track)
         # Whatever the holds: removing a clone asks nothing of GitHub or of claude.
         await self._discard_triage_workspaces()
         self._settle_dispatch_hold()
@@ -1209,8 +1228,12 @@ class Orchestrator:
     def _conflict_limit(self) -> int:
         return self._workflow.config.agent.max_conflict_reworks
 
-    async def _fetch_issues(self) -> Sequence[Issue] | None:
-        """The polled issues, reported to the observer; None when the fetch failed."""
+    async def _fetch_issues(self, track: _TrackRead | None = None) -> Sequence[Issue] | None:
+        """The polled issues, reported to the observer; None when the fetch failed.
+
+        ``track`` is the triage track this tick has already read, if it has; otherwise the
+        store's read is made here.
+        """
         states = fetch_states(
             observed=self._on_issues is not None, conflicts=self._conflict_limit() > 0
         )
@@ -1222,22 +1245,23 @@ class Orchestrator:
             return None
         self._note_fetch_success()
         self._report_issues(issues)
-        await self._observe_triage_track()
+        await self._observe_triage_track(track)
         await self._bounce_conflicts(issues)
         return issues
 
-    async def _observe_triage_track(self) -> None:
-        """Hand the store every open issue on the triage track; a failed read is a warning.
+    async def _read_triage_track(self) -> _TrackRead | None:
+        """Every open issue on the triage track, in one read; None in a worker without a store.
 
         The board poll reads by state label, so it never sees an issue waiting in Triaged; this
-        is the one extra read that does (triage spec section 7, rulings 4 and 5), and its answer
-        is the complete set, so the store reconciles against it. Only a worker with a store makes
-        it. A failure is deliberately outside the GitHub hold (#88): it neither counts towards
-        the hold nor resets the count, as the triage candidates' read does not, because the
-        board is not what dispatch depends on and a failed read reconciles nothing.
+        is the one extra read that does (triage spec section 7, rulings 4 and 5). Only a worker
+        with a store makes it, and a dispatching tick makes it once, for the store and for triage
+        dispatch both (#366): its answer holds every open `triage-todo` issue, which is what the
+        candidates' own read would fetch. A failure is deliberately outside the GitHub hold
+        (#88): it neither counts towards the hold nor resets the count, because the board is
+        not what dispatch depends on and a failed read reconciles nothing.
         """
         if self._on_triage_track is None:
-            return
+            return None
         labels = self._workflow.config.github.labels
         try:
             issues = await self._adapter.fetch_issues_with_any_label(
@@ -1245,7 +1269,20 @@ class Orchestrator:
             )
         except GitHubError as exc:
             self._log.warning("triage_track_fetch_failed", error=str(exc))
+            return _TrackRead(None, ceiling=isinstance(exc, PageCeilingError))
+        return _TrackRead(issues)
+
+    async def _observe_triage_track(self, track: _TrackRead | None = None) -> None:
+        """Hand the store every open issue on the triage track, read now unless ``track`` is
+        this tick's read already; its answer is the complete set, so the store reconciles
+        against it. A failed read hands over nothing."""
+        if self._on_triage_track is None:
             return
+        if track is None:
+            track = await self._read_triage_track()
+        if track is None or track.issues is None:
+            return
+        issues = track.issues
         try:
             self._on_triage_track(issues)
         except Exception:
@@ -1412,8 +1449,8 @@ class Orchestrator:
         # one leaves it, so the next tick tries again -- the issue is still a candidate.
         self._record_escape(issue.identifier, outcome)
 
-    async def _dispatch_candidates(self) -> int:
-        issues = await self._fetch_issues()
+    async def _dispatch_candidates(self, track: _TrackRead | None = None) -> int:
+        issues = await self._fetch_issues(track)
         if issues is None:
             return 0
         dispatched = 0
@@ -2019,27 +2056,33 @@ class Orchestrator:
 
     # --- triage (spec 2026-10-25-triage-design.md) ---------------------------------------
 
-    async def _dispatch_triage(self) -> int:
-        """File what is owed, then start a triage run for each candidate the gate admits, or a
-        parent review for one that has sub-issues (section 1).
+    async def _dispatch_triage(self, track: _TrackRead | None) -> int:
+        """Start a triage run for each candidate the gate admits, or a parent review for one
+        that has sub-issues (section 1); the tick has filed what is owed first.
 
-        The candidates are a read of their own -- one label, open issues only -- rather than a
-        field of the board's poll, which fetches by state label and so never sees an issue on
-        the triage track. A failure of that read is not counted towards the GitHub hold (#88):
-        the hold is the board's, and the board's own poll follows in this tick to answer it.
+        The candidates are not a field of the board's poll, which fetches by state label and so
+        never sees an issue on the triage track. In a worker with a store they are filtered out
+        of ``track``, this tick's read of the whole track (#366); without one, or when that read
+        stopped at its page ceiling, they are a read of their own -- one label, open issues only.
+        A failure of either read is not counted towards the GitHub hold (#88): the hold is the
+        board's, and the board's own poll follows in this tick to answer it.
         """
-        await self._retry_pending_verdicts()
-        if self._slots() == 0 and not self._triage_escapes and not self._parent_handovers:
+        labels = self._workflow.config.github.labels
+        if track is not None and track.issues is not None:
+            issues = track.issues
+        elif track is not None and not track.ceiling:
+            return 0  # the shared read failed, and has said so
+        elif self._slots() == 0 and not self._triage_escapes and not self._parent_handovers:
             # Section 9: every deployment shares the account's hourly GraphQL budget, and with
             # no slot to fill the gate would refuse the first candidate on `slots` anyway. An
             # escape or hand-over note still owed needs no slot, so it keeps the read.
             return 0
-        labels = self._workflow.config.github.labels
-        try:
-            issues = await self._adapter.fetch_issues_with_label(labels.triage_todo)
-        except GitHubError as exc:
-            self._log.warning("triage_fetch_failed", error=str(exc))
-            return 0
+        else:
+            try:
+                issues = await self._adapter.fetch_issues_with_label(labels.triage_todo)
+            except GitHubError as exc:
+                self._log.warning("triage_fetch_failed", error=str(exc))
+                return 0
         dispatched = 0
         for issue in issues:
             if not is_triage_candidate(issue, labels):

@@ -76,9 +76,12 @@ The Kanban has seven columns, in this order: `issuebot/triage-todo`, `issuebot/t
 - A triage run, and a review of a split parent, show in Running marked `(triage)` or
   `(parent review)`. The cards themselves carry no progress.
 - A worker with a store reads the triage track once a poll, for 1 GraphQL point a page of 33,
-  and an issue closed or unlabelled on GitHub leaves its column on the next poll. That is one
-  more point a poll, beside the read of `triage-todo` that dispatch already makes for its own
-  candidates, not instead of it.
+  and an issue closed or unlabelled on GitHub leaves its column on the next poll. It costs no
+  more than a worker without a store spends: dispatch finds its triage candidates in the same
+  answer rather than reading `triage-todo` again, so a poll makes one read of the triage labels,
+  not two. Should the union pass the read's 30-page ceiling, the two columns stop updating while
+  dispatch falls back to its own read of `triage-todo`
+  ([`docs/operations.md`](operations.md#more-than-one-repository)).
 - Renaming `github.labels.triage_todo` or `triage_complete` reaches the board after a worker
   restart: the store computes the track with the labels it started with, and the registry's
   column headings are written at start too.

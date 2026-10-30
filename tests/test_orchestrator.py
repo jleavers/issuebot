@@ -7932,6 +7932,89 @@ async def test_the_triage_track_is_read_once_per_poll_when_a_store_watches(tmp_p
     assert seen == [[60, 61], [60, 61]]
 
 
+async def test_a_dispatching_tick_with_a_store_reads_the_triage_labels_once(
+    tmp_path: Path,
+) -> None:
+    """#366: triage dispatch filters the track read's answer rather than reading `triage-todo`
+    again, so a dispatching tick in a worker with a store asks GitHub for the labels once. The
+    candidates are the ones the single-label read would have given, oldest first."""
+    seen: list[list[int]] = []
+    h = Harness(
+        tmp_path,
+        max_concurrent=3,
+        on_triage_track=lambda issues: seen.append([i.number for i in issues]),
+    )
+    opened = datetime(2026, 9, 1, tzinfo=UTC)
+    for number, days in ((5, 3), (6, 1), (7, 4), (8, 2)):
+        # #7 wears a state label beside `triage-todo`, so it is on the track but no candidate.
+        state = ["issuebot/review"] if number == 7 else []
+        h.github.add_issue(
+            f"Issue {number}", number=number, labels=state, created_at=opened + timedelta(days)
+        )
+        h.github.human_add_label(number, h.labels.triage_todo, actor="maintainer")
+    h.github.add_issue("seventy", number=70, labels=["issuebot/triage-complete"], created_at=opened)
+    await h.tick()
+    assert track_reads(h) == [(("issuebot/triage-todo", "issuebot/triage-complete"),)]
+    assert h.calls("fetch_issues_with_label") == []
+    assert [r.issue.number for r in h.triage_sessions.runs] == [6, 8, 5]
+    assert seen == [[70, 6, 8, 5, 7]]
+
+
+async def test_with_a_store_and_no_free_slot_the_track_read_is_the_only_triage_read(
+    tmp_path: Path,
+) -> None:
+    """#366: the no-slot skip saved the candidates' own read; with a store the track is read on
+    every poll anyway, so a full tick makes that one read and no other."""
+    h = Harness(tmp_path, max_concurrent=1, on_triage_track=lambda issues: None)
+    h.add_issue(1, "todo")
+    await h.tick()
+    assert len(h.sessions.runs) == 1
+    h.add_triage_issue(2)
+    before = len(track_reads(h))
+    await h.tick()
+    assert len(track_reads(h)) == before + 1
+    assert h.calls("fetch_issues_with_label") == []
+    assert h.triage_sessions.runs == []
+
+
+async def test_a_track_read_at_its_page_ceiling_leaves_triage_its_own_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#366: the union pages on every open issue still wearing `triage-complete` as well, so it
+    reaches `MAX_ISSUE_PAGES` before `triage-todo` alone does. Dispatch then reads that label
+    itself, as it did before the read was shared, and the store is handed nothing."""
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    h.add_triage_issue(2)
+
+    async def overgrown(labels: Sequence[str]) -> Any:
+        raise PageCeilingError("more than 990 issues carry the triage labels")
+
+    monkeypatch.setattr(h.github, "fetch_issues_with_any_label", overgrown)
+    with capture_logs() as logs:
+        await h.tick()
+    assert h.calls("fetch_issues_with_label") == [("issuebot/triage-todo",)]
+    assert [r.issue.number for r in h.triage_sessions.runs] == [2]
+    assert seen == []
+    assert [entry["event"] for entry in logs].count("triage_track_fetch_failed") == 1
+    assert h.orchestrator.snapshot().dispatch_hold is None
+
+
+async def test_a_failed_shared_track_read_skips_triage_dispatch_for_the_tick(
+    tmp_path: Path,
+) -> None:
+    """#366: any other failure of the shared read is the one warning, as a failure of either
+    read was before; triage dispatch reads nothing more and tries again on the next tick."""
+    h = Harness(tmp_path, on_triage_track=lambda issues: None)
+    h.add_triage_issue(2)
+    h.github.fail_next("transport", on="fetch_issues_with_any_label")
+    await h.tick()
+    assert h.calls("fetch_issues_with_label") == []
+    assert h.triage_sessions.runs == []
+    await h.tick()
+    assert [r.issue.number for r in h.triage_sessions.runs] == [2]
+
+
 async def test_no_store_no_triage_track_read(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     await h.tick()

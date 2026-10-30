@@ -1065,7 +1065,7 @@ widening.
 
 ## `issuebot.orchestrator`
 
-`_observe_triage_track` is the once-a-poll read of the two triage labels for the store, made in `_fetch_issues` and kept out of the GitHub dispatch hold (#88), which is the board poll's.
+`_read_triage_track` is the once-a-poll read of the two triage labels for the store, kept out of the GitHub dispatch hold (#88), which is the board poll's. A held tick makes it in `_fetch_issues`, through `_observe_triage_track`; a dispatching tick makes it once, ahead of `_dispatch_triage`, and hands the same `_TrackRead` to triage dispatch, which filters its candidates out of it, and to the store (#366). Without a store, or when that read stops at its page ceiling, `_dispatch_triage` reads `triage-todo` itself.
 
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
 the one gate every claim goes through: `admit(AdmissionRequest)` answers, in the order the
