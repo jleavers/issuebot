@@ -364,18 +364,18 @@ class _WorkerExited:
 class _ParentRead:
     """A tick's one ``parent_steps`` read, shared by the parent watch and the order hold (#357).
 
-    ``watched`` is what the watch asked for and ``held`` what the hold asked for, each empty
+    ``watched`` is what the watch asked for and ``ordered`` what the hold asked for, each empty
     while its own gate is shut; ``steps`` answers both, and is ``None`` when the read failed.
     """
 
     watched: tuple[int, ...]
-    held: tuple[int, ...]
+    ordered: tuple[int, ...]
     steps: Mapping[int, ParentSteps] | None
 
     @property
     def for_hold(self) -> Mapping[int, ParentSteps] | None:
         """The hold's view: nothing read while its gate was shut, so nothing to hold on."""
-        return self.steps if self.held else {}
+        return self.steps if self.ordered else {}
 
 
 _REFRESH = object()
@@ -1557,34 +1557,37 @@ class Orchestrator:
         A watched parent is one whose steps are still open, which is when they are `todo`
         candidates, so the two sets overlap heavily, and every deployment shares the account's
         hourly GraphQL budget (spec 2026-10-25, section 9). The read is the union of what each
-        asks for under its own gate -- ``_watched_parents`` and ``_held_parents`` -- and is made
+        asks for under its own gate -- ``_watched_parents`` and ``_ordered_parents`` -- and is made
         when either is open. A failed read is logged as each reader logged its own: the watch
         skips this tick, and the hold holds the poll's sub-issues for this poll only (they are
         given an unreadable ``OrderHold``). Neither feeds the GitHub hold, which is the board's.
         """
         watched = self._watched_parents()
-        held = self._held_parents(issues)
-        wanted = sorted({*watched, *held})
+        ordered = self._ordered_parents(issues)
+        wanted = sorted({*watched, *ordered})
         if not wanted:
-            return _ParentRead(watched, held, {})
+            return _ParentRead(watched, ordered, {})
         try:
             steps = await self._adapter.parent_steps(wanted)
         except GitHubError as exc:
             if watched:
                 self._log.warning("parent_watch_failed", error=str(exc), parents=list(watched))
-            if held:
-                self._log.warning("parent_steps_failed", error=str(exc), parents=list(held))
-            return _ParentRead(watched, held, None)
-        return _ParentRead(watched, held, steps)
+            if ordered:
+                self._log.warning("parent_steps_failed", error=str(exc), parents=list(ordered))
+            return _ParentRead(watched, ordered, None)
+        return _ParentRead(watched, ordered, steps)
 
-    def _held_parents(self, issues: Sequence[Issue] | None) -> tuple[int, ...]:
+    def _ordered_parents(self, issues: Sequence[Issue] | None) -> tuple[int, ...]:
         """The order hold's half of the read: every parent the poll's `todo` sub-issues point at.
 
         Nothing when the poll failed, when no candidate is a sub-issue, or when the tick cannot
         dispatch. For the last, the account's GraphQL budget is shared, and `admit` ranks
         stopping, hold and slots above `order`: the sweep stops at the first such refusal, so
         nothing is admitted this tick and an empty mapping cannot let a held step through (spec
-        2026-10-25, section 9). The hold is read here, after the fetch that may have lifted it.
+        2026-10-25, section 9). The gate is read after the fetch that may have lifted the hold,
+        and before the parent reviews this tick may start: a review that takes the last slot
+        leaves the hold's parents in a read that was being made anyway, which is the price of
+        one read rather than two.
         Running a step early is the failure the hold exists to stop, and waiting one poll costs
         one interval, which is why a failed read holds the steps rather than passing them.
         """
