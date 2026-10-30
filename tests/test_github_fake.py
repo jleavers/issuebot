@@ -603,3 +603,16 @@ async def test_fake_sub_issue_count_and_parent_steps_id_and_state(fake: FakeGitH
     assert steps.id and steps.state == "open"
     fake.close_issue(parent.number)
     assert (await fake.parent_steps([parent.number]))[parent.number].state == "closed"
+
+
+async def test_fetch_issues_with_any_label_is_the_union_case_insensitively() -> None:
+    gh = FakeGitHub(SETTINGS)
+    gh.add_issue("one", number=1, labels=["issuebot/triage-todo"])
+    gh.add_issue("two", number=2, labels=["Issuebot/Triage-Complete"])
+    gh.add_issue("three", number=3, labels=["issuebot/todo"])
+    gh.add_issue("four", number=4, labels=["issuebot/triage-complete"])
+    gh.close_issue(4)
+    found = await gh.fetch_issues_with_any_label(
+        ("issuebot/triage-todo", "issuebot/triage-complete")
+    )
+    assert [issue.number for issue in found] == [1, 2]

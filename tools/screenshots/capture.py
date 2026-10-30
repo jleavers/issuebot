@@ -30,12 +30,16 @@ IMAGES = HERE.parent.parent / "docs" / "images"
 FONTS = Path("/usr/share/fonts/truetype/dejavu")
 
 CAPTIONS = (
-    "1.  someone labels the issue  issuebot/todo",
-    "2.  the worker claims it, clones, and runs  claude -p",
-    "3.  it pushes a branch, opens a PR, and asks for review",
-    "4.  you merge; the issue closes and lands in  issuebot/complete",
+    "1.  a maintainer opens an issue; auto-triage labels it  issuebot/triage-todo",
+    "2.  a read-only session sizes it and files its verdict:  fits",
+    "3.  you label it  issuebot/todo",
+    "4.  the worker claims it, clones, and runs  claude -p",
+    "5.  it pushes a branch, opens a PR, and asks for review",
+    "6.  you merge; the issue closes and lands in  issuebot/complete",
 )
-HOLD_MS = (2300, 2300, 2300, 3000)
+# Must match seed.HERO_STAGE: capture.py runs without issuebot's imports, so it cannot read it.
+HERO_STAGE = 4
+HOLD_MS = (2300,) * 5 + (3000,)
 CAPTION_BAR = 52
 
 # The caption strip is drawn rather than rendered, so its colours have to be the ones the
@@ -111,7 +115,7 @@ def main() -> int:
 
         # The hero, with issue #42 mid-flight so the board is not half empty.
         subprocess.run(
-            [sys.executable, str(HERE / "seed.py"), "2"],
+            [sys.executable, str(HERE / "seed.py"), str(HERO_STAGE)],
             check=True,
             env={"DATABASE_URL": args.dsn, "PATH": "/usr/bin:/bin"},
             capture_output=True,
@@ -121,7 +125,7 @@ def main() -> int:
         page.close()
 
         boards: list[Image.Image] = []
-        for stage in (1, 2, 3, 4):
+        for stage in range(1, 7):
             subprocess.run(
                 [sys.executable, str(HERE / "seed.py"), str(stage)],
                 check=True,
@@ -160,7 +164,7 @@ def main() -> int:
         optimize=True,
         disposal=2,
     )
-    for stage in (1, 2, 3, 4):
+    for stage in range(1, 7):
         (HERE / f".frame-{stage}.png").unlink(missing_ok=True)
 
     # It reports its own size, and its exit status is the verdict on it.

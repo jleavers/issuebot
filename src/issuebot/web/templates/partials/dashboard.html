@@ -97,7 +97,7 @@
     <tr><th>issue</th><th>attempt</th><th class="num">turns</th><th>last event</th><th>last activity</th><th>started</th><th>stop</th></tr>
     {% for entry in live.running %}
     <tr>
-      <td><a class="issue-ref" href="{{ repo.base }}/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}</td>
+      <td><a class="issue-ref" href="{{ repo.base }}/issues/{{ entry.issue_number }}"><span class="chip">#{{ entry.issue_number }}</span><span class="text">{{ entry.title }}</span></a>{% if entry.rework %} <span class="muted">(rework)</span>{% endif %}{% if entry.resumed %} <span class="muted">(resumed)</span>{% endif %}{% if entry.kind == "triage" %} <span class="muted">(triage)</span>{% elif entry.kind == "parent_review" %} <span class="muted">(parent review)</span>{% endif %}</td>
       <td>{{ entry.attempt }}</td>
       <td class="num">{{ entry.turn_count }}</td>
       <td>{{ entry.last_event or "-" }}</td>
@@ -134,7 +134,7 @@
 <section class="kanban">
   {% for column in live.columns %}
   <div class="column {{ column.role }}">
-    <h3><span class="name">{{ column.label }}</span><span class="count">{{ column.total }}</span></h3>
+    <h3><span class="name">{{ column.label|replace("/", "/<wbr>"|safe) }}</span><span class="count">{{ column.total }}</span></h3>
     {% for row in column.rows %}
     <div class="card">
       <a class="issue-ref" href="{{ repo.base }}/issues/{{ row.number }}"><span class="chip">#{{ row.number }}</span><span class="text">{{ row.title }}</span></a>

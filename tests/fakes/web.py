@@ -183,6 +183,7 @@ def issue_row(**overrides: Any) -> IssueRow:
         "title": "Add a power function",
         "state": "review",
         "state_label": "issuebot/review",
+        "triage": None,
         "github_state": "open",
         "url": "https://github.com/example/repo/issues/7",
         "labels": ["issuebot/review"],

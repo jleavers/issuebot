@@ -12,6 +12,7 @@ from issuebot.config import GitHubLabels
 from issuebot.db import StoreError, connect, migrate
 from issuebot.db.database import Database
 from issuebot.db.queries import (
+    BOARD_COLUMNS,
     BOARD_LIMIT,
     ISSUE_LIST_LIMIT,
     AutoTriageRow,
@@ -328,7 +329,7 @@ async def test_daily_series_zero_fills_and_ends_today(seeded: Database, db_url: 
 async def test_issues_by_state_groups_every_role(seeded: Database) -> None:
     async with scoped(seeded) as q:
         groups = await q.issues_by_state()
-    assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
+    assert list(groups) == list(BOARD_COLUMNS)
     assert [row.number for row in groups["todo"]] == [1, 4]  # updated_at desc
     assert [row.number for row in groups["in_progress"]] == [2]
     assert [row.number for row in groups["review"]] == [3]
@@ -551,8 +552,109 @@ async def test_turn_returns_the_whole_row_or_none(with_turns: Database) -> None:
 async def test_state_counts_follow_the_kanban_predicate(seeded: Database) -> None:
     async with scoped(seeded) as q:
         counts = await q.state_counts()
-    assert counts == {"todo": 2, "in_progress": 1, "review": 1, "rework": 0, "complete": 3}
-    assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
+    assert counts == {
+        "triage_todo": 0,
+        "triage_complete": 0,
+        "todo": 2,
+        "in_progress": 1,
+        "review": 1,
+        "rework": 0,
+        "complete": 3,
+    }
+    assert list(counts) == list(BOARD_COLUMNS)
+
+
+async def seed_triage(db_url: str, make_issue: Callable[..., Issue], *specs: tuple) -> None:
+    """Upsert ``(number, state, labels, extra)`` issues through the store, as a poll would."""
+    store = PostgresStore(db_url, repo=REPO, labels=GitHubLabels())
+    await store.connect()
+    try:
+        await store.upsert_issues(
+            [
+                IssueSnapshot(
+                    issue=make_issue(
+                        number=number,
+                        identifier=f"repo-{number}",
+                        title=f"Issue {number}",
+                        state=state,
+                        state_labels=(f"issuebot/{state.value}",) if state else (),
+                        labels=labels,
+                        updated_at=NOW - timedelta(minutes=100 - number),
+                        **extra,
+                    ),
+                    seen_at=NOW,
+                )
+                for number, state, labels, extra in specs
+            ]
+        )
+    finally:
+        await store.close()
+
+
+TRIAGE_SEED = (
+    (60, None, ("issuebot/triage-todo",), {}),
+    (61, None, ("issuebot/triage-complete",), {}),
+    (62, None, ("issuebot/triage-todo", "issuebot/triage-complete"), {}),
+    (63, StateLabel.TODO, ("issuebot/todo", "issuebot/triage-complete"), {}),
+)
+
+
+async def test_the_board_draws_the_triage_track_left_of_todo(
+    seeded: Database, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await seed_triage(db_url, make_issue, *TRIAGE_SEED)
+    async with scoped(seeded) as q:
+        groups = await q.issues_by_state()
+    assert list(groups) == list(BOARD_COLUMNS)
+    assert [r.number for r in groups["triage_todo"]] == [62, 60]  # newest first, as every column
+    assert [r.number for r in groups["triage_complete"]] == [61]
+    assert 63 in [r.number for r in groups["todo"]]
+
+
+async def test_a_state_label_wins_over_the_triage_track(
+    seeded: Database, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await seed_triage(db_url, make_issue, *TRIAGE_SEED)
+    async with scoped(seeded) as q:
+        counts = await q.state_counts()
+    assert set(counts) == set(BOARD_COLUMNS)
+    # #1 and #4 from the fixture, and #63, which carries triage-complete beside its todo
+    assert counts["todo"] == 3
+    assert counts["triage_complete"] == 1 and counts["triage_todo"] == 2
+
+
+async def test_a_closed_triage_issue_is_on_no_column(
+    seeded: Database, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    # closed with its triage label still on and no state label: the store keeps `triage` set
+    await seed_triage(
+        db_url,
+        make_issue,
+        (70, None, ("issuebot/triage-complete",), {"github_state": "closed", "closed_at": NOW}),
+    )
+    conn = await connect(db_url)
+    try:
+        cursor = await conn.execute("SELECT triage FROM issues WHERE number = 70")
+        assert (await cursor.fetchone())[0] == "triage_complete"  # type: ignore[index]
+    finally:
+        await conn.close()
+    async with scoped(seeded) as q:
+        groups = await q.issues_by_state()
+        counts = await q.state_counts()
+        listed = await q.issues_for_state(None)
+        triaged = await q.issues_for_state("triage_complete")
+    assert 70 not in {row.number for rows in groups.values() for row in rows}
+    assert counts["triage_complete"] == 0
+    assert 70 not in {row.number for row in listed} and triaged == []
+
+
+async def test_issues_for_state_lists_a_triage_column(
+    seeded: Database, db_url: str, make_issue: Callable[..., Issue]
+) -> None:
+    await seed_triage(db_url, make_issue, *TRIAGE_SEED)
+    async with scoped(seeded) as q:
+        rows = await q.issues_for_state("triage_complete")
+    assert [r.number for r in rows] == [61]
 
 
 async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: str) -> None:
@@ -571,10 +673,10 @@ async def test_issues_by_state_skips_an_unknown_role(seeded: Database, db_url: s
     async with scoped(seeded) as q:
         groups = await q.issues_by_state()
         counts = await q.state_counts()
-    assert list(groups) == ["todo", "in_progress", "review", "rework", "complete"]
+    assert list(groups) == list(BOARD_COLUMNS)
     assert 77 not in {row.number for rows in groups.values() for row in rows}
-    assert list(counts) == ["todo", "in_progress", "review", "rework", "complete"]
-    assert counts == {"todo": 2, "in_progress": 1, "review": 1, "rework": 0, "complete": 3}
+    assert list(counts) == list(BOARD_COLUMNS)
+    assert counts["todo"] == 2 and counts["complete"] == 3
 
 
 async def test_queries_on_an_empty_schema_report_a_database_error(db_url: str) -> None:
@@ -671,6 +773,8 @@ async def test_scoped_reads_see_only_their_own_repository(
         )
         # state_counts: the board's headers, uncapped, per repository
         assert await theirs.state_counts() == {
+            "triage_todo": 0,
+            "triage_complete": 0,
             "todo": 1,
             "in_progress": 0,
             "review": 0,
@@ -678,6 +782,8 @@ async def test_scoped_reads_see_only_their_own_repository(
             "complete": 1,
         }
         assert await ours.state_counts() == {
+            "triage_todo": 0,
+            "triage_complete": 0,
             "todo": 2,
             "in_progress": 1,
             "review": 1,

@@ -42,6 +42,7 @@ from issuebot.web.views import (
     rate_limit_windows,
     repo_base,
     repo_labels,
+    running_entry,
     safe_href,
     switch_target,
     window_days,
@@ -102,6 +103,7 @@ def test_state_reshapes_the_snapshot(h: Harness) -> None:
         "attempt": 1,
         "rework": False,
         "resumed": False,
+        "kind": "work",
         "turn_count": 1,
         "last_event": "turn_activity",
         "started_at": (NOW - timedelta(minutes=3)).isoformat(),
@@ -221,7 +223,15 @@ def test_a_non_numeric_issue_is_a_404_envelope(h: Harness) -> None:
 def test_stats_default_window(h: Harness) -> None:
     h.queries.closed = {7: 2, 1: 1}
     h.queries.runs = {7: 3, 1: 1}
-    h.queries.counts = {"todo": 1, "in_progress": 0, "review": 1, "rework": 0, "complete": 3}
+    h.queries.counts = {
+        "triage_todo": 2,
+        "triage_complete": 1,
+        "todo": 1,
+        "in_progress": 0,
+        "review": 1,
+        "rework": 0,
+        "complete": 3,
+    }
     h.queries.series = [DailyPoint(day=date(2026, 9, 4), closed=1, runs=1)]
     body = h.client.get(f"{API}/stats").json()
     assert body == {
@@ -229,7 +239,15 @@ def test_stats_default_window(h: Harness) -> None:
         "days": 7,
         "closed": 2,
         "runs": 3,
-        "by_state": {"todo": 1, "in_progress": 0, "review": 1, "rework": 0, "complete": 3},
+        "by_state": {
+            "triage_todo": 2,
+            "triage_complete": 1,
+            "todo": 1,
+            "in_progress": 0,
+            "review": 1,
+            "rework": 0,
+            "complete": 3,
+        },
         "series": [{"day": "2026-09-04", "closed": 1, "runs": 1}],
     }
     assert h.queries.days_asked == 7
@@ -999,3 +1017,10 @@ def test_the_state_document_carries_the_owner_s_actions_minutes(h: Harness) -> N
 
 def test_the_state_document_has_null_actions_minutes_without_a_row(h: Harness) -> None:
     assert h.client.get(f"{API}/state").json()["actions_minutes"] is None
+
+
+def test_running_entry_carries_the_run_kind() -> None:
+    assert running_entry({"issue_number": 4, "kind": "triage"})["kind"] == "triage"
+    assert running_entry({"issue_number": 4, "kind": "parent_review"})["kind"] == "parent_review"
+    # a snapshot written before phase 1 has no kind: it was all work
+    assert running_entry({"issue_number": 4})["kind"] == "work"

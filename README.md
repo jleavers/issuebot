@@ -13,7 +13,7 @@ It is a bespoke version of [openai/symphony](https://github.com/openai/symphony)
 Claude instead of Codex and GitHub instead of Linear, with Slack notifications and a web
 dashboard added.
 
-![The issuebot dashboard: a worker status line, six hero tiles (issues closed, agents run, cost, tokens, usage limits, activity), a table of running agents, the Kanban board of the five label columns, and thirty-day charts of issues closed and agent runs per day, in the dashboard's dark theme. The data shown is fabricated.](docs/images/dashboard.png)
+![The issuebot dashboard: a worker status line, six hero tiles (issues closed, agents run, cost, tokens, usage limits, activity), a table of running agents, the Kanban board, from Triage and Triaged through the five state labels, and thirty-day charts of issues closed and agent runs per day, in the dashboard's dark theme. The data shown is fabricated.](docs/images/dashboard.png)
 
 ## Contents
 
@@ -50,7 +50,7 @@ which `issuebot labels ensure` creates, and nothing else.
 | `issuebot/triage-complete` | the worker, after it filed a triage verdict; it stays beside a later state label |
 | `issuebot/operator-step` | the worker, on a sub-issue triage filed for you to do outside issuebot |
 
-![An issue moving across the dashboard's Kanban board: someone labels it issuebot/todo, the worker claims it into issuebot/in-progress, it opens a pull request and moves to issuebot/review, and on merge it lands in issuebot/complete.](docs/images/issue-journey.gif)
+![An issue moving across the dashboard's Kanban board: auto-triage labels it issuebot/triage-todo, a read-only session files its verdict and it moves to issuebot/triage-complete, you label it issuebot/todo, the worker claims it into issuebot/in-progress, it opens a pull request and moves to issuebot/review, and on merge it lands in issuebot/complete.](docs/images/issue-journey.gif)
 
 Merging the pull request closes the issue and the worker marks it `issuebot/complete`;
 labelling it `issuebot/rework` sends it back to the agent with your review comments. The worker
@@ -75,7 +75,9 @@ issue back is [Triage](docs/operations.md#triage).
 
 With `triage.auto` on, the worker labels each new issue a maintainer opens `issuebot/triage-todo`
 itself, once; it never labels the backlog. See
-[Auto-triage](docs/operations.md#auto-triage).
+[Auto-triage](docs/operations.md#auto-triage). On the [dashboard](docs/dashboard.md#the-board)
+an issue waiting for triage sits in a Triage column and one with a verdict in Triaged, left of
+Todo.
 
 **A split is reviewed once its steps have closed.** The worker reviews the parent by itself
 when every step has closed, in the same read-only session, and files the next batch (`next`),

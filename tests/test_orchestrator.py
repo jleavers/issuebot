@@ -258,6 +258,7 @@ class Harness:
         initial_parents: Mapping[int, ParentRecord] | None = None,
         initial_auto_triage: AutoTriageRecord | None = None,
         on_issues: Callable[[Sequence[Issue]], None] | None = None,
+        on_triage_track: Callable[[Sequence[Issue]], None] | None = None,
         scrubber: Scrubber = DEFAULT_SCRUBBER,
         admin: bool = False,
         auto_triage: bool = False,
@@ -327,6 +328,7 @@ class Harness:
             environ=self.environ,
             on_snapshot=self.snapshots.append,
             on_issues=on_issues or (self.record_polled if observe_issues else None),
+            on_triage_track=on_triage_track,
             initial_rate_limits=initial_rate_limits,
             initial_ledger=initial_ledger,
             initial_parents=initial_parents,
@@ -7909,3 +7911,54 @@ async def test_a_gap_past_the_limit_whose_read_failed_is_handed_over_on_the_retr
     record = h.orchestrator._parents[10]
     assert (record.reviews, record.gap_rounds) == (1, 2) and record.handed_over is not None
     assert len(h.triage_sessions.runs) == 1
+
+
+def track_reads(h: Harness) -> list[tuple[Any, ...]]:
+    return [args for name, args in h.github.calls if name == "fetch_issues_with_any_label"]
+
+
+async def test_the_triage_track_is_read_once_per_poll_when_a_store_watches(tmp_path: Path) -> None:
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    # Both Triaged: a `triage-todo` issue would be dispatched for triage on the first tick, and
+    # its run would move its labels under the test. The held test below covers `triage-todo`.
+    h.github.add_issue("sixty", number=60, labels=["issuebot/triage-complete"])
+    h.github.add_issue("sixty-one", number=61, labels=["issuebot/triage-complete"])
+    h.github.add_issue("sixty-two", number=62, labels=["issuebot/triage-complete"])
+    h.github.close_issue(62)
+    await h.tick()
+    await h.tick()
+    assert track_reads(h) == [(("issuebot/triage-todo", "issuebot/triage-complete"),)] * 2
+    assert seen == [[60, 61], [60, 61]]
+
+
+async def test_no_store_no_triage_track_read(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    await h.tick()
+    assert track_reads(h) == []
+
+
+async def test_the_triage_track_is_read_while_dispatch_is_held(tmp_path: Path) -> None:
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    h.add_issue(1, "todo")
+    await h.tick()
+    await h.exit(h.run_for(1), **USAGE_LIMITED)  # the usage hold: no claims, the board still read
+    h.github.add_issue("sixty", number=60, labels=["issuebot/triage-todo"])
+    seen.clear()
+    await h.tick()
+    assert h.orchestrator.snapshot().dispatch_hold is not None
+    assert seen == [[60]]
+
+
+async def test_a_failed_triage_track_read_is_a_warning_not_a_hold(tmp_path: Path) -> None:
+    seen: list[list[int]] = []
+    h = Harness(tmp_path, on_triage_track=lambda issues: seen.append([i.number for i in issues]))
+    h.github.fail_next("transport", times=MAX_FETCH_FAILURES + 1, on="fetch_issues_with_any_label")
+    with capture_logs() as logs:
+        for _ in range(MAX_FETCH_FAILURES + 1):
+            await h.tick()
+    assert h.orchestrator.snapshot().dispatch_hold is None
+    assert seen == []
+    failed = [entry for entry in logs if entry["event"] == "triage_track_fetch_failed"]
+    assert len(failed) == MAX_FETCH_FAILURES + 1

@@ -166,7 +166,7 @@ carries the run's log directory. `AutoTriageState` is the first event with no is
 
 ## `issuebot.github`
 
-`fetch_issues_opened_since(since)` is auto-triage's one bounded read (33 a page).
+`fetch_issues_opened_since(since)` is auto-triage's one bounded read (33 a page), and `fetch_issues_with_any_label(labels)` the board's, one GraphQL read of every open issue carrying any of the labels (GitHub ORs them).
 
 `StateLabel` roles, the transition table, `model_label_style` and
 `marker_label_styles` (`state.py`; `classify_closed(issue, labels)` returns `complete` for a
@@ -1065,6 +1065,8 @@ widening.
 
 ## `issuebot.orchestrator`
 
+`_observe_triage_track` is the once-a-poll read of the two triage labels for the store, made in `_fetch_issues` and kept out of the GitHub dispatch hold (#88), which is the board poll's.
+
 one asyncio task owns the schedule. `admission.py` (pure, #112) is
 the one gate every claim goes through: `admit(AdmissionRequest)` answers, in the order the
 preconditions outrank each other -- shutdown, the `Hold` in force, the free slots, whether
@@ -1479,8 +1481,8 @@ warning or a limit hit (chosen by `hit`), times in UTC.
 
 the observability store, imported by `cli` and `web`; imports `config`,
 `events`, `github`, `log` and `agent.turnlog`. `migrations/NNNN_name.sql` (`0001_initial`,
-`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`, `0007_run_kind`;
-schema version 7) applied by
+`0002_run_turns`, `0003_repos`, `0004_run_turns_repo`, `0005_actions_minutes`, `0006_claude_limit_alerts`, `0007_run_kind`, `0008_triage_track`;
+schema version 8) applied by
 `migrate.py` in one transaction
 under an advisory lock (`schema_migrations` bookkeeping; a recorded version newer than the
 files is an error). `0003_repos` adds a `repos` registry (one row per worker: its labels,
@@ -1512,12 +1514,12 @@ appends to `events`, upserts `runs` on `run_started`/`run_ended` and inserts the
 turns into `run_turns` in the `run_ended` transaction (idempotent per `(repo, run_id,
 turn_number)`),
 or updates `issues` on `state_changed`, `issue_completed`, `issue_cancelled`; `upsert_issues`;
-`write_snapshot`), every write stamped with its `repo` by `_stamp`, which *forces* the
+`write_snapshot`; `issues.triage` is the triage track, set by `upsert_issues` and by `TRIAGE_CHANGED`, and cleared on open rows missing from a complete read by `reconcile_triage_track`), every write stamped with its `repo` by `_stamp`, which *forces* the
 store's over anything a row carries and is the only way a row is built, `INSERT_TURN`
 included (#111); every `issues` write is also guarded
 by `seen_at`, so write order never matters. `sink.py`:
 `PostgresSink` (`handle` enqueues events, cap 1000; `record_issues` merges polled snapshots
-into one pending batch; `record_snapshot` keeps the latest; one drain task writes, reconnects
+into one pending batch; `record_snapshot` keeps the latest; `record_triage_track` records the triage read's snapshots, then queues that reconcile; one drain task writes, reconnects
 with backoff and retries the item in flight; a `run_ended` item's turn files are captured
 once, in a thread, before its first write attempt (`db_turns_captured`,
 `db_turns_capture_failed`), and then its `log_dir` is scrubbed (`scrubber=`, the
@@ -1576,6 +1578,8 @@ the triage labels (`_on_the_triage_track`), though the `events` row is still wri
 `PARENT_RECORDS` returns each parent's latest `parent_review_state` for that seed.
 
 ## `issuebot.web`
+
+The columns, counts, list page and `/stats` all iterate `queries.BOARD_COLUMNS` (seven keys, in board order), and `running_entry` carries the run `kind` that Running marks `(triage)` or `(parent review)`.
 
 the dashboard, imported by `cli` only; imports `config`, `db`, `github`, `log` and
 `notifications`. `app.py`: `create_app(database, *, password, clock=, now=, actions=, claude_limits=)`

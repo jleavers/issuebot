@@ -10,6 +10,7 @@ from issuebot.config import GitHubLabels
 from issuebot.db import DatabaseError, MigrationResult, Probe
 from issuebot.db.connection import NOT_A_URL, is_postgres_url
 from issuebot.db.queries import (
+    BOARD_COLUMNS,
     ActionsMinutesRow,
     AutoTriageRow,
     DailyPoint,
@@ -26,7 +27,6 @@ from issuebot.db.queries import (
 )
 from issuebot.db.store import IssueSnapshot
 from issuebot.events import Event
-from issuebot.github import StateLabel
 
 DB_URL = "postgresql://issuebot:s3cret@db.example:5432/issuebot"
 PROBE_OK = Probe(server_version="PostgreSQL 18.1", schema_version=2, latest_version=2)
@@ -40,6 +40,7 @@ class FakeStore:
         self.turns: list[list[TurnCapture]] = []
         self.issues: list[list[IssueSnapshot]] = []
         self.snapshots: list[dict[str, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
         self.closed = False
 
     async def connect(self) -> None:
@@ -54,9 +55,13 @@ class FakeStore:
 
     async def upsert_issues(self, issues: Sequence[IssueSnapshot]) -> None:
         self.issues.append(list(issues))
+        self.calls.append(("issues", list(issues)))
 
     async def write_snapshot(self, at: datetime, data: Mapping[str, Any]) -> None:
         self.snapshots.append(dict(data))
+
+    async def reconcile_triage_track(self, numbers: Sequence[int], at: datetime) -> None:
+        self.calls.append(("reconcile", tuple(numbers), at))
 
 
 class FakeQueries:
@@ -74,8 +79,8 @@ class FakeQueries:
         self.runs = {1: 0, 7: 0}
         zero = RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0)
         self.totals = {1: zero, 7: zero}
-        self.groups: dict[str, list[IssueRow]] = {role.value: [] for role in StateLabel}
-        self.counts: dict[str, int] = {role.value: 0 for role in StateLabel}
+        self.groups: dict[str, list[IssueRow]] = {key: [] for key in BOARD_COLUMNS}
+        self.counts: dict[str, int] = {key: 0 for key in BOARD_COLUMNS}
         self.issue_list: list[IssueRow] = []
         self.ledger_rows: list[LedgerRow] = []
         self.parent_rows: list[ParentRecordRow] = []

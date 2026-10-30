@@ -44,10 +44,16 @@ them from that repository's checkout.
 
 Tokens that belong to one GitHub account share one budget. GitHub allows 5,000 GraphQL
 points an hour *per account*, not per token, and the sessions' own `gh` calls and yours spend
-from it too. An idle worker at the default `polling.interval_ms` spends about 530 of them an
-hour -- one point per state label per poll while no label holds more than 33 open issues,
-plus the terminal sweep -- and a worker with sessions running up to 120 more, so one account
-carries seven to nine workers before the polls alone use it up. Past that, lengthen
+from it too. An idle worker at the default `polling.interval_ms` spends about 770 of them an
+hour -- 120 polls of six points each (one per state label, one for the triage-candidates read
+that dispatch makes of `triage-todo`, and one for the triage-track read that feeds the
+dashboard's columns), plus about 50 for the terminal sweep, while no label holds more than 33
+open issues. The track read pages on the *union* of the two triage labels, and that union
+includes every open issue still wearing `triage-complete` beside a state label, so it is that
+count, not `triage-todo`'s alone, that has to stay under 33. `triage.auto` adds up to about 30
+an hour, since its scan runs at most every 120 s, and a worker with sessions running up to 120
+more, so about 890 an hour at most: 5,000 / 890 is 5.6 and 5,000 / 770 is 6.5, so one account
+carries five to six workers before the polls alone use it up. Past that, lengthen
 `polling.interval_ms` in each checkout's `configs/WORKFLOW.local.md`, which reloads without a
 restart, or give the extra deployments a token from another account. What a spent budget
 looks like is under ["GitHub itself"](#github-itself).

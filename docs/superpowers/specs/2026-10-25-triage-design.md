@@ -1,7 +1,7 @@
 # Triage: issuebot sizes an issue before anyone starts it
 
 Date: 2026-10-25
-Status: approved 2026-10-25; phase 3 (the parent review) and phase 4 (auto-triage) built; phase 1 planned in
+Status: approved 2026-10-25; phase 3 (the parent review), phase 4 (auto-triage) and phase 5 (the dashboard) built; phase 1 planned in
 [`../plans/2026-10-25-triage-phase-1.md`](../plans/2026-10-25-triage-phase-1.md), with the
 refinements found while planning folded in below (sections 1, 4 and 7, and "Phases")
 
@@ -493,6 +493,35 @@ Decided while planning phase 4:
   sits in Triaged until it closes, since it never gets `todo` itself. The board is built from
   the store, so the worker records the triage track there as it does the state labels. The
   README's two images are regenerated with the new columns (`tools/screenshots/`).
+
+Decided while planning phase 5:
+
+1. The triage track is its own column, `issues.triage` (migration 0008), and does not reuse
+   `state`, which every other reader takes to mean a state label. Its values are the label
+   roles `triage_todo` and `triage_complete`, computed against the configured names,
+   case-insensitively; an issue carrying both is `triage_todo`.
+2. A state label wins: the board's column is `coalesce(state, triage)`, so an issue is drawn
+   and counted once.
+3. The column keys are `triage_todo` and `triage_complete`, each headed with the label's own
+   name; the docs call them Triage and Triaged.
+4. One read per poll, only with a store: `fetch_issues_with_any_label` over both triage labels,
+   in `_fetch_issues`, so the held tick keeps the board fresh. 1 point a poll, 120 an hour.
+5. The read is a complete set, so the store clears `triage` on open rows missing from it,
+   guarded by `seen_at`. A failed or over-ceiling read reconciles nothing, logs
+   `triage_track_fetch_failed` and is not counted towards the GitHub hold (#88).
+6. A published move sets `triage` only when it lands on a triage label; any other move leaves
+   it to the same tick's reconcile.
+7. A running triage shows in the Running panel, marked `(triage)` or `(parent review)`; cards
+   do not change. `running_entry` gains `kind`, an additive change to `/state`.
+8. The issue page shows the triage label's pill when the issue has no state label.
+9. The two columns get new hues (teal and magenta), not the labels' own hexes, which are
+   1.1:1 and 1.5:1 on white and fail `tests/test_web_theme.py`.
+10. The board is seven columns, `repeat(7, minmax(150px, 1fr))`, and scrolls inside its own box
+    when the window is too narrow.
+11. The journey GIF starts in Triage and runs six stages; the standing board gains a Triage
+    card, two Triaged cards (one a split parent) and a running triage.
+12. `/issues?state=` and `/stats`'s `by_state` take the two new keys, since the column header's
+    "N more" link points at the list page. An additive API change.
 
 ### 8. Prompts
 

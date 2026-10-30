@@ -63,6 +63,10 @@ class FakeStore:
         await self._gate()
         self.calls.append(("snapshot", at, dict(data)))
 
+    async def reconcile_triage_track(self, numbers: Sequence[int], at: datetime) -> None:
+        await self._gate()
+        self.calls.append(("reconcile", tuple(numbers), at))
+
 
 class FakeSnapshot:
     def __init__(self, at: datetime, **data: Any) -> None:
@@ -205,6 +209,41 @@ async def test_record_issues_merges_by_number_and_stamps_seen_at(
         (2, "two", T0 + timedelta(seconds=1)),
     ]
     assert h.sink.written == 1
+
+
+async def test_record_triage_track_writes_the_snapshots_before_the_reconcile(
+    h: Harness, make_issue: Callable[..., Issue]
+) -> None:
+    h.sink.record_triage_track([make_issue(number=60, id="60"), make_issue(number=61, id="61")])
+    h.sink.start()
+    await h.sink.close()
+    seen_at = T0 + timedelta(seconds=1)
+    assert [call[0] for call in h.store.calls] == ["issues", "reconcile"]
+    assert [(s.issue.number, s.seen_at) for s in h.store.calls[0][1]] == [
+        (60, seen_at),
+        (61, seen_at),
+    ]
+    assert h.store.calls[1] == ("reconcile", (60, 61), seen_at)
+
+
+async def test_an_empty_triage_track_still_reconciles(h: Harness) -> None:
+    h.sink.record_triage_track([])
+    h.sink.start()
+    await h.sink.close()
+    assert h.store.calls == [("reconcile", (), T0 + timedelta(seconds=1))]
+
+
+async def test_a_full_queue_drops_the_reconcile_and_counts_it(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sink_module, "QUEUE_LIMIT", 1)
+    h.sink.handle(blocked(1))
+    h.sink.record_triage_track([])
+    assert h.sink.dropped == 1
+    assert h.logged("db_queue_full")[0]["kind"] == "triage_track"
+    h.sink.start()
+    await h.sink.close()
+    assert [call[0] for call in h.store.calls] == ["event"]
 
 
 async def test_record_snapshot_keeps_only_the_latest(h: Harness) -> None:

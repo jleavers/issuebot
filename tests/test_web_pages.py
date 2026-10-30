@@ -32,6 +32,7 @@ from issuebot.db import (
     RunTotals,
     StoreUnavailableError,
 )
+from issuebot.db.queries import BOARD_COLUMNS
 from issuebot.orchestrator.state import DispatchHold
 from issuebot.web import LIVE_POLL_S, SECURITY_HEADERS
 from issuebot.web.views import (
@@ -116,7 +117,7 @@ def test_the_dashboard_renders_and_escapes(h: Harness) -> None:
     assert '<link rel="icon" href="data:,">' in text
     assert '"code": "503", "swap": true' in text
     for label in GitHubLabels().as_tuple():
-        assert label in text
+        assert label.replace("/", "/<wbr>") in text
     assert f'href="{BASE}/issues/7"' in text and f'href="{BASE}/issues/3"' in text
     assert "javascript:" not in text and "PR#4" in text
     assert "<script>" not in text and ' style="' not in text  # the CSP forbids inline code
@@ -272,6 +273,29 @@ def test_the_running_row_keeps_its_markers_beside_the_link(h: Harness) -> None:
     assert '</a> <span class="muted">(rework)</span> <span class="muted">(resumed)</span>' in text
     assert css_declarations(".issue-ref {")["display"] == "inline-flex"
     assert css_declarations(".card .issue-ref {")["display"] == "flex"
+
+
+def test_a_triage_run_is_marked_in_the_running_panel(h: Harness) -> None:
+    h.queries.snapshot_row = snapshot(
+        running=(
+            running_row(issue_number=1, kind="triage"),
+            running_row(issue_number=2, kind="parent_review"),
+            running_row(issue_number=3, kind="work"),
+        )
+    )
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
+    rows = re.findall(r"<tr>.*?</tr>", text[text.index("Running") :], flags=re.S)
+    by_number = {n: next(r for r in rows if f"/issues/{n}" in r) for n in (1, 2, 3)}
+    assert text.count("(triage)") == 1 and text.count("(parent review)") == 1
+    assert "(triage)" in by_number[1] and "(parent review)" in by_number[2]
+    assert "(triage)" not in by_number[3] and "(parent review)" not in by_number[3]
+
+
+def test_the_board_has_a_column_per_board_column_in_order(h: Harness) -> None:
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
+    classes = re.findall(r'<div class="column ([a-z_]+)">', text)
+    assert classes == list(BOARD_COLUMNS)
+    assert "issuebot/<wbr>triage-todo" in text and "issuebot/<wbr>triage-complete" in text
 
 
 def test_the_running_title_is_still_escaped(h: Harness) -> None:
@@ -659,6 +683,23 @@ def test_the_issue_page_shows_a_running_run_without_the_not_captured_hint(h: Har
     assert "turn logs were not captured" not in text
 
 
+def test_the_issue_page_names_the_triage_label_when_there_is_no_state(h: Harness) -> None:
+    h.queries.issue_rows[9] = issue_row(
+        number=9, state=None, state_label=None, triage="triage_complete"
+    )
+    text = html(h.client.get(f"{BASE}/issues/9"))
+    assert 'class="state triage_complete"' in text and "issuebot/triage-complete" in text
+    assert "unlabelled" not in text
+
+
+def test_the_issue_page_renders_a_triage_value_it_does_not_know(h: Harness) -> None:
+    """The board tolerates an unknown role, so the page must not 500 on one either."""
+    h.queries.issue_rows[9] = issue_row(number=9, state=None, state_label=None, triage="mystery")
+    response = h.client.get(f"{BASE}/issues/9")
+    assert response.status_code == 200
+    assert 'class="state mystery"' in html(response)
+
+
 def test_the_issue_page_escapes_the_title(h: Harness) -> None:
     h.queries.issue_rows[7] = issue_row(title=HOSTILE)
     text = html(h.client.get(f"{BASE}/issues/7"))
@@ -704,9 +745,38 @@ def test_the_issues_page_filters_to_one_state(h: Harness) -> None:
 
 def test_the_issues_page_offers_a_filter_per_column_and_an_all(h: Harness) -> None:
     text = html(h.client.get(f"{BASE}/issues"))
-    for role in ("todo", "in_progress", "review", "rework", "complete"):
+    for role in BOARD_COLUMNS:
         assert f'href="{BASE}/issues?state={role}"' in text
     assert f'class="filter current" href="{BASE}/issues"' in text
+
+
+def test_the_list_page_draws_the_triage_pill_for_a_row_with_no_state(h: Harness) -> None:
+    h.queries.issue_list = [
+        issue_row(number=61, state=None, state_label=None, triage="triage_complete")
+    ]
+    text = html(h.client.get(f"{BASE}/issues?state=triage_complete"))
+    assert 'class="state triage_complete"' in text and "issuebot/triage-complete" in text
+
+
+def test_the_list_page_keeps_an_empty_state_cell_for_an_unlabelled_row(h: Harness) -> None:
+    h.queries.issue_list = [issue_row(number=70, state=None, state_label=None, triage=None)]
+    text = html(h.client.get(f"{BASE}/issues"))
+    assert "#70" in text
+    assert 'class="state unlabelled"' not in text and "unlabelled" not in text
+
+
+def test_the_list_page_filters_by_a_triage_column(h: Harness) -> None:
+    h.queries.counts["triage_todo"] = 3
+    h.queries.issue_list = [
+        issue_row(number=60, state=None, state_label=None, triage="triage_todo")
+    ]
+    response = h.client.get(f"{BASE}/issues?state=triage_todo")
+    assert response.status_code == 200
+    text = html(response)
+    assert h.queries.state_asked == "triage_todo"
+    assert len(re.findall(r'class="filter(?: current)?" href=', text)) == len(BOARD_COLUMNS) + 1
+    assert f'class="filter current" href="{BASE}/issues?state=triage_todo"' in text
+    assert h.client.get(f"{BASE}/issues?state=nonsense").status_code == 404
 
 
 def test_an_unknown_state_filter_is_a_404_page(h: Harness) -> None:
@@ -751,18 +821,22 @@ def test_issue_filters_mark_the_current_column() -> None:
     filters = issue_filters(
         "review", {"todo": 2, "review": 1, "complete": 44}, GitHubLabels(), BASE
     )
+    assert [entry["role"] for entry in filters] == [None, *BOARD_COLUMNS]
     assert [entry["label"] for entry in filters] == [
         "all",
+        "issuebot/triage-todo",
+        "issuebot/triage-complete",
         "issuebot/todo",
         "issuebot/in-progress",
         "issuebot/review",
         "issuebot/rework",
         "issuebot/complete",
     ]
-    assert [entry["current"] for entry in filters] == [False, False, False, True, False, False]
-    assert [entry["total"] for entry in filters] == [47, 2, 0, 1, 0, 44]
+    current = [entry["role"] == "review" for entry in filters]
+    assert [entry["current"] for entry in filters] == current and sum(current) == 1
+    assert [entry["total"] for entry in filters] == [47, 0, 0, 2, 0, 1, 0, 44]
     assert filters[0]["href"] == f"{BASE}/issues"
-    assert filters[3]["href"] == f"{BASE}/issues?state=review"
+    assert filters[BOARD_COLUMNS.index("review") + 1]["href"] == f"{BASE}/issues?state=review"
     assert issue_filters(None, {}, GitHubLabels(), BASE)[0]["current"] is True
 
 
@@ -951,7 +1025,20 @@ def test_the_scripts_load_in_an_order_app_js_can_work_in(h: Harness) -> None:
 def test_the_board_uses_the_repositorys_own_labels(h: Harness) -> None:
     h.register("acme/frontend", labels={**GitHubLabels().model_dump(), "review": "team/check"})
     text = html(h.client.get("/r/acme/frontend/"))
-    assert "team/check" in text and "issuebot/review" not in text
+    assert "team/<wbr>check" in text and "issuebot/review" not in text
+
+
+def test_a_column_heading_may_break_after_each_slash(h: Harness) -> None:
+    """``issuebot/complete`` has no hyphen, so without a ``<wbr>`` it overran its count."""
+    text = html(h.client.get(f"{BASE}/partials/dashboard"))
+    assert '<span class="name">issuebot/<wbr>complete</span>' in text
+
+
+def test_a_column_heading_is_escaped_before_the_break_is_added(h: Harness) -> None:
+    h.register("acme/frontend", labels={**GitHubLabels().model_dump(), "complete": "a<b>/c"})
+    text = html(h.client.get("/r/acme/frontend/"))
+    assert '<span class="name">a&lt;b&gt;/<wbr>c</span>' in text
+    assert "<b>" not in text
 
 
 # --- the pure helpers -------------------------------------------------------------------------
@@ -994,7 +1081,7 @@ def test_compact_abbreviates_large_counts() -> None:
 
 
 def test_dashboard_context() -> None:
-    groups = {role: [] for role in ("todo", "in_progress", "review", "rework", "complete")}
+    groups = {key: [] for key in BOARD_COLUMNS}
     groups["complete"] = [issue_row(number=n, state="complete") for n in range(BOARD_LIMIT)]
     counts = dict.fromkeys(groups, 0) | {"complete": 44}
     live = dashboard_context(
@@ -1033,9 +1120,10 @@ def test_dashboard_context() -> None:
         "actions": None,
     }
     assert [column["role"] for column in live["columns"]] == list(groups)
-    assert [column["label"] for column in live["columns"]] == list(GitHubLabels().as_tuple())
-    assert [column["total"] for column in live["columns"]] == [0, 0, 0, 0, 44]
-    assert [column["overflow"] for column in live["columns"]] == [0, 0, 0, 0, 39]
+    names = GitHubLabels().model_dump()
+    assert [column["label"] for column in live["columns"]] == [names[key] for key in BOARD_COLUMNS]
+    assert [column["total"] for column in live["columns"]] == [0, 0, 0, 0, 0, 0, 44]
+    assert [column["overflow"] for column in live["columns"]] == [0, 0, 0, 0, 0, 0, 39]
     assert live["running"][0]["issue_number"] == 7
     zero = RunTotals(input_tokens=0, output_tokens=0, cost_usd=0.0)
     empty = dashboard_context(
@@ -1060,7 +1148,7 @@ def test_dashboard_context() -> None:
 def test_dashboard_context_carries_a_held_dispatch() -> None:
     live = dashboard_context(
         snapshot(dispatch_hold=HOLD),
-        {role: [] for role in ("todo", "in_progress", "review", "rework", "complete")},
+        {key: [] for key in BOARD_COLUMNS},
         counts={},
         closed_1d=0,
         closed_7d=0,

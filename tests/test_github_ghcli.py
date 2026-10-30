@@ -23,6 +23,7 @@ from issuebot.github.ghcli import (
     MAX_TIMELINE_PAGES,
     OPEN_ISSUES_QUERY,
     GhCliAdapter,
+    _issues_query,
     by_ids_query,
 )
 from issuebot.github.models import WORKPAD_MARKER, StateLabel
@@ -281,7 +282,47 @@ async def test_board_poll_gives_up_past_the_page_cap() -> None:
     assert len(runner.calls) == MAX_ISSUE_PAGES
 
 
-@pytest.mark.parametrize("query", [OPEN_ISSUES_QUERY, CLOSED_ISSUES_QUERY], ids=["open", "closed"])
+async def test_fetch_issues_with_any_label_asks_for_every_label_in_one_read() -> None:
+    runner = StubRunner()
+    runner.on(has("label1=issuebot/triage-complete"), stdout=fixture("list_triage_track.json"))
+    issues = await make_adapter(runner).fetch_issues_with_any_label(
+        ("issuebot/triage-todo", "issuebot/triage-complete")
+    )
+    assert [issue.number for issue in issues] == [60, 61]
+    assert len(runner.calls) == 1
+    query = query_of(runner.argv(0))
+    assert "labels: [$label0, $label1]" in query
+    assert "$label0: String!" in query and "$label1: String!" in query
+    assert "states: [OPEN]" in query
+    assert has("label0=issuebot/triage-todo")(runner.argv(0))
+
+
+async def test_fetch_issues_with_any_label_of_nothing_asks_nothing() -> None:
+    runner = StubRunner()
+    assert await make_adapter(runner).fetch_issues_with_any_label(()) == []
+    assert runner.calls == []
+
+
+async def test_fetch_issues_with_any_label_gives_up_past_the_page_cap() -> None:
+    """The same ceiling, and the same failure, as the single-label read (#139)."""
+    runner = StubRunner()
+    runner.on(both(has("label1=b"), lacks("cursor=")), stdout=_issues_page(1, end_cursor="c1"))
+    for page in range(1, MAX_ISSUE_PAGES + 2):
+        runner.on(
+            both(has("label1=b"), arg(f"cursor=c{page}")),
+            stdout=_issues_page(page + 1, end_cursor=f"c{page + 1}"),
+        )
+    with pytest.raises(GitHubError) as excinfo:
+        await make_adapter(runner).fetch_issues_with_any_label(("a", "b"))
+    assert excinfo.value.category == "response"
+    assert len(runner.calls) == MAX_ISSUE_PAGES
+
+
+@pytest.mark.parametrize(
+    "query",
+    [OPEN_ISSUES_QUERY, CLOSED_ISSUES_QUERY, _issues_query("OPEN", 2)],
+    ids=["open", "closed", "any-of-two-labels"],
+)
 def test_a_page_of_issues_costs_one_graphql_point(query: str) -> None:
     """GitHub charges a query a point per hundred connections it could have to return.
 
@@ -292,7 +333,9 @@ def test_a_page_of_issues_costs_one_graphql_point(query: str) -> None:
     whether GitHub rounds to the nearest or up, and a connection added to ``IssueFields``
     fails here rather than tripling the poll again.
     """
-    match = re.search(r"issues\(labels: \[\$label\], states: \[\w+\], first: (\d+),", query)
+    match = re.search(
+        r"issues\(labels: \[\$label(?:0, \$label1)?\], states: \[\w+\], first: (\d+),", query
+    )
     assert match is not None
     per_page = int(match.group(1))
     nested = ISSUE_FIELDS.count("(first:")

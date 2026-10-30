@@ -38,10 +38,19 @@ class _EventItem:
     event: Event
 
 
+@dataclass(frozen=True, slots=True)
+class _TrackItem:
+    """The numbers of a complete triage-track read, to reconcile once its snapshots are in."""
+
+    numbers: tuple[int, ...]
+    at: datetime
+
+
 _Marker = Literal["issues", "snapshot"]
-_Item = _EventItem | _Marker
+_Item = _EventItem | _TrackItem | _Marker
 _Work = (
     _EventItem
+    | _TrackItem
     | tuple[Literal["issues"], list[IssueSnapshot]]
     | tuple[Literal["snapshot"], datetime, dict[str, Any]]
 )
@@ -50,9 +59,10 @@ _Work = (
 class PostgresSink:
     """Writes events, polled issues and the runtime snapshot from one background task.
 
-    ``handle``, ``record_issues`` and ``record_snapshot`` only enqueue; ``start`` creates
-    the drain task; ``close`` drains what is queued (bounded) and stops it. A lost
-    connection is retried with backoff and the item in flight is retried, not dropped.
+    ``handle``, ``record_issues``, ``record_triage_track`` and ``record_snapshot`` only
+    enqueue; ``start`` creates the drain task; ``close`` drains what is queued (bounded) and
+    stops it. A lost connection is retried with backoff and the item in flight is retried,
+    not dropped.
     A ``run_ended`` item has its turn files captured (in a thread, once) before its first
     write attempt, so the ``run_turns`` rows land in the same transaction as the run's.
     """
@@ -110,10 +120,31 @@ class PostgresSink:
         """Merge polled snapshots into the pending batch; a later snapshot replaces an earlier."""
         if self._closed or not issues:
             return
+        self._merge(issues, self._now())
+
+    def record_triage_track(self, issues: Sequence[Issue]) -> None:
+        """Merge a complete triage-track read, then queue the reconcile that follows it.
+
+        The reconcile is queued after the snapshots (the board poll's batch is already
+        pending, or written), so the drain applies them in that order. Unlike a marker it is
+        an item of its own and counts against the cap: it is dropped, and counted, when full.
+        """
+        if self._closed:
+            return
         seen_at = self._now()
+        if self._queue.qsize() >= QUEUE_LIMIT:
+            self.dropped += 1
+            self._log.warning(
+                "db_queue_full", kind="triage_track", issue_number=None, limit=QUEUE_LIMIT
+            )
+            return
+        self._merge(issues, seen_at)
+        self._queue.put_nowait(_TrackItem(tuple(issue.number for issue in issues), seen_at))
+
+    def _merge(self, issues: Sequence[Issue], seen_at: datetime) -> None:
         for issue in issues:
             self._issues[issue.number] = IssueSnapshot(issue=issue, seen_at=seen_at)
-        if not self._issues_queued:
+        if issues and not self._issues_queued:
             self._issues_queued = True
             self._queue.put_nowait("issues")
 
@@ -188,7 +219,7 @@ class PostgresSink:
 
         None when a snapshot marker finds no snapshot: nothing to write, never an empty row.
         """
-        if isinstance(item, _EventItem):
+        if isinstance(item, _EventItem | _TrackItem):
             return item
         if item == "issues":
             batch = list(self._issues.values())
@@ -301,6 +332,8 @@ class PostgresSink:
     async def _apply(self, work: _Work, turns: tuple[TurnCapture, ...]) -> None:
         if isinstance(work, _EventItem):
             await self._store.apply_event(work.event, turns=turns)
+        elif isinstance(work, _TrackItem):
+            await self._store.reconcile_triage_track(work.numbers, work.at)
         elif work[0] == "issues":
             await self._store.upsert_issues(work[1])
         else:
@@ -312,6 +345,8 @@ def _describe(work: _Work) -> dict[str, Any]:
         event = work.event
         number = event.issue_number if isinstance(event, IssueEvent) else None
         return {"kind": event.kind, "issue_number": number}
+    if isinstance(work, _TrackItem):
+        return {"kind": "triage_track", "count": len(work.numbers)}
     if work[0] == "issues":
         return {"kind": "issues", "count": len(work[1])}
     return {"kind": "snapshot"}
