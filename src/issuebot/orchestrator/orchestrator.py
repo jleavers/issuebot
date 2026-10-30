@@ -1086,7 +1086,8 @@ class Orchestrator:
                 # is left by this tick's triage pass and started on the next.
                 # The verdicts owed are filed before the track is read, so the store sees them
                 # this tick; and the track is read once, after the scan, for both triage
-                # dispatch and the store (#366). A label this tick's triage hand-backs take off
+                # dispatch and the store (#366). Any label this tick changes after the read -- a
+                # triage hand-back, or a verdict that lands while dispatch waits on GitHub --
                 # therefore reaches the board on the next poll, which is accepted.
                 await self._scan_for_auto_triage()
                 await self._retry_pending_verdicts()

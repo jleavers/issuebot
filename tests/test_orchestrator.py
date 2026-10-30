@@ -8157,6 +8157,32 @@ async def test_triage_dispatch_reads_for_itself_while_the_track_read_waits_out_i
     assert [entry["event"] for entry in logs].count("triage_track_fetch_failed") == 1
 
 
+async def test_both_triage_reads_past_their_ceilings_back_off_each_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback read past its own ceiling backs off as well (#367), so the hour that follows
+    makes neither read, and each warns once with its own remedy."""
+    h = Harness(tmp_path, on_triage_track=lambda issues: None)
+    h.add_triage_issue(2)
+    track_past_the_ceiling(h, monkeypatch)
+
+    async def overgrown(label: str) -> Any:
+        h.github.calls.append(("fetch_issues_with_label", (label,)))
+        raise PageCeilingError(f"more than 990 issues carry {label}")
+
+    monkeypatch.setattr(h.github, "fetch_issues_with_label", overgrown)
+    with capture_logs() as logs:
+        await h.tick()
+        h.clock.advance(30)
+        await h.tick()
+    assert len(track_reads(h)) == 1
+    assert h.calls("fetch_issues_with_label") == [("issuebot/triage-todo",)]
+    assert h.triage_sessions.runs == []
+    for event in ("triage_track_fetch_failed", "triage_fetch_failed"):
+        [line] = [entry for entry in logs if entry["event"] == event]
+        assert line["retry_in_s"] == CEILING_RETRY_S and "remedy" in line
+
+
 async def test_a_failed_triage_track_read_that_is_not_the_ceiling_is_retried_next_poll(
     tmp_path: Path,
 ) -> None:
